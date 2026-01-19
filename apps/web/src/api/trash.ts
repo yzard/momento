@@ -33,14 +33,14 @@ export const trashApi = {
 
   restore: async (mediaIds: number[]): Promise<TrashResponse> => {
     const response = await apiClient.post<TrashResponse>('/trash/restore', {
-      media_ids: mediaIds,
+      mediaIds,
     })
     return response.data
   },
 
   permanentlyDelete: async (mediaIds: number[]): Promise<TrashResponse> => {
     const response = await apiClient.post<TrashResponse>('/trash/delete', {
-      media_ids: mediaIds,
+      mediaIds,
     })
     return response.data
   },

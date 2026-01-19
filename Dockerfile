@@ -1,11 +1,10 @@
-# Stage 1: Build frontend
 FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app
 
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 
-COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json ./apps/web/
 COPY packages/shared/package.json ./packages/shared/
 
@@ -17,49 +16,47 @@ COPY packages/shared ./packages/shared
 WORKDIR /app/apps/web
 RUN pnpm build
 
-# Stage 2: Build and run API with frontend
-FROM python:3.12-alpine
+FROM rust:1-alpine AS backend-builder
 
 WORKDIR /app
 
-# Install system dependencies
+RUN apk add --no-cache musl-dev
+
+COPY apps/api/Cargo.toml apps/api/Cargo.lock ./apps/api/
+COPY apps/api ./apps/api
+
+WORKDIR /app/apps/api
+RUN cargo build --release
+
+FROM alpine:latest
+
+WORKDIR /app
+
 RUN apk add --no-cache \
-    build-base \
     ffmpeg \
     imagemagick \
-    libheif-dev \
+    exiftool \
     su-exec \
-    shadow \
-    tzdata
+    tzdata \
+    libheif
 
-# Copy and install Python dependencies
-COPY apps/api/pyproject.toml .
-RUN pip install --no-cache-dir .
+COPY --from=backend-builder /app/apps/api/target/release/momento-api /app/momento-api
 
-# Copy application code
-COPY apps/api/momento_api/ ./momento_api/
-COPY apps/api/schema.sql .
-
-# Copy frontend build artifacts
 COPY --from=frontend-builder /app/apps/web/dist ./static
 
-# Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Create data directory
 RUN mkdir -p /data
 
-# Set default environment variables
 ENV PUID=1000 \
     PGID=1000 \
     UMASK=022 \
     TZ=UTC \
-    PYTHONPATH=/app \
-    PYTHONUNBUFFERED=1 \
+    MOMENTO_DATA_DIR=/data \
     MOMENTO_STATIC_DIR=/app/static
 
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "-m", "uvicorn", "momento_api.main:create_application", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/momento-api"]

@@ -1,0 +1,357 @@
+use axum::{extract::State, routing::post, Json, Router};
+
+use crate::auth::{AppState, CurrentUser};
+use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id};
+use crate::error::{AppError, AppResult};
+use crate::models::{
+    AlbumAddMediaRequest, AlbumCreateRequest, AlbumDeleteRequest, AlbumDetailResponse,
+    AlbumGetRequest, AlbumListResponse, AlbumRemoveMediaRequest, AlbumReorderRequest,
+    AlbumResponse, AlbumUpdateRequest, MediaResponse,
+};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/album/create", post(create_album))
+        .route("/album/list", post(list_albums))
+        .route("/album/get", post(get_album))
+        .route("/album/update", post(update_album))
+        .route("/album/delete", post(delete_album))
+        .route("/album/add-media", post(add_media_to_album))
+        .route("/album/remove-media", post(remove_media_from_album))
+        .route("/album/reorder", post(reorder_album_media))
+}
+
+fn map_album_row(row: &rusqlite::Row) -> rusqlite::Result<AlbumResponse> {
+    Ok(AlbumResponse {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        cover_media_id: row.get(3)?,
+        media_count: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+async fn create_album(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumCreateRequest>,
+) -> AppResult<Json<AlbumResponse>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let album_id = insert_returning_id(
+        &conn,
+        "INSERT INTO albums (user_id, name, description) VALUES (?, ?, ?)",
+        &[&current_user.id, &request.name, &request.description],
+    )?;
+
+    let album = fetch_one(
+        &conn,
+        "SELECT a.id, a.name, a.description, a.cover_media_id, 0 as media_count, a.created_at FROM albums a WHERE a.id = ?",
+        &[&album_id],
+        map_album_row,
+    )?
+    .ok_or_else(|| AppError::Internal("Failed to create album".to_string()))?;
+
+    Ok(Json(album))
+}
+
+async fn list_albums(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> AppResult<Json<AlbumListResponse>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let albums = fetch_all(
+        &conn,
+        r#"
+        SELECT a.id, a.name, a.description, a.cover_media_id, COUNT(am.media_id) as media_count, a.created_at
+        FROM albums a
+        LEFT JOIN album_media am ON a.id = am.album_id
+        WHERE a.user_id = ?
+        GROUP BY a.id
+        ORDER BY a.created_at DESC
+        "#,
+        &[&current_user.id],
+        map_album_row,
+    )?;
+
+    Ok(Json(AlbumListResponse { albums }))
+}
+
+async fn get_album(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumGetRequest>,
+) -> AppResult<Json<AlbumDetailResponse>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let album = fetch_one(
+        &conn,
+        "SELECT id, name, description, cover_media_id, created_at FROM albums WHERE id = ? AND user_id = ?",
+        &[&request.album_id, &current_user.id],
+        |row| {
+            Ok(AlbumBasic {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                cover_media_id: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        },
+    )?
+    .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
+
+    let media = fetch_all(
+        &conn,
+        r#"
+        SELECT m.id, m.filename, m.original_filename, m.media_type, m.mime_type, m.width, m.height,
+               m.file_size, m.duration_seconds, m.date_taken, m.gps_latitude, m.gps_longitude,
+               m.camera_make, m.camera_model, m.iso, m.exposure_time, m.f_number, m.focal_length,
+               m.gps_altitude, m.location_state, m.location_country, m.keywords, m.created_at
+        FROM media m
+        JOIN album_media am ON m.id = am.media_id
+        WHERE am.album_id = ?
+        ORDER BY am.position
+        "#,
+        &[&request.album_id],
+        map_media_row,
+    )?;
+
+    Ok(Json(AlbumDetailResponse {
+        id: album.id,
+        name: album.name,
+        description: album.description,
+        cover_media_id: album.cover_media_id,
+        media,
+        created_at: album.created_at,
+    }))
+}
+
+struct AlbumBasic {
+    id: i64,
+    name: String,
+    description: Option<String>,
+    cover_media_id: Option<i64>,
+    created_at: String,
+}
+
+fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
+    Ok(MediaResponse {
+        id: row.get(0)?,
+        filename: row.get(1)?,
+        original_filename: row.get(2)?,
+        media_type: row.get(3)?,
+        mime_type: row.get(4)?,
+        width: row.get(5)?,
+        height: row.get(6)?,
+        file_size: row.get(7)?,
+        duration_seconds: row.get(8)?,
+        date_taken: row.get(9)?,
+        gps_latitude: row.get(10)?,
+        gps_longitude: row.get(11)?,
+        camera_make: row.get(12)?,
+        camera_model: row.get(13)?,
+        iso: row.get(14)?,
+        exposure_time: row.get(15)?,
+        f_number: row.get(16)?,
+        focal_length: row.get(17)?,
+        gps_altitude: row.get(18)?,
+        location_state: row.get(19)?,
+        location_country: row.get(20)?,
+        keywords: row.get(21)?,
+        created_at: row.get(22)?,
+    })
+}
+
+async fn update_album(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumUpdateRequest>,
+) -> AppResult<Json<AlbumResponse>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    // Check exists
+    let exists = fetch_one(
+        &conn,
+        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        &[&request.album_id, &current_user.id],
+        |row| Ok(row.get::<_, i64>(0)?),
+    )?;
+
+    if exists.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+
+    let mut updates = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(ref name) = request.name {
+        updates.push("name = ?");
+        params.push(Box::new(name.clone()));
+    }
+
+    if let Some(ref desc) = request.description {
+        updates.push("description = ?");
+        params.push(Box::new(desc.clone()));
+    }
+
+    if let Some(cover_id) = request.cover_media_id {
+        updates.push("cover_media_id = ?");
+        params.push(Box::new(cover_id));
+    }
+
+    if !updates.is_empty() {
+        params.push(Box::new(request.album_id));
+        let sql = format!("UPDATE albums SET {} WHERE id = ?", updates.join(", "));
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        execute_query(&conn, &sql, &param_refs)?;
+    }
+
+    let album = fetch_one(
+        &conn,
+        r#"
+        SELECT a.id, a.name, a.description, a.cover_media_id, COUNT(am.media_id) as media_count, a.created_at
+        FROM albums a
+        LEFT JOIN album_media am ON a.id = am.album_id
+        WHERE a.id = ?
+        GROUP BY a.id
+        "#,
+        &[&request.album_id],
+        map_album_row,
+    )?
+    .ok_or_else(|| AppError::Internal("Failed to update album".to_string()))?;
+
+    Ok(Json(album))
+}
+
+async fn delete_album(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumDeleteRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let exists = fetch_one(
+        &conn,
+        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        &[&request.album_id, &current_user.id],
+        |row| Ok(row.get::<_, i64>(0)?),
+    )?;
+
+    if exists.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+
+    execute_query(&conn, "DELETE FROM albums WHERE id = ?", &[&request.album_id])?;
+
+    Ok(Json(serde_json::json!({"message": "Album deleted successfully"})))
+}
+
+async fn add_media_to_album(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumAddMediaRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let exists = fetch_one(
+        &conn,
+        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        &[&request.album_id, &current_user.id],
+        |row| Ok(row.get::<_, i64>(0)?),
+    )?;
+
+    if exists.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+
+    let max_pos: i64 = fetch_one(
+        &conn,
+        "SELECT COALESCE(MAX(position), -1) FROM album_media WHERE album_id = ?",
+        &[&request.album_id],
+        |row| row.get(0),
+    )?
+    .unwrap_or(-1);
+
+    let mut next_pos = max_pos + 1;
+
+    for media_id in &request.media_ids {
+        // Check media belongs to user
+        let media_exists = fetch_one(
+            &conn,
+            "SELECT id FROM media WHERE id = ? AND user_id = ?",
+            &[media_id, &current_user.id],
+            |row| Ok(row.get::<_, i64>(0)?),
+        )?;
+
+        if media_exists.is_none() {
+            continue;
+        }
+
+        // Insert or ignore
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO album_media (album_id, media_id, position) VALUES (?, ?, ?)",
+            rusqlite::params![request.album_id, media_id, next_pos],
+        );
+        next_pos += 1;
+    }
+
+    Ok(Json(serde_json::json!({"message": "Media added to album"})))
+}
+
+async fn remove_media_from_album(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumRemoveMediaRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let exists = fetch_one(
+        &conn,
+        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        &[&request.album_id, &current_user.id],
+        |row| Ok(row.get::<_, i64>(0)?),
+    )?;
+
+    if exists.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+
+    for media_id in &request.media_ids {
+        conn.execute(
+            "DELETE FROM album_media WHERE album_id = ? AND media_id = ?",
+            rusqlite::params![request.album_id, media_id],
+        )?;
+    }
+
+    Ok(Json(serde_json::json!({"message": "Media removed from album"})))
+}
+
+async fn reorder_album_media(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<AlbumReorderRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let exists = fetch_one(
+        &conn,
+        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        &[&request.album_id, &current_user.id],
+        |row| Ok(row.get::<_, i64>(0)?),
+    )?;
+
+    if exists.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+
+    for (i, media_id) in request.media_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE album_media SET position = ? WHERE album_id = ? AND media_id = ?",
+            rusqlite::params![i as i64, request.album_id, media_id],
+        )?;
+    }
+
+    Ok(Json(serde_json::json!({"message": "Album reordered successfully"})))
+}

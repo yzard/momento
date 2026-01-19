@@ -29,8 +29,8 @@ function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
 
   const saveTokens = (tokens: TokenResponse) => {
-    localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token)
-    localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
+    localStorage.setItem(ACCESS_TOKEN_KEY, tokens.accessToken)
+    localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken)
   }
 
   const clearTokens = () => {

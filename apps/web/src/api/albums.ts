@@ -5,9 +5,9 @@ interface AlbumDetail {
   id: number
   name: string
   description: string | null
-  cover_media_id: number | null
+  coverMediaId: number | null
   media: Media[]
-  created_at: string
+  createdAt: string
 }
 
 interface AlbumCreateRequest {
@@ -16,10 +16,10 @@ interface AlbumCreateRequest {
 }
 
 interface AlbumUpdateRequest {
-  album_id: number
+  albumId: number
   name?: string
   description?: string
-  cover_media_id?: number
+  coverMediaId?: number
 }
 
 export const albumsApi = {
@@ -29,7 +29,7 @@ export const albumsApi = {
   },
 
   get: async (albumId: number): Promise<AlbumDetail> => {
-    const response = await apiClient.post<AlbumDetail>('/album/get', { album_id: albumId })
+    const response = await apiClient.post<AlbumDetail>('/album/get', { albumId })
     return response.data
   },
 
@@ -44,18 +44,18 @@ export const albumsApi = {
   },
 
   delete: async (albumId: number): Promise<void> => {
-    await apiClient.post('/album/delete', { album_id: albumId })
+    await apiClient.post('/album/delete', { albumId })
   },
 
   addMedia: async (albumId: number, mediaIds: number[]): Promise<void> => {
-    await apiClient.post('/album/add-media', { album_id: albumId, media_ids: mediaIds })
+    await apiClient.post('/album/add-media', { albumId, mediaIds })
   },
 
   removeMedia: async (albumId: number, mediaIds: number[]): Promise<void> => {
-    await apiClient.post('/album/remove-media', { album_id: albumId, media_ids: mediaIds })
+    await apiClient.post('/album/remove-media', { albumId, mediaIds })
   },
 
   reorder: async (albumId: number, mediaIds: number[]): Promise<void> => {
-    await apiClient.post('/album/reorder', { album_id: albumId, media_ids: mediaIds })
+    await apiClient.post('/album/reorder', { albumId, mediaIds })
   },
 }

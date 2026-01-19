@@ -1,9 +1,9 @@
 import { apiClient } from './client'
 
 export interface TokenResponse {
-  access_token: string
-  refresh_token: string
-  token_type: string
+  accessToken: string
+  refreshToken: string
+  tokenType: string
 }
 
 interface User {
@@ -24,13 +24,13 @@ export const authApi = {
 
   refresh: async (refreshToken: string): Promise<TokenResponse> => {
     const response = await apiClient.post<TokenResponse>('/user/refresh', {
-      refresh_token: refreshToken,
+      refreshToken,
     })
     return response.data
   },
 
   logout: async (refreshToken: string): Promise<void> => {
-    await apiClient.post('/user/logout', { refresh_token: refreshToken })
+    await apiClient.post('/user/logout', { refreshToken })
   },
 
   getMe: async (): Promise<User> => {
@@ -40,8 +40,8 @@ export const authApi = {
 
   changePassword: async (currentPassword: string, newPassword: string): Promise<void> => {
     await apiClient.post('/user/change-password', {
-      current_password: currentPassword,
-      new_password: newPassword,
+      currentPassword,
+      newPassword,
     })
   },
 }

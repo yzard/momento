@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { Play, Plus, Trash2 } from 'lucide-react'
@@ -75,22 +75,65 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
   const [isHovering, setIsHovering] = useState(false)
   const [showVideo, setShowVideo] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   const isVideo = item.mediaType === 'video'
   const isAnimated = isAnimatedFormat(item.mimeType)
   const shouldPreview = isVideo || isAnimated
   const formatBadge = getFormatBadge(item.mimeType, item.originalFilename, item.mediaType)
 
+  // Load thumbnail with IntersectionObserver for lazy loading
+  useEffect(() => {
+    if (!containerRef.current) return
+    let cancelled = false
+
+    const loadThumbnail = async () => {
+      try {
+        const url = await mediaApi.getThumbnailUrl(item.id)
+        if (!cancelled) setThumbnailUrl(url)
+      } catch (err) {
+        console.error('Failed to load thumbnail:', err)
+      }
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadThumbnail()
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '100px' }
+    )
+    observer.observe(containerRef.current)
+
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
+  }, [item.id])
+
   const handleMouseEnter = useCallback(() => {
     setIsHovering(true)
     if (shouldPreview) {
-      hoverTimeoutRef.current = setTimeout(() => {
+      hoverTimeoutRef.current = setTimeout(async () => {
+        // Load preview URL if not already loaded
+        if (!previewUrl) {
+          try {
+            const url = await mediaApi.getPreviewUrl(item.id)
+            setPreviewUrl(url)
+          } catch (err) {
+            console.error('Failed to load preview:', err)
+          }
+        }
         setShowVideo(true)
       }, 500)
     }
-  }, [shouldPreview])
+  }, [shouldPreview, previewUrl, item.id])
 
   const handleMouseLeave = useCallback(() => {
     setIsHovering(false)
@@ -122,22 +165,26 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
 
   return (
     <div
+      ref={containerRef}
       className="aspect-square relative cursor-pointer group overflow-hidden bg-muted rounded-lg transition-all duration-300 hover:z-10 hover:ring-4 hover:ring-background hover:shadow-xl hover:scale-105"
       onClick={() => onPhotoClick(item)}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      <img
-        src={mediaApi.getThumbnailUrl(item.id)}
-        alt={item.originalFilename}
-        className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${showVideo ? 'opacity-0' : 'opacity-100'}`}
-        loading="lazy"
-      />
+      {thumbnailUrl ? (
+        <img
+          src={thumbnailUrl}
+          alt={item.originalFilename}
+          className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${showVideo ? 'opacity-0' : 'opacity-100'}`}
+        />
+      ) : (
+        <div className="w-full h-full animate-pulse" />
+      )}
 
-      {isHovering && showVideo && shouldPreview && (
+      {isHovering && showVideo && shouldPreview && previewUrl && (
         <video
           ref={videoRef}
-          src={mediaApi.getPreviewUrl(item.id)}
+          src={previewUrl}
           className="absolute inset-0 w-full h-full object-cover"
           autoPlay
           muted
@@ -165,8 +212,8 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider border border-white/10">
           {(isHovering && showVideo)
             ? formatDuration(currentTime)
-            : (item.durationSeconds || (item as any).duration_seconds
-              ? formatDuration(item.durationSeconds || (item as any).duration_seconds)
+            : (item.durationSeconds
+              ? formatDuration(item.durationSeconds)
               : '0:00')}
         </div>
       )}

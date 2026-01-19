@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { trashApi, type TrashMedia } from '../api/trash'
 import { mediaApi } from '../api/media'
@@ -203,20 +203,57 @@ interface TrashItemProps {
 }
 
 function TrashItem({ item, selected, onToggle, daysRemaining }: TrashItemProps) {
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    let cancelled = false
+
+    const loadThumbnail = async () => {
+      try {
+        const url = await mediaApi.getThumbnailUrl(item.id)
+        if (!cancelled) setThumbnailUrl(url)
+      } catch (err) {
+        console.error('Failed to load thumbnail:', err)
+      }
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadThumbnail()
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '100px' }
+    )
+    observer.observe(containerRef.current)
+
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
+  }, [item.id])
+
   return (
     <div
+      ref={containerRef}
       className={cn(
         "relative aspect-square rounded-lg overflow-hidden cursor-pointer group transition-all",
         selected ? "ring-4 ring-primary" : "hover:ring-2 hover:ring-primary/50"
       )}
       onClick={onToggle}
     >
-      <img
-        src={mediaApi.getThumbnailUrl(item.id)}
-        alt={item.originalFilename}
-        className="w-full h-full object-cover"
-        loading="lazy"
-      />
+      {thumbnailUrl ? (
+        <img
+          src={thumbnailUrl}
+          alt={item.originalFilename}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full bg-muted animate-pulse" />
+      )}
 
       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity" />
 

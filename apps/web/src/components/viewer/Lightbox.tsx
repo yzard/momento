@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, X, Loader2 } from 'lucide-react'
 import { MediaDetails } from './MediaDetails'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
@@ -20,6 +20,8 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
   const [isZoomed, setIsZoomed] = useState(false)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
   const dragStart = useRef({ x: 0, y: 0 })
   const offsetStart = useRef({ x: 0, y: 0 })
 
@@ -50,6 +52,24 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
   useEffect(() => {
     resetZoom()
   }, [currentIndex, resetZoom])
+
+  // Load preview URL when media changes
+  useEffect(() => {
+    if (!currentMedia) return
+
+    setIsLoading(true)
+    setPreviewUrl(null)
+
+    mediaApi.getPreviewUrl(currentMedia.id)
+      .then((url) => {
+        setPreviewUrl(url)
+        setIsLoading(false)
+      })
+      .catch((err) => {
+        console.error('Failed to load preview:', err)
+        setIsLoading(false)
+      })
+  }, [currentMedia])
 
   if (!currentMedia) return null
 
@@ -120,32 +140,40 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
           </button>
         )}
 
-        {isVideo ? (
-          <video
-            src={mediaApi.getPreviewUrl(currentMedia.id)}
-            className="max-w-full max-h-full rounded-lg shadow-2xl"
-            controls
-            loop
-            playsInline
-            preload="metadata"
-          />
-        ) : (
-          <div
-            className="w-full h-full flex items-center justify-center overflow-hidden"
-            onDoubleClick={handleDoubleClick}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={stopDragging}
-            onMouseLeave={stopDragging}
-          >
-            <img
-              src={mediaApi.getPreviewUrl(currentMedia.id)}
-              alt={currentMedia.originalFilename}
-              className="max-w-full max-h-full object-contain rounded-lg shadow-2xl select-none"
-              style={imageStyle}
-              draggable={false}
-            />
+        {isLoading ? (
+          <div className="flex items-center justify-center">
+            <Loader2 className="w-12 h-12 animate-spin text-muted-foreground" />
           </div>
+        ) : previewUrl ? (
+          isVideo ? (
+            <video
+              src={previewUrl}
+              className="max-w-full max-h-full rounded-lg shadow-2xl"
+              controls
+              loop
+              playsInline
+              preload="metadata"
+            />
+          ) : (
+            <div
+              className="w-full h-full flex items-center justify-center overflow-hidden"
+              onDoubleClick={handleDoubleClick}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={stopDragging}
+              onMouseLeave={stopDragging}
+            >
+              <img
+                src={previewUrl}
+                alt={currentMedia.originalFilename}
+                className="max-w-full max-h-full object-contain rounded-lg shadow-2xl select-none"
+                style={imageStyle}
+                draggable={false}
+              />
+            </div>
+          )
+        ) : (
+          <div className="text-muted-foreground">Failed to load media</div>
         )}
       </div>
 

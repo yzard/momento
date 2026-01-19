@@ -5,7 +5,7 @@
 ## Project Overview
 
 Momento is a self-hosted photo management application with:
-- **Backend**: FastAPI + SQLite (Python 3.12+) in `apps/api/`
+- **Backend**: Axum + SQLite (Rust) in `apps/api/`
 - **Frontend**: React + TypeScript + Vite + Tailwind in `apps/web/`
 - **Shared**: TypeScript constants in `packages/shared/`
 
@@ -28,22 +28,20 @@ pnpm test                 # Run all tests
 ```bash
 cd apps/api
 
-# Install with dev dependencies
-uv pip install -e ".[dev]"
+# Build
+cargo build                # Debug build
+cargo build --release      # Release build
 
 # Run development server
-uvicorn momento_api.main:create_application --factory --reload --host 0.0.0.0 --port 8000
+cargo run                  # Starts server on 0.0.0.0:8000
 
 # Linting & formatting
-black momento_api/             # Format code
-isort momento_api/             # Sort imports
-mypy momento_api/              # Type checking
+cargo fmt                  # Format code
+cargo clippy               # Lint code
 
 # Testing
-pytest                         # Run all tests
-pytest tests/test_auth.py      # Run single test file
-pytest tests/test_auth.py::test_login -v   # Run single test
-pytest -k "test_login"         # Run tests matching pattern
+cargo test                 # Run all tests
+cargo test auth            # Run tests matching "auth"
 ```
 
 ### Frontend (apps/web)
@@ -66,57 +64,47 @@ docker-compose -f docker-compose.dev.yml up   # Dev mode
 
 ## Code Style Guidelines
 
-### Python (Backend)
+### Rust (Backend)
 
 **Formatting**:
-- Line length: 120 characters
-- Formatter: `black` with `skip-string-normalization = true`
-- Import sorting: `isort` with profile "black"
+- Use `cargo fmt` for formatting
+- Use `cargo clippy` for linting
 
-**Imports** (order enforced by isort):
-```python
-# 1. Standard library
-from typing import Annotated, Optional
+**Imports** (order):
+```rust
+// 1. Standard library
+use std::sync::Arc;
+use std::path::PathBuf;
 
-# 2. Third-party
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+// 2. External crates
+use axum::{extract::State, routing::post, Json, Router};
+use serde::{Deserialize, Serialize};
 
-# 3. Local
-from momento_api.auth.dependencies import CurrentUser, get_current_user
-from momento_api.database import fetch_one, fetch_all
+// 3. Local crate
+use crate::auth::{AppState, CurrentUser};
+use crate::error::AppError;
 ```
 
-**Type Hints**:
-- Always use type hints for function parameters and return types
-- Use `Optional[X]` or `X | None` for nullable types
-- Use `Annotated[X, Depends(...)]` for FastAPI dependencies
-- Pydantic models for request/response schemas
-
 **Naming Conventions**:
-- Files: `snake_case.py`
-- Classes: `PascalCase` (e.g., `MediaResponse`, `UserCreateRequest`)
+- Files: `snake_case.rs`
+- Structs/Enums: `PascalCase` (e.g., `MediaResponse`, `UserCreateRequest`)
 - Functions/variables: `snake_case`
 - Constants: `UPPER_SNAKE_CASE`
-- Private helpers: prefix with `_` (e.g., `_row_to_media_response`)
+- Modules: `snake_case`
 
 **Error Handling**:
-```python
-# Use HTTPException for API errors
-raise HTTPException(
-    status_code=status.HTTP_404_NOT_FOUND,
-    detail="Media not found"
-)
-
-# Custom exceptions in momento_api/exceptions.py for domain errors
-raise MediaProcessingError("Failed to generate thumbnail")
+```rust
+// Use AppError for API errors
+return Err(AppError::NotFound("Media not found".to_string()));
+return Err(AppError::BadRequest("Invalid input".to_string()));
+return Err(AppError::Authentication("Invalid token".to_string()));
 ```
 
 **Route Patterns**:
-- Router prefix defines resource: `APIRouter(prefix="/media", tags=["media"])`
+- Routers use `Router::new()` with `.route()` methods
 - POST for all mutations and queries (RPC-style API)
-- Request bodies use Pydantic models
-- Response models specified via `response_model=`
+- Request bodies use `Json<T>` extractor
+- Response types implement `IntoResponse`
 
 ### TypeScript (Frontend)
 
@@ -165,17 +153,21 @@ const MediaCard: React.FC<{ media: Media }> = ({ media }) => { ... }
 ```
 apps/
 ├── api/
-│   ├── momento_api/
-│   │   ├── auth/           # JWT, password, dependencies
-│   │   ├── models/         # Pydantic request/response models
+│   ├── src/
+│   │   ├── auth/           # JWT, password, extractors
+│   │   ├── config/         # YAML config loading
+│   │   ├── database/       # SQLite pool, schema, queries
+│   │   ├── models/         # Request/response DTOs (serde)
 │   │   ├── processor/      # Media processing, thumbnails, import
-│   │   ├── routes/         # FastAPI routers
-│   │   ├── config.py       # YAML config loading
-│   │   ├── database.py     # SQLite helpers
-│   │   ├── constants.py    # Paths, defaults
-│   │   └── main.py         # App factory
+│   │   ├── routes/         # Axum route handlers
+│   │   ├── utils/          # Helpers (datetime, geocoding)
+│   │   ├── app.rs          # App factory
+│   │   ├── constants.rs    # Paths, defaults
+│   │   ├── error.rs        # AppError type
+│   │   ├── lib.rs          # Library root
+│   │   └── main.rs         # Entry point
 │   ├── schema.sql          # Database schema
-│   └── pyproject.toml      # Python dependencies
+│   └── Cargo.toml          # Rust dependencies
 │
 ├── web/
 │   ├── src/
@@ -196,7 +188,7 @@ packages/
 ## API Conventions
 
 **Endpoint Pattern**: `/api/v1/<resource>/<operation>`
-- Resources: `user`, `image`, `album`, `tag`, `share`, `import`, `map`, `timeline`
+- Resources: `user`, `media`, `album`, `tag`, `share`, `import`, `map`, `timeline`, `trash`
 - Operations: `list`, `get`, `create`, `update`, `delete`
 
 **Authentication**:
@@ -206,16 +198,16 @@ packages/
 
 **Request/Response**:
 - All bodies are JSON
-- Pydantic handles validation
+- Serde handles serialization (camelCase for responses)
 - Consistent error format: `{"detail": "Error message"}`
 
 ---
 
 ## Database
 
-- SQLite with `sqlite3.Row` row factory
+- SQLite with r2d2 connection pooling
 - Schema in `apps/api/schema.sql`
-- Helper functions in `momento_api/database.py`:
+- Helper functions in `src/database/mod.rs`:
   - `fetch_one()`, `fetch_all()` for queries
   - `execute_query()` for mutations
   - `insert_returning_id()` for inserts
@@ -224,6 +216,21 @@ packages/
 
 ## Key Dependencies
 
-**Backend**: FastAPI, Pydantic, python-jose (JWT), bcrypt, Pillow, pillow-heif, ffmpeg-python
+**Backend (Rust)**:
+- axum (web framework)
+- tokio (async runtime)
+- rusqlite + r2d2 (SQLite)
+- serde + serde_json (serialization)
+- jsonwebtoken (JWT)
+- argon2 + bcrypt (password hashing)
+- image + kamadak-exif (image processing)
+- reqwest (HTTP client)
 
-**Frontend**: React 18, React Router 7, TanStack Query, Axios, Tailwind CSS, react-leaflet, react-virtuoso
+**Frontend**:
+- React 18
+- React Router 7
+- TanStack Query
+- Axios
+- Tailwind CSS
+- react-leaflet
+- react-virtuoso

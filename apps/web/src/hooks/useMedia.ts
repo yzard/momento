@@ -4,7 +4,7 @@ import { mediaApi, type GroupBy } from '../api/media'
 export function useTimeline(groupBy: GroupBy = 'day', limit = 100) {
   return useInfiniteQuery({
     queryKey: ['timeline', groupBy],
-    queryFn: ({ pageParam }) => mediaApi.timeline({ cursor: pageParam, limit, group_by: groupBy }),
+    queryFn: ({ pageParam }) => mediaApi.timeline({ cursor: pageParam, limit, groupBy }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => (lastPage.hasMore ? lastPage.nextCursor : undefined),
   })

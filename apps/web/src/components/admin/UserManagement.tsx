@@ -6,9 +6,9 @@ interface User {
   username: string
   email: string
   role: 'admin' | 'user'
-  must_change_password: boolean
-  is_active: boolean
-  created_at: string
+  mustChangePassword: boolean
+  isActive: boolean
+  createdAt: string
 }
 
 export default function UserManagement() {
@@ -46,7 +46,7 @@ export default function UserManagement() {
 
   const handleToggleActive = async (user: User) => {
     try {
-      await adminApi.updateUser(user.id, { is_active: !user.is_active })
+      await adminApi.updateUser(user.id, { isActive: !user.isActive })
       loadUsers()
     } catch {
       alert('Failed to update user')
@@ -101,8 +101,8 @@ export default function UserManagement() {
                   </span>
                 </td>
                 <td className="px-4 py-3">
-                  <span className={`px-2 py-1 rounded text-xs font-bold uppercase tracking-wide ${user.is_active ? 'bg-primary/10 text-primary border border-primary/20' : 'bg-destructive/10 text-destructive border border-destructive/20'}`}>
-                    {user.is_active ? 'Active' : 'Inactive'}
+                  <span className={`px-2 py-1 rounded text-xs font-bold uppercase tracking-wide ${user.isActive ? 'bg-primary/10 text-primary border border-primary/20' : 'bg-destructive/10 text-destructive border border-destructive/20'}`}>
+                    {user.isActive ? 'Active' : 'Inactive'}
                   </span>
                 </td>
                 <td className="px-4 py-3">
@@ -110,7 +110,7 @@ export default function UserManagement() {
                     onClick={() => handleToggleActive(user)}
                     className="text-primary hover:text-primary/80 mr-3 font-medium hover:underline"
                   >
-                    {user.is_active ? 'Deactivate' : 'Activate'}
+                    {user.isActive ? 'Deactivate' : 'Activate'}
                   </button>
                   <button
                     onClick={() => handleDelete(user.id)}

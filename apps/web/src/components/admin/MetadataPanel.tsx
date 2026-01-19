@@ -5,13 +5,13 @@ import { cn } from '../../lib/utils'
 
 interface RegenerationStatus {
   status: string
-  total_media: number
-  processed_media: number
-  updated_metadata: number
-  generated_thumbnails: number
-  updated_tags: number
-  started_at: string | null
-  completed_at: string | null
+  totalMedia: number
+  processedMedia: number
+  updatedMetadata: number
+  generatedThumbnails: number
+  updatedTags: number
+  startedAt: string | null
+  completedAt: string | null
   errors: string[]
 }
 
@@ -68,8 +68,8 @@ export default function MetadataPanel() {
   }
 
   const isRunning = status?.status === 'running'
-  const progress = status && status.total_media > 0
-    ? Math.round((status.processed_media / status.total_media) * 100)
+  const progress = status && status.totalMedia > 0
+    ? Math.round((status.processedMedia / status.totalMedia) * 100)
     : 0
 
   return (
@@ -116,12 +116,12 @@ export default function MetadataPanel() {
             <span className="text-muted-foreground">
               Status: <span className="font-medium text-foreground uppercase tracking-wide">{status.status}</span>
             </span>
-            {status.total_media > 0 && (
-              <span className="text-muted-foreground font-mono">{status.processed_media} / {status.total_media} files</span>
+            {status.totalMedia > 0 && (
+              <span className="text-muted-foreground font-mono">{status.processedMedia} / {status.totalMedia} files</span>
             )}
           </div>
 
-          {isRunning && status.total_media > 0 && (
+          {isRunning && status.totalMedia > 0 && (
             <div className="flex items-center gap-3 mb-6">
               <div className="flex-1 bg-muted/50 rounded-full h-2 overflow-hidden">
                 <div
@@ -142,15 +142,15 @@ export default function MetadataPanel() {
           <div className="grid grid-cols-3 gap-4 text-sm">
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Metadata</span>
-              <span className="font-bold text-lg text-foreground">{status.updated_metadata}</span>
+              <span className="font-bold text-lg text-foreground">{status.updatedMetadata}</span>
             </div>
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Thumbnails</span>
-              <span className="font-bold text-lg text-foreground">{status.generated_thumbnails}</span>
+              <span className="font-bold text-lg text-foreground">{status.generatedThumbnails}</span>
             </div>
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Tags</span>
-              <span className="font-bold text-lg text-foreground">{status.updated_tags}</span>
+              <span className="font-bold text-lg text-foreground">{status.updatedTags}</span>
             </div>
           </div>
 

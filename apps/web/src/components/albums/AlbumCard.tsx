@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { mediaApi } from '../../api/media'
 import type { Album } from '../../api/types'
 import { Folder, X } from 'lucide-react'
@@ -9,6 +10,27 @@ interface AlbumCardProps {
 }
 
 export default function AlbumCard({ album, onClick, onDelete }: AlbumCardProps) {
+  const [coverUrl, setCoverUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!album.coverMediaId) return
+    let cancelled = false
+
+    const loadCover = async () => {
+      try {
+        const url = await mediaApi.getThumbnailUrl(album.coverMediaId!)
+        if (!cancelled) setCoverUrl(url)
+      } catch (err) {
+        console.error('Failed to load album cover:', err)
+      }
+    }
+    loadCover()
+
+    return () => {
+      cancelled = true
+    }
+  }, [album.coverMediaId])
+
   return (
     <div
       className="relative group cursor-pointer bg-white rounded-xl border border-border overflow-hidden transition-all duration-300 hover:shadow-lg hover:border-primary/30"
@@ -16,17 +38,21 @@ export default function AlbumCard({ album, onClick, onDelete }: AlbumCardProps) 
     >
       <div className="aspect-[4/5] bg-muted relative overflow-hidden">
         {album.coverMediaId ? (
-          <img
-            src={mediaApi.getThumbnailUrl(album.coverMediaId)}
-            alt={album.name}
-            className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
-          />
+          coverUrl ? (
+            <img
+              src={coverUrl}
+              alt={album.name}
+              className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
+            />
+          ) : (
+            <div className="w-full h-full animate-pulse" />
+          )
         ) : (
           <div className="w-full h-full flex items-center justify-center text-muted-foreground/30 bg-muted/10">
             <Folder className="w-16 h-16 text-muted-foreground/20" strokeWidth={1} />
           </div>
         )}
-        
+
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors duration-300" />
       </div>
       

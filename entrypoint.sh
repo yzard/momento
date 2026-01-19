@@ -1,44 +1,34 @@
 #!/bin/sh
 
-# Set default values if not provided
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 UMASK=${UMASK:-022}
 
 echo "Starting with PUID=$PUID, PGID=$PGID, UMASK=$UMASK"
 
-# Set timezone if TZ is provided
 if [ -n "$TZ" ]; then
     echo "Setting timezone to $TZ"
-    cp /usr/share/zoneinfo/$TZ /etc/localtime 2>/dev/null || true
-    echo "$TZ" > /etc/timezone 2>/dev/null || true
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 fi
 
-# Create group if it doesn't exist
 if ! getent group momento > /dev/null 2>&1; then
     addgroup -g "$PGID" momento
 fi
 
-# Create user if it doesn't exist
 if ! id momento > /dev/null 2>&1; then
-    adduser -D -u "$PUID" -G momento -h /app momento
+    adduser -u "$PUID" -G momento -h /app -D momento
 fi
 
-# Set umask
 umask "$UMASK"
 
-# Create data directories
-mkdir -p /data/originals /data/thumbnails /data/imports
+mkdir -p /data/originals /data/thumbnails /data/imports /data/previews /data/trash /data/albums
 
-# Change ownership of data directory
-chown -R momento:momento /data 2>/dev/null || true
+chown -R momento:momento /data
 
-# Create default config if it doesn't exist
 if [ ! -f /data/config.yaml ]; then
-    su-exec momento:momento python -c "from pathlib import Path; from momento_api.config import save_default_config; save_default_config(Path('/data/config.yaml'))"
+    su-exec momento:momento /app/momento-api --init-config
 fi
 
-echo "Running as user momento ($(id momento))"
+echo "Running as user momento ($(id -u momento):$(id -g momento))"
 
-# Execute the application as the specified user
 exec su-exec momento:momento "$@"

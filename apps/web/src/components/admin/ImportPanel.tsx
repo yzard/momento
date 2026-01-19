@@ -3,12 +3,12 @@ import { adminApi } from '../../api/admin'
 
 interface ImportStatus {
   status: string
-  total_files: number
-  processed_files: number
-  successful_imports: number
-  failed_imports: number
-  started_at: string | null
-  completed_at: string | null
+  totalFiles: number
+  processedFiles: number
+  successfulImports: number
+  failedImports: number
+  startedAt: string | null
+  completedAt: string | null
   errors: string[]
 }
 
@@ -57,8 +57,8 @@ export default function ImportPanel() {
   }
 
   const isRunning = status?.status === 'running'
-  const progress = status && status.total_files > 0
-    ? Math.round((status.processed_files / status.total_files) * 100)
+  const progress = status && status.totalFiles > 0
+    ? Math.round((status.processedFiles / status.totalFiles) * 100)
     : 0
 
   return (
@@ -90,12 +90,12 @@ export default function ImportPanel() {
         <div className="mt-8 border-t border-border/50 pt-6">
           <div className="flex justify-between text-sm mb-3">
             <span className="text-muted-foreground">Status: <span className="font-medium text-foreground uppercase tracking-wide">{status.status}</span></span>
-            {status.total_files > 0 && (
-              <span className="text-muted-foreground font-mono">{status.processed_files} / {status.total_files} files</span>
+            {status.totalFiles > 0 && (
+              <span className="text-muted-foreground font-mono">{status.processedFiles} / {status.totalFiles} files</span>
             )}
           </div>
 
-          {isRunning && status.total_files > 0 && (
+          {isRunning && status.totalFiles > 0 && (
             <div className="w-full bg-muted/50 rounded-full h-2 mb-6 overflow-hidden">
               <div
                 className="bg-primary h-2 rounded-full transition-all duration-300 shadow-[0_0_10px_hsl(var(--primary))]"
@@ -107,11 +107,11 @@ export default function ImportPanel() {
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Successful</span>
-              <span className="font-bold text-lg text-green-500">{status.successful_imports}</span>
+              <span className="font-bold text-lg text-green-500">{status.successfulImports}</span>
             </div>
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Failed</span>
-              <span className="font-bold text-lg text-destructive">{status.failed_imports}</span>
+              <span className="font-bold text-lg text-destructive">{status.failedImports}</span>
             </div>
           </div>
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAlbum, useReorderAlbum } from '../../hooks/useAlbums'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
@@ -108,25 +108,15 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
       ) : (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2">
           {items.map((item) => (
-            <div
+            <AlbumMediaItem
               key={item.id}
-              draggable
+              item={item}
+              isDragged={draggedId === item.id}
               onDragStart={(e) => handleDragStart(e, item.id)}
               onDragOver={(e) => handleDragOver(e, item.id)}
               onDrop={handleDrop}
-              className={cn(
-                "aspect-square relative cursor-move group overflow-hidden rounded-xl bg-muted shadow-sm transition-all duration-300",
-                draggedId === item.id ? 'opacity-25 ring-2 ring-primary' : 'opacity-100 hover:shadow-md hover:ring-2 hover:ring-primary/20 hover:scale-[1.02]'
-              )}
               onClick={() => onPhotoClick(item, items)}
-            >
-              <img
-                src={mediaApi.getThumbnailUrl(item.id)}
-                alt={item.originalFilename}
-                className="w-full h-full object-cover pointer-events-none select-none transition-transform duration-500 group-hover:scale-110"
-                loading="lazy"
-              />
-            </div>
+            />
           ))}
         </div>
       )}
@@ -134,3 +124,71 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
   )
 }
 
+interface AlbumMediaItemProps {
+  item: Media
+  isDragged: boolean
+  onDragStart: (e: React.DragEvent) => void
+  onDragOver: (e: React.DragEvent) => void
+  onDrop: (e: React.DragEvent) => void
+  onClick: () => void
+}
+
+function AlbumMediaItem({ item, isDragged, onDragStart, onDragOver, onDrop, onClick }: AlbumMediaItemProps) {
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    let cancelled = false
+
+    const loadThumbnail = async () => {
+      try {
+        const url = await mediaApi.getThumbnailUrl(item.id)
+        if (!cancelled) setThumbnailUrl(url)
+      } catch (err) {
+        console.error('Failed to load thumbnail:', err)
+      }
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadThumbnail()
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '100px' }
+    )
+    observer.observe(containerRef.current)
+
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
+  }, [item.id])
+
+  return (
+    <div
+      ref={containerRef}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      className={cn(
+        "aspect-square relative cursor-move group overflow-hidden rounded-xl bg-muted shadow-sm transition-all duration-300",
+        isDragged ? 'opacity-25 ring-2 ring-primary' : 'opacity-100 hover:shadow-md hover:ring-2 hover:ring-primary/20 hover:scale-[1.02]'
+      )}
+      onClick={onClick}
+    >
+      {thumbnailUrl ? (
+        <img
+          src={thumbnailUrl}
+          alt={item.originalFilename}
+          className="w-full h-full object-cover pointer-events-none select-none transition-transform duration-500 group-hover:scale-110"
+        />
+      ) : (
+        <div className="w-full h-full animate-pulse" />
+      )}
+    </div>
+  )
+}

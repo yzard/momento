@@ -5,31 +5,31 @@ interface User {
   username: string
   email: string
   role: 'admin' | 'user'
-  must_change_password: boolean
-  is_active: boolean
-  created_at: string
+  mustChangePassword: boolean
+  isActive: boolean
+  createdAt: string
 }
 
 interface ImportStatus {
   status: string
-  total_files: number
-  processed_files: number
-  successful_imports: number
-  failed_imports: number
-  started_at: string | null
-  completed_at: string | null
+  totalFiles: number
+  processedFiles: number
+  successfulImports: number
+  failedImports: number
+  startedAt: string | null
+  completedAt: string | null
   errors: string[]
 }
 
 interface RegenerationStatus {
   status: string
-  total_media: number
-  processed_media: number
-  updated_metadata: number
-  generated_thumbnails: number
-  updated_tags: number
-  started_at: string | null
-  completed_at: string | null
+  totalMedia: number
+  processedMedia: number
+  updatedMetadata: number
+  generatedThumbnails: number
+  updatedTags: number
+  startedAt: string | null
+  completedAt: string | null
   errors: string[]
 }
 
@@ -44,13 +44,13 @@ export const adminApi = {
     return response.data
   },
 
-  updateUser: async (userId: number, data: { role?: 'admin' | 'user'; is_active?: boolean }): Promise<User> => {
-    const response = await apiClient.post<User>('/user/update', data, { params: { user_id: userId } })
+  updateUser: async (userId: number, data: { role?: 'admin' | 'user'; isActive?: boolean }): Promise<User> => {
+    const response = await apiClient.post<User>('/user/update', { userId, ...data })
     return response.data
   },
 
   deleteUser: async (userId: number): Promise<void> => {
-    await apiClient.post('/user/delete', { user_id: userId })
+    await apiClient.post('/user/delete', { userId })
   },
 
   triggerImport: async (): Promise<{ message: string; status: string }> => {
@@ -70,7 +70,7 @@ export const adminApi = {
 
   regenerateMedia: async (missingOnly: boolean): Promise<{ message: string; status: string }> => {
     const response = await apiClient.post<{ message: string; status: string }>('/import/regenerate', {
-      missing_only: missingOnly,
+      missingOnly,
     })
     return response.data
   },
