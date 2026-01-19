@@ -1,0 +1,94 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Editorial Light Theme (Default) */
+    --background: 40 20% 98%; /* Warm Paper */
+    --foreground: 220 30% 15%; /* Deep Ink Blue */
+    
+    --card: 0 0% 100%;
+    --card-foreground: 220 30% 15%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 30% 15%;
+    
+    --primary: 180 70% 35%; /* Deep Teal */
+    --primary-foreground: 0 0% 100%;
+    
+    --secondary: 35 90% 55%; /* Warm Amber */
+    --secondary-foreground: 220 30% 15%;
+    
+    --muted: 40 10% 92%;
+    --muted-foreground: 220 10% 45%;
+    
+    --accent: 40 20% 94%;
+    --accent-foreground: 180 70% 35%;
+    
+    --destructive: 0 85% 60%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --border: 220 10% 85%;
+    --input: 220 10% 85%;
+    --ring: 180 70% 35%;
+    
+    --radius: 0.5rem;
+  }
+
+  /* Optional Dark Mode (Deep Ink) */
+  .dark {
+    --background: 225 35% 7%;
+    --foreground: 210 20% 98%;
+    
+    --card: 225 30% 10%;
+    --card-foreground: 210 20% 98%;
+    
+    --popover: 225 30% 10%;
+    --popover-foreground: 210 20% 98%;
+    
+    --primary: 175 80% 45%;
+    --primary-foreground: 225 35% 7%;
+    
+    --secondary: 35 100% 50%;
+    --secondary-foreground: 225 35% 7%;
+    
+    --muted: 223 30% 15%;
+    --muted-foreground: 215 20% 65%;
+    
+    --accent: 223 30% 15%;
+    --accent-foreground: 175 80% 45%;
+    
+    --destructive: 0 85% 60%;
+    --destructive-foreground: 210 20% 98%;
+    
+    --border: 223 30% 20%;
+    --input: 223 30% 20%;
+    --ring: 175 80% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  
+  /* Focus Visible styles for accessibility */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Leaflet Customization */
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    @apply bg-card text-foreground border border-border rounded-lg p-0 shadow-xl;
+  }
+  .leaflet-popup-content {
+    @apply m-0 font-sans;
+  }
+}

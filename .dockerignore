@@ -1,0 +1,67 @@
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Build artifacts
+build/
+dist/
+sdist/
+wheels/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# IDE and editor
+.idea/
+.vscode/
+
+# Virtual environments
+.venv/
+venv*/
+
+# Cache
+.mypy_cache/
+.ruff_cache/
+.turbo/
+
+# Development files
+*.log
+
+# Database files
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Git
+.git/
+.gitignore
+
+# Docker (don't include in context recursively)
+.dockerignore
+
+# Documentation and planning
+.sisyphus/
+.ai-todo.md
+AGENTS.md
+*.md
+!apps/api/schema.sql
+
+# Node modules (will be installed fresh in build)
+node_modules/
+
+# Data directory
+data/
+
+# Test files
+tests/
+**/tests/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+
+# Environment files
+.env
+.env.*

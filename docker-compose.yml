@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  momento:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=022
+      - TZ=UTC
+    volumes:
+      - momento_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/api/v1/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  momento_data:
+    driver: local
