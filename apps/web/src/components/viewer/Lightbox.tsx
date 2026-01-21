@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type CSSProperties } from 'react'
+import { useLocation } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { ChevronLeft, ChevronRight, X, Loader2 } from 'lucide-react'
 import { MediaDetails } from './MediaDetails'
@@ -18,6 +19,33 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
   const currentMedia = media[currentIndex]
   const isVideo = currentMedia?.mediaType === 'video'
   const [isZoomed, setIsZoomed] = useState(false)
+  const location = useLocation()
+  const hasClosedRef = useRef(false)
+
+  useEffect(() => {
+    hasClosedRef.current = false
+    window.history.pushState({ lightbox: true, path: location.pathname }, '')
+
+    const handlePopState = () => {
+      if (!hasClosedRef.current) {
+        hasClosedRef.current = true
+        onClose()
+      }
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    return () => {
+      window.removeEventListener('popstate', handlePopState)
+    }
+  }, [location.pathname, onClose])
+
+  const handleClose = useCallback(() => {
+    if (!hasClosedRef.current) {
+      hasClosedRef.current = true
+      window.history.back()
+      onClose()
+    }
+  }, [onClose])
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -41,13 +69,13 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') handleClose()
       if (e.key === 'ArrowLeft') goToPrev()
       if (e.key === 'ArrowRight') goToNext()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose, goToPrev, goToNext])
+  }, [handleClose, goToPrev, goToNext])
 
   useEffect(() => {
     resetZoom()
@@ -123,8 +151,8 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
     <div className="absolute inset-0 z-[2000] flex bg-background/95 backdrop-blur-sm">
       <div className="flex-1 relative flex items-center justify-center p-4 min-w-0 min-h-0">
         <button
-          onClick={onClose}
-          className="absolute top-4 left-4 z-50 p-2 rounded-full bg-background/20 hover:bg-background/40 text-foreground transition-colors border border-border/10 backdrop-blur-md"
+          onClick={handleClose}
+          className="absolute top-4 right-4 z-50 p-2 rounded-full bg-background/20 hover:bg-background/40 text-foreground transition-colors border border-border/10 backdrop-blur-md"
         >
           <X className="w-6 h-6" />
         </button>

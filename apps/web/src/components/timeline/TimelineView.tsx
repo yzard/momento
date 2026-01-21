@@ -1,5 +1,5 @@
-import { useCallback } from 'react'
-import { Virtuoso } from 'react-virtuoso'
+import { useCallback, useEffect, useRef } from 'react'
+import { Virtuoso, type VirtuosoHandle, type ListRange } from 'react-virtuoso'
 import { useTimeline } from '../../hooks/useMedia'
 import DateHeader from './DateHeader'
 import PhotoGrid from './PhotoGrid'
@@ -14,11 +14,30 @@ interface TimelineViewProps {
   groupBy?: GroupBy
 }
 
+const SCROLL_STORAGE_KEY = 'timeline_scroll_index'
+
 export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, groupBy = 'day' }: TimelineViewProps) {
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading, error } = useTimeline(groupBy)
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const lastGroupByRef = useRef(groupBy)
 
   const groups = data?.pages.flatMap((page) => page.groups ?? []) ?? []
   const allMedia = groups.flatMap((g) => g.media)
+
+  const savedIndex = sessionStorage.getItem(SCROLL_STORAGE_KEY)
+  const initialIndex = savedIndex ? parseInt(savedIndex, 10) : 0
+
+  useEffect(() => {
+    if (lastGroupByRef.current !== groupBy) {
+      sessionStorage.removeItem(SCROLL_STORAGE_KEY)
+      virtuosoRef.current?.scrollToIndex({ index: 0 })
+      lastGroupByRef.current = groupBy
+    }
+  }, [groupBy])
+
+  const handleRangeChanged = useCallback((range: ListRange) => {
+    sessionStorage.setItem(SCROLL_STORAGE_KEY, String(range.startIndex))
+  }, [])
 
   const loadMore = useCallback(() => {
     if (hasNextPage && !isFetchingNextPage) {
@@ -60,8 +79,11 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
 
   return (
     <Virtuoso
+      ref={virtuosoRef}
       style={{ height: '100%' }}
       data={groups}
+      initialTopMostItemIndex={initialIndex}
+      rangeChanged={handleRangeChanged}
       endReached={loadMore}
       overscan={500}
       itemContent={(_, group) => (

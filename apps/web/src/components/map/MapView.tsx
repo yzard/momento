@@ -1,23 +1,62 @@
-import { useEffect, useState } from 'react'
-import { MapContainer, TileLayer, useMap } from 'react-leaflet'
-import { LatLngBounds } from 'leaflet'
+import { useEffect, useRef, useState } from 'react'
+import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet'
+import { LatLngBounds, type LatLngTuple } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { mediaApi } from '../../api/media'
 import PhotoMarker, { type GeoMedia } from './PhotoMarker'
 import type { Media } from '../../api/types'
 import { Loader2, Map as MapIcon } from 'lucide-react'
 
-function FitBoundsToMarkers({ geoMedia }: { geoMedia: GeoMedia[] }) {
+const VIEWPORT_STORAGE_KEY = 'map_viewport'
+
+interface SavedViewport {
+  center: LatLngTuple
+  zoom: number
+}
+
+function getSavedViewport(): SavedViewport | null {
+  const saved = sessionStorage.getItem(VIEWPORT_STORAGE_KEY)
+  if (!saved) return null
+  try {
+    return JSON.parse(saved) as SavedViewport
+  } catch {
+    return null
+  }
+}
+
+function MapViewportPersistence() {
+  const map = useMapEvents({
+    moveend: () => {
+      const center = map.getCenter()
+      const zoom = map.getZoom()
+      const viewport: SavedViewport = {
+        center: [center.lat, center.lng],
+        zoom,
+      }
+      sessionStorage.setItem(VIEWPORT_STORAGE_KEY, JSON.stringify(viewport))
+    },
+  })
+  return null
+}
+
+function FitBoundsToMarkers({ geoMedia, skipIfSavedViewport }: { geoMedia: GeoMedia[]; skipIfSavedViewport: boolean }) {
   const map = useMap()
+  const hasFittedRef = useRef(false)
 
   useEffect(() => {
     if (geoMedia.length === 0) return
+    if (hasFittedRef.current) return
+    if (skipIfSavedViewport) {
+      hasFittedRef.current = true
+      return
+    }
 
     const bounds = new LatLngBounds(
       geoMedia.map((m) => [m.latitude, m.longitude] as [number, number])
     )
     map.fitBounds(bounds, { padding: [50, 50] })
-  }, [map, geoMedia])
+    hasFittedRef.current = true
+  }, [map, geoMedia, skipIfSavedViewport])
 
   return null
 }
@@ -95,10 +134,15 @@ export default function MapView({ onPhotoClick, onMediaChange }: MapViewProps) {
     )
   }
 
+  const savedViewport = getSavedViewport()
+  const initialCenter: LatLngTuple = savedViewport?.center ?? [0, 0]
+  const initialZoom = savedViewport?.zoom ?? 2
+
   return (
     <div className="flex-1 w-full overflow-hidden rounded-2xl border border-border/60 shadow-sm bg-card m-6">
-      <MapContainer center={[0, 0]} zoom={2} style={{ height: '100%', width: '100%' }}>
-        <FitBoundsToMarkers geoMedia={geoMedia} />
+      <MapContainer center={initialCenter} zoom={initialZoom} style={{ height: '100%', width: '100%' }}>
+        <MapViewportPersistence />
+        <FitBoundsToMarkers geoMedia={geoMedia} skipIfSavedViewport={!!savedViewport} />
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
           url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
