@@ -1,4 +1,5 @@
 mod pool;
+pub mod queries;
 mod schema;
 
 pub use pool::*;

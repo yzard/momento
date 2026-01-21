@@ -4,13 +4,14 @@ use momento_api::config::{load_config, save_default_config};
 use momento_api::constants::{
     CONFIG_PATH, DATA_DIR, IMPORTS_DIR, ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR,
 };
-use momento_api::database::{create_pool, ensure_media_columns, fetch_one, init_database, insert_returning_id};
+use momento_api::database::{
+    create_pool, ensure_media_columns, fetch_one, init_database, insert_returning_id, queries,
+};
 use momento_api::logging::{init_logging, install_panic_hook};
-use momento_api::processor::regenerator::run_regeneration;
+use momento_api::processor::regenerator::generate_missing_metadata;
 use momento_api::routes::cleanup_expired_trash;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread;
 use tracing::info;
 
 fn init_directories() {
@@ -25,21 +26,20 @@ fn init_directories() {
     }
 }
 
-fn create_default_admin(pool: &momento_api::database::DbPool, config: &momento_api::config::Config) {
+fn create_default_admin(
+    pool: &momento_api::database::DbPool,
+    config: &momento_api::config::Config,
+) {
     let conn = match pool.get() {
         Ok(c) => c,
         Err(_) => return,
     };
 
     // Check if admin exists
-    let existing: Option<i64> = fetch_one(
-        &conn,
-        "SELECT id FROM users WHERE role = 'admin' LIMIT 1",
-        &[],
-        |row| row.get(0),
-    )
-    .ok()
-    .flatten();
+    let existing: Option<i64> =
+        fetch_one(&conn, queries::users::CHECK_ADMIN, &[], |row| row.get(0))
+            .ok()
+            .flatten();
 
     if existing.is_some() {
         return;
@@ -53,7 +53,7 @@ fn create_default_admin(pool: &momento_api::database::DbPool, config: &momento_a
 
     let _ = insert_returning_id(
         &conn,
-        "INSERT INTO users (username, email, hashed_password, role, must_change_password) VALUES (?, ?, ?, 'admin', 1)",
+        queries::users::INSERT_ADMIN,
         &[
             &config.admin.username,
             &format!("{}@localhost", config.admin.username),
@@ -62,13 +62,15 @@ fn create_default_admin(pool: &momento_api::database::DbPool, config: &momento_a
     );
 }
 
-fn start_background_tasks(config: Arc<momento_api::config::Config>, pool: momento_api::database::DbPool) {
+fn start_background_tasks(
+    config: Arc<momento_api::config::Config>,
+    pool: momento_api::database::DbPool,
+) {
     let config_clone = Arc::clone(&config);
     let pool_clone = pool.clone();
 
-    thread::spawn(move || {
-        // Regenerate missing thumbnails
-        run_regeneration(true, &config_clone, &pool_clone);
+    tokio::spawn(async move {
+        generate_missing_metadata(&config_clone, &pool_clone).await;
 
         // Cleanup expired trash items
         if let Ok(conn) = pool_clone.get() {
@@ -130,7 +132,5 @@ async fn main() {
         .await
         .expect("Failed to bind");
 
-    axum::serve(listener, app)
-        .await
-        .expect("Server failed");
+    axum::serve(listener, app).await.expect("Server failed");
 }

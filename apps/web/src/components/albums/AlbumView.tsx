@@ -134,16 +134,19 @@ interface AlbumMediaItemProps {
 }
 
 function AlbumMediaItem({ item, isDragged, onDragStart, onDragOver, onDrop, onClick }: AlbumMediaItemProps) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => 
+    mediaApi.getCachedThumbnailUrl(item.id) || null
+  )
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!containerRef.current) return
+    if (thumbnailUrl || !containerRef.current) return
     let cancelled = false
 
     const loadThumbnail = async () => {
       try {
-        const url = await mediaApi.getThumbnailUrl(item.id)
+        const batch = await mediaApi.getThumbnailBatch([item.id])
+        const url = batch.get(item.id) ?? null
         if (!cancelled) setThumbnailUrl(url)
       } catch (err) {
         console.error('Failed to load thumbnail:', err)
@@ -165,7 +168,7 @@ function AlbumMediaItem({ item, isDragged, onDragStart, onDragOver, onDrop, onCl
       cancelled = true
       observer.disconnect()
     }
-  }, [item.id])
+  }, [item.id, thumbnailUrl])
 
   return (
     <div

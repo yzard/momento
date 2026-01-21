@@ -1,7 +1,7 @@
 use axum::{extract::State, routing::post, Json, Router};
 
 use crate::auth::{AppState, CurrentUser, RequireAdmin};
-use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id};
+use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     TagAddToMediaRequest, TagCreateRequest, TagDeleteRequest, TagListResponse,
@@ -31,12 +31,7 @@ async fn list_tags(
 ) -> AppResult<Json<TagListResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let tags = fetch_all(
-        &conn,
-        "SELECT id, name, created_at FROM tags ORDER BY name",
-        &[],
-        map_tag_row,
-    )?;
+    let tags = fetch_all(&conn, queries::tags::SELECT_ALL, &[], map_tag_row)?;
 
     Ok(Json(TagListResponse { tags }))
 }
@@ -51,24 +46,19 @@ async fn create_tag(
     // Check existing
     let existing = fetch_one(
         &conn,
-        "SELECT id FROM tags WHERE name = ?",
+        queries::tags::SELECT_ID_BY_NAME,
         &[&request.name],
-        |row| Ok(row.get::<_, i64>(0)?),
+        |row| row.get::<_, i64>(0),
     )?;
 
     if existing.is_some() {
         return Err(AppError::BadRequest("Tag already exists".to_string()));
     }
 
-    let tag_id = insert_returning_id(&conn, "INSERT INTO tags (name) VALUES (?)", &[&request.name])?;
+    let tag_id = insert_returning_id(&conn, queries::tags::INSERT, &[&request.name])?;
 
-    let tag = fetch_one(
-        &conn,
-        "SELECT id, name, created_at FROM tags WHERE id = ?",
-        &[&tag_id],
-        map_tag_row,
-    )?
-    .ok_or_else(|| AppError::Internal("Failed to create tag".to_string()))?;
+    let tag = fetch_one(&conn, queries::tags::SELECT_BY_ID, &[&tag_id], map_tag_row)?
+        .ok_or_else(|| AppError::Internal("Failed to create tag".to_string()))?;
 
     Ok(Json(tag))
 }
@@ -82,18 +72,20 @@ async fn delete_tag(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM tags WHERE id = ?",
+        queries::tags::CHECK_EXISTS,
         &[&request.tag_id],
-        |row| Ok(row.get::<_, i64>(0)?),
+        |row| row.get::<_, i64>(0),
     )?;
 
     if exists.is_none() {
         return Err(AppError::NotFound("Tag not found".to_string()));
     }
 
-    execute_query(&conn, "DELETE FROM tags WHERE id = ?", &[&request.tag_id])?;
+    execute_query(&conn, queries::tags::DELETE, &[&request.tag_id])?;
 
-    Ok(Json(serde_json::json!({"message": "Tag deleted successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Tag deleted successfully"}),
+    ))
 }
 
 async fn add_tag_to_media(
@@ -105,9 +97,9 @@ async fn add_tag_to_media(
 
     let tag_exists = fetch_one(
         &conn,
-        "SELECT id FROM tags WHERE id = ?",
+        queries::tags::CHECK_EXISTS,
         &[&request.tag_id],
-        |row| Ok(row.get::<_, i64>(0)?),
+        |row| row.get::<_, i64>(0),
     )?;
 
     if tag_exists.is_none() {
@@ -118,9 +110,9 @@ async fn add_tag_to_media(
         // Check media belongs to user
         let media_exists = fetch_one(
             &conn,
-            "SELECT id FROM media WHERE id = ? AND user_id = ?",
+            queries::media::CHECK_EXISTS,
             &[media_id, &current_user.id],
-            |row| Ok(row.get::<_, i64>(0)?),
+            |row| row.get::<_, i64>(0),
         )?;
 
         if media_exists.is_none() {
@@ -128,7 +120,7 @@ async fn add_tag_to_media(
         }
 
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO media_tags (media_id, tag_id) VALUES (?, ?)",
+            queries::tags::ADD_TO_MEDIA,
             rusqlite::params![media_id, request.tag_id],
         );
     }
@@ -147,18 +139,20 @@ async fn remove_tag_from_media(
         // Check media belongs to user
         let media_exists = fetch_one(
             &conn,
-            "SELECT id FROM media WHERE id = ? AND user_id = ?",
+            queries::media::CHECK_EXISTS,
             &[media_id, &current_user.id],
-            |row| Ok(row.get::<_, i64>(0)?),
+            |row| row.get::<_, i64>(0),
         )?;
 
         if media_exists.is_some() {
             conn.execute(
-                "DELETE FROM media_tags WHERE media_id = ? AND tag_id = ?",
+                queries::tags::REMOVE_FROM_MEDIA,
                 rusqlite::params![media_id, request.tag_id],
             )?;
         }
     }
 
-    Ok(Json(serde_json::json!({"message": "Tag removed from media"})))
+    Ok(Json(
+        serde_json::json!({"message": "Tag removed from media"}),
+    ))
 }

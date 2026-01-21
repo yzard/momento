@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use rand::Rng;
 
 use crate::auth::{hash_password, AppState, CurrentUser};
-use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id};
+use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{ShareCreateRequest, ShareDeleteRequest, ShareLinkResponse, ShareListResponse};
 
@@ -50,9 +50,9 @@ async fn create_share_link(
     if let Some(media_id) = request.media_id {
         let exists = fetch_one(
             &conn,
-            "SELECT id FROM media WHERE id = ? AND user_id = ?",
+            queries::share::CHECK_MEDIA_OWNERSHIP,
             &[&media_id, &current_user.id],
-            |row| Ok(row.get::<_, i64>(0)?),
+            |row| row.get::<_, i64>(0),
         )?;
 
         if exists.is_none() {
@@ -63,9 +63,9 @@ async fn create_share_link(
     if let Some(album_id) = request.album_id {
         let exists = fetch_one(
             &conn,
-            "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+            queries::share::CHECK_ALBUM_OWNERSHIP,
             &[&album_id, &current_user.id],
-            |row| Ok(row.get::<_, i64>(0)?),
+            |row| row.get::<_, i64>(0),
         )?;
 
         if exists.is_none() {
@@ -93,7 +93,7 @@ async fn create_share_link(
 
     let share_id = insert_returning_id(
         &conn,
-        "INSERT INTO share_links (user_id, media_id, album_id, token, password_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        queries::share::INSERT,
         &[
             &current_user.id,
             &request.media_id,
@@ -106,7 +106,7 @@ async fn create_share_link(
 
     let share = fetch_one(
         &conn,
-        "SELECT id, token, media_id, album_id, password_hash, expires_at, view_count, created_at FROM share_links WHERE id = ?",
+        queries::share::SELECT_BY_ID,
         &[&share_id],
         map_share_row,
     )?
@@ -123,7 +123,7 @@ async fn list_share_links(
 
     let shares = fetch_all(
         &conn,
-        "SELECT id, token, media_id, album_id, password_hash, expires_at, view_count, created_at FROM share_links WHERE user_id = ? ORDER BY created_at DESC",
+        queries::share::SELECT_ALL_FOR_USER,
         &[&current_user.id],
         map_share_row,
     )?;
@@ -140,20 +140,18 @@ async fn delete_share_link(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM share_links WHERE id = ? AND user_id = ?",
+        queries::share::CHECK_OWNERSHIP,
         &[&request.share_id, &current_user.id],
-        |row| Ok(row.get::<_, i64>(0)?),
+        |row| row.get::<_, i64>(0),
     )?;
 
     if exists.is_none() {
         return Err(AppError::NotFound("Share link not found".to_string()));
     }
 
-    execute_query(
-        &conn,
-        "DELETE FROM share_links WHERE id = ?",
-        &[&request.share_id],
-    )?;
+    execute_query(&conn, queries::share::DELETE, &[&request.share_id])?;
 
-    Ok(Json(serde_json::json!({"message": "Share link deleted successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Share link deleted successfully"}),
+    ))
 }

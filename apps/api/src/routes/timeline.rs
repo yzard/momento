@@ -3,7 +3,7 @@ use chrono::{Datelike, NaiveDateTime};
 use indexmap::IndexMap;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::database::fetch_all;
+use crate::database::{fetch_all, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{MediaResponse, TimelineGroup, TimelineListRequest, TimelineListResponse};
 
@@ -59,17 +59,7 @@ async fn list_timeline(
             let cursor_id: i64 = parts[1].parse().unwrap_or(0);
             fetch_all(
                 &conn,
-                r#"
-                SELECT id, filename, original_filename, media_type, mime_type, width, height,
-                       file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-                       camera_make, camera_model, iso, exposure_time, f_number, focal_length,
-                       gps_altitude, location_state, location_country, keywords, created_at
-                FROM media
-                WHERE user_id = ? AND deleted_at IS NULL
-                  AND (date_taken < ? OR (date_taken = ? AND id < ?))
-                ORDER BY date_taken DESC, id DESC
-                LIMIT ?
-                "#,
+                queries::timeline::SELECT_PAGINATED,
                 &[&current_user.id, &cursor_date, &cursor_date, &cursor_id, &(limit + 1)],
                 map_timeline_row,
             )?
@@ -117,16 +107,7 @@ fn fetch_default_timeline(
 ) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
     fetch_all(
         conn,
-        r#"
-        SELECT id, filename, original_filename, media_type, mime_type, width, height,
-               file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-               camera_make, camera_model, iso, exposure_time, f_number, focal_length,
-               gps_altitude, location_state, location_country, keywords, created_at
-        FROM media
-        WHERE user_id = ? AND deleted_at IS NULL
-        ORDER BY date_taken DESC, id DESC
-        LIMIT ?
-        "#,
+        queries::timeline::SELECT_DEFAULT,
         &[&user_id, &(limit + 1)],
         map_timeline_row,
     )
@@ -149,15 +130,20 @@ fn map_timeline_row(row: &rusqlite::Row) -> rusqlite::Result<(MediaResponse, Opt
         gps_longitude: row.get(11)?,
         camera_make: row.get(12)?,
         camera_model: row.get(13)?,
-        iso: row.get(14)?,
-        exposure_time: row.get(15)?,
-        f_number: row.get(16)?,
-        focal_length: row.get(17)?,
-        gps_altitude: row.get(18)?,
-        location_state: row.get(19)?,
-        location_country: row.get(20)?,
-        keywords: row.get(21)?,
-        created_at: row.get(22)?,
+        lens_make: row.get(14)?,
+        lens_model: row.get(15)?,
+        iso: row.get(16)?,
+        exposure_time: row.get(17)?,
+        f_number: row.get(18)?,
+        focal_length: row.get(19)?,
+        focal_length_35mm: row.get(20)?,
+        gps_altitude: row.get(21)?,
+        location_city: row.get(22)?,
+        location_state: row.get(23)?,
+        location_country: row.get(24)?,
+        video_codec: row.get(25)?,
+        keywords: row.get(26)?,
+        created_at: row.get(27)?,
     };
     Ok((media, date_taken))
 }

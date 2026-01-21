@@ -4,7 +4,7 @@ import { mediaApi, type GroupBy } from '../api/media'
 export function useTimeline(groupBy: GroupBy = 'day', limit = 100) {
   return useInfiniteQuery({
     queryKey: ['timeline', groupBy],
-    queryFn: ({ pageParam }) => mediaApi.timeline({ cursor: pageParam, limit, groupBy }),
+    queryFn: ({ pageParam }) => mediaApi.listTimeline({ cursor: pageParam, limit, groupBy }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => (lastPage.hasMore ? lastPage.nextCursor : undefined),
   })
@@ -22,7 +22,7 @@ export function useMediaList(limit = 50) {
 export function useMapMedia() {
   return useInfiniteQuery({
     queryKey: ['mapMedia'],
-    queryFn: () => mediaApi.mapMedia(),
+    queryFn: () => mediaApi.listMapMedia(),
     initialPageParam: undefined,
     getNextPageParam: () => undefined,
   })

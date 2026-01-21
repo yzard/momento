@@ -9,20 +9,25 @@ interface MediaThumbnailProps {
 }
 
 export function MediaThumbnail({ mediaId, alt, className = '', loading = 'lazy' }: MediaThumbnailProps) {
-  const [url, setUrl] = useState<string | null>(null)
+  const [url, setUrl] = useState<string | null>(() => 
+    mediaApi.getCachedThumbnailUrl(mediaId) || null
+  )
   const [error, setError] = useState(false)
   const imgRef = useRef<HTMLImageElement>(null)
 
   useEffect(() => {
+    if (url) return
+    
     let cancelled = false
 
     const loadUrl = async () => {
       try {
-        const blobUrl = await mediaApi.getThumbnailUrl(mediaId)
+        const batch = await mediaApi.getThumbnailBatch([mediaId])
+        const blobUrl = batch.get(mediaId) ?? null
         if (!cancelled) {
           setUrl(blobUrl)
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setError(true)
         }
@@ -51,7 +56,7 @@ export function MediaThumbnail({ mediaId, alt, className = '', loading = 'lazy' 
         cancelled = true
       }
     }
-  }, [mediaId, loading])
+  }, [mediaId, loading, url])
 
   if (error) {
     return (

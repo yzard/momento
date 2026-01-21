@@ -8,11 +8,10 @@ pub type DbPool = Pool<SqliteConnectionManager>;
 pub type DbConn = PooledConnection<SqliteConnectionManager>;
 
 pub fn create_pool() -> AppResult<DbPool> {
-    let manager = SqliteConnectionManager::file(&*DATABASE_PATH)
-        .with_init(|conn| {
-            conn.execute_batch("PRAGMA foreign_keys = ON")?;
-            Ok(())
-        });
+    let manager = SqliteConnectionManager::file(&*DATABASE_PATH).with_init(|conn| {
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
+        Ok(())
+    });
 
     Pool::builder()
         .max_size(10)
@@ -24,7 +23,12 @@ pub fn get_connection(pool: &DbPool) -> AppResult<DbConn> {
     pool.get().map_err(AppError::Pool)
 }
 
-pub fn fetch_one<T, F>(conn: &DbConn, sql: &str, params: &[&dyn rusqlite::ToSql], mapper: F) -> AppResult<Option<T>>
+pub fn fetch_one<T, F>(
+    conn: &DbConn,
+    sql: &str,
+    params: &[&(dyn rusqlite::ToSql + '_)],
+    mapper: F,
+) -> AppResult<Option<T>>
 where
     F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
 {
@@ -37,7 +41,12 @@ where
     }
 }
 
-pub fn fetch_all<T, F>(conn: &DbConn, sql: &str, params: &[&dyn rusqlite::ToSql], mapper: F) -> AppResult<Vec<T>>
+pub fn fetch_all<T, F>(
+    conn: &DbConn,
+    sql: &str,
+    params: &[&(dyn rusqlite::ToSql + '_)],
+    mapper: F,
+) -> AppResult<Vec<T>>
 where
     F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
 {
@@ -51,16 +60,28 @@ where
     Ok(results)
 }
 
-pub fn execute_query(conn: &DbConn, sql: &str, params: &[&dyn rusqlite::ToSql]) -> AppResult<usize> {
+pub fn execute_query(
+    conn: &DbConn,
+    sql: &str,
+    params: &[&(dyn rusqlite::ToSql + '_)],
+) -> AppResult<usize> {
     conn.execute(sql, params).map_err(AppError::Database)
 }
 
-pub fn insert_returning_id(conn: &DbConn, sql: &str, params: &[&dyn rusqlite::ToSql]) -> AppResult<i64> {
+pub fn insert_returning_id(
+    conn: &DbConn,
+    sql: &str,
+    params: &[&(dyn rusqlite::ToSql + '_)],
+) -> AppResult<i64> {
     conn.execute(sql, params)?;
     Ok(conn.last_insert_rowid())
 }
 
-pub fn execute_many(conn: &DbConn, sql: &str, params_list: &[Vec<&dyn rusqlite::ToSql>]) -> AppResult<()> {
+pub fn execute_many(
+    conn: &DbConn,
+    sql: &str,
+    params_list: &[Vec<&(dyn rusqlite::ToSql + '_)>],
+) -> AppResult<()> {
     let mut stmt = conn.prepare(sql)?;
     for params in params_list {
         stmt.execute(params.as_slice())?;

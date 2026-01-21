@@ -3,7 +3,6 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Initialize the logging system with structured output
 pub fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("momento_api=info,tower_http=warn"));
@@ -17,14 +16,13 @@ pub fn init_logging() {
         .init();
 }
 
-/// Middleware to log all HTTP requests with timestamp, method, URI, status code, and duration
-pub async fn request_logger(request: Request<Body>, next: Next) -> Response {
+pub async fn request_logger(mut request: Request<Body>, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let path = uri.path().to_string();
 
-    // Skip logging for static assets to reduce noise
     let is_static = path.starts_with("/assets/") || path.ends_with(".js") || path.ends_with(".css");
+    let payload = extract_compact_payload(&mut request).await;
 
     let start = Instant::now();
     let response = next.run(request).await;
@@ -33,56 +31,67 @@ pub async fn request_logger(request: Request<Body>, next: Next) -> Response {
 
     if !is_static {
         let duration_ms = duration.as_secs_f64() * 1000.0;
+        let duration_text = format!("{:05.2}", duration_ms);
+        let payload_text = payload.unwrap_or_else(|| "{}".to_string());
+        let log_line = format!(
+            "{} {} {} {}ms {}",
+            method,
+            path,
+            status.as_u16(),
+            duration_text,
+            payload_text
+        );
 
-        match status.as_u16() {
-            200..=299 => {
-                info!(
-                    "{} {} {} {:.2}ms",
-                    method,
-                    path,
-                    status.as_u16(),
-                    duration_ms
-                );
-            }
-            400..=499 => {
-                warn!(
-                    "{} {} {} {:.2}ms",
-                    method,
-                    path,
-                    status.as_u16(),
-                    duration_ms
-                );
-            }
-            500..=599 => {
-                error!(
-                    "{} {} {} {:.2}ms",
-                    method,
-                    path,
-                    status.as_u16(),
-                    duration_ms
-                );
-            }
-            _ => {
-                info!(
-                    "{} {} {} {:.2}ms",
-                    method,
-                    path,
-                    status.as_u16(),
-                    duration_ms
-                );
-            }
+        let status_code = status.as_u16();
+        let is_missing_route = status_code == 404;
+
+        if is_missing_route {
+            warn!("{}", log_line);
+            return response;
+        }
+
+        match status_code {
+            200..=299 => info!("{}", log_line),
+            400..=499 => warn!("{}", log_line),
+            500..=599 => error!("{}", log_line),
+            _ => info!("{}", log_line),
         }
     }
 
     response
 }
 
-/// Log an error with context
+async fn extract_compact_payload(request: &mut Request<Body>) -> Option<String> {
+    if request.method() != axum::http::Method::POST {
+        return None;
+    }
+
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
+
+    let body_str = match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    let compact = match serde_json::from_str::<serde_json::Value>(&body_str) {
+        Ok(value) => value.to_string(),
+        Err(_) => body_str.trim().to_string(),
+    };
+
+    let restored = Body::from(bytes);
+    *request.body_mut() = restored;
+
+    Some(compact)
+}
+
 pub fn log_error(context: &str, error: &dyn std::error::Error) {
     error!("{}: {}", context, error);
 }
 
-/// Log an uncaught panic
 pub fn log_panic(info: &std::panic::PanicHookInfo) {
     let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
         s.to_string()
@@ -101,7 +110,6 @@ pub fn log_panic(info: &std::panic::PanicHookInfo) {
     error!("PANIC at {}: {}", location, payload);
 }
 
-/// Install a panic hook to log uncaught panics
 pub fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

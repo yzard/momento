@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::config::ReverseGeocodingConfig;
 use crate::constants::{IMAGE_EXTENSIONS, ORIGINALS_DIR, THUMBNAILS_DIR, VIDEO_EXTENSIONS};
-use crate::database::{insert_returning_id, DbPool};
+use crate::database::{insert_returning_id, queries, DbPool};
 use crate::processor::metadata::{extract_image_metadata, extract_video_metadata, MediaMetadata};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 
@@ -70,7 +70,7 @@ fn save_original_file(
     Ok((dest_path, relative_path, new_filename))
 }
 
-fn generate_thumbnails(
+pub async fn generate_thumbnails(
     dest_path: &Path,
     user_id: i64,
     media_type: &str,
@@ -80,13 +80,22 @@ fn generate_thumbnails(
 ) -> Option<String> {
     let thumbnail_filename = format!(
         "{}.jpg",
-        dest_path.file_stem().and_then(|s| s.to_str()).unwrap_or("thumb")
+        dest_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("thumb")
     );
     let thumbnail_relative = PathBuf::from(user_id.to_string()).join(&thumbnail_filename);
     let thumbnail_path = THUMBNAILS_DIR.join(&thumbnail_relative);
 
     let success = if media_type == "image" {
-        generate_image_thumbnail(dest_path, &thumbnail_path, thumbnail_max_size, thumbnail_quality)
+        generate_image_thumbnail(
+            dest_path,
+            &thumbnail_path,
+            thumbnail_max_size,
+            thumbnail_quality,
+        )
+        .await
     } else {
         generate_video_thumbnail(
             dest_path,
@@ -95,6 +104,7 @@ fn generate_thumbnails(
             thumbnail_quality,
             video_frame_quality,
         )
+        .await
     };
 
     if success {
@@ -104,13 +114,13 @@ fn generate_thumbnails(
     }
 }
 
-pub fn reverse_geocode(
+pub async fn reverse_geocode(
     config: &ReverseGeocodingConfig,
     latitude: f64,
     longitude: f64,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     if !config.enabled {
-        return (None, None);
+        return (None, None, None);
     }
 
     let url = format!(
@@ -118,31 +128,39 @@ pub fn reverse_geocode(
         config.base_url, latitude, longitude
     );
 
-    let client = match reqwest::blocking::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(config.timeout_seconds))
         .user_agent(&config.user_agent)
         .build()
     {
         Ok(c) => c,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None),
     };
 
-    let response = match client.get(&url).send() {
+    let response = match client.get(&url).send().await {
         Ok(r) => r,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None),
     };
 
-    let json: serde_json::Value = match response.json() {
+    let json: serde_json::Value = match response.json().await {
         Ok(j) => j,
-        Err(_) => return (None, None),
+        Err(_) => return (None, None, None),
     };
 
     let address = json.get("address");
     if address.is_none() {
-        return (None, None);
+        return (None, None, None);
     }
 
     let address = address.unwrap();
+    let city = address
+        .get("city")
+        .or_else(|| address.get("town"))
+        .or_else(|| address.get("village"))
+        .or_else(|| address.get("hamlet"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let state = address
         .get("state")
         .or_else(|| address.get("region"))
@@ -155,18 +173,18 @@ pub fn reverse_geocode(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    (state, country)
+    (city, state, country)
 }
 
-pub fn generate_complete_metadata(
+pub async fn generate_complete_metadata(
     source_path: &Path,
     media_type: &str,
     reverse_geo_config: Option<&ReverseGeocodingConfig>,
 ) -> MediaMetadata {
     let mut metadata = if media_type == "image" {
-        extract_image_metadata(source_path)
+        extract_image_metadata(source_path).await
     } else {
-        extract_video_metadata(source_path)
+        extract_video_metadata(source_path).await
     };
 
     // Ensure date_taken is populated
@@ -188,11 +206,15 @@ pub fn generate_complete_metadata(
             && metadata.gps_longitude.is_some()
             && (metadata.location_state.is_none() || metadata.location_country.is_none())
         {
-            let (state, country) = reverse_geocode(
+            let (city, state, country) = reverse_geocode(
                 geo_config,
                 metadata.gps_latitude.unwrap(),
                 metadata.gps_longitude.unwrap(),
-            );
+            )
+            .await;
+            if city.is_some() {
+                metadata.location_city = city;
+            }
             if state.is_some() {
                 metadata.location_state = state;
             }
@@ -200,29 +222,27 @@ pub fn generate_complete_metadata(
                 metadata.location_country = country;
             }
 
-            // Respect rate limit
-            std::thread::sleep(std::time::Duration::from_secs_f64(geo_config.rate_limit_seconds));
+            tokio::time::sleep(std::time::Duration::from_secs_f64(
+                geo_config.rate_limit_seconds,
+            ))
+            .await;
         }
     }
 
     metadata
 }
 
-pub fn process_media_file(
+pub async fn process_media_file(
     source_path: &Path,
     user_id: i64,
     thumbnail_max_size: u32,
     thumbnail_quality: u8,
     video_frame_quality: u8,
-    reverse_geo_config: Option<&ReverseGeocodingConfig>,
+    reverse_geo_config: Option<&crate::config::ReverseGeocodingConfig>,
     pool: &DbPool,
 ) -> Option<i64> {
     let media_type = get_media_type(source_path)?;
-    if !source_path.exists() {
-        return None;
-    }
-
-    let metadata = generate_complete_metadata(source_path, media_type, reverse_geo_config);
+    let metadata = generate_complete_metadata(source_path, media_type, reverse_geo_config).await;
     let date_taken = get_media_date(&metadata, source_path);
 
     let (dest_path, relative_path, new_filename) =
@@ -235,27 +255,22 @@ pub fn process_media_file(
         thumbnail_max_size,
         thumbnail_quality,
         video_frame_quality,
-    );
+    )
+    .await;
 
     let file_size = dest_path.metadata().ok().map(|m| m.len() as i64);
-
     let conn = pool.get().ok()?;
 
     let media_id = insert_returning_id(
         &conn,
-        r#"
-        INSERT INTO media (
-            user_id, filename, original_filename, file_path, thumbnail_path,
-            media_type, mime_type, width, height, file_size, duration_seconds,
-            date_taken, gps_latitude, gps_longitude, camera_make, camera_model,
-            iso, exposure_time, f_number, focal_length, gps_altitude,
-            location_state, location_country, keywords
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
+        queries::media::INSERT,
         &[
             &user_id,
             &new_filename,
-            &source_path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"),
+            &source_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown"),
             &relative_path.to_string_lossy().to_string(),
             &thumbnail_relative,
             &media_type,
@@ -269,13 +284,18 @@ pub fn process_media_file(
             &metadata.gps_longitude,
             &metadata.camera_make,
             &metadata.camera_model,
+            &metadata.lens_make,
+            &metadata.lens_model,
             &metadata.iso,
             &metadata.exposure_time,
             &metadata.f_number,
             &metadata.focal_length,
+            &metadata.focal_length_35mm,
             &metadata.gps_altitude,
+            &metadata.location_city,
             &metadata.location_state,
             &metadata.location_country,
+            &metadata.video_codec,
             &metadata.keywords,
         ],
     )

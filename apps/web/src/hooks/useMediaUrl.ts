@@ -11,14 +11,18 @@ export function useMediaUrl(mediaId: number, type: MediaUrlType): string | null 
 
     const loadUrl = async () => {
       try {
-        let blobUrl: string
+        let blobUrl: string | null = null
         switch (type) {
-          case 'thumbnail':
-            blobUrl = await mediaApi.getThumbnailUrl(mediaId)
+          case 'thumbnail': {
+            const batch = await mediaApi.getThumbnailBatch([mediaId])
+            blobUrl = batch.get(mediaId) ?? null
             break
-          case 'preview':
-            blobUrl = await mediaApi.getPreviewUrl(mediaId)
+          }
+          case 'preview': {
+            const batch = await mediaApi.getPreviewBatch([mediaId])
+            blobUrl = batch.get(mediaId) ?? null
             break
+          }
           case 'file':
             blobUrl = await mediaApi.getFileUrl(mediaId)
             break

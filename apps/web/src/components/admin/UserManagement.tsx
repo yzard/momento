@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
+import { AxiosError } from 'axios'
 import { adminApi } from '../../api/admin'
+import { AlertCircle } from 'lucide-react'
 
 interface User {
   id: number
@@ -16,6 +18,24 @@ export default function UserManagement() {
   const [isLoading, setIsLoading] = useState(true)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [newUser, setNewUser] = useState({ username: '', email: '', password: '', role: 'user' as 'admin' | 'user' })
+  
+  const [touched, setTouched] = useState<Record<string, boolean>>({})
+  const [serverError, setServerError] = useState<string | null>(null)
+
+  const validate = (data: typeof newUser) => {
+    const errors: Record<string, string> = {}
+    if (!data.username) errors.username = 'Username is required'
+    if (!data.email) errors.email = 'Email is required'
+    if (!data.password) {
+      errors.password = 'Password is required'
+    } else if (data.password.length < 8) {
+      errors.password = 'Password must be at least 8 characters'
+    }
+    return errors
+  }
+
+  const errors = validate(newUser)
+  const isValid = Object.keys(errors).length === 0
 
   const loadUsers = async () => {
     try {
@@ -32,15 +52,36 @@ export default function UserManagement() {
     loadUsers()
   }, [])
 
+  useEffect(() => {
+    if (!showCreateModal) {
+      setNewUser({ username: '', email: '', password: '', role: 'user' })
+      setTouched({})
+      setServerError(null)
+    }
+  }, [showCreateModal])
+
   const handleCreate = async () => {
-    if (!newUser.username || !newUser.email || !newUser.password) return
+    setTouched({
+      username: true,
+      email: true,
+      password: true
+    })
+
+    if (!isValid) return
+
+    setServerError(null)
+    
     try {
       await adminApi.createUser(newUser)
-      setNewUser({ username: '', email: '', password: '', role: 'user' })
       setShowCreateModal(false)
       loadUsers()
-    } catch {
-      alert('Failed to create user')
+    } catch (err) {
+      if (err instanceof AxiosError && err.response?.data?.detail) {
+        setServerError(err.response.data.detail)
+      } else {
+        const message = err instanceof Error ? err.message : 'Failed to create user'
+        setServerError(message)
+      }
     }
   }
 
@@ -129,28 +170,69 @@ export default function UserManagement() {
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-card border border-border/50 rounded-xl shadow-2xl p-6 w-full max-w-md animate-scale-in">
             <h3 className="text-xl font-display font-medium mb-6">Add User</h3>
+            
+            {serverError && (
+              <div className="mb-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-2 text-destructive text-sm">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{serverError}</span>
+              </div>
+            )}
+
             <div className="space-y-4">
-              <input
-                type="text"
-                placeholder="Username"
-                value={newUser.username}
-                onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
-                className="w-full px-4 py-2 bg-muted/20 border border-input rounded-lg focus:border-primary focus:bg-background outline-none transition-all"
-              />
-              <input
-                type="email"
-                placeholder="Email"
-                value={newUser.email}
-                onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-                className="w-full px-4 py-2 bg-muted/20 border border-input rounded-lg focus:border-primary focus:bg-background outline-none transition-all"
-              />
-              <input
-                type="password"
-                placeholder="Password"
-                value={newUser.password}
-                onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-                className="w-full px-4 py-2 bg-muted/20 border border-input rounded-lg focus:border-primary focus:bg-background outline-none transition-all"
-              />
+              <div className="space-y-1">
+                <input
+                  type="text"
+                  placeholder="Username"
+                  value={newUser.username}
+                  onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+                  onBlur={() => setTouched({ ...touched, username: true })}
+                  className={`w-full px-4 py-2 bg-muted/20 border rounded-lg outline-none transition-all ${
+                    touched.username && errors.username 
+                      ? 'border-destructive focus:border-destructive' 
+                      : 'border-input focus:border-primary focus:bg-background'
+                  }`}
+                />
+                {touched.username && errors.username && (
+                  <p className="text-xs text-destructive font-medium ml-1">{errors.username}</p>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <input
+                  type="email"
+                  placeholder="Email"
+                  value={newUser.email}
+                  onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                  onBlur={() => setTouched({ ...touched, email: true })}
+                  className={`w-full px-4 py-2 bg-muted/20 border rounded-lg outline-none transition-all ${
+                    touched.email && errors.email 
+                      ? 'border-destructive focus:border-destructive' 
+                      : 'border-input focus:border-primary focus:bg-background'
+                  }`}
+                />
+                {touched.email && errors.email && (
+                  <p className="text-xs text-destructive font-medium ml-1">{errors.email}</p>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={newUser.password}
+                  onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                  onBlur={() => setTouched({ ...touched, password: true })}
+                  className={`w-full px-4 py-2 bg-muted/20 border rounded-lg outline-none transition-all ${
+                    touched.password && errors.password 
+                      ? 'border-destructive focus:border-destructive' 
+                      : 'border-input focus:border-primary focus:bg-background'
+                  }`}
+                />
+                {touched.password && errors.password && (
+                  <p className="text-xs text-destructive font-medium ml-1">{errors.password}</p>
+                )}
+              </div>
+
               <select
                 value={newUser.role}
                 onChange={(e) => setNewUser({ ...newUser, role: e.target.value as 'admin' | 'user' })}
@@ -164,7 +246,15 @@ export default function UserManagement() {
               <button onClick={() => setShowCreateModal(false)} className="px-4 py-2 text-muted-foreground hover:text-foreground transition-colors font-medium">
                 Cancel
               </button>
-              <button onClick={handleCreate} className="px-6 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium shadow-lg shadow-primary/20">
+              <button 
+                onClick={handleCreate} 
+                disabled={!isValid}
+                className={`px-6 py-2 rounded-lg font-medium shadow-lg transition-all ${
+                  isValid 
+                    ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-primary/20' 
+                    : 'bg-muted text-muted-foreground cursor-not-allowed shadow-none'
+                }`}
+              >
                 Create User
               </button>
             </div>

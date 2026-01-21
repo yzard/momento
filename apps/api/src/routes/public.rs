@@ -13,7 +13,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::auth::{verify_password, AppState};
 use crate::constants::{ORIGINALS_DIR, THUMBNAILS_DIR};
-use crate::database::{execute_query, fetch_all, fetch_one};
+use crate::database::{execute_query, fetch_all, fetch_one, queries, DbConn};
 use crate::error::{AppError, AppResult};
 use crate::models::{MediaResponse, ShareVerifyRequest};
 
@@ -21,8 +21,14 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/public/share/:token", get(get_shared_content))
         .route("/public/share/:token/verify", post(verify_share_password))
-        .route("/public/share/:token/media/:media_id", get(get_shared_media_file))
-        .route("/public/share/:token/thumbnail/:media_id", get(get_shared_thumbnail))
+        .route(
+            "/public/share/:token/media/:media_id",
+            get(get_shared_media_file),
+        )
+        .route(
+            "/public/share/:token/thumbnail/:media_id",
+            get(get_shared_thumbnail),
+        )
 }
 
 #[derive(Deserialize)]
@@ -38,129 +44,39 @@ struct ShareRow {
     expires_at: Option<String>,
 }
 
-fn validate_share_token(
-    conn: &crate::database::DbConn,
-    token: &str,
-    password: Option<&str>,
-) -> AppResult<ShareRow> {
-    let share = fetch_one(
-        conn,
-        "SELECT id, media_id, album_id, password_hash, expires_at FROM share_links WHERE token = ?",
-        &[&token],
-        |row| {
-            Ok(ShareRow {
-                id: row.get(0)?,
-                media_id: row.get(1)?,
-                album_id: row.get(2)?,
-                password_hash: row.get(3)?,
-                expires_at: row.get(4)?,
-            })
-        },
-    )?
+fn validate_share_token(conn: &DbConn, token: &str, password: Option<&str>) -> AppResult<ShareRow> {
+    let share = fetch_one(conn, queries::share::SELECT_BY_TOKEN, &[&token], |row| {
+        Ok(ShareRow {
+            id: row.get(0)?,
+            media_id: row.get(1)?,
+            album_id: row.get(2)?,
+            password_hash: row.get(3)?,
+            expires_at: row.get(4)?,
+        })
+    })?
     .ok_or_else(|| AppError::NotFound("Share link not found".to_string()))?;
 
-    // Check expiry
-    if let Some(ref expires_at) = share.expires_at {
-        if let Ok(expires) = DateTime::parse_from_rfc3339(expires_at) {
-            if Utc::now() > expires {
-                return Err(AppError::Authentication("Share link has expired".to_string()));
+    // Check expiration
+    if let Some(expires_at) = &share.expires_at {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(expires_at) {
+            if dt.with_timezone(&Utc) < Utc::now() {
+                return Err(AppError::NotFound("Share link expired".to_string()));
             }
         }
     }
 
     // Check password
-    if let Some(ref hash) = share.password_hash {
-        let pwd = password.ok_or_else(|| AppError::Authentication("Password required".to_string()))?;
-        if !verify_password(pwd, hash) {
-            return Err(AppError::Authentication("Invalid password".to_string()));
+    if share.password_hash.is_some() {
+        if let Some(pwd) = password {
+            if !verify_password(pwd, share.password_hash.as_ref().unwrap()) {
+                return Err(AppError::Authentication("Invalid password".to_string()));
+            }
+        } else {
+            return Err(AppError::Authentication("Password required".to_string()));
         }
     }
 
-    // Increment view count
-    let _ = execute_query(
-        conn,
-        "UPDATE share_links SET view_count = view_count + 1 WHERE id = ?",
-        &[&share.id],
-    );
-
     Ok(share)
-}
-
-async fn get_shared_content(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-    Query(query): Query<PasswordQuery>,
-) -> AppResult<Json<serde_json::Value>> {
-    let password = query
-        .password
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("Password is required".to_string()))?;
-
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_token(&conn, &token, Some(password))?;
-
-    if let Some(media_id) = share.media_id {
-        let media = fetch_one(
-            &conn,
-            r#"
-            SELECT id, filename, original_filename, media_type, mime_type, width, height,
-                   file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-                   camera_make, camera_model, created_at
-            FROM media WHERE id = ?
-            "#,
-            &[&media_id],
-            map_public_media_row,
-        )?
-        .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
-
-        return Ok(Json(serde_json::json!({
-            "type": "media",
-            "media": media
-        })));
-    }
-
-    if let Some(album_id) = share.album_id {
-        let album = fetch_one(
-            &conn,
-            "SELECT id, name, description FROM albums WHERE id = ?",
-            &[&album_id],
-            |row| {
-                Ok(AlbumBasic {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                })
-            },
-        )?
-        .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
-
-        let media = fetch_all(
-            &conn,
-            r#"
-            SELECT m.id, m.filename, m.original_filename, m.media_type, m.mime_type, m.width, m.height,
-                   m.file_size, m.duration_seconds, m.date_taken, m.gps_latitude, m.gps_longitude,
-                   m.camera_make, m.camera_model, m.created_at
-            FROM media m
-            JOIN album_media am ON m.id = am.media_id
-            WHERE am.album_id = ?
-            ORDER BY am.position
-            "#,
-            &[&album_id],
-            map_public_media_row,
-        )?;
-
-        return Ok(Json(serde_json::json!({
-            "type": "album",
-            "album": {
-                "id": album.id,
-                "name": album.name,
-                "description": album.description
-            },
-            "media": media
-        })));
-    }
-
-    Err(AppError::Internal("Invalid share link".to_string()))
 }
 
 struct AlbumBasic {
@@ -185,16 +101,84 @@ fn map_public_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> 
         gps_longitude: row.get(11)?,
         camera_make: row.get(12)?,
         camera_model: row.get(13)?,
-        iso: None,
-        exposure_time: None,
-        f_number: None,
-        focal_length: None,
-        gps_altitude: None,
-        location_state: None,
-        location_country: None,
-        keywords: None,
-        created_at: row.get(14)?,
+        lens_make: row.get(14)?,
+        lens_model: row.get(15)?,
+        iso: row.get(16)?,
+        exposure_time: row.get(17)?,
+        f_number: row.get(18)?,
+        focal_length: row.get(19)?,
+        focal_length_35mm: row.get(20)?,
+        gps_altitude: row.get(21)?,
+        location_city: row.get(22)?,
+        location_state: row.get(23)?,
+        location_country: row.get(24)?,
+        video_codec: row.get(25)?,
+        keywords: row.get(26)?,
+        created_at: row.get(27)?,
     })
+}
+
+async fn get_shared_content(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    Query(query): Query<PasswordQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let share = validate_share_token(&conn, &token, query.password.as_deref())?;
+
+    // Increment view count
+    let _ = execute_query(&conn, queries::share::INCREMENT_VIEW_COUNT, &[&share.id]);
+
+    if let Some(media_id) = share.media_id {
+        let media = fetch_one(
+            &conn,
+            queries::media::SELECT_BY_ID,
+            &[&media_id],
+            map_public_media_row,
+        )?
+        .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
+
+        return Ok(Json(serde_json::json!({
+            "type": "media",
+            "media": media
+        })));
+    }
+
+    if let Some(album_id) = share.album_id {
+        let album = fetch_one(
+            &conn,
+            queries::public::SELECT_ALBUM_BASIC,
+            &[&album_id],
+            |row| {
+                Ok(AlbumBasic {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                })
+            },
+        )?
+        .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
+
+        let media = fetch_all(
+            &conn,
+            queries::public::SELECT_ALBUM_MEDIA,
+            &[&album_id],
+            map_public_media_row,
+        )?;
+
+        return Ok(Json(serde_json::json!({
+            "type": "album",
+            "album": {
+                "id": album.id,
+                "name": album.name,
+                "description": album.description
+            },
+            "media": media
+        })));
+    }
+
+    Err(AppError::Internal("Invalid share link".to_string()))
 }
 
 async fn verify_share_password(
@@ -206,9 +190,9 @@ async fn verify_share_password(
 
     let share = fetch_one(
         &conn,
-        "SELECT password_hash FROM share_links WHERE token = ?",
+        queries::share::SELECT_PASSWORD_HASH,
         &[&token],
-        |row| Ok(row.get::<_, Option<String>>(0)?),
+        |row| row.get::<_, Option<String>>(0),
     )?
     .ok_or_else(|| AppError::NotFound("Share link not found".to_string()))?;
 
@@ -219,11 +203,18 @@ async fn verify_share_password(
         })));
     }
 
-    if verify_password(&request.password, &share.unwrap()) {
-        return Ok(Json(serde_json::json!({"valid": true})));
+    let password = request.password.clone();
+    if verify_password(&password, share.as_ref().unwrap()) {
+        return Ok(Json(serde_json::json!({
+            "valid": true,
+            "message": "Password correct"
+        })));
     }
 
-    Err(AppError::Authentication("Invalid password".to_string()))
+    Ok(Json(serde_json::json!({
+        "valid": false,
+        "message": "Invalid password"
+    })))
 }
 
 async fn get_shared_media_file(
@@ -231,13 +222,8 @@ async fn get_shared_media_file(
     Path((token, media_id)): Path<(String, i64)>,
     Query(query): Query<PasswordQuery>,
 ) -> AppResult<Response> {
-    let password = query
-        .password
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("Password is required".to_string()))?;
-
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_token(&conn, &token, Some(password))?;
+    let share = validate_share_token(&conn, &token, query.password.as_deref())?;
 
     // Verify media is in share
     if let Some(share_media_id) = share.media_id {
@@ -249,19 +235,21 @@ async fn get_shared_media_file(
     if let Some(album_id) = share.album_id {
         let in_album = fetch_one(
             &conn,
-            "SELECT 1 FROM album_media WHERE album_id = ? AND media_id = ?",
+            queries::public::CHECK_ALBUM_MEDIA,
             &[&album_id, &media_id],
-            |row| Ok(row.get::<_, i32>(0)?),
+            |row| row.get::<_, i32>(0),
         )?;
 
         if in_album.is_none() {
-            return Err(AppError::Authorization("Media not in shared album".to_string()));
+            return Err(AppError::Authorization(
+                "Media not in shared album".to_string(),
+            ));
         }
     }
 
     let media = fetch_one(
         &conn,
-        "SELECT file_path, mime_type, original_filename FROM media WHERE id = ?",
+        queries::public::SELECT_MEDIA_FILE_INFO,
         &[&media_id],
         |row| {
             Ok(FileInfo {
@@ -280,7 +268,9 @@ async fn get_shared_media_file(
 
     serve_file(
         full_path,
-        &media.mime_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+        &media
+            .mime_type
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
         Some(&media.original_filename),
     )
     .await
@@ -297,13 +287,11 @@ async fn get_shared_thumbnail(
     Path((token, media_id)): Path<(String, i64)>,
     Query(query): Query<PasswordQuery>,
 ) -> AppResult<Response> {
-    let password = query
-        .password
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("Password is required".to_string()))?;
-
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_token(&conn, &token, Some(password))?;
+
+    // We need password to access thumbnails too
+    let password = query.password.as_deref();
+    let share = validate_share_token(&conn, &token, password)?;
 
     // Verify media is in share
     if let Some(share_media_id) = share.media_id {
@@ -315,19 +303,21 @@ async fn get_shared_thumbnail(
     if let Some(album_id) = share.album_id {
         let in_album = fetch_one(
             &conn,
-            "SELECT 1 FROM album_media WHERE album_id = ? AND media_id = ?",
+            queries::public::CHECK_ALBUM_MEDIA,
             &[&album_id, &media_id],
-            |row| Ok(row.get::<_, i32>(0)?),
+            |row| row.get::<_, i32>(0),
         )?;
 
         if in_album.is_none() {
-            return Err(AppError::Authorization("Media not in shared album".to_string()));
+            return Err(AppError::Authorization(
+                "Media not in shared album".to_string(),
+            ));
         }
     }
 
     let thumbnail_path: Option<String> = fetch_one(
         &conn,
-        "SELECT thumbnail_path FROM media WHERE id = ?",
+        queries::public::SELECT_MEDIA_THUMBNAIL,
         &[&media_id],
         |row| row.get(0),
     )?

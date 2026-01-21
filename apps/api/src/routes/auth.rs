@@ -10,11 +10,9 @@ use crate::auth::{
     create_access_token, create_refresh_token, hash_password, hash_refresh_token,
     verify_and_migrate, AppState, CurrentUser,
 };
-use crate::database::{execute_query, fetch_one, insert_returning_id};
+use crate::database::{execute_query, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
-use crate::models::{
-    ChangePasswordRequest, LogoutRequest, RefreshTokenRequest, TokenResponse,
-};
+use crate::models::{ChangePasswordRequest, LogoutRequest, RefreshTokenRequest, TokenResponse};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -53,7 +51,7 @@ async fn login(
 
     let user = fetch_one(
         &conn,
-        "SELECT id, username, email, role, hashed_password, is_active FROM users WHERE username = ?",
+        queries::auth::SELECT_USER_BY_USERNAME,
         &[&username],
         |row| {
             Ok(UserAuthRow {
@@ -76,7 +74,7 @@ async fn login(
     if let Some(new_hash) = new_hash {
         let _ = execute_query(
             &conn,
-            "UPDATE users SET hashed_password = ? WHERE id = ?",
+            queries::auth::UPDATE_PASSWORD,
             &[&new_hash, &user.id],
         );
     }
@@ -90,7 +88,7 @@ async fn login(
 
     insert_returning_id(
         &conn,
-        "INSERT INTO refresh_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+        queries::auth::INSERT_REFRESH_TOKEN,
         &[&token_hash, &user.id, &expires_at.to_rfc3339()],
     )?;
 
@@ -114,12 +112,7 @@ async fn refresh(
 
     let token_row = fetch_one(
         &conn,
-        r#"
-        SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked, u.username, u.role, u.is_active
-        FROM refresh_tokens rt
-        JOIN users u ON rt.user_id = u.id
-        WHERE rt.token_hash = ?
-        "#,
+        queries::auth::VALIDATE_REFRESH_TOKEN,
         &[&token_hash],
         |row| {
             Ok(RefreshTokenRow {
@@ -135,7 +128,9 @@ async fn refresh(
     .ok_or_else(|| AppError::Authentication("Invalid refresh token".to_string()))?;
 
     if token_row.revoked != 0 {
-        return Err(AppError::Authentication("Token has been revoked".to_string()));
+        return Err(AppError::Authentication(
+            "Token has been revoked".to_string(),
+        ));
     }
 
     if token_row.is_active == 0 {
@@ -143,16 +138,8 @@ async fn refresh(
     }
 
     // Revoke old token
-    execute_query(
-        &conn,
-        "UPDATE refresh_tokens SET revoked = 1 WHERE id = ?",
-        &[&token_row.id],
-    )?;
-    execute_query(
-        &conn,
-        "DELETE FROM refresh_tokens WHERE revoked = 1 AND id = ?",
-        &[&token_row.id],
-    )?;
+    execute_query(&conn, queries::auth::REVOKE_REFRESH_TOKEN, &[&token_row.id])?;
+    execute_query(&conn, queries::auth::DELETE_REVOKED_TOKEN, &[&token_row.id])?;
 
     // Create new tokens
     let access_token = create_access_token(
@@ -166,8 +153,12 @@ async fn refresh(
 
     insert_returning_id(
         &conn,
-        "INSERT INTO refresh_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-        &[&new_token_hash, &token_row.user_id, &expires_at.to_rfc3339()],
+        queries::auth::INSERT_REFRESH_TOKEN,
+        &[
+            &new_token_hash,
+            &token_row.user_id,
+            &expires_at.to_rfc3339(),
+        ],
     )?;
 
     Ok(Json(TokenResponse::new(access_token, raw_refresh)))
@@ -191,11 +182,13 @@ async fn logout(
 
     execute_query(
         &conn,
-        "UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?",
+        queries::auth::REVOKE_REFRESH_TOKEN_BY_HASH,
         &[&token_hash],
     )?;
 
-    Ok(Json(serde_json::json!({"message": "Logged out successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Logged out successfully"}),
+    ))
 }
 
 async fn change_password(
@@ -207,9 +200,9 @@ async fn change_password(
 
     let user = fetch_one(
         &conn,
-        "SELECT hashed_password FROM users WHERE id = ?",
+        queries::auth::SELECT_PASSWORD_HASH,
         &[&current_user.id],
-        |row| Ok(row.get::<_, String>(0)?),
+        |row| row.get::<_, String>(0),
     )?
     .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
@@ -231,15 +224,17 @@ async fn change_password(
 
     execute_query(
         &conn,
-        "UPDATE users SET hashed_password = ?, must_change_password = 0 WHERE id = ?",
+        queries::auth::UPDATE_PASSWORD_AND_RESET_FLAG,
         &[&new_hash, &current_user.id],
     )?;
 
     execute_query(
         &conn,
-        "UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?",
+        queries::auth::REVOKE_ALL_USER_TOKENS,
         &[&current_user.id],
     )?;
 
-    Ok(Json(serde_json::json!({"message": "Password changed successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Password changed successfully"}),
+    ))
 }

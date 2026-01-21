@@ -6,9 +6,12 @@ use std::sync::RwLock;
 
 use crate::config::Config;
 use crate::constants::{ORIGINALS_DIR, THUMBNAILS_DIR};
-use crate::database::{fetch_all, DbPool};
+use crate::database::{fetch_all, queries, DbPool};
 use crate::processor::media_processor::generate_complete_metadata;
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
+use futures::stream::{self, StreamExt};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegenerationStatus {
@@ -153,7 +156,11 @@ fn merge_keyword_tags(conn: &rusqlite::Connection, media_id: i64, keywords: Opti
         _ => return 0,
     };
 
-    let tags: Vec<&str> = keywords.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let tags: Vec<&str> = keywords
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if tags.is_empty() {
         return 0;
     }
@@ -162,19 +169,19 @@ fn merge_keyword_tags(conn: &rusqlite::Connection, media_id: i64, keywords: Opti
     for tag in tags {
         // Check if tag exists
         let existing: Option<i64> = conn
-            .query_row("SELECT id FROM tags WHERE name = ?", [tag], |row| row.get(0))
+            .query_row(queries::regenerator::SELECT_TAG_ID, [tag], |row| row.get(0))
             .ok();
 
         let tag_id = match existing {
             Some(id) => id,
             None => {
-                conn.execute("INSERT INTO tags (name) VALUES (?)", [tag]).ok();
+                conn.execute(queries::regenerator::INSERT_TAG, [tag]).ok();
                 conn.last_insert_rowid()
             }
         };
 
         conn.execute(
-            "INSERT OR IGNORE INTO media_tags (media_id, tag_id) VALUES (?, ?)",
+            queries::regenerator::INSERT_MEDIA_TAG,
             rusqlite::params![media_id, tag_id],
         )
         .ok();
@@ -191,48 +198,21 @@ pub fn clear_all_metadata_and_thumbnails(pool: &DbPool) -> i64 {
     };
 
     // Get all media with thumbnails
-    let rows: Vec<(i64, Option<String>)> = fetch_all(
-        &conn,
-        "SELECT id, thumbnail_path FROM media",
-        &[],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .unwrap_or_default();
+    let rows: Vec<(i64, Option<String>)> =
+        fetch_all(&conn, queries::regenerator::SELECT_THUMBNAILS, &[], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap_or_default();
 
     let mut cleared_count = 0;
 
     for (id, thumbnail_path) in rows {
-        // Delete thumbnail file
         if let Some(thumb_path) = thumbnail_path {
             let thumb_file = THUMBNAILS_DIR.join(&thumb_path);
             let _ = std::fs::remove_file(&thumb_file);
         }
 
-        // Clear metadata
-        let _ = conn.execute(
-            r#"
-            UPDATE media SET
-                thumbnail_path = NULL,
-                width = NULL,
-                height = NULL,
-                duration_seconds = NULL,
-                date_taken = NULL,
-                gps_latitude = NULL,
-                gps_longitude = NULL,
-                gps_altitude = NULL,
-                camera_make = NULL,
-                camera_model = NULL,
-                iso = NULL,
-                exposure_time = NULL,
-                f_number = NULL,
-                focal_length = NULL,
-                location_state = NULL,
-                location_country = NULL,
-                keywords = NULL
-            WHERE id = ?
-            "#,
-            [id],
-        );
+        let _ = conn.execute(queries::regenerator::CLEAR_METADATA, [id]);
         cleared_count += 1;
     }
 
@@ -255,37 +235,39 @@ struct MediaRow {
     gps_altitude: Option<f64>,
     camera_make: Option<String>,
     camera_model: Option<String>,
+    lens_make: Option<String>,
+    lens_model: Option<String>,
     iso: Option<i32>,
     exposure_time: Option<String>,
     f_number: Option<f64>,
     focal_length: Option<f64>,
+    focal_length_35mm: Option<f64>,
+    location_city: Option<String>,
     location_state: Option<String>,
     location_country: Option<String>,
+    video_codec: Option<String>,
     keywords: Option<String>,
 }
 
-pub fn run_regeneration(missing_only: bool, config: &Config, pool: &DbPool) {
+use tracing::{error, info};
+
+pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
     clear_cancel_request();
     start_job();
 
     let conn = match pool.get() {
         Ok(c) => c,
         Err(e) => {
-            finalize_job_failure(&format!("Failed to get connection: {}", e));
+            let msg = format!("Failed to get connection: {}", e);
+            error!("{}", msg);
+            finalize_job_failure(&msg);
             return;
         }
     };
 
     let rows: Vec<MediaRow> = match fetch_all(
         &conn,
-        r#"
-        SELECT id, user_id, file_path, thumbnail_path, media_type, width, height,
-               duration_seconds, date_taken, gps_latitude, gps_longitude, gps_altitude,
-               camera_make, camera_model, iso, exposure_time, f_number, focal_length,
-               location_state, location_country, keywords
-        FROM media
-        ORDER BY id
-        "#,
+        queries::regenerator::SELECT_MISSING_METADATA,
         &[],
         |row| {
             Ok(MediaRow {
@@ -303,147 +285,265 @@ pub fn run_regeneration(missing_only: bool, config: &Config, pool: &DbPool) {
                 gps_altitude: row.get(11)?,
                 camera_make: row.get(12)?,
                 camera_model: row.get(13)?,
-                iso: row.get(14)?,
-                exposure_time: row.get(15)?,
-                f_number: row.get(16)?,
-                focal_length: row.get(17)?,
-                location_state: row.get(18)?,
-                location_country: row.get(19)?,
-                keywords: row.get(20)?,
+                lens_make: row.get(14)?,
+                lens_model: row.get(15)?,
+                iso: row.get(16)?,
+                exposure_time: row.get(17)?,
+                f_number: row.get(18)?,
+                focal_length: row.get(19)?,
+                focal_length_35mm: row.get(20)?,
+                location_city: row.get(21)?,
+                location_state: row.get(22)?,
+                location_country: row.get(23)?,
+                video_codec: row.get(24)?,
+                keywords: row.get(25)?,
             })
         },
     ) {
         Ok(r) => r,
         Err(e) => {
-            finalize_job_failure(&format!("Failed to fetch media: {}", e));
+            let msg = format!("Failed to fetch media: {}", e);
+            error!("{}", msg);
+            finalize_job_failure(&msg);
             return;
         }
     };
 
-    update_job_totals(rows.len() as i64);
+    let count = rows.len();
+    let missing_metadata = rows
+        .iter()
+        .filter(|row| row.width.is_none() || row.height.is_none())
+        .count();
+    let missing_thumbnails = rows
+        .iter()
+        .filter(|row| row.thumbnail_path.is_none())
+        .count();
+    info!(
+        "Starting metadata/thumbnail generation for {} items (missing metadata: {}, missing thumbnails: {})",
+        count,
+        missing_metadata,
+        missing_thumbnails
+    );
+    update_job_totals(count as i64);
 
-    for row in rows {
-        if is_cancel_requested() {
-            finalize_job_cancelled();
-            clear_cancel_request();
-            return;
-        }
-
-        let original_path = ORIGINALS_DIR.join(&row.file_path);
-        if !original_path.exists() {
-            update_job_progress(false, false, 0, Some(&format!("Missing file: {}", row.file_path)));
-            continue;
-        }
-
-        let thumbnail_file = row.thumbnail_path.as_ref().map(|p| THUMBNAILS_DIR.join(p));
-        let thumbnail_missing = row.thumbnail_path.is_none()
-            || thumbnail_file.as_ref().map(|f| !f.exists()).unwrap_or(true);
-
-        let metadata_missing = row.width.is_none()
-            || row.height.is_none()
-            || row.date_taken.is_none()
-            || row.gps_latitude.is_none()
-            || row.camera_make.is_none()
-            || row.iso.is_none();
-
-        if missing_only && !metadata_missing && !thumbnail_missing {
-            update_job_progress(false, false, 0, None);
-            continue;
-        }
-
-        let geo_config = if missing_only { None } else { Some(&config.reverse_geocoding) };
-        let metadata = generate_complete_metadata(&original_path, &row.media_type, geo_config);
-
-        // Helper to choose existing or new value
-        fn choose<T: Clone>(missing_only: bool, existing: Option<T>, new_value: Option<T>) -> Option<T> {
-            if missing_only && existing.is_some() {
-                existing
-            } else {
-                new_value.or(existing)
-            }
-        }
-
-        let width = choose(missing_only, row.width, metadata.width);
-        let height = choose(missing_only, row.height, metadata.height);
-        let date_taken = metadata.date_taken.map(|dt| dt.to_rfc3339()).or(row.date_taken.clone());
-        let gps_latitude = choose(missing_only, row.gps_latitude, metadata.gps_latitude);
-        let gps_longitude = choose(missing_only, row.gps_longitude, metadata.gps_longitude);
-        let gps_altitude = choose(missing_only, row.gps_altitude, metadata.gps_altitude);
-        let camera_make = choose(missing_only, row.camera_make.clone(), metadata.camera_make);
-        let camera_model = choose(missing_only, row.camera_model.clone(), metadata.camera_model);
-        let iso = choose(missing_only, row.iso, metadata.iso);
-        let exposure_time = choose(missing_only, row.exposure_time.clone(), metadata.exposure_time);
-        let f_number = choose(missing_only, row.f_number, metadata.f_number);
-        let focal_length = choose(missing_only, row.focal_length, metadata.focal_length);
-        let location_state = choose(missing_only, row.location_state.clone(), metadata.location_state);
-        let location_country = choose(missing_only, row.location_country.clone(), metadata.location_country);
-        let keywords = choose(missing_only, row.keywords.clone(), metadata.keywords);
-        let duration_seconds = choose(missing_only, row.duration_seconds, metadata.duration_seconds);
-
-        // Update metadata
-        let _ = conn.execute(
-            r#"
-            UPDATE media SET
-                width = ?, height = ?, date_taken = ?,
-                gps_latitude = ?, gps_longitude = ?, gps_altitude = ?,
-                camera_make = ?, camera_model = ?, iso = ?,
-                exposure_time = ?, f_number = ?, focal_length = ?,
-                location_state = ?, location_country = ?, keywords = ?,
-                duration_seconds = ?
-            WHERE id = ?
-            "#,
-            rusqlite::params![
-                width, height, date_taken,
-                gps_latitude, gps_longitude, gps_altitude,
-                camera_make, camera_model, iso,
-                exposure_time, f_number, focal_length,
-                location_state, location_country, keywords,
-                duration_seconds, row.id
-            ],
-        );
-
-        let metadata_updated = true;
-        let mut thumbnail_generated = false;
-
-        // Generate thumbnail if needed
-        if !missing_only || thumbnail_missing {
-            let thumbnail_relative = row.thumbnail_path.clone().unwrap_or_else(|| {
-                PathBuf::from(row.user_id.to_string())
-                    .join(format!("{}.jpg", PathBuf::from(&row.file_path).file_stem().unwrap().to_string_lossy()))
-                    .to_string_lossy()
-                    .to_string()
-            });
-            let thumbnail_output = THUMBNAILS_DIR.join(&thumbnail_relative);
-
-            thumbnail_generated = if row.media_type == "image" {
-                generate_image_thumbnail(
-                    &original_path,
-                    &thumbnail_output,
-                    config.thumbnails.max_size,
-                    config.thumbnails.quality,
-                )
-            } else {
-                generate_video_thumbnail(
-                    &original_path,
-                    &thumbnail_output,
-                    config.thumbnails.max_size,
-                    config.thumbnails.quality,
-                    config.thumbnails.video_frame_quality,
-                )
-            };
-
-            if thumbnail_generated {
-                let _ = conn.execute(
-                    "UPDATE media SET thumbnail_path = ? WHERE id = ?",
-                    rusqlite::params![thumbnail_relative, row.id],
-                );
-            }
-        }
-
-        let tags_updated = merge_keyword_tags(&conn, row.id, keywords.as_deref());
-
-        update_job_progress(metadata_updated, thumbnail_generated, tags_updated, None);
+    if count == 0 {
+        finalize_job_success();
+        return;
     }
 
-    finalize_job_success();
+    // Limit concurrency to avoid overloading the system
+    let concurrency = if config.regenerate.num_cpus > 0 {
+        config.regenerate.num_cpus
+    } else {
+        num_cpus::get()
+    };
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let config = Arc::new(config.clone());
+    let pool = pool.clone();
+
+    let mut stream = stream::iter(rows)
+        .map(|row| {
+            let semaphore = semaphore.clone();
+            let config = config.clone();
+            let pool = pool.clone();
+
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
+
+                if is_cancel_requested() {
+                    return None;
+                }
+
+                let original_path = ORIGINALS_DIR.join(&row.file_path);
+                if !original_path.exists() {
+                    let msg = format!("Missing file: {}", row.file_path);
+                    error!("{}", msg);
+                    update_job_progress(false, false, 0, Some(&msg));
+                    return Some(());
+                }
+
+                // Since we filtered by NULLs, we know we need to generate things.
+                // But we still check specifically what's missing for the 'choose' logic.
+
+                let geo_config = Some(&config.reverse_geocoding);
+
+                // Always generate complete metadata as we are in "fill missing" mode
+                let metadata =
+                    generate_complete_metadata(&original_path, &row.media_type, geo_config).await;
+
+                // Choose logic: If DB has value, keep it (unless we want to overwrite, but this function is 'generate missing')
+                // Wait, if we came from "Clean & Regenerate", the DB values are NULL, so we take new metadata.
+                // If we came from "Generate Info" (missing only), existing valid values are kept.
+
+                fn choose<T: Clone>(existing: Option<T>, new_value: Option<T>) -> Option<T> {
+                    existing.or(new_value)
+                }
+
+                let width = choose(row.width, metadata.width);
+                let height = choose(row.height, metadata.height);
+                let date_taken = row
+                    .date_taken
+                    .clone()
+                    .or(metadata.date_taken.map(|dt| dt.to_rfc3339()));
+                let gps_latitude = choose(row.gps_latitude, metadata.gps_latitude);
+                let gps_longitude = choose(row.gps_longitude, metadata.gps_longitude);
+                let gps_altitude = choose(row.gps_altitude, metadata.gps_altitude);
+                let camera_make = choose(row.camera_make.clone(), metadata.camera_make);
+                let camera_model = choose(row.camera_model.clone(), metadata.camera_model);
+                let lens_make = choose(row.lens_make.clone(), metadata.lens_make);
+                let lens_model = choose(row.lens_model.clone(), metadata.lens_model);
+                let iso = choose(row.iso, metadata.iso);
+                let exposure_time = choose(row.exposure_time.clone(), metadata.exposure_time);
+                let f_number = choose(row.f_number, metadata.f_number);
+                let focal_length = choose(row.focal_length, metadata.focal_length);
+                let location_city = choose(row.location_city.clone(), metadata.location_city);
+                let location_state = choose(row.location_state.clone(), metadata.location_state);
+                let location_country =
+                    choose(row.location_country.clone(), metadata.location_country);
+                let keywords = choose(row.keywords.clone(), metadata.keywords);
+                let kw_clone = keywords.clone();
+                let duration_seconds = choose(row.duration_seconds, metadata.duration_seconds);
+                let focal_length_35mm = choose(row.focal_length_35mm, metadata.focal_length_35mm);
+                let video_codec = choose(row.video_codec.clone(), metadata.video_codec);
+
+                let pool_clone = pool.clone();
+                let row_id = row.id;
+
+                let update_keywords = keywords.clone();
+                let update_result = tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = pool_clone.get() {
+                        let _ = conn.execute(
+                            queries::regenerator::UPDATE_METADATA,
+                            rusqlite::params![
+                                width,
+                                height,
+                                date_taken,
+                                gps_latitude,
+                                gps_longitude,
+                                gps_altitude,
+                                camera_make,
+                                camera_model,
+                                lens_make,
+                                lens_model,
+                                iso,
+                                exposure_time,
+                                f_number,
+                                focal_length,
+                                focal_length_35mm,
+                                location_city,
+                                location_state,
+                                location_country,
+                                video_codec,
+                                update_keywords,
+                                duration_seconds,
+                                row_id
+                            ],
+                        );
+                    }
+                })
+                .await;
+
+                if let Err(e) = update_result {
+                    error!("Failed to update metadata DB for {}: {}", row_id, e);
+                }
+
+                let metadata_updated = row.width.is_none() || row.height.is_none();
+                let mut thumbnail_generated = false;
+
+                let thumbnail_missing = row.thumbnail_path.is_none()
+                    || row
+                        .thumbnail_path
+                        .as_ref()
+                        .map(|p| !THUMBNAILS_DIR.join(p).exists())
+                        .unwrap_or(true);
+
+                if thumbnail_missing {
+                    let thumbnail_relative = row.thumbnail_path.clone().unwrap_or_else(|| {
+                        PathBuf::from(row.user_id.to_string())
+                            .join(format!(
+                                "{}.jpg",
+                                PathBuf::from(&row.file_path)
+                                    .file_stem()
+                                    .unwrap()
+                                    .to_string_lossy()
+                            ))
+                            .to_string_lossy()
+                            .to_string()
+                    });
+                    let thumbnail_output = THUMBNAILS_DIR.join(&thumbnail_relative);
+
+                    thumbnail_generated = if row.media_type == "image" {
+                        generate_image_thumbnail(
+                            &original_path,
+                            &thumbnail_output,
+                            config.thumbnails.max_size,
+                            config.thumbnails.quality,
+                        )
+                        .await
+                    } else {
+                        generate_video_thumbnail(
+                            &original_path,
+                            &thumbnail_output,
+                            config.thumbnails.max_size,
+                            config.thumbnails.quality,
+                            config.thumbnails.video_frame_quality,
+                        )
+                        .await
+                    };
+
+                    if thumbnail_generated {
+                        let pool_clone = pool.clone();
+                        let row_id = row.id;
+                        let thumb_path = thumbnail_relative.clone();
+
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(conn) = pool_clone.get() {
+                                let _ = conn.execute(
+                                    queries::regenerator::UPDATE_THUMBNAIL,
+                                    rusqlite::params![thumb_path, row_id],
+                                );
+                            }
+                        })
+                        .await;
+                    }
+                }
+
+                let pool_clone = pool.clone();
+                let row_id = row.id;
+
+                let tags_updated = tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = pool_clone.get() {
+                        merge_keyword_tags(&conn, row_id, kw_clone.as_deref())
+                    } else {
+                        0
+                    }
+                })
+                .await
+                .unwrap_or(0);
+
+                update_job_progress(metadata_updated, thumbnail_generated, tags_updated, None);
+                Some(())
+            }
+        })
+        .buffer_unordered(concurrency);
+
+    while (stream.next().await).is_some() {}
+
+    let job = get_regeneration_status();
+    info!(
+        "Generation completed. Metadata updated: {}, Thumbnails generated: {}",
+        job.updated_metadata, job.generated_thumbnails
+    );
+
+    let job = get_regeneration_status();
+    info!(
+        "Generation completed. Metadata updated: {}, Thumbnails generated: {}",
+        job.updated_metadata, job.generated_thumbnails
+    );
+
+    if is_cancel_requested() {
+        finalize_job_cancelled();
+    } else {
+        finalize_job_success();
+    }
 }

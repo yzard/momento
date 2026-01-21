@@ -1,51 +1,43 @@
 use std::path::Path;
-use std::process::Command;
+use tokio::process::Command;
+use tracing::error;
 
-fn run_command(cmd: &[&str], _timeout_secs: u64) -> bool {
-    match Command::new(cmd[0])
-        .args(&cmd[1..])
-        .output()
-    {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
-    }
-}
-
-fn get_video_duration(source_path: &Path) -> f64 {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            source_path.to_str().unwrap_or(""),
-        ])
-        .output();
-
-    match output {
+async fn run_command(cmd: &[&str], _timeout_secs: u64) -> bool {
+    match Command::new(cmd[0]).args(&cmd[1..]).output().await {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.trim().parse().unwrap_or(0.0)
+            if !output.status.success() {
+                error!(
+                    "Command failed: {:?}\nStderr: {}",
+                    cmd,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return false;
+            }
+            true
         }
-        Err(_) => 0.0,
+        Err(e) => {
+            error!("Failed to execute command {:?}: {}", cmd, e);
+            false
+        }
     }
 }
 
-pub fn generate_image_thumbnail(
+pub async fn generate_image_thumbnail(
     source_path: &Path,
     output_path: &Path,
     max_size: u32,
     quality: u8,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
+        if tokio::fs::create_dir_all(parent).await.is_err() {
             return false;
         }
     }
 
-    generate_montage_thumbnail(source_path, output_path, max_size, quality)
+    generate_montage_thumbnail(source_path, output_path, max_size, quality).await
 }
 
-pub fn generate_video_thumbnail(
+pub async fn generate_video_thumbnail(
     source_path: &Path,
     output_path: &Path,
     max_size: u32,
@@ -53,38 +45,46 @@ pub fn generate_video_thumbnail(
     video_frame_quality: u8,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
+        if tokio::fs::create_dir_all(parent).await.is_err() {
             return false;
         }
     }
 
     let temp_frame = output_path.with_extension("temp.jpg");
-    if !extract_video_frame(source_path, &temp_frame, video_frame_quality) {
+    if !extract_video_frame(source_path, &temp_frame, video_frame_quality).await {
+        error!(
+            "Failed to extract video frame for thumbnail: {:?}",
+            source_path
+        );
         return false;
     }
 
-    let success = generate_montage_thumbnail(&temp_frame, output_path, max_size, quality);
+    let success = generate_montage_thumbnail(&temp_frame, output_path, max_size, quality).await;
+    if !success {
+        error!("Failed to generate montage thumbnail: {:?}", output_path);
+    }
 
-    let _ = std::fs::remove_file(&temp_frame);
+    let _ = tokio::fs::remove_file(&temp_frame).await;
 
     success
 }
 
-pub fn generate_image_preview(
+pub async fn generate_image_preview(
     source_path: &Path,
     output_path: &Path,
     max_size: u32,
     quality: u8,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
+        if tokio::fs::create_dir_all(parent).await.is_err() {
             return false;
         }
     }
 
+    let source_input = format!("{}[0]", source_path.to_str().unwrap_or(""));
     let cmd = [
         "convert",
-        source_path.to_str().unwrap_or(""),
+        source_input.as_str(),
         "-auto-orient",
         "-resize",
         &format!("{}x{}>", max_size, max_size),
@@ -93,19 +93,20 @@ pub fn generate_image_preview(
         output_path.to_str().unwrap_or(""),
     ];
 
-    run_command(&cmd, 60) && output_path.exists()
+    run_command(&cmd, 60).await && output_path.exists()
 }
 
-fn generate_montage_thumbnail(
+async fn generate_montage_thumbnail(
     source_path: &Path,
     output_path: &Path,
     max_size: u32,
     quality: u8,
 ) -> bool {
     let resized = format!("{}x{}", max_size, max_size);
+    let source_input = format!("{}[0]", source_path.to_str().unwrap_or(""));
     let cmd = [
         "convert",
-        source_path.to_str().unwrap_or(""),
+        source_input.as_str(),
         "-auto-orient",
         "-thumbnail",
         &format!("{}^", resized),
@@ -118,22 +119,21 @@ fn generate_montage_thumbnail(
         output_path.to_str().unwrap_or(""),
     ];
 
-    run_command(&cmd, 60) && output_path.exists()
+    run_command(&cmd, 60).await && output_path.exists()
 }
 
-fn extract_video_frame(source_path: &Path, output_path: &Path, video_frame_quality: u8) -> bool {
-    let duration = get_video_duration(source_path);
-    let seek_time = if duration > 0.0 {
-        (duration * 0.1).min(5.0)
-    } else {
-        0.0
-    };
+async fn extract_video_frame(
+    source_path: &Path,
+    output_path: &Path,
+    video_frame_quality: u8,
+) -> bool {
+    let seek_time = "00:00:00";
 
     let cmd = [
         "ffmpeg",
         "-y",
         "-ss",
-        &seek_time.to_string(),
+        seek_time,
         "-i",
         source_path.to_str().unwrap_or(""),
         "-vframes",
@@ -143,5 +143,5 @@ fn extract_video_frame(source_path: &Path, output_path: &Path, video_frame_quali
         output_path.to_str().unwrap_or(""),
     ];
 
-    run_command(&cmd, 60) && output_path.exists()
+    run_command(&cmd, 60).await && output_path.exists()
 }

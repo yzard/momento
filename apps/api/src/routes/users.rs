@@ -6,7 +6,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::auth::{hash_password, AppState, CurrentUser, RequireAdmin};
-use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id};
+use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     UserCreateRequest, UserDeleteRequest, UserListResponse, UserResponse, UserUpdateRequest,
@@ -51,9 +51,9 @@ async fn create_user(
     // Check existing
     let existing = fetch_one(
         &conn,
-        "SELECT id FROM users WHERE username = ? OR email = ?",
+        queries::users::SELECT_ID_BY_CREDENTIALS,
         &[&request.username, &request.email],
-        |row| Ok(row.get::<_, i64>(0)?),
+        |row| row.get::<_, i64>(0),
     )?;
 
     if existing.is_some() {
@@ -73,26 +73,21 @@ async fn create_user(
 
     let user_id = insert_returning_id(
         &conn,
-        "INSERT INTO users (username, email, hashed_password, role, must_change_password) VALUES (?, ?, ?, ?, 1)",
+        queries::users::INSERT,
         &[&request.username, &request.email, &hashed, &request.role],
     )?;
 
-    let user = fetch_one(
-        &conn,
-        "SELECT id, username, email, role, must_change_password, is_active, created_at FROM users WHERE id = ?",
-        &[&user_id],
-        |row| {
-            Ok(row_to_user_response(
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        },
-    )?
+    let user = fetch_one(&conn, queries::users::SELECT_BY_ID, &[&user_id], |row| {
+        Ok(row_to_user_response(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })?
     .ok_or_else(|| AppError::Internal("Failed to create user".to_string()))?;
 
     Ok(Json(user))
@@ -104,22 +99,17 @@ async fn list_users(
 ) -> AppResult<Json<UserListResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let users = fetch_all(
-        &conn,
-        "SELECT id, username, email, role, must_change_password, is_active, created_at FROM users ORDER BY created_at DESC",
-        &[],
-        |row| {
-            Ok(row_to_user_response(
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        },
-    )?;
+    let users = fetch_all(&conn, queries::users::SELECT_ALL, &[], |row| {
+        Ok(row_to_user_response(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })?;
 
     Ok(Json(UserListResponse { users }))
 }
@@ -132,7 +122,7 @@ async fn get_user(
 
     let user = fetch_one(
         &conn,
-        "SELECT id, username, email, role, must_change_password, is_active, created_at FROM users WHERE id = ?",
+        queries::users::SELECT_BY_ID,
         &[&current_user.id],
         |row| {
             Ok(row_to_user_response(
@@ -166,12 +156,9 @@ async fn update_user(
     let user_id = query.user_id;
 
     // Check user exists
-    let exists = fetch_one(
-        &conn,
-        "SELECT id FROM users WHERE id = ?",
-        &[&user_id],
-        |row| Ok(row.get::<_, i64>(0)?),
-    )?;
+    let exists = fetch_one(&conn, queries::users::CHECK_EXISTS, &[&user_id], |row| {
+        row.get::<_, i64>(0)
+    })?;
 
     if exists.is_none() {
         return Err(AppError::NotFound("User not found".to_string()));
@@ -206,22 +193,17 @@ async fn update_user(
         execute_query(&conn, &sql, &param_refs)?;
     }
 
-    let user = fetch_one(
-        &conn,
-        "SELECT id, username, email, role, must_change_password, is_active, created_at FROM users WHERE id = ?",
-        &[&user_id],
-        |row| {
-            Ok(row_to_user_response(
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        },
-    )?
+    let user = fetch_one(&conn, queries::users::SELECT_BY_ID, &[&user_id], |row| {
+        Ok(row_to_user_response(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    })?
     .ok_or_else(|| AppError::Internal("Failed to update user".to_string()))?;
 
     Ok(Json(user))
@@ -240,16 +222,18 @@ async fn delete_user(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM users WHERE id = ?",
+        queries::users::CHECK_EXISTS,
         &[&request.user_id],
-        |row| Ok(row.get::<_, i64>(0)?),
+        |row| row.get::<_, i64>(0),
     )?;
 
     if exists.is_none() {
         return Err(AppError::NotFound("User not found".to_string()));
     }
 
-    execute_query(&conn, "DELETE FROM users WHERE id = ?", &[&request.user_id])?;
+    execute_query(&conn, queries::users::DELETE, &[&request.user_id])?;
 
-    Ok(Json(serde_json::json!({"message": "User deleted successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "User deleted successfully"}),
+    ))
 }

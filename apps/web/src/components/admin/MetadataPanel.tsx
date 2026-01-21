@@ -90,7 +90,7 @@ export default function MetadataPanel() {
           )}
         >
           {isTriggering ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          Generate Metadata Info
+          Generate Metadata & Thumbnails
         </button>
 
         <button
@@ -107,7 +107,7 @@ export default function MetadataPanel() {
       </div>
 
       <p className="text-xs text-muted-foreground text-center mt-4">
-        "Generate Metadata Info" generates metadata and thumbnails for files that don't have them. "Clean & Regenerate All" clears all metadata and thumbnails first, then regenerates everything.
+        "Generate Metadata & Thumbnails" generates metadata and thumbnails for files that don't have them. "Clean & Regenerate All" clears all metadata and thumbnails first, then regenerates everything.
       </p>
 
       {status && status.status !== 'idle' && (

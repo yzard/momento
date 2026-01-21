@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 
 use crate::auth::{AppState, CurrentUser};
 use crate::constants::TRASH_RETENTION_DAYS;
-use crate::database::{execute_query, fetch_all};
+use crate::database::{execute_query, fetch_all, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     TrashDeleteRequest, TrashListResponse, TrashMediaResponse, TrashResponse, TrashRestoreRequest,
@@ -43,14 +43,7 @@ async fn list_trash(
 
     let items = fetch_all(
         &conn,
-        r#"
-        SELECT id, filename, original_filename, media_type, mime_type,
-               width, height, file_size, duration_seconds, date_taken,
-               deleted_at, created_at
-        FROM media
-        WHERE user_id = ? AND deleted_at IS NOT NULL
-        ORDER BY deleted_at DESC
-        "#,
+        queries::trash::SELECT_DELETED,
         &[&current_user.id],
         map_trash_row,
     )?;
@@ -88,10 +81,7 @@ async fn restore_from_trash(
         .collect();
     params.push(Box::new(current_user.id));
 
-    let sql = format!(
-        "UPDATE media SET deleted_at = NULL WHERE id IN ({}) AND user_id = ? AND deleted_at IS NOT NULL",
-        placeholders
-    );
+    let sql = queries::trash::RESTORE_MEDIA.replace("{}", &placeholders);
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     execute_query(&conn, &sql, &param_refs)?;
 
@@ -129,10 +119,7 @@ async fn permanently_delete(
         .collect();
     params.push(Box::new(current_user.id));
 
-    let sql = format!(
-        "SELECT id, file_path, thumbnail_path FROM media WHERE id IN ({}) AND user_id = ? AND deleted_at IS NOT NULL",
-        placeholders
-    );
+    let sql = queries::trash::SELECT_FOR_DELETE.replace("{}", &placeholders);
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     let rows: Vec<MediaFileInfo> = fetch_all(&conn, &sql, &param_refs, |row| {
@@ -146,7 +133,7 @@ async fn permanently_delete(
     let mut deleted_count = 0;
     for row in rows {
         delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-        execute_query(&conn, "DELETE FROM media WHERE id = ?", &[&row.id])?;
+        execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         deleted_count += 1;
     }
 
@@ -170,7 +157,7 @@ async fn empty_trash(
 
     let rows: Vec<MediaFileInfo> = fetch_all(
         &conn,
-        "SELECT id, file_path, thumbnail_path FROM media WHERE user_id = ? AND deleted_at IS NOT NULL",
+        queries::trash::SELECT_ALL_DELETED,
         &[&current_user.id],
         |row| {
             Ok(MediaFileInfo {
@@ -184,7 +171,7 @@ async fn empty_trash(
     let mut deleted_count = 0;
     for row in rows {
         delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-        execute_query(&conn, "DELETE FROM media WHERE id = ?", &[&row.id])?;
+        execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         deleted_count += 1;
     }
 
@@ -199,7 +186,7 @@ pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
 
     let rows: Vec<MediaFileInfo> = fetch_all(
         conn,
-        "SELECT id, file_path, thumbnail_path FROM media WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+        queries::trash::SELECT_OLD_DELETED,
         &[&cutoff_date],
         |row| {
             Ok(MediaFileInfo {
@@ -213,7 +200,7 @@ pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
     let mut deleted_count = 0;
     for row in rows {
         delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-        execute_query(conn, "DELETE FROM media WHERE id = ?", &[&row.id])?;
+        execute_query(conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         deleted_count += 1;
     }
 

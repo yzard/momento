@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS media (
   , gps_longitude REAL
   , camera_make TEXT
   , camera_model TEXT
+  , lens_make TEXT
+  , lens_model TEXT
   , iso INTEGER
   , exposure_time TEXT
   , f_number REAL
@@ -34,6 +36,9 @@ CREATE TABLE IF NOT EXISTS media (
   , gps_altitude REAL
   , location_state TEXT
   , location_country TEXT
+  , location_city TEXT
+  , video_codec TEXT
+  , focal_length_35mm REAL
   , keywords TEXT
   , created_at TEXT DEFAULT (datetime('now'))
   , deleted_at TEXT DEFAULT NULL

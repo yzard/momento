@@ -20,17 +20,25 @@ pub fn ensure_media_columns(conn: &DbConn) -> AppResult<()> {
         ("exposure_time", "TEXT"),
         ("f_number", "REAL"),
         ("focal_length", "REAL"),
+        ("focal_length_35mm", "REAL"),
         ("gps_altitude", "REAL"),
+        ("location_city", "TEXT"),
         ("location_state", "TEXT"),
         ("location_country", "TEXT"),
+        ("video_codec", "TEXT"),
         ("keywords", "TEXT"),
         ("deleted_at", "TEXT"),
+        ("lens_make", "TEXT"),
+        ("lens_model", "TEXT"),
     ];
 
     for (column_name, column_type) in columns {
         if !existing.contains(column_name) {
             conn.execute(
-                &format!("ALTER TABLE media ADD COLUMN {} {}", column_name, column_type),
+                &format!(
+                    "ALTER TABLE media ADD COLUMN {} {}",
+                    column_name, column_type
+                ),
                 [],
             )?;
         }

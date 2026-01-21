@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { Play, Plus, Trash2 } from 'lucide-react'
+import { batchLoader, previewBatchLoader } from '../../utils/batcher'
 
 interface PhotoGridProps {
   media: Media[]
@@ -74,8 +75,11 @@ interface MediaItemProps {
 function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProps) {
   const [isHovering, setIsHovering] = useState(false)
   const [showVideo, setShowVideo] = useState(false)
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => 
+    mediaApi.getCachedThumbnailUrl(item.id) || null
+  )
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -88,15 +92,16 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
 
   // Load thumbnail with IntersectionObserver for lazy loading
   useEffect(() => {
-    if (!containerRef.current) return
+    if (thumbnailUrl || !containerRef.current) return
+
     let cancelled = false
 
     const loadThumbnail = async () => {
       try {
-        const url = await mediaApi.getThumbnailUrl(item.id)
-        if (!cancelled) setThumbnailUrl(url)
-      } catch (err) {
-        console.error('Failed to load thumbnail:', err)
+        const url = await batchLoader.load(item.id)
+        if (!cancelled && url) setThumbnailUrl(url)
+      } catch {
+        console.error('Failed to load thumbnail')
       }
     }
 
@@ -107,7 +112,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
           observer.disconnect()
         }
       },
-      { rootMargin: '100px' }
+      { rootMargin: '400px' }
     )
     observer.observe(containerRef.current)
 
@@ -115,7 +120,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
       cancelled = true
       observer.disconnect()
     }
-  }, [item.id])
+  }, [item.id, thumbnailUrl])
 
   const handleMouseEnter = useCallback(() => {
     setIsHovering(true)
@@ -124,20 +129,25 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         // Load preview URL if not already loaded
         if (!previewUrl) {
           try {
-            const url = await mediaApi.getPreviewUrl(item.id)
-            setPreviewUrl(url)
-          } catch (err) {
-            console.error('Failed to load preview:', err)
+            if (item.mediaType === 'video') {
+              setPreviewUrl(mediaApi.getFileStreamUrl(item.id))
+            } else {
+              const url = await previewBatchLoader.load(item.id)
+              setPreviewUrl(url)
+            }
+          } catch (error) {
+            console.error('Failed to load preview:', error)
           }
         }
         setShowVideo(true)
       }, 500)
     }
-  }, [shouldPreview, previewUrl, item.id])
+  }, [shouldPreview, previewUrl, item.id, item.mediaType])
 
   const handleMouseLeave = useCallback(() => {
     setIsHovering(false)
     setShowVideo(false)
+    setIsVideoPlaying(false)
     setCurrentTime(0)
     if (hoverTimeoutRef.current) {
       clearTimeout(hoverTimeoutRef.current)
@@ -175,7 +185,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         <img
           src={thumbnailUrl}
           alt={item.originalFilename}
-          className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${showVideo ? 'opacity-0' : 'opacity-100'}`}
+          className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${isVideoPlaying ? 'opacity-0' : 'opacity-100'}`}
         />
       ) : (
         <div className="w-full h-full animate-pulse" />
@@ -190,6 +200,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
           muted
           loop={false}
           playsInline
+          onPlay={() => setIsVideoPlaying(true)}
           onTimeUpdate={handleVideoTimeUpdate}
         />
       )}

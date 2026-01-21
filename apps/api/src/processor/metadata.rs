@@ -1,8 +1,8 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use image::ImageReader;
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
+use tokio::process::Command;
+use tracing::{info, warn};
 
 #[derive(Debug, Default, Clone)]
 pub struct MediaMetadata {
@@ -14,6 +14,8 @@ pub struct MediaMetadata {
     pub gps_altitude: Option<f64>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    pub lens_make: Option<String>,
+    pub lens_model: Option<String>,
     pub iso: Option<i32>,
     pub exposure_time: Option<String>,
     pub f_number: Option<f64>,
@@ -23,6 +25,9 @@ pub struct MediaMetadata {
     pub mime_type: Option<String>,
     pub location_state: Option<String>,
     pub location_country: Option<String>,
+    pub location_city: Option<String>,
+    pub video_codec: Option<String>,
+    pub focal_length_35mm: Option<f64>,
 }
 
 fn fallback_to_mtime(file_path: &Path) -> Option<DateTime<Utc>> {
@@ -30,57 +35,55 @@ fn fallback_to_mtime(file_path: &Path) -> Option<DateTime<Utc>> {
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
-        .map(|t| DateTime::<Utc>::from(t))
+        .map(DateTime::<Utc>::from)
 }
 
-pub fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
+pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
     let mut metadata = MediaMetadata::default();
 
-    // Try to read basic image info
-    match ImageReader::open(file_path) {
-        Ok(reader) => {
-            if let Ok(img) = reader.decode() {
-                metadata.width = Some(img.width() as i32);
-                metadata.height = Some(img.height() as i32);
-            }
-        }
-        Err(_) => {
-            metadata.date_taken = fallback_to_mtime(file_path);
-            return metadata;
-        }
-    }
-
-    // Determine MIME type from extension
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    metadata.mime_type = Some(match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "heic" | "heif" => "image/heic",
-        "tiff" => "image/tiff",
-        "bmp" => "image/bmp",
-        _ => "image/jpeg",
-    }.to_string());
-
-    // Try to read EXIF data using exiftool (more reliable than pure Rust)
-    if let Ok(output) = Command::new("exiftool")
+    let output = Command::new("exiftool")
         .args(["-json", "-n", file_path.to_str().unwrap_or("")])
         .output()
-    {
-        if output.status.success() {
-            if let Ok(json_str) = String::from_utf8(output.stdout) {
-                if let Ok(exif_data) = serde_json::from_str::<Vec<ExifToolOutput>>(&json_str) {
-                    if let Some(data) = exif_data.into_iter().next() {
+        .await;
+
+    match output {
+        Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
+            Ok(json_str) => match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                Ok(exif_data) => {
+                    if let Some(data) = exif_data.first() {
                         apply_exif_data(&mut metadata, data);
                     }
                 }
+                Err(e) => {
+                    warn!(
+                        "Failed to parse exiftool JSON for {:?}: {}",
+                        file_path.file_name().unwrap_or_default(),
+                        e
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to read exiftool output for {:?}: {}",
+                    file_path.file_name().unwrap_or_default(),
+                    e
+                );
             }
+        },
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "exiftool failed for {:?}: {}",
+                file_path.file_name().unwrap_or_default(),
+                stderr
+            );
+        }
+        Err(e) => {
+            warn!(
+                "Failed to run exiftool for {:?}: {}",
+                file_path.file_name().unwrap_or_default(),
+                e
+            );
         }
     }
 
@@ -88,61 +91,92 @@ pub fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
         metadata.date_taken = fallback_to_mtime(file_path);
     }
 
+    if metadata.mime_type.is_none() {
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        metadata.mime_type = Some(
+            match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "png" => "image/png",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "heic" | "heif" => "image/heic",
+                "tiff" | "tif" => "image/tiff",
+                "bmp" => "image/bmp",
+                "avif" => "image/avif",
+                "svg" => "image/svg+xml",
+                _ => "application/octet-stream",
+            }
+            .to_string(),
+        );
+    }
+
+    log_extracted_metadata(file_path, &metadata);
     metadata
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ExifToolOutput {
-    #[serde(alias = "DateTimeOriginal")]
-    date_time_original: Option<String>,
-    #[serde(alias = "CreateDate")]
-    create_date: Option<String>,
-    #[serde(alias = "GPSLatitude")]
-    gps_latitude: Option<f64>,
-    #[serde(alias = "GPSLongitude")]
-    gps_longitude: Option<f64>,
-    #[serde(alias = "GPSAltitude")]
-    gps_altitude: Option<f64>,
-    make: Option<String>,
-    model: Option<String>,
-    #[serde(alias = "ISO")]
-    iso: Option<i32>,
-    #[serde(alias = "ExposureTime")]
-    exposure_time: Option<f64>,
-    #[serde(alias = "FNumber")]
-    f_number: Option<f64>,
-    #[serde(alias = "FocalLength")]
-    focal_length: Option<f64>,
-    #[serde(alias = "Keywords")]
-    keywords: Option<serde_json::Value>,
-    #[serde(alias = "ImageWidth")]
-    image_width: Option<i32>,
-    #[serde(alias = "ImageHeight")]
-    image_height: Option<i32>,
-}
+fn apply_exif_data(metadata: &mut MediaMetadata, data: &serde_json::Value) {
+    fn get_str(data: &serde_json::Value, keys: &[&str]) -> Option<String> {
+        for key in keys {
+            if let Some(v) = data.get(key) {
+                if let Some(s) = v.as_str() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
+    }
 
-fn apply_exif_data(metadata: &mut MediaMetadata, data: ExifToolOutput) {
-    // Date
-    let date_str = data.date_time_original.or(data.create_date);
-    if let Some(date_str) = date_str {
+    fn get_i32(data: &serde_json::Value, keys: &[&str]) -> Option<i32> {
+        for key in keys {
+            if let Some(v) = data.get(key) {
+                if let Some(n) = v.as_i64() {
+                    return Some(n as i32);
+                }
+                if let Some(n) = v.as_f64() {
+                    return Some(n as i32);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_f64(data: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+        for key in keys {
+            if let Some(v) = data.get(key) {
+                if let Some(n) = v.as_f64() {
+                    return Some(n);
+                }
+                if let Some(n) = v.as_i64() {
+                    return Some(n as f64);
+                }
+            }
+        }
+        None
+    }
+
+    if let Some(date_str) = get_str(data, &["DateTimeOriginal", "CreateDate", "ModifyDate"]) {
         metadata.date_taken = parse_exif_datetime(&date_str);
     }
 
-    // GPS
-    metadata.gps_latitude = data.gps_latitude;
-    metadata.gps_longitude = data.gps_longitude;
-    metadata.gps_altitude = data.gps_altitude;
+    metadata.gps_latitude = get_f64(data, &["GPSLatitude"]);
+    metadata.gps_longitude = get_f64(data, &["GPSLongitude"]);
+    metadata.gps_altitude = get_f64(data, &["GPSAltitude"]);
 
-    // Camera info
-    metadata.camera_make = data.make;
-    metadata.camera_model = data.model;
-    metadata.iso = data.iso;
-    metadata.f_number = data.f_number;
-    metadata.focal_length = data.focal_length;
+    metadata.camera_make = get_str(data, &["Make"]);
+    metadata.camera_model = get_str(data, &["Model", "HostComputer"]);
+    metadata.lens_make = get_str(data, &["LensMake"]);
+    metadata.lens_model = get_str(data, &["LensModel", "LensID"]);
 
-    // Exposure time as string
-    if let Some(exp) = data.exposure_time {
+    metadata.iso = get_i32(data, &["ISO"]);
+    metadata.f_number = get_f64(data, &["FNumber", "Aperture"]);
+    metadata.focal_length = get_f64(data, &["FocalLength"]);
+    metadata.focal_length_35mm = get_f64(data, &["FocalLengthIn35mmFormat", "FocalLength35efl"]);
+
+    if let Some(exp) = get_f64(data, &["ExposureTime", "ShutterSpeed"]) {
         if exp > 0.0 && exp < 1.0 {
             metadata.exposure_time = Some(format!("1/{}", (1.0 / exp).round() as i32));
         } else {
@@ -150,10 +184,9 @@ fn apply_exif_data(metadata: &mut MediaMetadata, data: ExifToolOutput) {
         }
     }
 
-    // Keywords
-    if let Some(kw) = data.keywords {
+    if let Some(kw) = data.get("Keywords") {
         metadata.keywords = match kw {
-            serde_json::Value::String(s) => Some(s),
+            serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Array(arr) => {
                 let strs: Vec<String> = arr
                     .iter()
@@ -169,12 +202,14 @@ fn apply_exif_data(metadata: &mut MediaMetadata, data: ExifToolOutput) {
         };
     }
 
-    // Dimensions from EXIF if not already set
-    if metadata.width.is_none() {
-        metadata.width = data.image_width;
-    }
-    if metadata.height.is_none() {
-        metadata.height = data.image_height;
+    metadata.width = get_i32(data, &["ImageWidth", "ExifImageWidth", "SourceImageWidth"]);
+    metadata.height = get_i32(
+        data,
+        &["ImageHeight", "ExifImageHeight", "SourceImageHeight"],
+    );
+
+    if let Some(mime) = get_str(data, &["MIMEType"]) {
+        metadata.mime_type = Some(mime);
     }
 }
 
@@ -197,19 +232,68 @@ fn parse_exif_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-pub fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
+pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
     let mut metadata = MediaMetadata::default();
+
+    let exif_output = Command::new("exiftool")
+        .args(["-json", "-n", file_path.to_str().unwrap_or("")])
+        .output()
+        .await;
+
+    match exif_output {
+        Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
+            Ok(json_str) => match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                Ok(exif_data) => {
+                    if let Some(data) = exif_data.first() {
+                        apply_exif_data(&mut metadata, data);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to parse exiftool JSON for {:?}: {}",
+                        file_path.file_name().unwrap_or_default(),
+                        e
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to read exiftool output for {:?}: {}",
+                    file_path.file_name().unwrap_or_default(),
+                    e
+                );
+            }
+        },
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "exiftool failed for {:?}: {}",
+                file_path.file_name().unwrap_or_default(),
+                stderr
+            );
+        }
+        Err(e) => {
+            warn!(
+                "Failed to run exiftool for {:?}: {}",
+                file_path.file_name().unwrap_or_default(),
+                e
+            );
+        }
+    }
 
     // Run ffprobe
     let output = Command::new("ffprobe")
         .args([
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_format",
             "-show_streams",
             file_path.to_str().unwrap_or(""),
         ])
-        .output();
+        .output()
+        .await;
 
     let output = match output {
         Ok(o) if o.status.success() => o,
@@ -242,6 +326,7 @@ pub fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
             if stream.codec_type.as_deref() == Some("video") {
                 metadata.width = stream.width;
                 metadata.height = stream.height;
+                metadata.video_codec = stream.codec_name;
                 break;
             }
         }
@@ -288,16 +373,20 @@ pub fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
         .unwrap_or("")
         .to_lowercase();
 
-    metadata.mime_type = Some(match ext.as_str() {
-        "mp4" => "video/mp4",
-        "mov" => "video/quicktime",
-        "avi" => "video/x-msvideo",
-        "mkv" => "video/x-matroska",
-        "webm" => "video/webm",
-        "m4v" => "video/x-m4v",
-        _ => "video/mp4",
-    }.to_string());
+    metadata.mime_type = Some(
+        match ext.as_str() {
+            "mp4" => "video/mp4",
+            "mov" => "video/quicktime",
+            "avi" => "video/x-msvideo",
+            "mkv" => "video/x-matroska",
+            "webm" => "video/webm",
+            "m4v" => "video/x-m4v",
+            _ => "video/mp4",
+        }
+        .to_string(),
+    );
 
+    log_extracted_metadata(file_path, &metadata);
     metadata
 }
 
@@ -310,6 +399,7 @@ struct FfprobeOutput {
 #[derive(Debug, Deserialize)]
 struct FfprobeStream {
     codec_type: Option<String>,
+    codec_name: Option<String>,
     width: Option<i32>,
     height: Option<i32>,
 }
@@ -328,6 +418,83 @@ struct FfprobeTags {
     location: Option<String>,
     #[serde(rename = "com.apple.quicktime.location.ISO6709")]
     com_apple_quicktime_location_iso6709: Option<String>,
+}
+
+fn log_extracted_metadata(file_path: &Path, metadata: &MediaMetadata) {
+    let mut fields = Vec::new();
+
+    if let Some(w) = metadata.width {
+        fields.push(format!("width={}", w));
+    }
+    if let Some(h) = metadata.height {
+        fields.push(format!("height={}", h));
+    }
+    if let Some(ref dt) = metadata.date_taken {
+        fields.push(format!("date_taken={}", dt.to_rfc3339()));
+    }
+    if let Some(lat) = metadata.gps_latitude {
+        fields.push(format!("gps_latitude={:.6}", lat));
+    }
+    if let Some(lon) = metadata.gps_longitude {
+        fields.push(format!("gps_longitude={:.6}", lon));
+    }
+    if let Some(alt) = metadata.gps_altitude {
+        fields.push(format!("gps_altitude={:.2}", alt));
+    }
+    if let Some(ref make) = metadata.camera_make {
+        fields.push(format!("camera_make={}", make));
+    }
+    if let Some(ref model) = metadata.camera_model {
+        fields.push(format!("camera_model={}", model));
+    }
+    if let Some(ref make) = metadata.lens_make {
+        fields.push(format!("lens_make={}", make));
+    }
+    if let Some(ref model) = metadata.lens_model {
+        fields.push(format!("lens_model={}", model));
+    }
+    if let Some(iso) = metadata.iso {
+        fields.push(format!("iso={}", iso));
+    }
+    if let Some(ref exp) = metadata.exposure_time {
+        fields.push(format!("exposure_time={}", exp));
+    }
+    if let Some(f) = metadata.f_number {
+        fields.push(format!("f_number={:.1}", f));
+    }
+    if let Some(fl) = metadata.focal_length {
+        fields.push(format!("focal_length={:.1}mm", fl));
+    }
+    if let Some(fl35) = metadata.focal_length_35mm {
+        fields.push(format!("focal_length_35mm={:.1}mm", fl35));
+    }
+    if let Some(dur) = metadata.duration_seconds {
+        fields.push(format!("duration={:.2}s", dur));
+    }
+    if let Some(ref mime) = metadata.mime_type {
+        fields.push(format!("mime_type={}", mime));
+    }
+    if let Some(ref codec) = metadata.video_codec {
+        fields.push(format!("video_codec={}", codec));
+    }
+    if let Some(ref city) = metadata.location_city {
+        fields.push(format!("location_city={}", city));
+    }
+    if let Some(ref state) = metadata.location_state {
+        fields.push(format!("location_state={}", state));
+    }
+    if let Some(ref country) = metadata.location_country {
+        fields.push(format!("location_country={}", country));
+    }
+    if let Some(ref kw) = metadata.keywords {
+        fields.push(format!("keywords={}", kw));
+    }
+
+    info!(
+        "Extracted metadata from {:?}: [{}]",
+        file_path.file_name().unwrap_or_default(),
+        fields.join(", ")
+    );
 }
 
 fn parse_iso6709_location(location: &str) -> Option<(f64, f64)> {
@@ -355,7 +522,7 @@ fn parse_iso6709_location(location: &str) -> Option<(f64, f64)> {
     let mut lon_str: String = chars[split_idx..].iter().collect();
 
     // Handle altitude suffix
-    if let Some(pos) = lon_str[1..].find(|c: char| c == '+' || c == '-') {
+    if let Some(pos) = lon_str[1..].find(['+', '-']) {
         lon_str = lon_str[..pos + 1].to_string();
     }
 

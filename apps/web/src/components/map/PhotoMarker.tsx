@@ -1,12 +1,10 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Marker } from 'react-leaflet'
 import { DivIcon } from 'leaflet'
-import { mediaApi } from '../../api/media'
+import { batchLoader } from '../../utils/batcher'
 
 export interface GeoMedia {
   id: number
-  thumbnailPath: string | null
-  thumbnailData: string | null
   latitude: number
   longitude: number
   dateTaken: string | null
@@ -23,24 +21,16 @@ interface PhotoMarkerProps {
 const THUMB_SIZE = 48
 
 export default function PhotoMarker({ media, onClick }: PhotoMarkerProps) {
-  // Use thumbnailData (base64) if available, otherwise load via API
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(media.thumbnailData)
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
 
   useEffect(() => {
-    // If we already have base64 data, use it directly
-    if (media.thumbnailData) {
-      setThumbnailUrl(media.thumbnailData)
-      return
-    }
-
-    // Otherwise, load via API with Authorization header
     let cancelled = false
     const loadThumbnail = async () => {
       try {
-        const url = await mediaApi.getThumbnailUrl(media.id)
-        if (!cancelled) setThumbnailUrl(url)
-      } catch (err) {
-        console.error('Failed to load marker thumbnail:', err)
+        const url = await batchLoader.load(media.id)
+        if (!cancelled && url) setThumbnailUrl(url)
+      } catch (error) {
+        console.error('Failed to load marker thumbnail:', error)
       }
     }
     loadThumbnail()
@@ -48,7 +38,7 @@ export default function PhotoMarker({ media, onClick }: PhotoMarkerProps) {
     return () => {
       cancelled = true
     }
-  }, [media.id, media.thumbnailData])
+  }, [media.id])
 
   const icon = useMemo(() => new DivIcon({
     className: '',

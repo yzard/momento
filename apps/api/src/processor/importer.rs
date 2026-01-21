@@ -136,7 +136,11 @@ fn collect_import_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-pub fn run_local_import(
+use futures::stream::{self, StreamExt};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+pub async fn run_local_import(
     user_id: i64,
     thumbnail_max_size: u32,
     thumbnail_quality: u8,
@@ -144,55 +148,75 @@ pub fn run_local_import(
     delete_after_import: bool,
     reverse_geo_config: Option<&ReverseGeocodingConfig>,
     pool: &DbPool,
+    concurrency: usize,
 ) {
     start_import_job();
 
     let files_to_import = collect_import_files(&IMPORTS_DIR);
     update_job_totals(files_to_import.len() as i64);
 
-    for file_path in files_to_import {
-        if !file_path.exists() {
-            update_job_progress(
-                false,
-                Some(&format!("Missing file: {}", file_path.display())),
-            );
-            continue;
-        }
+    let effective_concurrency = if concurrency > 0 {
+        concurrency
+    } else {
+        num_cpus::get()
+    };
+    let semaphore = Arc::new(Semaphore::new(effective_concurrency));
+    let config_rev_geo = reverse_geo_config.cloned();
+    let config_rev_geo = config_rev_geo.map(Arc::new);
+    let pool = pool.clone();
 
-        let media_id = process_media_file(
-            &file_path,
-            user_id,
-            thumbnail_max_size,
-            thumbnail_quality,
-            video_frame_quality,
-            reverse_geo_config,
-            pool,
-        );
+    let mut stream = stream::iter(files_to_import)
+        .map(|file_path| {
+            let semaphore = semaphore.clone();
+            let config_rev_geo = config_rev_geo.clone();
+            let pool = pool.clone();
 
-        if media_id.is_none() {
-            update_job_progress(
-                false,
-                Some(&format!("Failed to process: {}", file_path.display())),
-            );
-            continue;
-        }
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
 
-        if delete_after_import {
-            if let Err(e) = std::fs::remove_file(&file_path) {
-                update_job_progress(
-                    false,
-                    Some(&format!(
-                        "Failed to delete {}: {}",
-                        file_path.display(),
-                        e
-                    )),
-                );
-                continue;
+                if !file_path.exists() {
+                    update_job_progress(
+                        false,
+                        Some(&format!("Missing file: {}", file_path.display())),
+                    );
+                    return;
+                }
+
+                let media_id = process_media_file(
+                    &file_path,
+                    user_id,
+                    thumbnail_max_size,
+                    thumbnail_quality,
+                    video_frame_quality,
+                    config_rev_geo.as_deref(),
+                    &pool,
+                )
+                .await;
+
+                if media_id.is_none() {
+                    update_job_progress(
+                        false,
+                        Some(&format!("Failed to process: {}", file_path.display())),
+                    );
+                    return;
+                }
+
+                if delete_after_import {
+                    if let Err(e) = tokio::fs::remove_file(&file_path).await {
+                        update_job_progress(
+                            false,
+                            Some(&format!("Failed to delete {}: {}", file_path.display(), e)),
+                        );
+                        return;
+                    }
+                }
+
+                update_job_progress(true, None);
             }
-        }
+        })
+        .buffer_unordered(effective_concurrency);
 
-        update_job_progress(true, None);
-    }
+    while (stream.next().await).is_some() {}
 
     finalize_job_success();
 }

@@ -1,6 +1,6 @@
 use crate::auth::jwt::decode_access_token;
 use crate::config::Config;
-use crate::database::{fetch_one, DbPool};
+use crate::database::{fetch_one, queries, DbPool};
 use crate::error::AppError;
 use axum::{
     extract::FromRequestParts,
@@ -60,7 +60,8 @@ where
             }
         }
 
-        let token = token_str.ok_or_else(|| AppError::Authentication("Not authenticated".to_string()))?;
+        let token =
+            token_str.ok_or_else(|| AppError::Authentication("Not authenticated".to_string()))?;
 
         let claims = decode_access_token(&token, &app_state.config)
             .ok_or_else(|| AppError::Authentication("Invalid or expired token".to_string()))?;
@@ -74,7 +75,7 @@ where
 
         let user = fetch_one(
             &conn,
-            "SELECT id, username, email, role, must_change_password, is_active FROM users WHERE id = ?",
+            queries::auth::SELECT_USER_FOR_TOKEN,
             &[&user_id],
             |row| {
                 Ok(UserRow {

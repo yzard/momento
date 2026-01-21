@@ -17,7 +17,7 @@ interface TimelineViewProps {
 export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, groupBy = 'day' }: TimelineViewProps) {
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading, error } = useTimeline(groupBy)
 
-  const groups = data?.pages.flatMap((page) => page.groups) ?? []
+  const groups = data?.pages.flatMap((page) => page.groups ?? []) ?? []
   const allMedia = groups.flatMap((g) => g.media)
 
   const loadMore = useCallback(() => {
@@ -63,7 +63,7 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
       style={{ height: '100%' }}
       data={groups}
       endReached={loadMore}
-      overscan={200}
+      overscan={500}
       itemContent={(_, group) => (
         <div key={group.date} className="mb-2">
           <DateHeader date={group.date} count={group.media.length} groupBy={groupBy} />

@@ -6,7 +6,7 @@ export interface Media {
   mimeType: string
   width: number | null
   height: number | null
-  fileSize: number
+  fileSize: number | null
   durationSeconds: number | null
   dateTaken: string | null
   gpsLatitude: number | null
@@ -18,8 +18,11 @@ export interface Media {
   fNumber: number | null
   focalLength: number | null
   gpsAltitude: number | null
+  locationCity: string | null
   locationState: string | null
   locationCountry: string | null
+  videoCodec: string | null
+  focalLength35mm: number | null
   keywords: string | null
   createdAt: string
 }

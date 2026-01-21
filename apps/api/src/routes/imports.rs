@@ -1,6 +1,5 @@
 use axum::{extract::State, routing::post, Json, Router};
 use std::sync::Arc;
-use std::thread;
 
 use crate::auth::{AppState, RequireAdmin};
 use crate::error::{AppError, AppResult};
@@ -10,8 +9,8 @@ use crate::models::{
 };
 use crate::processor::importer::{get_import_status, is_import_running, run_local_import};
 use crate::processor::regenerator::{
-    cancel_regeneration, clear_all_metadata_and_thumbnails, get_regeneration_status,
-    is_regeneration_running, run_regeneration,
+    cancel_regeneration, clear_all_metadata_and_thumbnails, generate_missing_metadata,
+    get_regeneration_status, is_regeneration_running,
 };
 
 pub fn router() -> Router<AppState> {
@@ -19,7 +18,10 @@ pub fn router() -> Router<AppState> {
         .route("/import/local", post(trigger_local_import))
         .route("/import/status", post(get_import_job_status))
         .route("/import/regenerate", post(trigger_regeneration))
-        .route("/import/regenerate/status", post(get_regeneration_job_status))
+        .route(
+            "/import/regenerate/status",
+            post(get_regeneration_job_status),
+        )
         .route("/import/regenerate/cancel", post(cancel_regeneration_job))
         .route("/import/reset", post(trigger_reset))
 }
@@ -35,8 +37,9 @@ async fn trigger_local_import(
     let config = Arc::clone(&state.config);
     let pool = state.pool.clone();
     let user_id = admin.id;
+    let concurrency = config.regenerate.num_cpus;
 
-    thread::spawn(move || {
+    tokio::spawn(async move {
         run_local_import(
             user_id,
             config.thumbnails.max_size,
@@ -45,7 +48,9 @@ async fn trigger_local_import(
             true,
             Some(&config.reverse_geocoding),
             &pool,
-        );
+            concurrency,
+        )
+        .await;
     });
 
     Ok(Json(ImportTriggerResponse {
@@ -74,7 +79,7 @@ async fn get_import_job_status(
 async fn trigger_regeneration(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(request): Json<RegenerateRequest>,
+    Json(_request): Json<RegenerateRequest>,
 ) -> AppResult<Json<RegenerateResponse>> {
     if is_regeneration_running() {
         return Err(AppError::Conflict(
@@ -84,14 +89,13 @@ async fn trigger_regeneration(
 
     let config = Arc::clone(&state.config);
     let pool = state.pool.clone();
-    let missing_only = request.missing_only;
 
-    thread::spawn(move || {
-        run_regeneration(missing_only, &config, &pool);
+    tokio::spawn(async move {
+        generate_missing_metadata(&config, &pool).await;
     });
 
     Ok(Json(RegenerateResponse {
-        message: "Regeneration started".to_string(),
+        message: "Metadata generation started".to_string(),
         status: "running".to_string(),
     }))
 }
@@ -147,9 +151,15 @@ async fn trigger_reset(
     let config = Arc::clone(&state.config);
     let pool = state.pool.clone();
 
-    thread::spawn(move || {
-        clear_all_metadata_and_thumbnails(&pool);
-        run_regeneration(false, &config, &pool);
+    tokio::spawn(async move {
+        let pool_clone = pool.clone();
+        tokio::task::spawn_blocking(move || {
+            clear_all_metadata_and_thumbnails(&pool_clone);
+        })
+        .await
+        .unwrap();
+
+        generate_missing_metadata(&config, &pool).await;
     });
 
     Ok(Json(RegenerateResponse {

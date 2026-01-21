@@ -207,6 +207,24 @@ impl Default for ReverseGeocodingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegenerateConfig {
+    #[serde(default = "default_regenerate_num_cpus")]
+    pub num_cpus: usize,
+}
+
+fn default_regenerate_num_cpus() -> usize {
+    num_cpus::get()
+}
+
+impl Default for RegenerateConfig {
+    fn default() -> Self {
+        Self {
+            num_cpus: default_regenerate_num_cpus(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -221,6 +239,8 @@ pub struct Config {
     pub thumbnails: ThumbnailConfig,
     #[serde(default)]
     pub reverse_geocoding: ReverseGeocodingConfig,
+    #[serde(default)]
+    pub regenerate: RegenerateConfig,
 }
 
 pub fn load_config(config_path: &Path) -> Config {
@@ -240,8 +260,7 @@ pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
     }
 
     let config = Config::default();
-    let yaml = serde_yaml::to_string(&config).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-    })?;
+    let yaml = serde_yaml::to_string(&config)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     fs::write(config_path, yaml)
 }

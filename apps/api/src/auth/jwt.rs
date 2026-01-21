@@ -16,7 +16,12 @@ pub struct Claims {
     pub token_type: String,
 }
 
-pub fn create_access_token(user_id: i64, username: &str, role: &str, config: &Config) -> AppResult<String> {
+pub fn create_access_token(
+    user_id: i64,
+    username: &str,
+    role: &str,
+    config: &Config,
+) -> AppResult<String> {
     let expiration = Utc::now() + Duration::minutes(config.security.access_token_expire_minutes);
 
     let claims = Claims {
@@ -36,7 +41,10 @@ pub fn create_access_token(user_id: i64, username: &str, role: &str, config: &Co
     Ok(token)
 }
 
-pub fn create_refresh_token(_user_id: i64, config: &Config) -> (String, String, chrono::DateTime<Utc>) {
+pub fn create_refresh_token(
+    _user_id: i64,
+    config: &Config,
+) -> (String, String, chrono::DateTime<Utc>) {
     let raw_token: String = rand::thread_rng()
         .sample_iter(&rand::distributions::Alphanumeric)
         .take(43)

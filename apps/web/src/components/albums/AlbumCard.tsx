@@ -18,7 +18,8 @@ export default function AlbumCard({ album, onClick, onDelete }: AlbumCardProps) 
 
     const loadCover = async () => {
       try {
-        const url = await mediaApi.getThumbnailUrl(album.coverMediaId!)
+        const batch = await mediaApi.getThumbnailBatch([album.coverMediaId!])
+        const url = batch.get(album.coverMediaId!) ?? null
         if (!cancelled) setCoverUrl(url)
       } catch (err) {
         console.error('Failed to load album cover:', err)

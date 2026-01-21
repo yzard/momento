@@ -57,16 +57,31 @@ impl IntoResponse for AppError {
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            AppError::Internal(msg) => {
+                tracing::error!(
+                    "Internal error: {}\nBacktrace: {:?}",
+                    msg,
+                    std::backtrace::Backtrace::capture()
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+            }
             AppError::Database(e) => {
-                tracing::error!("Database error: {}", e);
+                tracing::error!(
+                    "Database error: {}\nBacktrace: {:?}",
+                    e,
+                    std::backtrace::Backtrace::capture()
+                );
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Database error".to_string(),
                 )
             }
             AppError::Pool(e) => {
-                tracing::error!("Pool error: {}", e);
+                tracing::error!(
+                    "Pool error: {}\nBacktrace: {:?}",
+                    e,
+                    std::backtrace::Backtrace::capture()
+                );
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Connection pool error".to_string(),
@@ -77,7 +92,11 @@ impl IntoResponse for AppError {
                 (StatusCode::UNAUTHORIZED, "Invalid token".to_string())
             }
             AppError::Io(e) => {
-                tracing::error!("IO error: {}", e);
+                tracing::error!(
+                    "IO error: {}\nBacktrace: {:?}",
+                    e,
+                    std::backtrace::Backtrace::capture()
+                );
                 (StatusCode::INTERNAL_SERVER_ERROR, "IO error".to_string())
             }
             AppError::Json(e) => {
@@ -85,7 +104,11 @@ impl IntoResponse for AppError {
                 (StatusCode::BAD_REQUEST, "JSON parsing error".to_string())
             }
             AppError::Request(e) => {
-                tracing::error!("Request error: {}", e);
+                tracing::error!(
+                    "Request error: {}\nBacktrace: {:?}",
+                    e,
+                    std::backtrace::Backtrace::capture()
+                );
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "External request failed".to_string(),

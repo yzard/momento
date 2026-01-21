@@ -1,4 +1,4 @@
-import { Calendar, Camera, Ruler, HardDrive, MapPin, Clock, FileType, Tag, Smartphone } from 'lucide-react'
+import { Calendar, Camera, MapPin, FileType, Tag, Smartphone } from 'lucide-react'
 import type { Media } from '../../api/types'
 import { cn } from '../../lib/utils'
 
@@ -8,7 +8,8 @@ interface MediaDetailsProps {
 }
 
 export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
-  const formatFileSize = (bytes: number) => {
+  const formatFileSize = (bytes: number | null | undefined) => {
+    if (bytes == null) return null
     if (bytes === 0) return '0 B'
     const k = 1024
     const sizes = ['B', 'KB', 'MB', 'GB']
@@ -20,8 +21,9 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     if (!date) return null
     const d = new Date(date)
     const dateStr = d.toLocaleDateString(undefined, {
+      weekday: 'short',
       year: 'numeric',
-      month: 'long',
+      month: 'short',
       day: 'numeric',
     })
     const timeStr = d.toLocaleTimeString(undefined, {
@@ -44,27 +46,40 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     return `${lat.toFixed(4)}, ${lng.toFixed(4)}`
   }
 
+  const formatNumber = (value: number, maxFractionDigits = 3) => {
+    return value.toLocaleString(undefined, { maximumFractionDigits: maxFractionDigits })
+  }
+
+  const formatCodec = (codec: string | null) => {
+    if (!codec) return null
+    const normalized = codec.toLowerCase()
+    if (normalized === 'hevc' || normalized === 'h265') return 'HEVC'
+    if (normalized === 'h264') return 'H.264'
+    if (normalized === 'av1') return 'AV1'
+    if (normalized === 'vp9') return 'VP9'
+    return codec.toUpperCase()
+  }
+
   const deviceName = [media.cameraMake, media.cameraModel].filter(Boolean).join(' ')
-  const cameraSettings = [
-    media.iso ? `ISO ${media.iso}` : null,
-    media.exposureTime ? `${media.exposureTime}s` : null,
-    media.fNumber ? `ƒ/${media.fNumber}` : null,
-    media.focalLength ? `${media.focalLength}mm` : null
-  ].filter(Boolean).join(' • ')
+  const settingsDeviceName = media.cameraModel || deviceName
+  const settingsParts = [
+    media.focalLength ? `${formatNumber(media.focalLength)}mm` : null,
+    media.fNumber ? `ƒ/${formatNumber(media.fNumber, 2)}` : null,
+    media.focalLength35mm ? `${Math.round(media.focalLength35mm)}mm` : null
+  ].filter(Boolean)
+  const cameraSettings = settingsParts.length > 0
+    ? (settingsDeviceName ? `${settingsDeviceName} ${settingsParts.join(', ')}` : settingsParts.join(', '))
+    : null
 
   const isPhone = deviceName.toLowerCase().includes('iphone') ||
                   deviceName.toLowerCase().includes('samsung') ||
                   deviceName.toLowerCase().includes('pixel') ||
                   deviceName.toLowerCase().includes('android')
 
-  const DeviceValue = () => (
-    <div className="flex flex-col gap-0.5">
-      {deviceName && <span>{deviceName}</span>}
-      {cameraSettings && <span className="text-xs text-muted-foreground font-normal">{cameraSettings}</span>}
-    </div>
-  )
 
-  const locationName = [media.locationState, media.locationCountry].filter(Boolean).join(', ')
+  const locationName = [media.locationCity, media.locationState, media.locationCountry]
+    .filter(Boolean)
+    .join(', ')
   const coords = formatCoords(media.gpsLatitude, media.gpsLongitude)
   const altitude = media.gpsAltitude ? `${Math.round(media.gpsAltitude)}m` : null
   
@@ -93,16 +108,28 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     : []
 
   const details = [
-    { icon: Calendar, label: 'Date Taken', value: formatDate(media.dateTaken) },
+    { icon: Calendar, label: 'Time', value: formatDate(media.dateTaken) },
     {
       icon: isPhone ? Smartphone : Camera,
-      label: 'Device',
-      value: (deviceName || cameraSettings) ? <DeviceValue /> : null
+      label: 'Camera',
+      value: deviceName || null
     },
-    { icon: Ruler, label: 'Dimensions', value: media.width && media.height ? `${media.width} × ${media.height}` : null },
-    { icon: HardDrive, label: 'File Size', value: formatFileSize(media.fileSize) },
-    { icon: FileType, label: 'Type', value: media.mimeType || media.mediaType },
-    { icon: Clock, label: 'Duration', value: formatDuration(media.durationSeconds) },
+    {
+      icon: Camera,
+      label: 'Camera Settings',
+      value: cameraSettings || null
+    },
+    {
+      icon: FileType,
+      label: 'Format',
+      value: [
+        formatDuration(media.durationSeconds),
+        formatCodec(media.videoCodec) || media.mimeType,
+        media.width && media.height ? `${media.width} × ${media.height}` : null,
+        formatFileSize(media.fileSize ?? null),
+      ].filter(Boolean).join(', ')
+    },
+    { icon: FileType, label: 'Original Name', value: media.originalFilename || null },
     { 
       icon: MapPin, 
       label: 'Location', 

@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { trashApi, type TrashMedia } from '../api/trash'
-import { mediaApi } from '../api/media'
 import { Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { batchLoader } from '../utils/batcher'
 
 export default function Trash() {
   const queryClient = useQueryClient()
@@ -212,8 +212,8 @@ function TrashItem({ item, selected, onToggle, daysRemaining }: TrashItemProps) 
 
     const loadThumbnail = async () => {
       try {
-        const url = await mediaApi.getThumbnailUrl(item.id)
-        if (!cancelled) setThumbnailUrl(url)
+        const url = await batchLoader.load(item.id)
+        if (!cancelled && url) setThumbnailUrl(url)
       } catch (err) {
         console.error('Failed to load thumbnail:', err)
       }

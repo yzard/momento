@@ -60,13 +60,20 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
     setIsLoading(true)
     setPreviewUrl(null)
 
-    mediaApi.getPreviewUrl(currentMedia.id)
-      .then((url) => {
+    if (currentMedia.mediaType === 'video') {
+      setPreviewUrl(mediaApi.getFileStreamUrl(currentMedia.id))
+      setIsLoading(false)
+      return
+    }
+
+    mediaApi.getPreviewBatch([currentMedia.id])
+      .then((batch) => {
+        const url = batch.get(currentMedia.id) ?? null
         setPreviewUrl(url)
         setIsLoading(false)
       })
-      .catch((err) => {
-        console.error('Failed to load preview:', err)
+      .catch(() => {
+        console.error('Failed to load preview')
         setIsLoading(false)
       })
   }, [currentMedia])

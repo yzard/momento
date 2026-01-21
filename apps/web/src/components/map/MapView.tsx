@@ -4,6 +4,7 @@ import { LatLngBounds } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { mediaApi } from '../../api/media'
 import PhotoMarker, { type GeoMedia } from './PhotoMarker'
+import type { Media } from '../../api/types'
 import { Loader2, Map as MapIcon } from 'lucide-react'
 
 function FitBoundsToMarkers({ geoMedia }: { geoMedia: GeoMedia[] }) {
@@ -23,7 +24,7 @@ function FitBoundsToMarkers({ geoMedia }: { geoMedia: GeoMedia[] }) {
 
 interface MapViewProps {
   onPhotoClick?: (mediaId: number) => void
-  onMediaChange?: (items: GeoMedia[]) => void
+  onMediaChange?: (items: Media[]) => void
 }
 
 export default function MapView({ onPhotoClick, onMediaChange }: MapViewProps) {
@@ -34,8 +35,20 @@ export default function MapView({ onPhotoClick, onMediaChange }: MapViewProps) {
   useEffect(() => {
     const loadMedia = async () => {
       try {
-        const data = await mediaApi.mapMedia()
-        setGeoMedia(data)
+        const data = await mediaApi.listMapMedia()
+        const geotagged = data.filter((m) => m.gpsLatitude !== null && m.gpsLongitude !== null)
+        const geoItems: GeoMedia[] = geotagged.map((m) => ({
+          id: m.id,
+          thumbnailPath: null,
+          thumbnailData: null,
+          latitude: m.gpsLatitude as number,
+          longitude: m.gpsLongitude as number,
+          dateTaken: m.dateTaken,
+          mediaType: m.mediaType,
+          mimeType: m.mimeType,
+          originalFilename: m.originalFilename,
+        }))
+        setGeoMedia(geoItems)
         onMediaChange?.(data)
       } catch {
         setError('Failed to load map data')
