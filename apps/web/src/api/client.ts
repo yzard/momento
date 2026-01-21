@@ -58,11 +58,11 @@ apiClient.interceptors.response.use(
 
       try {
         const response = await axios.post('/api/v1/user/refresh', {
-          refresh_token: refreshToken,
+          refreshToken: refreshToken,
         })
-        const { access_token, refresh_token } = response.data
-        localStorage.setItem(ACCESS_TOKEN_KEY, access_token)
-        localStorage.setItem(REFRESH_TOKEN_KEY, refresh_token)
+        const { accessToken, refreshToken: newRefreshToken } = response.data
+        localStorage.setItem(ACCESS_TOKEN_KEY, accessToken)
+        localStorage.setItem(REFRESH_TOKEN_KEY, newRefreshToken)
         processQueue(null)
         return apiClient(originalRequest)
       } catch (refreshError) {
