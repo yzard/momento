@@ -30,78 +30,88 @@ pub mod media {
       , location_country
       , video_codec
       , keywords
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      , content_hash
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    "#;
+
+    pub const SELECT_BY_CONTENT_HASH: &str = r#"
+    SELECT id
+      FROM media
+     WHERE content_hash = ?
+     LIMIT 1
     "#;
 
     pub const SELECT_ALL_FOR_USER: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , gps_latitude
-         , gps_longitude
-         , camera_make
-         , camera_model
-         , lens_make
-         , lens_model
-         , iso
-         , exposure_time
-         , f_number
-         , focal_length
-         , focal_length_35mm
-         , gps_altitude
-         , location_city
-         , location_state
-         , location_country
-         , video_codec
-         , keywords
-         , created_at
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NULL
-     ORDER BY date_taken DESC, id DESC
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , m.gps_latitude
+         , m.gps_longitude
+         , m.camera_make
+         , m.camera_model
+         , m.lens_make
+         , m.lens_model
+         , m.iso
+         , m.exposure_time
+         , m.f_number
+         , m.focal_length
+         , m.focal_length_35mm
+         , m.gps_altitude
+         , m.location_city
+         , m.location_state
+         , m.location_country
+         , m.video_codec
+         , m.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+     ORDER BY m.date_taken DESC, m.id DESC
     "#;
 
     pub const SELECT_PAGINATED_FOR_USER: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , gps_latitude
-         , gps_longitude
-         , camera_make
-         , camera_model
-         , lens_make
-         , lens_model
-         , iso
-         , exposure_time
-         , f_number
-         , focal_length
-         , focal_length_35mm
-         , gps_altitude
-         , location_city
-         , location_state
-         , location_country
-         , video_codec
-         , keywords
-         , created_at
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NULL
-       AND (date_taken < ? OR (date_taken = ? AND id < ?))
-     ORDER BY date_taken DESC, id DESC
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , m.gps_latitude
+         , m.gps_longitude
+         , m.camera_make
+         , m.camera_model
+         , m.lens_make
+         , m.lens_model
+         , m.iso
+         , m.exposure_time
+         , m.f_number
+         , m.focal_length
+         , m.focal_length_35mm
+         , m.gps_altitude
+         , m.location_city
+         , m.location_state
+         , m.location_country
+         , m.video_codec
+         , m.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND (m.date_taken < ? OR (m.date_taken = ? AND m.id < ?))
+     ORDER BY m.date_taken DESC, m.id DESC
      LIMIT ?
     "#;
 
@@ -139,192 +149,212 @@ pub mod media {
     "#;
 
     pub const SELECT_BY_ID_AND_USER: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , gps_latitude
-         , gps_longitude
-         , camera_make
-         , camera_model
-         , lens_make
-         , lens_model
-         , iso
-         , exposure_time
-         , f_number
-         , focal_length
-         , focal_length_35mm
-         , gps_altitude
-         , location_city
-         , location_state
-         , location_country
-         , video_codec
-         , keywords
-         , created_at
-      FROM media
-     WHERE id = ?
-       AND user_id = ?
-       AND deleted_at IS NULL
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , m.gps_latitude
+         , m.gps_longitude
+         , m.camera_make
+         , m.camera_model
+         , m.lens_make
+         , m.lens_model
+         , m.iso
+         , m.exposure_time
+         , m.f_number
+         , m.focal_length
+         , m.focal_length_35mm
+         , m.gps_altitude
+         , m.location_city
+         , m.location_state
+         , m.location_country
+         , m.video_codec
+         , m.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE m.id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
     "#;
 
     pub const CHECK_EXISTS: &str = r#"
-    SELECT id
-      FROM media
-     WHERE id = ?
-       AND user_id = ?
-       AND deleted_at IS NULL
+    SELECT m.id
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE m.id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
     "#;
 
     pub const UPDATE_DELETED_AT: &str = r#"
-    UPDATE media
+    UPDATE media_access
        SET deleted_at = ?
-     WHERE id = ?
+     WHERE media_id = ?
        AND user_id = ?
        AND deleted_at IS NULL
     "#;
 
     pub const SELECT_FILE_INFO: &str = r#"
-    SELECT file_path
-         , mime_type
-         , original_filename
-      FROM media
-     WHERE id = ?
-       AND user_id = ?
+    SELECT m.file_path
+         , m.mime_type
+         , m.original_filename
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE m.id = ?
+       AND ma.user_id = ?
     "#;
 
     pub const SELECT_FOR_MAP: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , gps_latitude
-         , gps_longitude
-         , camera_make
-         , camera_model
-         , lens_make
-         , lens_model
-         , iso
-         , exposure_time
-         , f_number
-         , focal_length
-         , focal_length_35mm
-         , gps_altitude
-         , location_city
-         , location_state
-         , location_country
-         , video_codec
-         , keywords
-         , created_at
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NULL
-       AND gps_latitude IS NOT NULL
-       AND gps_longitude IS NOT NULL
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , m.gps_latitude
+         , m.gps_longitude
+         , m.camera_make
+         , m.camera_model
+         , m.lens_make
+         , m.lens_model
+         , m.iso
+         , m.exposure_time
+         , m.f_number
+         , m.focal_length
+         , m.focal_length_35mm
+         , m.gps_altitude
+         , m.location_city
+         , m.location_state
+         , m.location_country
+         , m.video_codec
+         , m.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND m.gps_latitude IS NOT NULL
+       AND m.gps_longitude IS NOT NULL
     "#;
 
     pub const SELECT_THUMBNAIL_BATCH: &str = r#"
-    SELECT id
-         , thumbnail_path
-         , file_path
-         , media_type
-         , user_id
-      FROM media
-     WHERE user_id = ?
+    SELECT m.id
+         , m.thumbnail_path
+         , m.file_path
+         , m.media_type
+         , ma.user_id
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
     "#;
 
     pub const SELECT_PREVIEW_BATCH: &str = r#"
-    SELECT id
-         , file_path
-         , media_type
-         , mime_type
+    SELECT m.id
+         , m.file_path
+         , m.media_type
+         , m.mime_type
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+    "#;
+
+    pub const UPDATE_CONTENT_HASH: &str = r#"
+    UPDATE media
+       SET content_hash = ?
+     WHERE id = ?
+    "#;
+
+    pub const SELECT_WITHOUT_HASH: &str = r#"
+    SELECT id, file_path
       FROM media
-     WHERE user_id = ?
+     WHERE content_hash IS NULL
     "#;
 }
 
 pub mod timeline {
     pub const SELECT_DEFAULT: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , gps_latitude
-         , gps_longitude
-         , camera_make
-         , camera_model
-         , lens_make
-         , lens_model
-         , iso
-         , exposure_time
-         , f_number
-         , focal_length
-         , focal_length_35mm
-         , gps_altitude
-         , location_city
-         , location_state
-         , location_country
-         , video_codec
-         , keywords
-         , created_at
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NULL
-     ORDER BY date_taken DESC, id DESC
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , m.gps_latitude
+         , m.gps_longitude
+         , m.camera_make
+         , m.camera_model
+         , m.lens_make
+         , m.lens_model
+         , m.iso
+         , m.exposure_time
+         , m.f_number
+         , m.focal_length
+         , m.focal_length_35mm
+         , m.gps_altitude
+         , m.location_city
+         , m.location_state
+         , m.location_country
+         , m.video_codec
+         , m.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+     ORDER BY m.date_taken DESC, m.id DESC
      LIMIT ?
     "#;
 
     pub const SELECT_PAGINATED: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , gps_latitude
-         , gps_longitude
-         , camera_make
-         , camera_model
-         , lens_make
-         , lens_model
-         , iso
-         , exposure_time
-         , f_number
-         , focal_length
-         , focal_length_35mm
-         , gps_altitude
-         , location_city
-         , location_state
-         , location_country
-         , video_codec
-         , keywords
-         , created_at
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NULL
-       AND (date_taken < ? OR (date_taken = ? AND id < ?))
-     ORDER BY date_taken DESC, id DESC
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , m.gps_latitude
+         , m.gps_longitude
+         , m.camera_make
+         , m.camera_model
+         , m.lens_make
+         , m.lens_model
+         , m.iso
+         , m.exposure_time
+         , m.f_number
+         , m.focal_length
+         , m.focal_length_35mm
+         , m.gps_altitude
+         , m.location_city
+         , m.location_state
+         , m.location_country
+         , m.video_codec
+         , m.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND (m.date_taken < ? OR (m.date_taken = ? AND m.id < ?))
+     ORDER BY m.date_taken DESC, m.id DESC
      LIMIT ?
     "#;
 }
@@ -379,10 +409,9 @@ pub mod regenerator {
      WHERE id = ?
     "#;
 
-    // Include deleted media in regeneration
     pub const SELECT_MISSING_METADATA: &str = r#"
     SELECT id
-         , user_id
+         , -1 as user_id
          , file_path
          , thumbnail_path
          , media_type
@@ -475,17 +504,19 @@ pub mod albums {
          , COUNT(am.media_id) as media_count
          , a.created_at
       FROM albums AS a
+      JOIN album_access AS aa ON a.id = aa.album_id
       LEFT JOIN album_media AS am ON a.id = am.album_id
-     WHERE a.user_id = ?
+     WHERE aa.user_id = ?
      GROUP BY a.id
      ORDER BY a.created_at DESC
     "#;
 
     pub const CHECK_OWNERSHIP: &str = r#"
-    SELECT id
-      FROM albums
-     WHERE id = ?
-       AND user_id = ?
+    SELECT a.id
+      FROM albums AS a
+      JOIN album_access AS aa ON a.id = aa.album_id
+     WHERE a.id = ?
+       AND aa.user_id = ?
     "#;
 
     pub const DELETE: &str = r#"
@@ -553,6 +584,16 @@ pub mod albums {
       JOIN album_media AS am ON m.id = am.media_id
      WHERE am.album_id = ?
      ORDER BY am.position
+    "#;
+
+    pub const DELETE_ACCESS: &str = r#"
+    DELETE FROM album_access
+     WHERE album_id = ?
+       AND user_id = ?
+    "#;
+
+    pub const CHECK_ACCESS_COUNT: &str = r#"
+    SELECT COUNT(*) FROM album_access WHERE album_id = ?
     "#;
 }
 
@@ -768,17 +809,20 @@ pub mod auth {
 
 pub mod share {
     pub const CHECK_MEDIA_OWNERSHIP: &str = r#"
-    SELECT id
-      FROM media
-     WHERE id = ?
-       AND user_id = ?
+    SELECT m.id
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE m.id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
     "#;
 
     pub const CHECK_ALBUM_OWNERSHIP: &str = r#"
-    SELECT id
-      FROM albums
-     WHERE id = ?
-       AND user_id = ?
+    SELECT a.id
+      FROM albums AS a
+      JOIN album_access AS aa ON a.id = aa.album_id
+     WHERE a.id = ?
+       AND aa.user_id = ?
     "#;
 
     pub const INSERT: &str = r#"
@@ -922,40 +966,42 @@ pub mod public {
 
 pub mod trash {
     pub const SELECT_DELETED: &str = r#"
-    SELECT id
-         , filename
-         , original_filename
-         , media_type
-         , mime_type
-         , width
-         , height
-         , file_size
-         , duration_seconds
-         , date_taken
-         , deleted_at
-         , created_at
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NOT NULL
-     ORDER BY deleted_at DESC
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , m.width
+         , m.height
+         , m.file_size
+         , m.duration_seconds
+         , m.date_taken
+         , ma.deleted_at
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NOT NULL
+     ORDER BY ma.deleted_at DESC
     "#;
 
     pub const RESTORE_MEDIA: &str = r#"
-    UPDATE media
+    UPDATE media_access
        SET deleted_at = NULL
-     WHERE id IN ({})
+     WHERE media_id IN ({})
        AND user_id = ?
        AND deleted_at IS NOT NULL
     "#;
 
     pub const SELECT_FOR_DELETE: &str = r#"
-    SELECT id
-         , file_path
-         , thumbnail_path
-      FROM media
-     WHERE id IN ({})
-       AND user_id = ?
-       AND deleted_at IS NOT NULL
+    SELECT m.id
+         , m.file_path
+         , m.thumbnail_path
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE m.id IN ({})
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NOT NULL
     "#;
 
     pub const DELETE_PERMANENTLY: &str = r#"
@@ -963,21 +1009,62 @@ pub mod trash {
      WHERE id = ?
     "#;
 
+    pub const DELETE_ACCESS: &str = r#"
+    DELETE FROM media_access
+     WHERE media_id = ?
+       AND user_id = ?
+    "#;
+
+    pub const CHECK_ACCESS_COUNT: &str = r#"
+    SELECT COUNT(*) FROM media_access WHERE media_id = ?
+    "#;
+
     pub const SELECT_ALL_DELETED: &str = r#"
-    SELECT id
-         , file_path
-         , thumbnail_path
-      FROM media
-     WHERE user_id = ?
-       AND deleted_at IS NOT NULL
+    SELECT m.id
+         , m.file_path
+         , m.thumbnail_path
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NOT NULL
     "#;
 
     pub const SELECT_OLD_DELETED: &str = r#"
-    SELECT id
-         , file_path
-         , thumbnail_path
-      FROM media
-     WHERE deleted_at IS NOT NULL
-       AND deleted_at < ?
+    SELECT m.id
+         , m.file_path
+         , m.thumbnail_path
+         , ma.user_id
+      FROM media_access AS ma
+      JOIN media AS m ON ma.media_id = m.id
+     WHERE ma.deleted_at IS NOT NULL
+       AND ma.deleted_at < ?
+    "#;
+}
+
+pub mod access {
+    pub const INSERT_MEDIA_ACCESS: &str = r#"
+    INSERT OR IGNORE INTO media_access (media_id, user_id, access_level, deleted_at)
+    VALUES (?, ?, ?, NULL)
+    "#;
+
+    pub const INSERT_ALBUM_ACCESS: &str = r#"
+    INSERT OR IGNORE INTO album_access (album_id, user_id, access_level)
+    VALUES (?, ?, ?)
+    "#;
+
+    pub const CHECK_MEDIA_ACCESS: &str = r#"
+    SELECT access_level FROM media_access WHERE media_id = ? AND user_id = ?
+    "#;
+
+    pub const REMOVE_MEDIA_ACCESS: &str = r#"
+    DELETE FROM media_access WHERE media_id = ? AND user_id = ?
+    "#;
+
+    pub const COUNT_MEDIA_ACCESS: &str = r#"
+    SELECT COUNT(*) FROM media_access WHERE media_id = ?
+    "#;
+
+    pub const DELETE_MEDIA_PERMANENTLY: &str = r#"
+    DELETE FROM media WHERE id = ?
     "#;
 }

@@ -30,6 +30,7 @@ pub struct MediaResponse {
     pub location_country: Option<String>,
     pub video_codec: Option<String>,
     pub keywords: Option<String>,
+    pub content_hash: Option<String>,
     pub created_at: String,
 }
 

@@ -7,6 +7,8 @@ use std::sync::RwLock;
 use crate::config::Config;
 use crate::constants::{ORIGINALS_DIR, THUMBNAILS_DIR};
 use crate::database::{fetch_all, queries, DbPool};
+use crate::utils::hash::calculate_file_hash;
+use crate::database::execute_query;
 use crate::processor::media_processor::generate_complete_metadata;
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 use futures::stream::{self, StreamExt};
@@ -264,6 +266,42 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
             return;
         }
     };
+
+
+    // Backfill missing hashes
+    let hash_rows: Vec<(i64, String)> = fetch_all(
+        &conn,
+        queries::media::SELECT_WITHOUT_HASH,
+        &[],
+        |row| Ok((row.get(0)?, row.get(1)?))
+    ).unwrap_or_default();
+
+    if !hash_rows.is_empty() {
+        info!("Backfilling hashes for {} items", hash_rows.len());
+        let hash_semaphore = Arc::new(Semaphore::new(if config.regenerate.num_cpus > 0 { config.regenerate.num_cpus } else { num_cpus::get() }));
+        let pool_hash = pool.clone();
+        
+        stream::iter(hash_rows)
+            .for_each_concurrent(Some(num_cpus::get()), |(id, path)| {
+                let pool = pool_hash.clone();
+                let sem = hash_semaphore.clone();
+                async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let full_path = ORIGINALS_DIR.join(&path);
+                    if let Ok(hash) = calculate_file_hash(&full_path).await {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(c) = pool.get() {
+                                let _ = execute_query(
+                                    &c,
+                                    queries::media::UPDATE_CONTENT_HASH,
+                                    &[&hash, &id]
+                                );
+                            }
+                        }).await;
+                    }
+                }
+            }).await;
+    }
 
     let rows: Vec<MediaRow> = match fetch_all(
         &conn,

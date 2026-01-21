@@ -103,6 +103,7 @@ fn row_to_media_response(
         video_codec,
         keywords,
         created_at,
+        content_hash: None,
     }
 }
 
@@ -215,15 +216,7 @@ async fn get_media(
 
     let media = fetch_one(
         &conn,
-        r#"
-        SELECT id, filename, original_filename, media_type, mime_type, width, height,
-               file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-               camera_make, camera_model, lens_make, lens_model, iso, exposure_time, f_number, focal_length,
-               focal_length_35mm, gps_altitude, location_city, location_state, location_country,
-               video_codec, keywords, created_at
-        FROM media
-        WHERE id = ? AND user_id = ? AND deleted_at IS NULL
-        "#,
+        queries::media::SELECT_BY_ID_AND_USER,
         &[&request.media_id, &current_user.id],
         map_media_row,
     )?
@@ -270,9 +263,9 @@ async fn update_media(
 
     if !updates.is_empty() {
         params.push(Box::new(request.media_id));
-        params.push(Box::new(current_user.id));
+        
         let sql = format!(
-            "UPDATE media SET {} WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+            "UPDATE media SET {} WHERE id = ?",
             updates.join(", ")
         );
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -281,15 +274,7 @@ async fn update_media(
 
     let media = fetch_one(
         &conn,
-        r#"
-        SELECT id, filename, original_filename, media_type, mime_type, width, height,
-               file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-               camera_make, camera_model, lens_make, lens_model, iso, exposure_time, f_number, focal_length,
-               focal_length_35mm, gps_altitude, location_city, location_state, location_country,
-               video_codec, keywords, created_at
-        FROM media
-        WHERE id = ? AND user_id = ? AND deleted_at IS NULL
-        "#,
+        queries::media::SELECT_BY_ID_AND_USER,
         &[&request.media_id, &current_user.id],
         map_media_row,
     )?
@@ -373,20 +358,30 @@ fn fetch_default_media(
 ) -> AppResult<Vec<MediaResponse>> {
     fetch_all(
         conn,
-        r#"
-        SELECT id, filename, original_filename, media_type, mime_type, width, height,
-               file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-               camera_make, camera_model, lens_make, lens_model, iso, exposure_time, f_number, focal_length,
-               focal_length_35mm, gps_altitude, location_city, location_state, location_country,
-               video_codec, keywords, created_at
-        FROM media
-        WHERE user_id = ? AND deleted_at IS NULL
-        ORDER BY date_taken DESC, id DESC
-        LIMIT ?
-        "#,
-        &[&user_id, &(limit + 1)],
+        queries::media::SELECT_PAGINATED_FOR_USER,
+        &[
+            &user_id,
+            &Utc::now().to_rfc3339(),
+            &Utc::now().to_rfc3339(),
+            &i64::MAX,
+            &(limit + 1)
+        ],
         map_media_row,
-    )
+    ).or_else(|_| {
+        let future_date = "9999-12-31T23:59:59";
+        fetch_all(
+            conn,
+            queries::media::SELECT_PAGINATED_FOR_USER,
+            &[
+                &user_id,
+                &future_date,
+                &future_date,
+                &i64::MAX,
+                &(limit + 1)
+            ],
+            map_media_row,
+        )
+    })
 }
 
 fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
@@ -468,18 +463,7 @@ fn fetch_timeline_rows(
             let cursor_id: i64 = parts[1].parse().unwrap_or(0);
             return fetch_all(
                 conn,
-                r#"
-        SELECT id, filename, original_filename, media_type, mime_type, width, height,
-               file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-               camera_make, camera_model, lens_make, lens_model, iso, exposure_time, f_number, focal_length,
-               focal_length_35mm, gps_altitude, location_city, location_state, location_country,
-               video_codec, keywords, created_at
-        FROM media
-        WHERE user_id = ? AND deleted_at IS NULL
-          AND (date_taken < ? OR (date_taken = ? AND id < ?))
-        ORDER BY date_taken DESC, id DESC
-        LIMIT ?
-        "#,
+                queries::timeline::SELECT_PAGINATED,
                 &[
                     &user_id,
                     &cursor_date,
@@ -502,17 +486,7 @@ fn fetch_default_timeline(
 ) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
     fetch_all(
         conn,
-        r#"
-        SELECT id, filename, original_filename, media_type, mime_type, width, height,
-               file_size, duration_seconds, date_taken, gps_latitude, gps_longitude,
-               camera_make, camera_model, lens_make, lens_model, iso, exposure_time, f_number, focal_length,
-               focal_length_35mm, gps_altitude, location_city, location_state, location_country,
-               video_codec, keywords, created_at
-        FROM media
-        WHERE user_id = ? AND deleted_at IS NULL
-        ORDER BY date_taken DESC, id DESC
-        LIMIT ?
-        "#,
+        queries::timeline::SELECT_DEFAULT,
         &[&user_id, &(limit + 1)],
         map_timeline_row,
     )
@@ -595,7 +569,7 @@ async fn get_media_thumbnail_batch(
 
     let mut thumbnails: HashMap<i64, Option<String>> = HashMap::new();
 
-    for (media_id, thumbnail_path, file_path, _media_type, user_id) in rows {
+    for (media_id, thumbnail_path, file_path, _media_type, _user_id) in rows {
         let stem = PathBuf::from(&file_path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -604,7 +578,16 @@ async fn get_media_thumbnail_batch(
 
         let thumbnail_relative = thumbnail_path
             .clone()
-            .unwrap_or_else(|| format!("{}/{}.jpg", user_id, stem));
+            .unwrap_or_else(|| {
+                 let parent = PathBuf::from(&file_path)
+                     .parent()
+                     .and_then(|p| p.file_name())
+                     .and_then(|n| n.to_str())
+                     .unwrap_or("unknown")
+                     .to_string();
+                 format!("{}/{}.jpg", parent, stem)
+            });
+            
         let full_path = THUMBNAILS_DIR.join(&thumbnail_relative);
 
         if full_path.exists() {

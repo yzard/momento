@@ -45,6 +45,12 @@ async fn create_album(
         &[&current_user.id, &request.name, &request.description],
     )?;
 
+    execute_query(
+        &conn,
+        queries::access::INSERT_ALBUM_ACCESS,
+        &[&album_id, &current_user.id, &2],
+    )?;
+
     let album = fetch_one(&conn, queries::albums::SELECT_BY_ID, &[&album_id], |row| {
         Ok(AlbumBasic {
             id: row.get(0)?,
@@ -111,6 +117,7 @@ fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
         video_codec: row.get(25)?,
         keywords: row.get(26)?,
         created_at: row.get(27)?,
+        content_hash: None,
     })
 }
 
@@ -121,10 +128,9 @@ async fn update_album(
 ) -> AppResult<Json<AlbumResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    // Check exists
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        queries::albums::CHECK_OWNERSHIP,
         &[&request.album_id, &current_user.id],
         |row| row.get::<_, i64>(0),
     )?;
@@ -184,7 +190,7 @@ async fn delete_album(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        queries::albums::CHECK_OWNERSHIP,
         &[&request.album_id, &current_user.id],
         |row| row.get::<_, i64>(0),
     )?;
@@ -195,8 +201,8 @@ async fn delete_album(
 
     execute_query(
         &conn,
-        "DELETE FROM albums WHERE id = ?",
-        &[&request.album_id],
+        queries::albums::DELETE_ACCESS,
+        &[&request.album_id, &current_user.id],
     )?;
 
     Ok(Json(
@@ -213,7 +219,7 @@ async fn add_media_to_album(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        queries::albums::CHECK_OWNERSHIP,
         &[&request.album_id, &current_user.id],
         |row| row.get::<_, i64>(0),
     )?;
@@ -233,10 +239,9 @@ async fn add_media_to_album(
     let mut next_pos = max_pos + 1;
 
     for media_id in &request.media_ids {
-        // Check media belongs to user
         let media_exists = fetch_one(
             &conn,
-            "SELECT id FROM media WHERE id = ? AND user_id = ?",
+            queries::media::CHECK_EXISTS,
             &[media_id, &current_user.id],
             |row| row.get::<_, i64>(0),
         )?;
@@ -245,7 +250,6 @@ async fn add_media_to_album(
             continue;
         }
 
-        // Insert or ignore
         let _ = conn.execute(
             "INSERT OR IGNORE INTO album_media (album_id, media_id, position) VALUES (?, ?, ?)",
             rusqlite::params![request.album_id, media_id, next_pos],
@@ -265,7 +269,7 @@ async fn remove_media_from_album(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        queries::albums::CHECK_OWNERSHIP,
         &[&request.album_id, &current_user.id],
         |row| row.get::<_, i64>(0),
     )?;
@@ -309,7 +313,6 @@ async fn get_album(
 ) -> AppResult<Json<AlbumDetailResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    // Check ownership
     let exists = fetch_one(
         &conn,
         queries::albums::CHECK_OWNERSHIP,
@@ -363,7 +366,7 @@ async fn reorder_album_media(
 
     let exists = fetch_one(
         &conn,
-        "SELECT id FROM albums WHERE id = ? AND user_id = ?",
+        queries::albums::CHECK_OWNERSHIP,
         &[&request.album_id, &current_user.id],
         |row| row.get::<_, i64>(0),
     )?;

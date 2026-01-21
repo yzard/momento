@@ -112,6 +112,7 @@ async fn main() {
         let conn = pool.get().expect("Failed to get connection");
         init_database(&conn).expect("Failed to initialize database");
         ensure_media_columns(&conn).expect("Failed to ensure media columns");
+        momento_api::database::ensure_access_control_setup(&conn).expect("Failed to ensure access control");
     }
 
     // Create default admin if needed

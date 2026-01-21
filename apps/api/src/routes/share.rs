@@ -5,13 +5,18 @@ use rand::Rng;
 use crate::auth::{hash_password, AppState, CurrentUser};
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
-use crate::models::{ShareCreateRequest, ShareDeleteRequest, ShareLinkResponse, ShareListResponse};
+use crate::models::{
+    ShareAlbumRequest, ShareCreateRequest, ShareDeleteRequest, ShareLinkResponse,
+    ShareListResponse, ShareMediaRequest,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/share/create", post(create_share_link))
         .route("/share/list", post(list_share_links))
         .route("/share/delete", post(delete_share_link))
+        .route("/share/media", post(share_media_with_user))
+        .route("/share/album", post(share_album_with_user))
 }
 
 fn map_share_row(row: &rusqlite::Row) -> rusqlite::Result<ShareLinkResponse> {
@@ -73,7 +78,6 @@ async fn create_share_link(
         }
     }
 
-    // Generate token
     let token: String = rand::thread_rng()
         .sample_iter(&rand::distributions::Alphanumeric)
         .take(22)
@@ -154,4 +158,59 @@ async fn delete_share_link(
     Ok(Json(
         serde_json::json!({"message": "Share link deleted successfully"}),
     ))
+}
+
+async fn share_media_with_user(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<ShareMediaRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let access_level: i32 = fetch_one(
+        &conn,
+        queries::access::CHECK_MEDIA_ACCESS,
+        &[&request.media_id, &current_user.id],
+        |row| row.get(0),
+    )?
+    .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
+
+    if access_level < 2 {
+        return Err(AppError::Forbidden("Insufficient permissions to share".to_string()));
+    }
+
+    execute_query(
+        &conn,
+        queries::access::INSERT_MEDIA_ACCESS,
+        &[&request.media_id, &request.target_user_id, &request.access_level],
+    )?;
+
+    Ok(Json(serde_json::json!({"message": "Media shared successfully"})))
+}
+
+async fn share_album_with_user(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<ShareAlbumRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    let exists = fetch_one(
+        &conn,
+        queries::albums::CHECK_OWNERSHIP,
+        &[&request.album_id, &current_user.id],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    if exists.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+
+    execute_query(
+        &conn,
+        queries::access::INSERT_ALBUM_ACCESS,
+        &[&request.album_id, &request.target_user_id, &request.access_level],
+    )?;
+
+    Ok(Json(serde_json::json!({"message": "Album shared successfully"})))
 }

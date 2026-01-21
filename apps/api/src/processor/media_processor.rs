@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::config::ReverseGeocodingConfig;
 use crate::constants::{IMAGE_EXTENSIONS, ORIGINALS_DIR, THUMBNAILS_DIR, VIDEO_EXTENSIONS};
-use crate::database::{insert_returning_id, queries, DbPool};
+use crate::utils::hash::calculate_file_hash;
+use crate::database::{fetch_one, insert_returning_id, queries, DbPool, execute_query};
 use crate::processor::metadata::{extract_image_metadata, extract_video_metadata, MediaMetadata};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 
@@ -40,7 +41,6 @@ fn get_media_date(metadata: &MediaMetadata, source_path: &Path) -> DateTime<Utc>
 fn save_original_file(
     source_path: &Path,
     date_taken: DateTime<Utc>,
-    user_id: i64,
 ) -> std::io::Result<(PathBuf, PathBuf, String)> {
     let year_month = date_taken.format("%Y-%m").to_string();
     let unique_id = &Uuid::new_v4().to_string()[..12];
@@ -56,8 +56,7 @@ fn save_original_file(
         ext
     );
 
-    let relative_path = PathBuf::from(user_id.to_string())
-        .join(&year_month)
+    let relative_path = PathBuf::from(&year_month)
         .join(&new_filename);
     let dest_path = ORIGINALS_DIR.join(&relative_path);
 
@@ -72,7 +71,6 @@ fn save_original_file(
 
 pub async fn generate_thumbnails(
     dest_path: &Path,
-    user_id: i64,
     media_type: &str,
     thumbnail_max_size: u32,
     thumbnail_quality: u8,
@@ -85,8 +83,18 @@ pub async fn generate_thumbnails(
             .and_then(|s| s.to_str())
             .unwrap_or("thumb")
     );
-    let thumbnail_relative = PathBuf::from(user_id.to_string()).join(&thumbnail_filename);
+    
+    let parent_name = dest_path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+        
+    let thumbnail_relative = PathBuf::from(parent_name).join(&thumbnail_filename);
     let thumbnail_path = THUMBNAILS_DIR.join(&thumbnail_relative);
+
+    if let Some(parent) = thumbnail_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
 
     let success = if media_type == "image" {
         generate_image_thumbnail(
@@ -187,7 +195,6 @@ pub async fn generate_complete_metadata(
         extract_video_metadata(source_path).await
     };
 
-    // Ensure date_taken is populated
     if metadata.date_taken.is_none() {
         metadata.date_taken = source_path
             .metadata()
@@ -199,7 +206,6 @@ pub async fn generate_complete_metadata(
         }
     }
 
-    // Perform reverse geocoding if config matches and coordinates exist
     if let Some(geo_config) = reverse_geo_config {
         if geo_config.enabled
             && metadata.gps_latitude.is_some()
@@ -242,15 +248,71 @@ pub async fn process_media_file(
     pool: &DbPool,
 ) -> Option<i64> {
     let media_type = get_media_type(source_path)?;
+
+    let content_hash = match calculate_file_hash(source_path).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("Failed to hash file {}: {}", source_path.display(), e);
+            return None;
+        }
+    };
+
+    if let Ok(conn) = pool.get() {
+        let existing_media_id: Option<i64> = fetch_one(
+            &conn,
+            queries::media::SELECT_BY_CONTENT_HASH,
+            &[&content_hash],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+        if let Some(media_id) = existing_media_id {
+            tracing::info!("Found existing media {} for hash {}", media_id, content_hash);
+            
+             let has_access: Option<i32> = fetch_one(
+                &conn,
+                queries::access::CHECK_MEDIA_ACCESS,
+                &[&media_id, &user_id],
+                |row| row.get(0),
+            ).ok().flatten();
+
+            if has_access.is_some() {
+                 tracing::info!("User {} already has access to media {}", user_id, media_id);
+                 
+                 let _ = execute_query(
+                     &conn,
+                     "UPDATE media_access SET deleted_at = NULL WHERE media_id = ? AND user_id = ?",
+                     &[&media_id, &user_id]
+                 );
+                 
+                 return Some(media_id);
+            }
+            
+            let _ = execute_query(
+                &conn,
+                queries::access::INSERT_MEDIA_ACCESS,
+                &[&media_id, &user_id, &2] 
+            );
+            
+            tracing::info!("Granted access to media {} for user {}", media_id, user_id);
+            return Some(media_id);
+        }
+    }
+    
     let metadata = generate_complete_metadata(source_path, media_type, reverse_geo_config).await;
     let date_taken = get_media_date(&metadata, source_path);
 
-    let (dest_path, relative_path, new_filename) =
-        save_original_file(source_path, date_taken, user_id).ok()?;
+    let (dest_path, relative_path, new_filename) = match save_original_file(source_path, date_taken) {
+        Ok(res) => res,
+        Err(e) => {
+            tracing::error!("Failed to save original file: {}", e);
+            return None;
+        }
+    };
 
     let thumbnail_relative = generate_thumbnails(
         &dest_path,
-        user_id,
         media_type,
         thumbnail_max_size,
         thumbnail_quality,
@@ -259,9 +321,15 @@ pub async fn process_media_file(
     .await;
 
     let file_size = dest_path.metadata().ok().map(|m| m.len() as i64);
-    let conn = pool.get().ok()?;
+    let conn = match pool.get() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to get DB connection: {}", e);
+            return None;
+        }
+    };
 
-    let media_id = insert_returning_id(
+    let media_id_result = insert_returning_id(
         &conn,
         queries::media::INSERT,
         &[
@@ -297,9 +365,23 @@ pub async fn process_media_file(
             &metadata.location_country,
             &metadata.video_codec,
             &metadata.keywords,
+            &content_hash,
         ],
-    )
-    .ok()?;
+    );
+
+    let media_id = match media_id_result {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("Failed to insert media into DB: {}", e);
+            return None;
+        }
+    };
+
+    let _ = execute_query(
+        &conn,
+        queries::access::INSERT_MEDIA_ACCESS,
+        &[&media_id, &user_id, &2]
+    );
 
     Some(media_id)
 }

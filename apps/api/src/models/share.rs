@@ -39,3 +39,19 @@ pub struct ShareListResponse {
 pub struct ShareVerifyRequest {
     pub password: String,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareMediaRequest {
+    pub media_id: i64,
+    pub target_user_id: i64,
+    pub access_level: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareAlbumRequest {
+    pub album_id: i64,
+    pub target_user_id: i64,
+    pub access_level: i32,
+}

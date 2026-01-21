@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 
 use crate::auth::{AppState, CurrentUser};
 use crate::constants::TRASH_RETENTION_DAYS;
-use crate::database::{execute_query, fetch_all, queries};
+use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     TrashDeleteRequest, TrashListResponse, TrashMediaResponse, TrashResponse, TrashRestoreRequest,
@@ -132,8 +132,25 @@ async fn permanently_delete(
 
     let mut deleted_count = 0;
     for row in rows {
-        delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-        execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
+        execute_query(
+            &conn,
+            queries::trash::DELETE_ACCESS,
+            &[&row.id, &current_user.id],
+        )?;
+
+        let access_count: i64 = fetch_one(
+            &conn,
+            queries::trash::CHECK_ACCESS_COUNT,
+            &[&row.id],
+            |r| r.get(0),
+        )?
+        .unwrap_or(0);
+
+        if access_count == 0 {
+            delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
+            execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
+        }
+        
         deleted_count += 1;
     }
 
@@ -170,8 +187,25 @@ async fn empty_trash(
 
     let mut deleted_count = 0;
     for row in rows {
-        delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-        execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
+        execute_query(
+            &conn,
+            queries::trash::DELETE_ACCESS,
+            &[&row.id, &current_user.id],
+        )?;
+
+        let access_count: i64 = fetch_one(
+            &conn,
+            queries::trash::CHECK_ACCESS_COUNT,
+            &[&row.id],
+            |r| r.get(0),
+        )?
+        .unwrap_or(0);
+
+        if access_count == 0 {
+            delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
+            execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
+        }
+        
         deleted_count += 1;
     }
 
@@ -184,25 +218,50 @@ async fn empty_trash(
 pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
     let cutoff_date = (Utc::now() - Duration::days(TRASH_RETENTION_DAYS)).to_rfc3339();
 
-    let rows: Vec<MediaFileInfo> = fetch_all(
+    let rows: Vec<MediaFileInfoWithUser> = fetch_all(
         conn,
         queries::trash::SELECT_OLD_DELETED,
         &[&cutoff_date],
         |row| {
-            Ok(MediaFileInfo {
+            Ok(MediaFileInfoWithUser {
                 id: row.get(0)?,
                 file_path: row.get(1)?,
                 thumbnail_path: row.get(2)?,
+                user_id: row.get(3)?,
             })
         },
     )?;
 
     let mut deleted_count = 0;
     for row in rows {
-        delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-        execute_query(conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
+        execute_query(
+            conn,
+            queries::trash::DELETE_ACCESS,
+            &[&row.id, &row.user_id],
+        )?;
+
+        let access_count: i64 = fetch_one(
+            conn,
+            queries::trash::CHECK_ACCESS_COUNT,
+            &[&row.id],
+            |r| r.get(0),
+        )?
+        .unwrap_or(0);
+
+        if access_count == 0 {
+            delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
+            execute_query(conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
+        }
+        
         deleted_count += 1;
     }
 
     Ok(deleted_count)
+}
+
+struct MediaFileInfoWithUser {
+    id: i64,
+    file_path: String,
+    thumbnail_path: Option<String>,
+    user_id: i64,
 }

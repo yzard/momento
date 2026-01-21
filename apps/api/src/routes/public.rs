@@ -115,6 +115,7 @@ fn map_public_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> 
         video_codec: row.get(25)?,
         keywords: row.get(26)?,
         created_at: row.get(27)?,
+        content_hash: None,
     })
 }
 

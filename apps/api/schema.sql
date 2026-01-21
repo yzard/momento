@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS media (
     id INTEGER PRIMARY KEY AUTOINCREMENT
-  , user_id INTEGER NOT NULL
   , filename TEXT NOT NULL
   , original_filename TEXT NOT NULL
   , file_path TEXT NOT NULL
@@ -33,6 +32,7 @@ CREATE TABLE IF NOT EXISTS media (
   , exposure_time TEXT
   , f_number REAL
   , focal_length REAL
+  , focal_length_35mm REAL
   , gps_altitude REAL
   , location_state TEXT
   , location_country TEXT
@@ -40,9 +40,8 @@ CREATE TABLE IF NOT EXISTS media (
   , video_codec TEXT
   , focal_length_35mm REAL
   , keywords TEXT
+  , content_hash TEXT UNIQUE
   , created_at TEXT DEFAULT (datetime('now'))
-  , deleted_at TEXT DEFAULT NULL
-  , FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS albums (
@@ -109,8 +108,29 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   , FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS media_access (
+    media_id INTEGER NOT NULL
+  , user_id INTEGER NOT NULL
+  , access_level INTEGER NOT NULL
+  , created_at TEXT DEFAULT (datetime('now'))
+  , deleted_at TEXT DEFAULT NULL
+  , PRIMARY KEY (media_id, user_id)
+  , FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+  , FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS album_access (
+    album_id INTEGER NOT NULL
+  , user_id INTEGER NOT NULL
+  , access_level INTEGER NOT NULL
+  , created_at TEXT DEFAULT (datetime('now'))
+  , PRIMARY KEY (album_id, user_id)
+  , FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+  , FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_media_pagination 
-ON media (user_id, date_taken DESC, id DESC);
+ON media (date_taken DESC, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_media_date_taken 
 ON media (date_taken DESC, id DESC);
@@ -121,6 +141,11 @@ WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_media_file_path 
 ON media (file_path);
+
+CREATE INDEX IF NOT EXISTS idx_media_content_hash 
+ON media (content_hash) 
+WHERE content_hash IS NOT NULL;
+
 
 CREATE INDEX IF NOT EXISTS idx_albums_user 
 ON albums (user_id, created_at DESC);
@@ -140,6 +165,12 @@ ON share_links (token);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
 ON refresh_tokens (user_id, revoked);
 
-CREATE INDEX IF NOT EXISTS idx_media_deleted
-ON media (user_id, deleted_at)
+CREATE INDEX IF NOT EXISTS idx_media_access_user_deleted
+ON media_access (user_id, deleted_at)
 WHERE deleted_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_media_access_media
+ON media_access (media_id);
+
+CREATE INDEX IF NOT EXISTS idx_album_access_user 
+ON album_access(user_id);
