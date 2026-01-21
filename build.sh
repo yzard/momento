@@ -2,7 +2,7 @@
 
 # Get current date in YYYYMMDD format
 TAG=$(date +%Y%m%d)
-IMAGE_NAME="momento"
+IMAGE_NAME="zhuoyin/momento"
 
 echo "Building Docker image: ${IMAGE_NAME}:${TAG}..."
 
