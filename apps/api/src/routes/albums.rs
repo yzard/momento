@@ -166,13 +166,7 @@ async fn update_album(
 
     let album = fetch_one(
         &conn,
-        r#"
-        SELECT a.id, a.name, a.description, a.cover_media_id, COUNT(am.media_id) as media_count, a.created_at
-        FROM albums a
-        LEFT JOIN album_media am ON a.id = am.album_id
-        WHERE a.id = ?
-        GROUP BY a.id
-        "#,
+        queries::albums::SELECT_WITH_COUNT,
         &[&request.album_id],
         map_album_row,
     )?
@@ -230,7 +224,7 @@ async fn add_media_to_album(
 
     let max_pos: i64 = fetch_one(
         &conn,
-        "SELECT COALESCE(MAX(position), -1) FROM album_media WHERE album_id = ?",
+        queries::albums::SELECT_MAX_POSITION,
         &[&request.album_id],
         |row| row.get(0),
     )?
@@ -251,7 +245,7 @@ async fn add_media_to_album(
         }
 
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO album_media (album_id, media_id, position) VALUES (?, ?, ?)",
+            queries::albums::ADD_MEDIA,
             rusqlite::params![request.album_id, media_id, next_pos],
         );
         next_pos += 1;
@@ -280,7 +274,7 @@ async fn remove_media_from_album(
 
     for media_id in &request.media_ids {
         conn.execute(
-            "DELETE FROM album_media WHERE album_id = ? AND media_id = ?",
+            queries::albums::REMOVE_MEDIA,
             rusqlite::params![request.album_id, media_id],
         )?;
     }
@@ -377,7 +371,7 @@ async fn reorder_album_media(
 
     for (i, media_id) in request.media_ids.iter().enumerate() {
         conn.execute(
-            "UPDATE album_media SET position = ? WHERE album_id = ? AND media_id = ?",
+            queries::albums::UPDATE_POSITION,
             rusqlite::params![i as i64, request.album_id, media_id],
         )?;
     }

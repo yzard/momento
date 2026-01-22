@@ -595,6 +595,19 @@ pub mod albums {
     pub const CHECK_ACCESS_COUNT: &str = r#"
     SELECT COUNT(*) FROM album_access WHERE album_id = ?
     "#;
+
+    pub const SELECT_WITH_COUNT: &str = r#"
+    SELECT a.id
+         , a.name
+         , a.description
+         , a.cover_media_id
+         , COUNT(am.media_id) as media_count
+         , a.created_at
+      FROM albums AS a
+      LEFT JOIN album_media AS am ON a.id = am.album_id
+     WHERE a.id = ?
+     GROUP BY a.id
+    "#;
 }
 
 pub mod tags {
@@ -1045,6 +1058,13 @@ pub mod access {
     pub const INSERT_MEDIA_ACCESS: &str = r#"
     INSERT OR IGNORE INTO media_access (media_id, user_id, access_level, deleted_at)
     VALUES (?, ?, ?, NULL)
+    "#;
+
+    pub const RESTORE_MEDIA_ACCESS: &str = r#"
+    UPDATE media_access
+       SET deleted_at = NULL
+     WHERE media_id = ?
+       AND user_id = ?
     "#;
 
     pub const INSERT_ALBUM_ACCESS: &str = r#"

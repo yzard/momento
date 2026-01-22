@@ -324,7 +324,7 @@ pub async fn process_media_file(
 
                 let _ = execute_query(
                     &conn,
-                    "UPDATE media_access SET deleted_at = NULL WHERE media_id = ? AND user_id = ?",
+                    queries::access::RESTORE_MEDIA_ACCESS,
                     &[&media_id, &user_id],
                 );
 

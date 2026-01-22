@@ -5,7 +5,7 @@ use momento_api::constants::{
     CONFIG_PATH, DATA_DIR, IMPORTS_DIR, ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR,
 };
 use momento_api::database::{
-    create_pool, ensure_media_columns, fetch_one, init_database, insert_returning_id, queries,
+    create_pool, fetch_one, init_database, insert_returning_id, queries,
 };
 use momento_api::logging::{init_logging, install_panic_hook};
 use momento_api::processor::regenerator::generate_missing_metadata;
@@ -111,9 +111,6 @@ async fn main() {
     {
         let conn = pool.get().expect("Failed to get connection");
         init_database(&conn).expect("Failed to initialize database");
-        ensure_media_columns(&conn).expect("Failed to ensure media columns");
-        momento_api::database::ensure_access_control_setup(&conn)
-            .expect("Failed to ensure access control");
     }
 
     // Create default admin if needed

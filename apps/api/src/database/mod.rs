@@ -1,6 +1,6 @@
 mod pool;
 pub mod queries;
-mod schema;
+pub mod schema;
 
 pub use pool::*;
-pub use schema::*;
+pub use schema::init_database;
