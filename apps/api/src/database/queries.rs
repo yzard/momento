@@ -663,7 +663,7 @@ pub mod users {
       , hashed_password
       , role
       , must_change_password
-    ) VALUES (?, ?, ?, ?, 1)
+    ) VALUES (?, ?, ?, ?, 0)
     "#;
 
     pub const SELECT_BY_ID: &str = r#"
