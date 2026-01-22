@@ -1,5 +1,7 @@
 import { createContext, useState, useEffect, useCallback, type ReactNode } from 'react'
 import { authApi, type TokenResponse } from '../api/auth'
+import { mediaApi } from '../api/media'
+import { queryClient } from '../lib/queryClient'
 
 const ACCESS_TOKEN_KEY = 'momento_access_token'
 const REFRESH_TOKEN_KEY = 'momento_refresh_token'
@@ -106,6 +108,10 @@ function AuthProvider({ children }: { children: ReactNode }) {
     }
     clearTokens()
     setUser(null)
+    
+    // Clear all cached data to prevent data leakage between users
+    queryClient.clear()
+    mediaApi.clearCache()
   }
 
   return (
