@@ -80,10 +80,20 @@ pub struct DeleteMediaResponse {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThumbnailSize {
+    #[default]
+    Normal,
+    Tiny,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThumbnailBatchRequest {
     pub media_ids: Vec<i64>,
+    #[serde(default)]
+    pub size: ThumbnailSize,
 }
 
 #[derive(Debug, Serialize)]

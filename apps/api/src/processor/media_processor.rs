@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::config::ReverseGeocodingConfig;
-use crate::constants::{IMAGE_EXTENSIONS, ORIGINALS_DIR, THUMBNAILS_DIR, VIDEO_EXTENSIONS};
-use crate::utils::hash::calculate_file_hash;
-use crate::database::{fetch_one, insert_returning_id, queries, DbPool, execute_query};
+use crate::constants::{
+    IMAGE_EXTENSIONS, ORIGINALS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR, VIDEO_EXTENSIONS,
+};
+use crate::database::{execute_query, fetch_one, insert_returning_id, queries, DbPool};
 use crate::processor::metadata::{extract_image_metadata, extract_video_metadata, MediaMetadata};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
+use crate::utils::hash::calculate_file_hash;
 
 pub fn get_media_type(file_path: &Path) -> Option<&'static str> {
     let ext = file_path
@@ -56,8 +58,7 @@ fn save_original_file(
         ext
     );
 
-    let relative_path = PathBuf::from(&year_month)
-        .join(&new_filename);
+    let relative_path = PathBuf::from(&year_month).join(&new_filename);
     let dest_path = ORIGINALS_DIR.join(&relative_path);
 
     if let Some(parent) = dest_path.parent() {
@@ -73,9 +74,10 @@ pub async fn generate_thumbnails(
     dest_path: &Path,
     media_type: &str,
     thumbnail_max_size: u32,
+    tiny_thumbnail_size: u32,
     thumbnail_quality: u8,
     video_frame_quality: u8,
-) -> Option<String> {
+) -> (Option<String>, Option<String>) {
     let thumbnail_filename = format!(
         "{}.jpg",
         dest_path
@@ -83,20 +85,21 @@ pub async fn generate_thumbnails(
             .and_then(|s| s.to_str())
             .unwrap_or("thumb")
     );
-    
-    let parent_name = dest_path.parent()
+
+    let parent_name = dest_path
+        .parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-        
-    let thumbnail_relative = PathBuf::from(parent_name).join(&thumbnail_filename);
-    let thumbnail_path = THUMBNAILS_DIR.join(&thumbnail_relative);
 
+    let thumbnail_relative = PathBuf::from(parent_name).join(&thumbnail_filename);
+
+    let thumbnail_path = THUMBNAILS_DIR.join(&thumbnail_relative);
     if let Some(parent) = thumbnail_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
 
-    let success = if media_type == "image" {
+    let normal_success = if media_type == "image" {
         generate_image_thumbnail(
             dest_path,
             &thumbnail_path,
@@ -115,11 +118,43 @@ pub async fn generate_thumbnails(
         .await
     };
 
-    if success {
+    let tiny_thumbnail_path = THUMBNAILS_TINY_DIR.join(&thumbnail_relative);
+    if let Some(parent) = tiny_thumbnail_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let tiny_success = if media_type == "image" {
+        generate_image_thumbnail(
+            dest_path,
+            &tiny_thumbnail_path,
+            tiny_thumbnail_size,
+            thumbnail_quality,
+        )
+        .await
+    } else {
+        generate_video_thumbnail(
+            dest_path,
+            &tiny_thumbnail_path,
+            tiny_thumbnail_size,
+            thumbnail_quality,
+            video_frame_quality,
+        )
+        .await
+    };
+
+    let normal_relative = if normal_success {
         Some(thumbnail_relative.to_string_lossy().to_string())
     } else {
         None
-    }
+    };
+
+    let tiny_relative = if tiny_success {
+        Some(thumbnail_relative.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    (normal_relative, tiny_relative)
 }
 
 pub async fn reverse_geocode(
@@ -242,6 +277,7 @@ pub async fn process_media_file(
     source_path: &Path,
     user_id: i64,
     thumbnail_max_size: u32,
+    tiny_thumbnail_size: u32,
     thumbnail_quality: u8,
     video_frame_quality: u8,
     reverse_geo_config: Option<&crate::config::ReverseGeocodingConfig>,
@@ -268,42 +304,49 @@ pub async fn process_media_file(
         .flatten();
 
         if let Some(media_id) = existing_media_id {
-            tracing::info!("Found existing media {} for hash {}", media_id, content_hash);
-            
-             let has_access: Option<i32> = fetch_one(
+            tracing::info!(
+                "Found existing media {} for hash {}",
+                media_id,
+                content_hash
+            );
+
+            let has_access: Option<i32> = fetch_one(
                 &conn,
                 queries::access::CHECK_MEDIA_ACCESS,
                 &[&media_id, &user_id],
                 |row| row.get(0),
-            ).ok().flatten();
+            )
+            .ok()
+            .flatten();
 
             if has_access.is_some() {
-                 tracing::info!("User {} already has access to media {}", user_id, media_id);
-                 
-                 let _ = execute_query(
-                     &conn,
-                     "UPDATE media_access SET deleted_at = NULL WHERE media_id = ? AND user_id = ?",
-                     &[&media_id, &user_id]
-                 );
-                 
-                 return Some(media_id);
+                tracing::info!("User {} already has access to media {}", user_id, media_id);
+
+                let _ = execute_query(
+                    &conn,
+                    "UPDATE media_access SET deleted_at = NULL WHERE media_id = ? AND user_id = ?",
+                    &[&media_id, &user_id],
+                );
+
+                return Some(media_id);
             }
-            
+
             let _ = execute_query(
                 &conn,
                 queries::access::INSERT_MEDIA_ACCESS,
-                &[&media_id, &user_id, &2] 
+                &[&media_id, &user_id, &2],
             );
-            
+
             tracing::info!("Granted access to media {} for user {}", media_id, user_id);
             return Some(media_id);
         }
     }
-    
+
     let metadata = generate_complete_metadata(source_path, media_type, reverse_geo_config).await;
     let date_taken = get_media_date(&metadata, source_path);
 
-    let (dest_path, relative_path, new_filename) = match save_original_file(source_path, date_taken) {
+    let (dest_path, relative_path, new_filename) = match save_original_file(source_path, date_taken)
+    {
         Ok(res) => res,
         Err(e) => {
             tracing::error!("Failed to save original file: {}", e);
@@ -311,10 +354,11 @@ pub async fn process_media_file(
         }
     };
 
-    let thumbnail_relative = generate_thumbnails(
+    let (thumbnail_relative, _tiny_thumbnail_relative) = generate_thumbnails(
         &dest_path,
         media_type,
         thumbnail_max_size,
+        tiny_thumbnail_size,
         thumbnail_quality,
         video_frame_quality,
     )
@@ -380,7 +424,7 @@ pub async fn process_media_file(
     let _ = execute_query(
         &conn,
         queries::access::INSERT_MEDIA_ACCESS,
-        &[&media_id, &user_id, &2]
+        &[&media_id, &user_id, &2],
     );
 
     Some(media_id)

@@ -176,16 +176,24 @@ async fn share_media_with_user(
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
     if access_level < 2 {
-        return Err(AppError::Forbidden("Insufficient permissions to share".to_string()));
+        return Err(AppError::Forbidden(
+            "Insufficient permissions to share".to_string(),
+        ));
     }
 
     execute_query(
         &conn,
         queries::access::INSERT_MEDIA_ACCESS,
-        &[&request.media_id, &request.target_user_id, &request.access_level],
+        &[
+            &request.media_id,
+            &request.target_user_id,
+            &request.access_level,
+        ],
     )?;
 
-    Ok(Json(serde_json::json!({"message": "Media shared successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Media shared successfully"}),
+    ))
 }
 
 async fn share_album_with_user(
@@ -209,8 +217,14 @@ async fn share_album_with_user(
     execute_query(
         &conn,
         queries::access::INSERT_ALBUM_ACCESS,
-        &[&request.album_id, &request.target_user_id, &request.access_level],
+        &[
+            &request.album_id,
+            &request.target_user_id,
+            &request.access_level,
+        ],
     )?;
 
-    Ok(Json(serde_json::json!({"message": "Album shared successfully"})))
+    Ok(Json(
+        serde_json::json!({"message": "Album shared successfully"}),
+    ))
 }

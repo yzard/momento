@@ -9,7 +9,7 @@ pub async fn calculate_file_hash(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path).await?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 8192]; // 8KB buffer
-    
+
     loop {
         let bytes_read = file.read(&mut buffer).await?;
         if bytes_read == 0 {
@@ -17,10 +17,14 @@ pub async fn calculate_file_hash(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buffer[..bytes_read]);
     }
-    
+
     Ok(hex_encode(hasher.finalize()))
 }
 
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+    bytes
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }

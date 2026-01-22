@@ -143,6 +143,7 @@ use tokio::sync::Semaphore;
 pub async fn run_local_import(
     user_id: i64,
     thumbnail_max_size: u32,
+    tiny_thumbnail_size: u32,
     thumbnail_quality: u8,
     video_frame_quality: u8,
     delete_after_import: bool,
@@ -186,6 +187,7 @@ pub async fn run_local_import(
                     &file_path,
                     user_id,
                     thumbnail_max_size,
+                    tiny_thumbnail_size,
                     thumbnail_quality,
                     video_frame_quality,
                     config_rev_geo.as_deref(),

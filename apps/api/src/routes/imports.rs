@@ -43,6 +43,7 @@ async fn trigger_local_import(
         run_local_import(
             user_id,
             config.thumbnails.max_size,
+            config.thumbnails.tiny_size,
             config.thumbnails.quality,
             config.thumbnails.video_frame_quality,
             true,

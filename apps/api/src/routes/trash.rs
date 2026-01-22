@@ -138,19 +138,17 @@ async fn permanently_delete(
             &[&row.id, &current_user.id],
         )?;
 
-        let access_count: i64 = fetch_one(
-            &conn,
-            queries::trash::CHECK_ACCESS_COUNT,
-            &[&row.id],
-            |r| r.get(0),
-        )?
-        .unwrap_or(0);
+        let access_count: i64 =
+            fetch_one(&conn, queries::trash::CHECK_ACCESS_COUNT, &[&row.id], |r| {
+                r.get(0)
+            })?
+            .unwrap_or(0);
 
         if access_count == 0 {
             delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
             execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         }
-        
+
         deleted_count += 1;
     }
 
@@ -193,19 +191,17 @@ async fn empty_trash(
             &[&row.id, &current_user.id],
         )?;
 
-        let access_count: i64 = fetch_one(
-            &conn,
-            queries::trash::CHECK_ACCESS_COUNT,
-            &[&row.id],
-            |r| r.get(0),
-        )?
-        .unwrap_or(0);
+        let access_count: i64 =
+            fetch_one(&conn, queries::trash::CHECK_ACCESS_COUNT, &[&row.id], |r| {
+                r.get(0)
+            })?
+            .unwrap_or(0);
 
         if access_count == 0 {
             delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
             execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         }
-        
+
         deleted_count += 1;
     }
 
@@ -240,19 +236,17 @@ pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
             &[&row.id, &row.user_id],
         )?;
 
-        let access_count: i64 = fetch_one(
-            conn,
-            queries::trash::CHECK_ACCESS_COUNT,
-            &[&row.id],
-            |r| r.get(0),
-        )?
-        .unwrap_or(0);
+        let access_count: i64 =
+            fetch_one(conn, queries::trash::CHECK_ACCESS_COUNT, &[&row.id], |r| {
+                r.get(0)
+            })?
+            .unwrap_or(0);
 
         if access_count == 0 {
             delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
             execute_query(conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         }
-        
+
         deleted_count += 1;
     }
 

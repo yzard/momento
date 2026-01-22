@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Marker } from 'react-leaflet'
 import { DivIcon } from 'leaflet'
-import { batchLoader } from '../../utils/batcher'
+import { tinyBatchLoader } from '../../utils/batcher'
 
 export interface GeoMedia {
   id: number
@@ -27,7 +27,7 @@ export default function PhotoMarker({ media, onClick }: PhotoMarkerProps) {
     let cancelled = false
     const loadThumbnail = async () => {
       try {
-        const url = await batchLoader.load(media.id)
+        const url = await tinyBatchLoader.load(media.id)
         if (!cancelled && url) setThumbnailUrl(url)
       } catch (error) {
         console.error('Failed to load marker thumbnail:', error)

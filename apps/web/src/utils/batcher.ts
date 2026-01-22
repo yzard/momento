@@ -1,4 +1,4 @@
-import { mediaApi } from '../api/media'
+import { mediaApi, type ThumbnailSize } from '../api/media'
 
 class ThumbnailBatcher {
   private queue: Set<number> = new Set()
@@ -6,11 +6,16 @@ class ThumbnailBatcher {
   private missing: Set<number> = new Set()
   private timeout: ReturnType<typeof setTimeout> | null = null
   private batchDelayMs = 100
+  private size: ThumbnailSize
+
+  constructor(size: ThumbnailSize = 'normal') {
+    this.size = size
+  }
 
   load(id: number): Promise<string | null> {
     if (this.missing.has(id)) return Promise.resolve(null)
 
-    const cached = mediaApi.getCachedThumbnailUrl(id)
+    const cached = mediaApi.getCachedThumbnailUrl(id, this.size)
     if (cached) return Promise.resolve(cached)
 
     return new Promise((resolve) => {
@@ -34,7 +39,7 @@ class ThumbnailBatcher {
     if (idsToFetch.length === 0) return
 
     try {
-      const results = await mediaApi.getThumbnailBatch(idsToFetch)
+      const results = await mediaApi.getThumbnailBatch(idsToFetch, this.size)
 
       idsToFetch.forEach((id) => {
         const resolvers = this.pending.get(id)
@@ -115,5 +120,6 @@ class PreviewBatcher {
   }
 }
 
-export const batchLoader = new ThumbnailBatcher()
+export const batchLoader = new ThumbnailBatcher('normal')
+export const tinyBatchLoader = new ThumbnailBatcher('tiny')
 export const previewBatchLoader = new PreviewBatcher()

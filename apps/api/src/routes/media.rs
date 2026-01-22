@@ -13,13 +13,13 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::{ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR};
+use crate::constants::{ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR};
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     DeleteMediaResponse, MediaDeleteRequest, MediaGetRequest, MediaListRequest, MediaListResponse,
     MediaResponse, MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse,
-    ThumbnailBatchRequest, ThumbnailBatchResponse,
+    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
 };
 use crate::processor::thumbnails::generate_image_preview;
 use base64::engine::general_purpose::STANDARD;
@@ -263,11 +263,8 @@ async fn update_media(
 
     if !updates.is_empty() {
         params.push(Box::new(request.media_id));
-        
-        let sql = format!(
-            "UPDATE media SET {} WHERE id = ?",
-            updates.join(", ")
-        );
+
+        let sql = format!("UPDATE media SET {} WHERE id = ?", updates.join(", "));
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         execute_query(&conn, &sql, &param_refs)?;
     }
@@ -364,10 +361,11 @@ fn fetch_default_media(
             &Utc::now().to_rfc3339(),
             &Utc::now().to_rfc3339(),
             &i64::MAX,
-            &(limit + 1)
+            &(limit + 1),
         ],
         map_media_row,
-    ).or_else(|_| {
+    )
+    .or_else(|_| {
         let future_date = "9999-12-31T23:59:59";
         fetch_all(
             conn,
@@ -377,7 +375,7 @@ fn fetch_default_media(
                 &future_date,
                 &future_date,
                 &i64::MAX,
-                &(limit + 1)
+                &(limit + 1),
             ],
             map_media_row,
         )
@@ -546,6 +544,11 @@ async fn get_media_thumbnail_batch(
         }));
     }
 
+    let thumbnail_base_dir = match request.size {
+        ThumbnailSize::Normal => &*THUMBNAILS_DIR,
+        ThumbnailSize::Tiny => &*THUMBNAILS_TINY_DIR,
+    };
+
     let rows: Vec<(i64, Option<String>, String, String, i64)> = fetch_all(
         &conn,
         queries::media::SELECT_THUMBNAIL_BATCH,
@@ -576,19 +579,17 @@ async fn get_media_thumbnail_batch(
             .unwrap_or("thumb")
             .to_string();
 
-        let thumbnail_relative = thumbnail_path
-            .clone()
-            .unwrap_or_else(|| {
-                 let parent = PathBuf::from(&file_path)
-                     .parent()
-                     .and_then(|p| p.file_name())
-                     .and_then(|n| n.to_str())
-                     .unwrap_or("unknown")
-                     .to_string();
-                 format!("{}/{}.jpg", parent, stem)
-            });
-            
-        let full_path = THUMBNAILS_DIR.join(&thumbnail_relative);
+        let thumbnail_relative = thumbnail_path.clone().unwrap_or_else(|| {
+            let parent = PathBuf::from(&file_path)
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            format!("{}/{}.jpg", parent, stem)
+        });
+
+        let full_path = thumbnail_base_dir.join(&thumbnail_relative);
 
         if full_path.exists() {
             if let Ok(data) = tokio::fs::read(&full_path).await {

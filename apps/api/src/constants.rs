@@ -12,6 +12,7 @@ pub static CONFIG_PATH: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("config.yaml"
 pub static DATABASE_PATH: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("database.sqlite"));
 pub static ORIGINALS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("originals"));
 pub static THUMBNAILS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("thumbnails"));
+pub static THUMBNAILS_TINY_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("thumbnails_tiny"));
 pub static PREVIEWS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("previews"));
 pub static IMPORTS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("imports"));
 pub static ALBUMS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("albums"));
@@ -42,5 +43,6 @@ pub static SUPPORTED_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 });
 
 pub const DEFAULT_THUMBNAIL_SIZE: u32 = 400;
+pub const DEFAULT_TINY_THUMBNAIL_SIZE: u32 = 48;
 pub const DEFAULT_THUMBNAIL_QUALITY: u8 = 85;
 pub const DEFAULT_VIDEO_FRAME_QUALITY: u8 = 2;

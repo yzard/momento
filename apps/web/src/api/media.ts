@@ -8,6 +8,9 @@ interface MediaListRequest {
 }
 
 type GroupBy = 'year' | 'month' | 'week' | 'day'
+type ThumbnailSize = 'normal' | 'tiny'
+
+export type { ThumbnailSize }
 
 
 interface MediaListResponse {
@@ -84,21 +87,21 @@ async function fetchMediaAsBlob(url: string, cacheKey: string): Promise<string> 
 
 
 export const mediaApi = {
-  isThumbnailCached: (mediaId: number): boolean => {
-    return blobUrlCache.has(`thumbnail-${mediaId}`)
+  isThumbnailCached: (mediaId: number, size: ThumbnailSize = 'normal'): boolean => {
+    return blobUrlCache.has(`thumbnail-${size}-${mediaId}`)
   },
 
-  getCachedThumbnailUrl: (mediaId: number): string | undefined => {
-    return blobUrlCache.get(`thumbnail-${mediaId}`)
+  getCachedThumbnailUrl: (mediaId: number, size: ThumbnailSize = 'normal'): string | undefined => {
+    return blobUrlCache.get(`thumbnail-${size}-${mediaId}`)
   },
 
-  getThumbnailBatch: async (mediaIds: number[]): Promise<Map<number, string>> => {
+  getThumbnailBatch: async (mediaIds: number[], size: ThumbnailSize = 'normal'): Promise<Map<number, string>> => {
     const uniqueIds = Array.from(new Set(mediaIds)).filter((id) => id > 0)
     if (uniqueIds.length === 0) {
       return new Map()
     }
 
-    const cacheKeys = uniqueIds.map((id) => `thumbnail-${id}`)
+    const cacheKeys = uniqueIds.map((id) => `thumbnail-${size}-${id}`)
     const cached = new Map<number, string>()
     const missingIds: number[] = []
 
@@ -115,7 +118,7 @@ export const mediaApi = {
       return cached
     }
 
-    const batchKey = missingIds.join(',')
+    const batchKey = `${size}:${missingIds.join(',')}`
     const pending = pendingThumbnailBatch.get(batchKey)
     if (pending) {
       const pendingResult = await pending
@@ -127,13 +130,13 @@ export const mediaApi = {
       try {
         const response = await apiClient.post<{ thumbnails: Record<string, string | null> }>(
           '/thumbnail/get',
-          { mediaIds: missingIds }
+          { mediaIds: missingIds, size }
         )
         const result = new Map<number, string>()
         Object.entries(response.data.thumbnails).forEach(([id, data]) => {
           const numericId = Number(id)
           if (!Number.isNaN(numericId) && data) {
-            blobUrlCache.set(`thumbnail-${numericId}`, data)
+            blobUrlCache.set(`thumbnail-${size}-${numericId}`, data)
             result.set(numericId, data)
           }
         })

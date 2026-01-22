@@ -1,7 +1,8 @@
 mod settings;
 
 use crate::constants::{
-    DEFAULT_THUMBNAIL_QUALITY, DEFAULT_THUMBNAIL_SIZE, DEFAULT_VIDEO_FRAME_QUALITY,
+    DEFAULT_THUMBNAIL_QUALITY, DEFAULT_THUMBNAIL_SIZE, DEFAULT_TINY_THUMBNAIL_SIZE,
+    DEFAULT_VIDEO_FRAME_QUALITY,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -133,6 +134,8 @@ impl Default for WebDAVConfig {
 pub struct ThumbnailConfig {
     #[serde(default = "default_max_size")]
     pub max_size: u32,
+    #[serde(default = "default_tiny_size")]
+    pub tiny_size: u32,
     #[serde(default = "default_quality")]
     pub quality: u8,
     #[serde(default = "default_video_frame_quality")]
@@ -141,6 +144,10 @@ pub struct ThumbnailConfig {
 
 fn default_max_size() -> u32 {
     DEFAULT_THUMBNAIL_SIZE
+}
+
+fn default_tiny_size() -> u32 {
+    DEFAULT_TINY_THUMBNAIL_SIZE
 }
 
 fn default_quality() -> u8 {
@@ -155,6 +162,7 @@ impl Default for ThumbnailConfig {
     fn default() -> Self {
         Self {
             max_size: default_max_size(),
+            tiny_size: default_tiny_size(),
             quality: default_quality(),
             video_frame_quality: default_video_frame_quality(),
         }
@@ -260,7 +268,6 @@ pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
     }
 
     let config = Config::default();
-    let yaml = serde_yaml::to_string(&config)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let yaml = serde_yaml::to_string(&config).map_err(|e| std::io::Error::other(e.to_string()))?;
     fs::write(config_path, yaml)
 }
