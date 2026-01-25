@@ -65,6 +65,9 @@ impl Default for RegenerationJob {
     }
 }
 
+/// Maximum number of errors to store in job state to prevent unbounded memory growth
+const MAX_JOB_ERRORS: usize = 100;
+
 lazy_static::lazy_static! {
     static ref CURRENT_JOB: RwLock<RegenerationJob> = RwLock::new(RegenerationJob::default());
 }
@@ -118,7 +121,15 @@ fn finalize_job_failure(message: &str) {
     let mut job = CURRENT_JOB.write().unwrap();
     job.status = RegenerationStatus::Failed;
     job.completed_at = Some(Utc::now());
-    job.errors.push(message.to_string());
+    push_job_error(&mut job.errors, message);
+}
+
+fn push_job_error(errors: &mut Vec<String>, message: &str) {
+    if errors.len() < MAX_JOB_ERRORS {
+        errors.push(message.to_string());
+    } else if errors.len() == MAX_JOB_ERRORS {
+        errors.push("(additional errors truncated)".to_string());
+    }
 }
 
 fn finalize_job_cancelled() {
@@ -148,7 +159,7 @@ fn update_job_progress(
     }
     job.updated_tags += tags_updated;
     if let Some(msg) = error {
-        job.errors.push(msg.to_string());
+        push_job_error(&mut job.errors, msg);
     }
 }
 

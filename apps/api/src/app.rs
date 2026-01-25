@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::database::DbPool;
 use crate::logging::request_logger;
 use crate::routes::api_router;
+use crate::webdav::webdav_router;
 use crate::VERSION;
 
 #[derive(Serialize)]
@@ -48,6 +49,7 @@ pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
 
     let mut app = Router::new()
         .nest("/api/v1", api_routes)
+        .merge(webdav_router(state.clone()))
         .layer(middleware::from_fn(request_logger))
         .layer(cors)
         .with_state(state);
@@ -62,6 +64,10 @@ pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
             let static_dir = static_dir.clone();
             async move {
                 let path = req.uri().path().trim_start_matches('/');
+
+                if path.starts_with("webdav") {
+                    return (StatusCode::NOT_FOUND, "Not Found").into_response();
+                }
 
                 // Try to serve static file
                 let file_path = static_dir.join(path);

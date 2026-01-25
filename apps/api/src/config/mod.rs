@@ -104,28 +104,89 @@ impl Default for AdminConfig {
 pub struct WebDAVConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_webdav_mount_path")]
+    pub mount_path: String,
+    #[serde(default = "default_webdav_realm")]
+    pub realm: String,
     #[serde(default)]
-    pub hostname: String,
+    pub limits: WebDAVLimits,
     #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-    #[serde(default = "default_remote_path")]
-    pub remote_path: String,
+    pub processing: WebDAVProcessing,
 }
 
-fn default_remote_path() -> String {
-    "/".to_string()
+fn default_webdav_mount_path() -> String {
+    "/webdav".to_string()
+}
+
+fn default_webdav_realm() -> String {
+    "Momento WebDAV".to_string()
 }
 
 impl Default for WebDAVConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            hostname: String::new(),
-            username: String::new(),
-            password: String::new(),
-            remote_path: default_remote_path(),
+            mount_path: default_webdav_mount_path(),
+            realm: default_webdav_realm(),
+            limits: WebDAVLimits::default(),
+            processing: WebDAVProcessing::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebDAVLimits {
+    #[serde(default = "default_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+}
+
+fn default_max_upload_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+fn default_max_concurrent_requests() -> usize {
+    16
+}
+
+impl Default for WebDAVLimits {
+    fn default() -> Self {
+        Self {
+            max_upload_bytes: default_max_upload_bytes(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebDAVProcessing {
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "default_stable_file_age")]
+    pub stable_file_age_seconds: u64,
+    #[serde(default = "default_max_concurrent_processing")]
+    pub max_concurrent_processing: usize,
+}
+
+fn default_poll_interval() -> u64 {
+    5
+}
+
+fn default_stable_file_age() -> u64 {
+    10
+}
+
+fn default_max_concurrent_processing() -> usize {
+    2
+}
+
+impl Default for WebDAVProcessing {
+    fn default() -> Self {
+        Self {
+            poll_interval_seconds: default_poll_interval(),
+            stable_file_age_seconds: default_stable_file_age(),
+            max_concurrent_processing: default_max_concurrent_processing(),
         }
     }
 }

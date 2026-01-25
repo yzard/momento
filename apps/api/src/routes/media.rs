@@ -115,7 +115,7 @@ async fn list_media(
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
     if let Some(group_by) = request.group_by.as_deref() {
-        let limit = request.limit.unwrap_or(100).min(5000);
+        let limit = request.limit.unwrap_or(100);
         let rows = fetch_timeline_rows(&conn, current_user.id, limit, request.cursor.as_deref())?;
         let has_more = rows.len() > limit as usize;
         let rows: Vec<_> = rows.into_iter().take(limit as usize).collect();
@@ -162,7 +162,7 @@ async fn list_media(
         }));
     }
 
-    let limit = request.limit.unwrap_or(100).min(5000);
+    let limit = request.limit.unwrap_or(100);
     let rows = if let Some(ref cursor) = request.cursor {
         let parts: Vec<&str> = cursor.split('_').collect();
         if parts.len() == 2 {

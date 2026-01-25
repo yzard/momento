@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS media (
    , keywords TEXT
   , content_hash TEXT UNIQUE
   , created_at TEXT DEFAULT (datetime('now'))
+  , geohash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS albums (
@@ -173,3 +174,16 @@ ON media_access (media_id);
 
 CREATE INDEX IF NOT EXISTS idx_album_access_user 
 ON album_access(user_id);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS media_rtree USING rtree(
+    media_id,
+    min_lat, max_lat,
+    min_lon, max_lon
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_geohash ON media(geohash);

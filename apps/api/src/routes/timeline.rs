@@ -50,7 +50,7 @@ async fn list_timeline(
     Json(request): Json<TimelineListRequest>,
 ) -> AppResult<Json<TimelineListResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let limit = request.limit.min(500);
+    let limit = request.limit;
 
     let rows = if let Some(ref cursor) = request.cursor {
         let parts: Vec<&str> = cursor.split('_').collect();

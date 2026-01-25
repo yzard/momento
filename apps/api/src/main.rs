@@ -2,12 +2,13 @@ use momento_api::app::create_app;
 use momento_api::auth::hash_password;
 use momento_api::config::{load_config, save_default_config};
 use momento_api::constants::{
-    CONFIG_PATH, DATA_DIR, IMPORTS_DIR, ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR,
+    CONFIG_PATH, DATA_DIR, IMPORTS_DIR, ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR, WEBDAV_DIR,
 };
 use momento_api::database::{
     create_pool, fetch_one, init_database, insert_returning_id, queries,
 };
 use momento_api::logging::{init_logging, install_panic_hook};
+use momento_api::processor::importer::start_webdav_import_job;
 use momento_api::processor::regenerator::generate_missing_metadata;
 use momento_api::routes::cleanup_expired_trash;
 use std::net::SocketAddr;
@@ -21,6 +22,7 @@ fn init_directories() {
         &*THUMBNAILS_DIR,
         &*PREVIEWS_DIR,
         &*IMPORTS_DIR,
+        &*WEBDAV_DIR,
     ] {
         std::fs::create_dir_all(dir).ok();
     }
@@ -72,11 +74,18 @@ fn start_background_tasks(
     tokio::spawn(async move {
         generate_missing_metadata(&config_clone, &pool_clone).await;
 
-        // Cleanup expired trash items
         if let Ok(conn) = pool_clone.get() {
             let _ = cleanup_expired_trash(&conn);
         }
     });
+
+    if config.webdav.enabled {
+        let webdav_config = Arc::clone(&config);
+        let webdav_pool = pool.clone();
+        tokio::spawn(async move {
+            start_webdav_import_job(webdav_config, webdav_pool).await;
+        });
+    }
 }
 
 #[tokio::main]

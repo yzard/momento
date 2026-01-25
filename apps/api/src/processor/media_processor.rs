@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::config::ReverseGeocodingConfig;
@@ -283,12 +284,23 @@ pub async fn process_media_file(
     reverse_geo_config: Option<&crate::config::ReverseGeocodingConfig>,
     pool: &DbPool,
 ) -> Option<i64> {
+    let start_time = Instant::now();
+    tracing::info!(
+        "Media processing started for {} (user_id={})",
+        source_path.display(),
+        user_id
+    );
     let media_type = get_media_type(source_path)?;
 
     let content_hash = match calculate_file_hash(source_path).await {
         Ok(h) => h,
         Err(e) => {
-            tracing::error!("Failed to hash file {}: {}", source_path.display(), e);
+            tracing::error!(
+                "Media processing failed for {} after {:?}: failed to hash file: {}",
+                source_path.display(),
+                start_time.elapsed(),
+                e
+            );
             return None;
         }
     };
@@ -328,6 +340,11 @@ pub async fn process_media_file(
                     &[&media_id, &user_id],
                 );
 
+                tracing::info!(
+                    "Media processing completed for {} in {:?}",
+                    source_path.display(),
+                    start_time.elapsed()
+                );
                 return Some(media_id);
             }
 
@@ -338,6 +355,11 @@ pub async fn process_media_file(
             );
 
             tracing::info!("Granted access to media {} for user {}", media_id, user_id);
+            tracing::info!(
+                "Media processing completed for {} in {:?}",
+                source_path.display(),
+                start_time.elapsed()
+            );
             return Some(media_id);
         }
     }
@@ -349,7 +371,12 @@ pub async fn process_media_file(
     {
         Ok(res) => res,
         Err(e) => {
-            tracing::error!("Failed to save original file: {}", e);
+            tracing::error!(
+                "Media processing failed for {} after {:?}: failed to save original file: {}",
+                source_path.display(),
+                start_time.elapsed(),
+                e
+            );
             return None;
         }
     };
@@ -368,7 +395,12 @@ pub async fn process_media_file(
     let conn = match pool.get() {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to get DB connection: {}", e);
+            tracing::error!(
+                "Media processing failed for {} after {:?}: failed to get DB connection: {}",
+                source_path.display(),
+                start_time.elapsed(),
+                e
+            );
             return None;
         }
     };
@@ -416,7 +448,12 @@ pub async fn process_media_file(
     let media_id = match media_id_result {
         Ok(id) => id,
         Err(e) => {
-            tracing::error!("Failed to insert media into DB: {}", e);
+            tracing::error!(
+                "Media processing failed for {} after {:?}: failed to insert media into DB: {}",
+                source_path.display(),
+                start_time.elapsed(),
+                e
+            );
             return None;
         }
     };
@@ -427,6 +464,11 @@ pub async fn process_media_file(
         &[&media_id, &user_id, &2],
     );
 
+    tracing::info!(
+        "Media processing completed for {} in {:?}",
+        source_path.display(),
+        start_time.elapsed()
+    );
     Some(media_id)
 }
 

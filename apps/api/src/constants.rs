@@ -17,6 +17,7 @@ pub static PREVIEWS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("previews"))
 pub static IMPORTS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("imports"));
 pub static ALBUMS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("albums"));
 pub static TRASH_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("trash"));
+pub static WEBDAV_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("webdav"));
 
 pub const TRASH_RETENTION_DAYS: i64 = 30;
 
