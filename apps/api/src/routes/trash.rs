@@ -8,7 +8,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{
     TrashDeleteRequest, TrashListResponse, TrashMediaResponse, TrashResponse, TrashRestoreRequest,
 };
-use crate::processor::media_processor::delete_media_files;
+use crate::processor::media_processor::{delete_from_rtree, delete_media_files};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -145,6 +145,7 @@ async fn permanently_delete(
             .unwrap_or(0);
 
         if access_count == 0 {
+            let _ = delete_from_rtree(&conn, row.id);
             delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
             execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         }
@@ -198,6 +199,7 @@ async fn empty_trash(
             .unwrap_or(0);
 
         if access_count == 0 {
+            let _ = delete_from_rtree(&conn, row.id);
             delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
             execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         }
@@ -243,6 +245,7 @@ pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
             .unwrap_or(0);
 
         if access_count == 0 {
+            let _ = delete_from_rtree(conn, row.id);
             delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
             execute_query(conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
         }
