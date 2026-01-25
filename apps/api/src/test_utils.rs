@@ -60,17 +60,36 @@ pub fn create_test_media_with_gps(
     latitude: f64,
     longitude: f64,
 ) -> i64 {
+    create_test_media_with_gps_and_date(pool, filename, latitude, longitude, "2024-01-15T10:30:00")
+}
+
+pub fn create_test_media_with_gps_and_date(
+    pool: &DbPool,
+    filename: &str,
+    latitude: f64,
+    longitude: f64,
+    date_taken: &str,
+) -> i64 {
     let conn = pool.get().expect("Failed to get connection");
     let media_id = MEDIA_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let file_path = format!("/test/media/{}", filename);
     let content_hash = format!("hash_{}", media_id);
 
+    let geohash = geohash::encode(
+        geohash::Coord {
+            x: longitude,
+            y: latitude,
+        },
+        9,
+    )
+    .ok();
+
     conn.execute(
         "INSERT INTO media (
             id, filename, original_filename, file_path, media_type, mime_type,
             width, height, file_size, date_taken, gps_latitude, gps_longitude,
-            content_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            content_hash, geohash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         rusqlite::params![
             media_id,
             filename,
@@ -81,15 +100,25 @@ pub fn create_test_media_with_gps(
             1920,
             1080,
             1024000,
-            "2024-01-15T10:30:00",
+            date_taken,
             latitude,
             longitude,
             content_hash,
+            geohash,
         ],
     )
     .expect("Failed to insert test media");
 
     media_id
+}
+
+pub fn grant_media_access(pool: &DbPool, media_id: i64, user_id: i64) {
+    let conn = pool.get().expect("Failed to get connection");
+    conn.execute(
+        "INSERT OR IGNORE INTO media_access (media_id, user_id, access_level) VALUES (?, ?, 1)",
+        rusqlite::params![media_id, user_id],
+    )
+    .expect("Failed to grant media access");
 }
 
 /// Test fixture: Create media without GPS coordinates

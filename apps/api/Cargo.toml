@@ -56,6 +56,13 @@ async-trait = "0.1"
 # HTTP headers
 headers = "0.4"
 
+# Geospatial
+geohash = "0.13"
+
+# WebDAV server
+dav-server = "0.7"
+http-body-util = "0.1"
+
 [dev-dependencies]
 axum-test = "15"
 tempfile = "3"
