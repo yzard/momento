@@ -9,5 +9,9 @@ pub mod models;
 pub mod processor;
 pub mod routes;
 pub mod utils;
+pub mod webdav;
+
+#[cfg(test)]
+pub mod test_utils;
 
 pub const VERSION: &str = "0.1.0";

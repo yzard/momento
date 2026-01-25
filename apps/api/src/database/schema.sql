@@ -28,18 +28,17 @@ CREATE TABLE IF NOT EXISTS media (
   , camera_model TEXT
   , lens_make TEXT
   , lens_model TEXT
-  , iso INTEGER
-  , exposure_time TEXT
-  , f_number REAL
-  , focal_length REAL
-  , focal_length_35mm REAL
-  , gps_altitude REAL
-  , location_state TEXT
-  , location_country TEXT
-  , location_city TEXT
-  , video_codec TEXT
-  , focal_length_35mm REAL
-  , keywords TEXT
+   , iso INTEGER
+   , exposure_time TEXT
+   , f_number REAL
+   , focal_length REAL
+   , focal_length_35mm REAL
+   , gps_altitude REAL
+   , location_state TEXT
+   , location_country TEXT
+   , location_city TEXT
+   , video_codec TEXT
+   , keywords TEXT
   , content_hash TEXT UNIQUE
   , created_at TEXT DEFAULT (datetime('now'))
 );
