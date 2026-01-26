@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Config, ReverseGeocodingConfig};
+use crate::config::Config;
 use crate::constants::{IMPORTS_DIR, SUPPORTED_EXTENSIONS, WEBDAV_DIR};
 use crate::database::{fetch_one, DbPool};
-use crate::processor::media_processor::process_media_file;
+use crate::processor::media_processor::{process_media_file, MediaProcessingContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStatus {
@@ -38,6 +38,13 @@ pub struct ImportJob {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct ImportSettings {
+    pub processing: MediaProcessingContext,
+    pub delete_after_import: bool,
+    pub concurrency: usize,
 }
 
 impl Default for ImportJob {
@@ -154,37 +161,25 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-pub async fn run_local_import(
-    user_id: i64,
-    thumbnail_max_size: u32,
-    tiny_thumbnail_size: u32,
-    thumbnail_quality: u8,
-    video_frame_quality: u8,
-    delete_after_import: bool,
-    reverse_geo_config: Option<&ReverseGeocodingConfig>,
-    pool: &DbPool,
-    concurrency: usize,
-) {
+pub async fn run_local_import(settings: ImportSettings) {
     start_import_job();
 
     let files_to_import = collect_import_files(&IMPORTS_DIR);
     update_job_totals(files_to_import.len() as i64);
 
-    let effective_concurrency = if concurrency > 0 {
-        concurrency
+    let effective_concurrency = if settings.concurrency > 0 {
+        settings.concurrency
     } else {
         num_cpus::get()
     };
     let semaphore = Arc::new(Semaphore::new(effective_concurrency));
-    let config_rev_geo = reverse_geo_config.cloned();
-    let config_rev_geo = config_rev_geo.map(Arc::new);
-    let pool = pool.clone();
+    let delete_after_import = settings.delete_after_import;
+    let processing = settings.processing;
 
     let mut stream = stream::iter(files_to_import)
-        .map(|file_path| {
+        .map(move |file_path| {
             let semaphore = semaphore.clone();
-            let config_rev_geo = config_rev_geo.clone();
-            let pool = pool.clone();
+            let processing = processing.clone();
 
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
@@ -197,17 +192,7 @@ pub async fn run_local_import(
                     return;
                 }
 
-                let media_id = process_media_file(
-                    &file_path,
-                    user_id,
-                    thumbnail_max_size,
-                    tiny_thumbnail_size,
-                    thumbnail_quality,
-                    video_frame_quality,
-                    config_rev_geo.as_deref(),
-                    &pool,
-                )
-                .await;
+                let media_id = process_media_file(&file_path, &processing).await;
 
                 if media_id.is_none() {
                     update_job_progress(
@@ -312,8 +297,7 @@ async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
         if files.is_empty() {
             debug!(
                 "WebDAV import: no stable files for user {} (id={})",
-                username,
-                user_id
+                username, user_id
             );
             continue;
         }
@@ -352,9 +336,7 @@ async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
 
     debug!(
         "WebDAV import cycle complete: users_scanned={}, queued_files={}, skipped_users={}",
-        user_dir_count,
-        queued_files,
-        skipped_user_dirs
+        user_dir_count, queued_files, skipped_user_dirs
     );
 }
 
@@ -397,24 +379,19 @@ async fn process_webdav_file(
         processing_path.display()
     );
 
-    let result = process_media_file(
-        &processing_path,
+    let processing = MediaProcessingContext {
         user_id,
-        config.thumbnails.max_size,
-        config.thumbnails.tiny_size,
-        config.thumbnails.quality,
-        config.thumbnails.video_frame_quality,
-        Some(&config.reverse_geocoding),
-        pool,
-    )
-    .await;
+        thumbnails: config.thumbnails.clone(),
+        reverse_geocoding: Some(config.reverse_geocoding.clone()),
+        pool: pool.clone(),
+    };
+    let result = process_media_file(&processing_path, &processing).await;
 
     match result {
         Some(media_id) => {
             info!(
                 "WebDAV import success: {} -> media_id={} (thumbnails + metadata generated)",
-                filename,
-                media_id
+                filename, media_id
             );
             match tokio::fs::remove_file(&processing_path).await {
                 Ok(()) => {
@@ -470,10 +447,7 @@ async fn move_to_failed(processing_path: &Path, user_dir: &Path) {
 
     match std::fs::write(&error_sidecar, error_content) {
         Ok(()) => {
-            debug!(
-                "WebDAV wrote error sidecar: {}",
-                error_sidecar.display()
-            );
+            debug!("WebDAV wrote error sidecar: {}", error_sidecar.display());
         }
         Err(e) => {
             warn!("Failed to write error sidecar: {}", e);
@@ -531,10 +505,7 @@ fn collect_stable_files_recursive(
                     if let Ok(age) = now.duration_since(modified) {
                         let supported = is_supported_extension(&path);
                         if age >= min_age && supported {
-                            debug!(
-                                "WebDAV file stable: {}",
-                                path.display()
-                            );
+                            debug!("WebDAV file stable: {}", path.display());
                             files.push(path);
                         } else if age < min_age {
                             debug!(

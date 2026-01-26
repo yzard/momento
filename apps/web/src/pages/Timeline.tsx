@@ -18,7 +18,7 @@ export default function Timeline() {
   const queryClient = useQueryClient()
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [initialIndex, setInitialIndex] = useState(0)
-  const [mediaList, setMediaList] = useState<Media[]>([])
+  const [mediaIds, setMediaIds] = useState<number[]>([])
   const [addToAlbumMedia, setAddToAlbumMedia] = useState<Media | null>(null)
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
   const [showGroupByMenu, setShowGroupByMenu] = useState(false)
@@ -34,7 +34,7 @@ export default function Timeline() {
 
   const handlePhotoClick = (media: Media, allMedia: Media[]) => {
     const index = allMedia.findIndex((m) => m.id === media.id)
-    setMediaList(allMedia)
+    setMediaIds(allMedia.map((item) => item.id))
     setInitialIndex(index >= 0 ? index : 0)
     setLightboxOpen(true)
   }
@@ -100,7 +100,7 @@ export default function Timeline() {
       </div>
       {lightboxOpen && (
         <Lightbox
-          media={mediaList}
+          mediaIds={mediaIds}
           currentIndex={initialIndex}
           onClose={() => setLightboxOpen(false)}
           onIndexChange={setInitialIndex}

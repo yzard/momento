@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::MediaResponse;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoundingBox {
@@ -14,6 +16,14 @@ pub struct BoundingBox {
 pub struct MapClustersRequest {
     pub bounds: BoundingBox,
     pub zoom: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapMediaRequest {
+    pub bounds: BoundingBox,
+    #[serde(default)]
+    pub geohash_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,4 +41,10 @@ pub struct Cluster {
 pub struct MapClustersResponse {
     pub clusters: Vec<Cluster>,
     pub total_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapMediaListResponse {
+    pub items: Vec<MediaResponse>,
 }

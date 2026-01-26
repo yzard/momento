@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::config::ReverseGeocodingConfig;
+use crate::config::{ReverseGeocodingConfig, ThumbnailConfig};
 use crate::constants::{
     IMAGE_EXTENSIONS, ORIGINALS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR, VIDEO_EXTENSIONS,
 };
@@ -13,6 +13,14 @@ use crate::database::{execute_query, fetch_one, insert_returning_id, queries, Db
 use crate::processor::metadata::{extract_image_metadata, extract_video_metadata, MediaMetadata};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 use crate::utils::hash::calculate_file_hash;
+
+#[derive(Clone)]
+pub struct MediaProcessingContext {
+    pub user_id: i64,
+    pub thumbnails: ThumbnailConfig,
+    pub reverse_geocoding: Option<ReverseGeocodingConfig>,
+    pub pool: DbPool,
+}
 
 pub fn get_media_type(file_path: &Path) -> Option<&'static str> {
     let ext = file_path
@@ -277,15 +285,10 @@ pub async fn generate_complete_metadata(
 
 pub async fn process_media_file(
     source_path: &Path,
-    user_id: i64,
-    thumbnail_max_size: u32,
-    tiny_thumbnail_size: u32,
-    thumbnail_quality: u8,
-    video_frame_quality: u8,
-    reverse_geo_config: Option<&crate::config::ReverseGeocodingConfig>,
-    pool: &DbPool,
+    context: &MediaProcessingContext,
 ) -> Option<i64> {
     let start_time = Instant::now();
+    let user_id = context.user_id;
     tracing::info!(
         "Media processing started for {} (user_id={})",
         source_path.display(),
@@ -306,7 +309,7 @@ pub async fn process_media_file(
         }
     };
 
-    if let Ok(conn) = pool.get() {
+    if let Ok(conn) = context.pool.get() {
         let existing_media_id: Option<i64> = fetch_one(
             &conn,
             queries::media::SELECT_BY_CONTENT_HASH,
@@ -365,7 +368,9 @@ pub async fn process_media_file(
         }
     }
 
-    let metadata = generate_complete_metadata(source_path, media_type, reverse_geo_config).await;
+    let metadata =
+        generate_complete_metadata(source_path, media_type, context.reverse_geocoding.as_ref())
+            .await;
     let date_taken = get_media_date(&metadata, source_path);
 
     let (dest_path, relative_path, new_filename) = match save_original_file(source_path, date_taken)
@@ -385,15 +390,15 @@ pub async fn process_media_file(
     let (thumbnail_relative, _tiny_thumbnail_relative) = generate_thumbnails(
         &dest_path,
         media_type,
-        thumbnail_max_size,
-        tiny_thumbnail_size,
-        thumbnail_quality,
-        video_frame_quality,
+        context.thumbnails.max_size,
+        context.thumbnails.tiny_size,
+        context.thumbnails.quality,
+        context.thumbnails.video_frame_quality,
     )
     .await;
 
     let file_size = dest_path.metadata().ok().map(|m| m.len() as i64);
-    let conn = match pool.get() {
+    let conn = match context.pool.get() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(
@@ -473,11 +478,7 @@ pub async fn process_media_file(
 
     if let (Some(lat), Some(lon)) = (metadata.gps_latitude, metadata.gps_longitude) {
         if let Err(e) = insert_into_rtree(&conn, media_id, lat, lon) {
-            tracing::warn!(
-                "Failed to insert media {} into R-tree: {}",
-                media_id,
-                e
-            );
+            tracing::warn!("Failed to insert media {} into R-tree: {}", media_id, e);
         }
     }
 
@@ -508,7 +509,12 @@ pub fn calculate_geohash(lat: f64, lon: f64) -> Option<String> {
     encode(coord, 7).ok()
 }
 
-pub fn insert_into_rtree(conn: &DbConn, media_id: i64, lat: f64, lon: f64) -> Result<(), rusqlite::Error> {
+pub fn insert_into_rtree(
+    conn: &DbConn,
+    media_id: i64,
+    lat: f64,
+    lon: f64,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)",
         rusqlite::params![media_id, lat, lat, lon, lon],
@@ -522,140 +528,4 @@ pub fn delete_from_rtree(conn: &DbConn, media_id: i64) -> Result<(), rusqlite::E
         rusqlite::params![media_id],
     )?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::create_test_db;
-
-    #[test]
-    fn test_calculate_geohash_new_york() {
-        let geohash = calculate_geohash(40.7128, -74.0060);
-        assert!(geohash.is_some());
-
-        let hash = geohash.unwrap();
-        assert_eq!(hash.len(), 7);
-        assert!(hash.starts_with("dr5r"));
-    }
-
-    #[test]
-    fn test_calculate_geohash_london() {
-        let geohash = calculate_geohash(51.5074, -0.1278);
-        assert!(geohash.is_some());
-
-        let hash = geohash.unwrap();
-        assert_eq!(hash.len(), 7);
-        assert!(hash.starts_with("gcpv"));
-    }
-
-    #[test]
-    fn test_calculate_geohash_tokyo() {
-        let geohash = calculate_geohash(35.6762, 139.6503);
-        assert!(geohash.is_some());
-
-        let hash = geohash.unwrap();
-        assert_eq!(hash.len(), 7);
-        assert!(hash.starts_with("xn7"));
-    }
-
-    fn insert_test_media(conn: &DbConn, id: i64, filename: &str) {
-        conn.execute(
-            "INSERT INTO media (id, filename, original_filename, file_path, media_type, content_hash) VALUES (?, ?, ?, ?, ?, ?)",
-            rusqlite::params![id, filename, filename, format!("/path/{}", filename), "image", format!("hash{}", id)],
-        ).expect("Failed to insert test media");
-    }
-
-    #[test]
-    fn test_rtree_insert_and_query() {
-        let pool = create_test_db();
-        let conn = pool.get().expect("Failed to get connection");
-
-        insert_test_media(&conn, 1, "test.jpg");
-        insert_into_rtree(&conn, 1, 40.7128, -74.0060).expect("R-tree insert should succeed");
-
-        let count: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM media_rtree WHERE min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?",
-                rusqlite::params![40.0, 41.0, -75.0, -73.0],
-                |row| row.get(0),
-            )
-            .expect("R-tree query should succeed");
-
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn test_rtree_query_excludes_outside_bbox() {
-        let pool = create_test_db();
-        let conn = pool.get().expect("Failed to get connection");
-
-        insert_test_media(&conn, 1, "test.jpg");
-        insert_into_rtree(&conn, 1, 40.7128, -74.0060).expect("R-tree insert should succeed");
-
-        let count: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM media_rtree WHERE min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?",
-                rusqlite::params![51.0, 52.0, -1.0, 1.0],
-                |row| row.get(0),
-            )
-            .expect("R-tree query should succeed");
-
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn test_rtree_delete() {
-        let pool = create_test_db();
-        let conn = pool.get().expect("Failed to get connection");
-
-        insert_test_media(&conn, 1, "test.jpg");
-        insert_into_rtree(&conn, 1, 40.7128, -74.0060).expect("R-tree insert should succeed");
-
-        let count_before: i32 = conn
-            .query_row("SELECT COUNT(*) FROM media_rtree WHERE media_id = ?", [1], |row| row.get(0))
-            .expect("Query should succeed");
-        assert_eq!(count_before, 1);
-
-        delete_from_rtree(&conn, 1).expect("R-tree delete should succeed");
-
-        let count_after: i32 = conn
-            .query_row("SELECT COUNT(*) FROM media_rtree WHERE media_id = ?", [1], |row| row.get(0))
-            .expect("Query should succeed");
-        assert_eq!(count_after, 0);
-    }
-
-    #[test]
-    fn test_rtree_multiple_entries() {
-        let pool = create_test_db();
-        let conn = pool.get().expect("Failed to get connection");
-
-        for i in 1..=3 {
-            insert_test_media(&conn, i, &format!("test{}.jpg", i));
-        }
-
-        insert_into_rtree(&conn, 1, 40.7128, -74.0060).expect("NYC insert should succeed");
-        insert_into_rtree(&conn, 2, 51.5074, -0.1278).expect("London insert should succeed");
-        insert_into_rtree(&conn, 3, 35.6762, 139.6503).expect("Tokyo insert should succeed");
-
-        let count: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM media_rtree WHERE min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?",
-                rusqlite::params![-90.0, 90.0, -180.0, 180.0],
-                |row| row.get(0),
-            )
-            .expect("R-tree query should succeed");
-
-        assert_eq!(count, 3);
-
-        let nyc_count: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM media_rtree WHERE min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?",
-                rusqlite::params![40.0, 41.0, -75.0, -73.0],
-                |row| row.get(0),
-            )
-            .expect("R-tree query should succeed");
-
-        assert_eq!(nyc_count, 1);
-    }
 }

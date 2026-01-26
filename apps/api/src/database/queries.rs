@@ -1,3 +1,12 @@
+pub mod schema {
+    pub const TABLE_EXISTS: &str = r#"
+    SELECT COUNT(*)
+      FROM sqlite_master
+     WHERE type = 'table'
+       AND name = ?
+    "#;
+}
+
 pub mod media {
     pub const INSERT: &str = r#"
     INSERT INTO media (
@@ -281,6 +290,49 @@ pub mod media {
       FROM media
      WHERE content_hash IS NULL
     "#;
+
+    pub fn build_select_by_ids(count: usize) -> String {
+        let placeholders = (0..count).map(|_| "?").collect::<Vec<_>>().join(", ");
+
+        format!(
+            r#"
+            SELECT m.id
+                 , m.filename
+                 , m.original_filename
+                 , m.media_type
+                 , m.mime_type
+                 , m.width
+                 , m.height
+                 , m.file_size
+                 , m.duration_seconds
+                 , m.date_taken
+                 , m.gps_latitude
+                 , m.gps_longitude
+                 , m.camera_make
+                 , m.camera_model
+                 , m.lens_make
+                 , m.lens_model
+                 , m.iso
+                 , m.exposure_time
+                 , m.f_number
+                 , m.focal_length
+                 , m.focal_length_35mm
+                 , m.gps_altitude
+                 , m.location_city
+                 , m.location_state
+                 , m.location_country
+                 , m.video_codec
+                 , m.keywords
+                 , m.created_at
+              FROM media AS m
+              JOIN media_access AS ma ON m.id = ma.media_id
+             WHERE ma.user_id = ?
+               AND ma.deleted_at IS NULL
+               AND m.id IN ({placeholders})
+            "#,
+            placeholders = placeholders
+        )
+    }
 }
 
 pub mod timeline {
@@ -609,6 +661,101 @@ pub mod albums {
      WHERE a.id = ?
      GROUP BY a.id
     "#;
+}
+
+pub mod map {
+    pub const LONGITUDE_CLAUSE_STANDARD: &str = "m.gps_longitude BETWEEN ? AND ?";
+    pub const LONGITUDE_CLAUSE_ANTIMERIDIAN: &str =
+        "(m.gps_longitude >= ? OR m.gps_longitude <= ?)";
+
+    pub fn build_clusters_query(precision: usize, longitude_clause: &str) -> String {
+        format!(
+            r#"
+            WITH clustered AS (
+                SELECT SUBSTR(m.geohash, 1, {precision}) AS cell
+                     , COUNT(*) AS count
+                     , AVG(m.gps_latitude) AS center_lat
+                     , AVG(m.gps_longitude) AS center_lon
+                     , MAX(COALESCE(m.date_taken, m.created_at) || '_' || m.id) AS latest
+                  FROM media AS m
+                  JOIN media_access AS ma ON m.id = ma.media_id
+                 WHERE ma.user_id = ?
+                   AND ma.deleted_at IS NULL
+                   AND m.gps_latitude BETWEEN ? AND ?
+                   AND {longitude_clause}
+                   AND m.geohash IS NOT NULL
+                 GROUP BY cell
+            )
+            SELECT c.cell
+                 , c.count
+                 , c.center_lat
+                 , c.center_lon
+                 , CAST(SUBSTR(c.latest, INSTR(c.latest, '_') + 1) AS INTEGER) AS representative_id
+              FROM clustered AS c
+            "#,
+            precision = precision,
+            longitude_clause = longitude_clause
+        )
+    }
+
+    pub fn build_media_query(geohash_count: usize, longitude_clause: &str) -> String {
+        let geohash_clause = if geohash_count > 0 {
+            let conditions = (0..geohash_count)
+                .map(|_| "m.geohash LIKE ?")
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            format!("\n               AND ({})", conditions)
+        } else {
+            String::new()
+        };
+
+        format!(
+            r#"
+            SELECT m.id
+                 , m.filename
+                 , m.original_filename
+                 , m.media_type
+                 , m.mime_type
+                 , m.width
+                 , m.height
+                 , m.file_size
+                 , m.duration_seconds
+                 , m.date_taken
+                 , m.gps_latitude
+                 , m.gps_longitude
+                 , m.camera_make
+                 , m.camera_model
+                 , m.lens_make
+                 , m.lens_model
+                 , m.iso
+                 , m.exposure_time
+                 , m.f_number
+                 , m.focal_length
+                 , m.focal_length_35mm
+                 , m.gps_altitude
+                 , m.location_city
+                 , m.location_state
+                 , m.location_country
+                 , m.video_codec
+                 , m.keywords
+                 , m.content_hash
+                 , m.created_at
+              FROM media AS m
+              JOIN media_access AS ma ON m.id = ma.media_id
+             WHERE ma.user_id = ?
+               AND ma.deleted_at IS NULL
+               AND m.gps_latitude BETWEEN ? AND ?
+               AND {longitude_clause}
+               AND m.gps_latitude IS NOT NULL
+               AND m.gps_longitude IS NOT NULL
+               AND m.geohash IS NOT NULL{geohash_clause}
+             ORDER BY COALESCE(m.date_taken, m.created_at) DESC
+                    , m.id DESC
+            "#,
+            longitude_clause = longitude_clause,
+            geohash_clause = geohash_clause
+        )
+    }
 }
 
 pub mod tags {

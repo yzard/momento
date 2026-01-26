@@ -43,6 +43,12 @@ pub struct MediaListRequest {
     pub group_by: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaBatchRequest {
+    pub ids: Vec<i64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaListResponse {
@@ -53,10 +59,10 @@ pub struct MediaListResponse {
     pub groups: Option<Vec<TimelineGroup>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MediaGetRequest {
-    pub media_id: i64,
+pub struct MediaBatchResponse {
+    pub items: Vec<MediaResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,50 +125,4 @@ pub struct PreviewBatchResponse {
 pub struct TimelineGroup {
     pub date: String,
     pub media: Vec<MediaResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TimelineListRequest {
-    pub cursor: Option<String>,
-    #[serde(default = "default_timeline_limit")]
-    pub limit: i32,
-    #[serde(default = "default_group_by")]
-    pub group_by: String,
-}
-
-fn default_timeline_limit() -> i32 {
-    100
-}
-
-fn default_group_by() -> String {
-    "day".to_string()
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TimelineListResponse {
-    pub groups: Vec<TimelineGroup>,
-    pub next_cursor: Option<String>,
-    pub has_more: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GeoMediaResponse {
-    pub id: i64,
-    pub thumbnail_path: Option<String>,
-    pub thumbnail_data: Option<String>,
-    pub latitude: f64,
-    pub longitude: f64,
-    pub date_taken: Option<String>,
-    pub media_type: String,
-    pub mime_type: Option<String>,
-    pub original_filename: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapMediaResponse {
-    pub items: Vec<GeoMediaResponse>,
 }

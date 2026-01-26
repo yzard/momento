@@ -7,7 +7,10 @@ use crate::models::{
     ImportStatusResponse, ImportTriggerResponse, RegenerateRequest, RegenerateResponse,
     RegenerationStatusResponse,
 };
-use crate::processor::importer::{get_import_status, is_import_running, run_local_import};
+use crate::processor::importer::{
+    get_import_status, is_import_running, run_local_import, ImportSettings,
+};
+use crate::processor::media_processor::MediaProcessingContext;
 use crate::processor::regenerator::{
     cancel_regeneration, clear_all_metadata_and_thumbnails, generate_missing_metadata,
     get_regeneration_status, is_regeneration_running,
@@ -38,20 +41,19 @@ async fn trigger_local_import(
     let pool = state.pool.clone();
     let user_id = admin.id;
     let concurrency = config.regenerate.num_cpus;
+    let settings = ImportSettings {
+        processing: MediaProcessingContext {
+            user_id,
+            thumbnails: config.thumbnails.clone(),
+            reverse_geocoding: Some(config.reverse_geocoding.clone()),
+            pool: pool.clone(),
+        },
+        delete_after_import: true,
+        concurrency,
+    };
 
     tokio::spawn(async move {
-        run_local_import(
-            user_id,
-            config.thumbnails.max_size,
-            config.thumbnails.tiny_size,
-            config.thumbnails.quality,
-            config.thumbnails.video_frame_quality,
-            true,
-            Some(&config.reverse_geocoding),
-            &pool,
-            concurrency,
-        )
-        .await;
+        run_local_import(settings).await;
     });
 
     Ok(Json(ImportTriggerResponse {

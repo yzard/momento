@@ -8,7 +8,9 @@ use crate::config::Config;
 use crate::constants::{ORIGINALS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR};
 use crate::database::execute_query;
 use crate::database::{fetch_all, queries, DbPool};
-use crate::processor::media_processor::generate_complete_metadata;
+use crate::processor::media_processor::{
+    calculate_geohash, delete_from_rtree, generate_complete_metadata, insert_into_rtree,
+};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 use crate::utils::hash::calculate_file_hash;
 use futures::stream::{self, StreamExt};
@@ -438,9 +440,9 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                     .date_taken
                     .clone()
                     .or(metadata.date_taken.map(|dt| dt.to_rfc3339()));
-                let gps_latitude = choose(row.gps_latitude, metadata.gps_latitude);
-                let gps_longitude = choose(row.gps_longitude, metadata.gps_longitude);
-                let gps_altitude = choose(row.gps_altitude, metadata.gps_altitude);
+                let gps_latitude = metadata.gps_latitude.or(row.gps_latitude);
+                let gps_longitude = metadata.gps_longitude.or(row.gps_longitude);
+                let gps_altitude = metadata.gps_altitude.or(row.gps_altitude);
                 let camera_make = choose(row.camera_make.clone(), metadata.camera_make);
                 let camera_model = choose(row.camera_model.clone(), metadata.camera_model);
                 let lens_make = choose(row.lens_make.clone(), metadata.lens_make);
@@ -492,6 +494,28 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                                 row_id
                             ],
                         );
+
+                        let geohash = match (gps_latitude, gps_longitude) {
+                            (Some(lat), Some(lon)) => calculate_geohash(lat, lon),
+                            _ => None,
+                        };
+
+                        if let Err(err) = conn.execute(
+                            "UPDATE media SET geohash = ? WHERE id = ?",
+                            rusqlite::params![geohash, row_id],
+                        ) {
+                            error!("Failed to update geohash for {}: {}", row_id, err);
+                        }
+
+                        if let Err(err) = delete_from_rtree(&conn, row_id) {
+                            error!("Failed to clear rtree for {}: {}", row_id, err);
+                        }
+
+                        if let (Some(lat), Some(lon)) = (gps_latitude, gps_longitude) {
+                            if let Err(err) = insert_into_rtree(&conn, row_id, lat, lon) {
+                                error!("Failed to insert rtree for {}: {}", row_id, err);
+                            }
+                        }
                     }
                 })
                 .await;

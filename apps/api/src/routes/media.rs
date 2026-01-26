@@ -17,9 +17,12 @@ use crate::constants::{ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR, THUMBNAILS_T
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DeleteMediaResponse, MediaDeleteRequest, MediaGetRequest, MediaListRequest, MediaListResponse,
-    MediaResponse, MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse,
-    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
+    DeleteMediaResponse, MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest,
+    MediaListRequest, MediaListResponse, MediaResponse, MediaUpdateRequest, PreviewBatchRequest,
+    PreviewBatchResponse, ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
+};
+use crate::processor::media_processor::{
+    calculate_geohash, delete_from_rtree, insert_into_rtree,
 };
 use crate::processor::thumbnails::generate_image_preview;
 use base64::engine::general_purpose::STANDARD;
@@ -30,7 +33,7 @@ use std::path::PathBuf;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/media/list", post(list_media))
-        .route("/media/get", post(get_media))
+        .route("/media/get-batch", post(get_media_batch))
         .route("/media/update", post(update_media))
         .route("/media/delete", post(delete_media))
         .route("/media/file/:media_id", get(get_media_file))
@@ -44,7 +47,7 @@ pub fn preview_router() -> Router<AppState> {
     Router::new().route("/preview/get", post(get_media_preview_batch))
 }
 
-fn row_to_media_response(
+struct MediaRowData {
     id: i64,
     filename: String,
     original_filename: String,
@@ -73,7 +76,74 @@ fn row_to_media_response(
     video_codec: Option<String>,
     keywords: Option<String>,
     created_at: String,
-) -> MediaResponse {
+}
+
+impl MediaRowData {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            filename: row.get(1)?,
+            original_filename: row.get(2)?,
+            media_type: row.get(3)?,
+            mime_type: row.get(4)?,
+            width: row.get(5)?,
+            height: row.get(6)?,
+            file_size: row.get(7)?,
+            duration_seconds: row.get(8)?,
+            date_taken: row.get(9)?,
+            gps_latitude: row.get(10)?,
+            gps_longitude: row.get(11)?,
+            camera_make: row.get(12)?,
+            camera_model: row.get(13)?,
+            lens_make: row.get(14)?,
+            lens_model: row.get(15)?,
+            iso: row.get(16)?,
+            exposure_time: row.get(17)?,
+            f_number: row.get(18)?,
+            focal_length: row.get(19)?,
+            focal_length_35mm: row.get(20)?,
+            gps_altitude: row.get(21)?,
+            location_city: row.get(22)?,
+            location_state: row.get(23)?,
+            location_country: row.get(24)?,
+            video_codec: row.get(25)?,
+            keywords: row.get(26)?,
+            created_at: row.get(27)?,
+        })
+    }
+}
+
+fn row_to_media_response(row: MediaRowData) -> MediaResponse {
+    let MediaRowData {
+        id,
+        filename,
+        original_filename,
+        media_type,
+        mime_type,
+        width,
+        height,
+        file_size,
+        duration_seconds,
+        date_taken,
+        gps_latitude,
+        gps_longitude,
+        camera_make,
+        camera_model,
+        lens_make,
+        lens_model,
+        iso,
+        exposure_time,
+        f_number,
+        focal_length,
+        focal_length_35mm,
+        gps_altitude,
+        location_city,
+        location_state,
+        location_country,
+        video_codec,
+        keywords,
+        created_at,
+    } = row;
     MediaResponse {
         id,
         filename,
@@ -207,22 +277,40 @@ async fn list_media(
     }))
 }
 
-async fn get_media(
+async fn get_media_batch(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<MediaGetRequest>,
-) -> AppResult<Json<MediaResponse>> {
+    Json(request): Json<MediaBatchRequest>,
+) -> AppResult<Json<MediaBatchResponse>> {
+    if request.ids.is_empty() {
+        return Ok(Json(MediaBatchResponse { items: Vec::new() }));
+    }
+
     let conn = state.pool.get().map_err(AppError::Pool)?;
+    let query = queries::media::build_select_by_ids(request.ids.len());
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(request.ids.len() + 1);
+    params.push(Box::new(current_user.id));
+    for media_id in &request.ids {
+        params.push(Box::new(*media_id));
+    }
 
-    let media = fetch_one(
-        &conn,
-        queries::media::SELECT_BY_ID_AND_USER,
-        &[&request.media_id, &current_user.id],
-        map_media_row,
-    )?
-    .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|param| param.as_ref()).collect();
+    let items = fetch_all(&conn, &query, &param_refs, map_media_row)?;
 
-    Ok(Json(media))
+    let mut by_id = std::collections::HashMap::new();
+    for item in items {
+        by_id.insert(item.id, item);
+    }
+
+    let ordered_items = request
+        .ids
+        .iter()
+        .filter_map(|media_id| by_id.get(media_id).cloned())
+        .collect();
+
+    Ok(Json(MediaBatchResponse {
+        items: ordered_items,
+    }))
 }
 
 async fn update_media(
@@ -276,6 +364,25 @@ async fn update_media(
         map_media_row,
     )?
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
+
+    if request.gps_latitude.is_some() || request.gps_longitude.is_some() {
+        let geohash = match (media.gps_latitude, media.gps_longitude) {
+            (Some(lat), Some(lon)) => calculate_geohash(lat, lon),
+            _ => None,
+        };
+
+        execute_query(
+            &conn,
+            "UPDATE media SET geohash = ? WHERE id = ?",
+            &[&geohash, &media.id],
+        )?;
+
+        delete_from_rtree(&conn, media.id).map_err(AppError::Database)?;
+
+        if let (Some(lat), Some(lon)) = (media.gps_latitude, media.gps_longitude) {
+            insert_into_rtree(&conn, media.id, lat, lon).map_err(AppError::Database)?;
+        }
+    }
 
     Ok(Json(media))
 }
@@ -383,36 +490,8 @@ fn fetch_default_media(
 }
 
 fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
-    Ok(row_to_media_response(
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-        row.get(8)?,
-        row.get(9)?,
-        row.get(10)?,
-        row.get(11)?,
-        row.get(12)?,
-        row.get(13)?,
-        row.get(14)?,
-        row.get(15)?,
-        row.get(16)?,
-        row.get(17)?,
-        row.get(18)?,
-        row.get(19)?,
-        row.get(20)?,
-        row.get(21)?,
-        row.get(22)?,
-        row.get(23)?,
-        row.get(24)?,
-        row.get(25)?,
-        row.get(26)?,
-        row.get(27)?,
-    ))
+    let media_row = MediaRowData::from_row(row)?;
+    Ok(row_to_media_response(media_row))
 }
 
 fn timeline_group_key(date_taken: Option<&str>, group_by: &str) -> String {
@@ -491,37 +570,9 @@ fn fetch_default_timeline(
 }
 
 fn map_timeline_row(row: &rusqlite::Row) -> rusqlite::Result<(MediaResponse, Option<String>)> {
-    let date_taken: Option<String> = row.get(9)?;
-    let media = row_to_media_response(
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-        row.get(8)?,
-        date_taken.clone(),
-        row.get(10)?,
-        row.get(11)?,
-        row.get(12)?,
-        row.get(13)?,
-        row.get(14)?,
-        row.get(15)?,
-        row.get(16)?,
-        row.get(17)?,
-        row.get(18)?,
-        row.get(19)?,
-        row.get(20)?,
-        row.get(21)?,
-        row.get(22)?,
-        row.get(23)?,
-        row.get(24)?,
-        row.get(25)?,
-        row.get(26)?,
-        row.get(27)?,
-    );
+    let media_row = MediaRowData::from_row(row)?;
+    let date_taken = media_row.date_taken.clone();
+    let media = row_to_media_response(media_row);
 
     Ok((media, date_taken))
 }

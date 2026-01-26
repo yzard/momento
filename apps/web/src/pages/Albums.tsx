@@ -8,7 +8,7 @@ export default function Albums() {
   const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [initialIndex, setInitialIndex] = useState(0)
-  const [mediaList, setMediaList] = useState<Media[]>([])
+  const [mediaIds, setMediaIds] = useState<number[]>([])
 
   const handleAlbumClick = (album: Album) => {
     setSelectedAlbumId(album.id)
@@ -16,7 +16,7 @@ export default function Albums() {
 
   const handlePhotoClick = (media: Media, allMedia: Media[]) => {
     const index = allMedia.findIndex((m) => m.id === media.id)
-    setMediaList(allMedia)
+    setMediaIds(allMedia.map((item) => item.id))
     setInitialIndex(index >= 0 ? index : 0)
     setLightboxOpen(true)
   }
@@ -36,7 +36,7 @@ export default function Albums() {
       </div>
       {lightboxOpen && (
         <Lightbox
-          media={mediaList}
+          mediaIds={mediaIds}
           currentIndex={initialIndex}
           onClose={() => setLightboxOpen(false)}
           onIndexChange={setInitialIndex}

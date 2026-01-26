@@ -45,8 +45,10 @@ export default function PhotoMarker({ media, onClick }: PhotoMarkerProps) {
     iconSize: [THUMB_SIZE, THUMB_SIZE],
     iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE / 2],
     popupAnchor: [0, -THUMB_SIZE / 2],
-    html: `<div style="width:${THUMB_SIZE}px;height:${THUMB_SIZE}px;border-radius:6px;overflow:hidden;border:2px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);background:#f0f0f0;display:flex;align-items:center;justify-content:center;">
-      ${thumbnailUrl ? `<img src="${thumbnailUrl}" style="width:100%;height:100%;object-fit:cover;" />` : '<div style="width:60%;height:60%;border-radius:4px;background:#e5e7eb;"></div>'}
+    html: `<div class="map-marker">
+      <div class="map-marker__bubble" style="width:${THUMB_SIZE}px;height:${THUMB_SIZE}px;border-radius:6px;overflow:hidden;border:2px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3);background:#f0f0f0;display:flex;align-items:center;justify-content:center;animation:mapMarkerPop 180ms ease-out;transform-origin:center;">
+        ${thumbnailUrl ? `<img src="${thumbnailUrl}" style="width:100%;height:100%;object-fit:cover;" />` : '<div style="width:60%;height:60%;border-radius:4px;background:#e5e7eb;"></div>'}
+      </div>
     </div>`,
   }), [thumbnailUrl])
 

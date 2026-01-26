@@ -101,8 +101,7 @@ pub async fn basic_auth_middleware(
     let Some((user_id, db_username, hash, is_active)) = user_result else {
         warn!(
             "WebDAV auth failed: unknown user {} from {}",
-            username,
-            client_ip
+            username, client_ip
         );
         return unauthorized_response(&state.config.webdav.realm);
     };
@@ -110,8 +109,7 @@ pub async fn basic_auth_middleware(
     if is_active == 0 || !verify_password(password, &hash) {
         warn!(
             "WebDAV auth failed: invalid credentials for user {} from {}",
-            db_username,
-            client_ip
+            db_username, client_ip
         );
         return unauthorized_response(&state.config.webdav.realm);
     }

@@ -15,7 +15,6 @@ interface ImportStatus {
 export default function ImportPanel() {
   const [status, setStatus] = useState<ImportStatus | null>(null)
   const [isTriggering, setIsTriggering] = useState(false)
-  const [isWebdavTriggering, setIsWebdavTriggering] = useState(false)
 
   const loadStatus = async () => {
     try {
@@ -44,18 +43,6 @@ export default function ImportPanel() {
     }
   }
 
-  const handleTriggerWebdavImport = async () => {
-    setIsWebdavTriggering(true)
-    try {
-      await adminApi.triggerWebdavImport()
-      loadStatus()
-    } catch {
-      alert('Failed to start WebDAV import. Check configuration and ensure no import is running.')
-    } finally {
-      setIsWebdavTriggering(false)
-    }
-  }
-
   const isRunning = status?.status === 'running'
   const progress = status && status.totalFiles > 0
     ? Math.round((status.processedFiles / status.totalFiles) * 100)
@@ -66,7 +53,7 @@ export default function ImportPanel() {
       <h3 className="text-lg font-medium mb-4 text-foreground">Import Photos</h3>
 
       <p className="text-muted-foreground mb-6 font-light">
-        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import or configure WebDAV in <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/config.yaml</code>.
+        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import. WebDAV uploads are processed automatically when enabled in <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/config.yaml</code>.
       </p>
 
       <div className="flex flex-wrap gap-3">
@@ -76,13 +63,6 @@ export default function ImportPanel() {
           className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg shadow-primary/20 transition-all"
         >
           {isRunning ? 'Importing...' : isTriggering ? 'Starting...' : 'Start Local Import'}
-        </button>
-        <button
-          onClick={handleTriggerWebdavImport}
-          disabled={isWebdavTriggering || isRunning}
-          className="bg-secondary text-secondary-foreground px-6 py-2 rounded-lg hover:bg-secondary/90 disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg shadow-secondary/20 transition-all"
-        >
-          {isRunning ? 'Importing...' : isWebdavTriggering ? 'Starting...' : 'Start WebDAV Import'}
         </button>
       </div>
 

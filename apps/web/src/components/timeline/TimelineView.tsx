@@ -21,7 +21,19 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const lastGroupByRef = useRef(groupBy)
 
-  const groups = data?.pages.flatMap((page) => page.groups ?? []) ?? []
+  const groups = (() => {
+    const allGroups = data?.pages.flatMap((page) => page.groups ?? []) ?? []
+    const merged = new Map<string, Media[]>()
+    for (const group of allGroups) {
+      const existing = merged.get(group.date)
+      if (existing) {
+        existing.push(...group.media)
+      } else {
+        merged.set(group.date, [...group.media])
+      }
+    }
+    return Array.from(merged.entries()).map(([date, media]) => ({ date, media }))
+  })()
   const allMedia = groups.flatMap((g) => g.media)
 
   const savedIndex = sessionStorage.getItem(SCROLL_STORAGE_KEY)

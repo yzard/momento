@@ -58,11 +58,6 @@ export const adminApi = {
     return response.data
   },
 
-  triggerWebdavImport: async (): Promise<{ message: string; status: string }> => {
-    const response = await apiClient.post<{ message: string; status: string }>('/import/webdav')
-    return response.data
-  },
-
   getImportStatus: async (): Promise<ImportStatus> => {
     const response = await apiClient.post<ImportStatus>('/import/status')
     return response.data

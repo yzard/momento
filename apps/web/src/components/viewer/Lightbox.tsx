@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type CSSProperties } from 'react'
 import { useLocation } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { ChevronLeft, ChevronRight, X, Loader2 } from 'lucide-react'
@@ -7,7 +7,7 @@ import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 
 interface LightboxProps {
-  media: Media[]
+  mediaIds: number[]
   currentIndex: number
   onClose: () => void
   onIndexChange: (index: number) => void
@@ -15,8 +15,14 @@ interface LightboxProps {
 
 const ZOOM_SCALE = 2.0
 
-export default function Lightbox({ media, currentIndex, onClose, onIndexChange }: LightboxProps) {
-  const currentMedia = media[currentIndex]
+export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChange }: LightboxProps) {
+  const [mediaList, setMediaList] = useState<Media[]>([])
+  const [isMetadataLoading, setIsMetadataLoading] = useState(true)
+  const [metadataError, setMetadataError] = useState(false)
+  const safeIndex = mediaList.length > 0
+    ? Math.min(currentIndex, mediaList.length - 1)
+    : 0
+  const currentMedia = mediaList[safeIndex]
   const isVideo = currentMedia?.mediaType === 'video'
   const [isZoomed, setIsZoomed] = useState(false)
   const location = useLocation()
@@ -53,13 +59,43 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
   const dragStart = useRef({ x: 0, y: 0 })
   const offsetStart = useRef({ x: 0, y: 0 })
 
+  useEffect(() => {
+    let cancelled = false
+    if (mediaIds.length === 0) {
+      setMediaList([])
+      setIsMetadataLoading(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setIsMetadataLoading(true)
+    setMetadataError(false)
+    mediaApi.getBatch(mediaIds)
+      .then((items) => {
+        if (cancelled) return
+        setMediaList(items)
+        setIsMetadataLoading(false)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setMediaList([])
+        setIsMetadataLoading(false)
+        setMetadataError(true)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [mediaIds])
+
   const goToPrev = useCallback(() => {
-    if (currentIndex > 0) onIndexChange(currentIndex - 1)
-  }, [currentIndex, onIndexChange])
+    if (safeIndex > 0) onIndexChange(safeIndex - 1)
+  }, [safeIndex, onIndexChange])
 
   const goToNext = useCallback(() => {
-    if (currentIndex < media.length - 1) onIndexChange(currentIndex + 1)
-  }, [currentIndex, media.length, onIndexChange])
+    if (safeIndex < mediaList.length - 1) onIndexChange(safeIndex + 1)
+  }, [safeIndex, mediaList.length, onIndexChange])
 
   const resetZoom = useCallback(() => {
     setIsZoomed(false)
@@ -68,7 +104,7 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
   }, [])
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') handleClose()
       if (e.key === 'ArrowLeft') goToPrev()
       if (e.key === 'ArrowRight') goToNext()
@@ -78,8 +114,15 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
   }, [handleClose, goToPrev, goToNext])
 
   useEffect(() => {
+    if (!currentMedia) return
     resetZoom()
-  }, [currentIndex, resetZoom])
+  }, [currentMedia, resetZoom])
+
+  useEffect(() => {
+    if (mediaList.length > 0 && currentIndex >= mediaList.length) {
+      onIndexChange(0)
+    }
+  }, [currentIndex, mediaList.length, onIndexChange])
 
   // Load preview URL when media changes
   useEffect(() => {
@@ -106,6 +149,14 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
       })
   }, [currentMedia])
 
+  if (!currentMedia && isMetadataLoading) {
+    return (
+      <div className="absolute inset-0 z-[2000] flex items-center justify-center bg-background/95 backdrop-blur-sm">
+        <Loader2 className="w-12 h-12 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
   if (!currentMedia) return null
 
   const handleDoubleClick = () => {
@@ -118,7 +169,14 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
     })
   }
 
-  const handleMouseDown = (event: MouseEvent<HTMLDivElement>) => {
+  const handleImageKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      handleDoubleClick()
+    }
+  }
+
+  const handleMouseDown = (event: ReactMouseEvent<HTMLButtonElement>) => {
     if (!isZoomed) return
     event.preventDefault()
     setIsDragging(true)
@@ -126,7 +184,7 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
     offsetStart.current = { ...offset }
   }
 
-  const handleMouseMove = (event: MouseEvent<HTMLDivElement>) => {
+  const handleMouseMove = (event: ReactMouseEvent<HTMLButtonElement>) => {
     if (!isDragging) return
     const dx = event.clientX - dragStart.current.x
     const dy = event.clientY - dragStart.current.y
@@ -151,14 +209,16 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
     <div className="absolute inset-0 z-[2000] flex bg-background/95 backdrop-blur-sm">
       <div className="flex-1 relative flex items-center justify-center p-4 min-w-0 min-h-0">
         <button
+          type="button"
           onClick={handleClose}
           className="absolute top-4 right-4 z-50 p-2 rounded-full bg-background/20 hover:bg-background/40 text-foreground transition-colors border border-border/10 backdrop-blur-md"
         >
           <X className="w-6 h-6" />
         </button>
 
-        {currentIndex > 0 && (
+        {safeIndex > 0 && (
           <button
+            type="button"
             onClick={goToPrev}
             className="absolute left-4 top-1/2 -translate-y-1/2 z-10 p-3 rounded-full bg-background/20 hover:bg-background/40 text-foreground transition-colors border border-border/10 backdrop-blur-md"
           >
@@ -166,8 +226,9 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
           </button>
         )}
 
-        {currentIndex < media.length - 1 && (
+        {safeIndex < mediaList.length - 1 && (
           <button
+            type="button"
             onClick={goToNext}
             className="absolute right-4 top-1/2 -translate-y-1/2 z-10 p-3 rounded-full bg-background/20 hover:bg-background/40 text-foreground transition-colors border border-border/10 backdrop-blur-md"
           >
@@ -175,10 +236,12 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
           </button>
         )}
 
-        {isLoading ? (
+        {isLoading || isMetadataLoading ? (
           <div className="flex items-center justify-center">
             <Loader2 className="w-12 h-12 animate-spin text-muted-foreground" />
           </div>
+        ) : metadataError ? (
+          <div className="text-sm text-muted-foreground">Unable to load media details.</div>
         ) : previewUrl ? (
           isVideo ? (
             <video
@@ -188,15 +251,20 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
               loop
               playsInline
               preload="metadata"
-            />
+            >
+              <track kind="captions" />
+            </video>
           ) : (
-            <div
+            <button
+              type="button"
               className="w-full h-full flex items-center justify-center overflow-hidden"
               onDoubleClick={handleDoubleClick}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={stopDragging}
               onMouseLeave={stopDragging}
+              onKeyDown={handleImageKeyDown}
+              aria-label="Toggle zoom"
             >
               <img
                 src={previewUrl}
@@ -205,7 +273,7 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
                 style={imageStyle}
                 draggable={false}
               />
-            </div>
+            </button>
           )
         ) : (
           <div className="text-muted-foreground">Failed to load media</div>
@@ -217,7 +285,7 @@ export default function Lightbox({ media, currentIndex, onClose, onIndexChange }
 
         <div className="mt-6 pt-6 border-t border-border">
           <p className="text-xs text-muted-foreground text-center">
-            {currentIndex + 1} / {media.length}
+            {safeIndex + 1} / {mediaList.length}
           </p>
         </div>
       </div>

@@ -7,6 +7,10 @@ interface MediaListRequest {
   groupBy?: GroupBy
 }
 
+interface MediaBatchRequest {
+  ids: number[]
+}
+
 type GroupBy = 'year' | 'month' | 'week' | 'day'
 type ThumbnailSize = 'normal' | 'tiny'
 
@@ -19,22 +23,14 @@ interface MediaListResponse {
   hasMore: boolean
 }
 
+interface MediaBatchResponse {
+  items: Media[]
+}
+
 interface TimelineListResponse {
   groups: TimelineGroup[]
   nextCursor: string | null
   hasMore: boolean
-}
-
-interface GeoMedia {
-  id: number
-  thumbnailPath: string | null
-  thumbnailData: string | null
-  latitude: number
-  longitude: number
-  dateTaken: string | null
-  mediaType: 'image' | 'video'
-  mimeType: string | null
-  originalFilename: string | null
 }
 
 export type { GroupBy }
@@ -221,15 +217,17 @@ export const mediaApi = {
     return response.data
   },
 
+  getBatch: async (mediaIds: number[]): Promise<Media[]> => {
+    if (mediaIds.length === 0) return []
+    const response = await apiClient.post<MediaBatchResponse>('/media/get-batch', { ids: mediaIds } as MediaBatchRequest)
+    return response.data.items
+  },
+
   listMapMedia: async (): Promise<Media[]> => {
     const response = await apiClient.post<MediaListResponse>('/media/list', {})
     return response.data.items
   },
 
-  get: async (mediaId: number): Promise<Media> => {
-    const response = await apiClient.post<Media>('/media/get', { mediaId })
-    return response.data
-  },
 
   delete: async (mediaId: number): Promise<void> => {
     await apiClient.post('/media/delete', { mediaId })
@@ -252,11 +250,5 @@ export const mediaApi = {
   clearCache: () => {
     blobUrlCache.forEach((url) => URL.revokeObjectURL(url))
     blobUrlCache.clear()
-  },
-
-
-  mapMedia: async (): Promise<GeoMedia[]> => {
-    const response = await apiClient.post<{ items: GeoMedia[] }>('/map/media')
-    return response.data.items
   },
 }

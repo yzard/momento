@@ -66,10 +66,7 @@ pub async fn handle_webdav_request(dav_handler: DavHandler, request: Request) ->
     let (mut resp_parts, resp_body) = dav_response.into_parts();
 
     if method.as_str() == "MKCOL" && resp_parts.status == StatusCode::METHOD_NOT_ALLOWED {
-        info!(
-            "WebDAV MKCOL already exists, returning 204 for {}",
-            path
-        );
+        info!("WebDAV MKCOL already exists, returning 204 for {}", path);
         resp_parts.status = StatusCode::NO_CONTENT;
     }
 
@@ -78,15 +75,9 @@ pub async fn handle_webdav_request(dav_handler: DavHandler, request: Request) ->
         Err(e) => {
             error!(
                 "WebDAV response body read failed: {} {} (status={}, error={})",
-                method,
-                path,
-                resp_parts.status,
-                e
+                method, path, resp_parts.status, e
             );
-            trace!(
-                "WebDAV response body read error details: {:?}",
-                e
-            );
+            trace!("WebDAV response body read error details: {:?}", e);
             return Response::builder()
                 .status(500)
                 .body(Body::from("Failed to read response body"))
@@ -97,28 +88,17 @@ pub async fn handle_webdav_request(dav_handler: DavHandler, request: Request) ->
     if resp_parts.status.is_server_error() {
         error!(
             "WebDAV server error: {} {} -> {}",
-            method,
-            path,
-            resp_parts.status
+            method, path, resp_parts.status
         );
-        trace!(
-            "WebDAV server error headers: {:?}",
-            resp_parts.headers
-        );
+        trace!("WebDAV server error headers: {:?}", resp_parts.headers);
     }
 
     if method == Method::PUT {
-        info!(
-            "WebDAV upload response: {} -> {}",
-            path,
-            resp_parts.status
-        );
+        info!("WebDAV upload response: {} -> {}", path, resp_parts.status);
     } else {
         debug!(
             "WebDAV response: {} {} -> {}",
-            method,
-            path,
-            resp_parts.status
+            method, path, resp_parts.status
         );
     }
 

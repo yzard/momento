@@ -4,16 +4,13 @@ use momento_api::config::{load_config, save_default_config};
 use momento_api::constants::{
     CONFIG_PATH, DATA_DIR, IMPORTS_DIR, ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR, WEBDAV_DIR,
 };
-use momento_api::database::{
-    create_pool, fetch_one, init_database, insert_returning_id, queries,
-};
+use momento_api::database::{create_pool, init_database, queries};
 use momento_api::logging::{init_logging, install_panic_hook};
 use momento_api::processor::importer::start_webdav_import_job;
 use momento_api::processor::regenerator::generate_missing_metadata;
 use momento_api::routes::cleanup_expired_trash;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::info;
 
 fn init_directories() {
     for dir in [
@@ -28,6 +25,14 @@ fn init_directories() {
     }
 }
 
+fn ensure_backtrace_enabled() {
+    let has_backtrace = std::env::var_os("RUST_LIB_BACKTRACE").is_some()
+        || std::env::var_os("RUST_BACKTRACE").is_some();
+    if !has_backtrace {
+        std::env::set_var("RUST_LIB_BACKTRACE", "1");
+    }
+}
+
 fn create_default_admin(
     pool: &momento_api::database::DbPool,
     config: &momento_api::config::Config,
@@ -38,10 +43,9 @@ fn create_default_admin(
     };
 
     // Check if admin exists
-    let existing: Option<i64> =
-        fetch_one(&conn, queries::users::CHECK_ADMIN, &[], |row| row.get(0))
-            .ok()
-            .flatten();
+    let existing: Option<i64> = conn
+        .query_row(queries::users::CHECK_ADMIN, [], |row| row.get(0))
+        .ok();
 
     if existing.is_some() {
         return;
@@ -53,14 +57,10 @@ fn create_default_admin(
         Err(_) => return,
     };
 
-    let _ = insert_returning_id(
-        &conn,
+    let email = format!("{}@localhost", config.admin.username);
+    let _ = conn.execute(
         queries::users::INSERT_ADMIN,
-        &[
-            &config.admin.username,
-            &format!("{}@localhost", config.admin.username),
-            &hashed,
-        ],
+        (&config.admin.username, &email, &hashed),
     );
 }
 
@@ -103,6 +103,8 @@ async fn main() {
         }
     }
 
+    ensure_backtrace_enabled();
+
     // Initialize logging
     init_logging();
     install_panic_hook();
@@ -133,7 +135,7 @@ async fn main() {
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
-    info!("Starting Momento API on {}", addr);
+    println!("Starting Momento API on {}", addr);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr)

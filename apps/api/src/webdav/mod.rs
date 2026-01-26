@@ -1,16 +1,11 @@
 mod auth;
 mod handler;
 
-use axum::{
-    body::Body,
-    extract::Request,
-    middleware,
-    response::IntoResponse,
-    response::Response,
-    routing::any,
-    Router,
-};
 use axum::http::{uri::PathAndQuery, StatusCode, Uri};
+use axum::{
+    body::Body, extract::Request, middleware, response::IntoResponse, response::Response,
+    routing::any, Router,
+};
 
 use crate::auth::AppState;
 use crate::constants::WEBDAV_DIR;
