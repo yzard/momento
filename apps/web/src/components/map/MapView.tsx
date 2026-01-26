@@ -5,7 +5,7 @@ import 'leaflet/dist/leaflet.css'
 import ClusterMarker from './ClusterMarker'
 import { useMapClusters, type MapCluster } from '../../hooks/useMapClusters'
 import type { BoundingBox } from '../../api/map'
-import { Loader2, Map as MapIcon } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 
 const VIEWPORT_STORAGE_KEY = 'map_viewport'
 
@@ -125,7 +125,7 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
   const mapRef = useRef<LeafletMap | null>(null)
   const [bounds, setBounds] = useState<BoundingBox | null>(null)
   const [zoom, setZoom] = useState(initialZoom)
-  const { clusters, isLoading, totalCount, supercluster, error } = useMapClusters({ bounds, zoom })
+  const { clusters, isLoading, supercluster, error } = useMapClusters({ bounds, zoom })
 
   const handleViewportChange = ({ bounds: nextBounds, zoom: nextZoom }: MapViewportUpdate) => {
     setBounds(nextBounds)
@@ -178,22 +178,6 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
         >
           Retry
         </button>
-      </div>
-    )
-  }
-
-  if (!isLoading && bounds && totalCount === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-6 bg-muted/5 rounded-xl border border-border/50">
-        <div className="p-6 bg-background rounded-full border border-border/50 shadow-lg">
-          <MapIcon className="w-10 h-10 opacity-60 text-primary" strokeWidth={1.5} />
-        </div>
-        <div className="text-center">
-          <h3 className="text-xl font-medium text-foreground font-display tracking-tight">No geotagged photos</h3>
-          <p className="text-sm mt-2 max-w-xs mx-auto font-medium">
-            Photos with GPS location data will appear on this map.
-          </p>
-        </div>
       </div>
     )
   }
