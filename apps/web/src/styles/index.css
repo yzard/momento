@@ -97,19 +97,6 @@
   }
 
   .map-marker__bubble {
-    animation: mapMarkerPop 180ms ease-out;
     transform-origin: center;
-    will-change: transform, opacity;
-  }
-}
-
-@keyframes mapMarkerPop {
-  0% {
-    opacity: 0;
-    transform: scale(0.7);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
   }
 }

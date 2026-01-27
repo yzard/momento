@@ -7,8 +7,6 @@ description = "Self-hosted photo management backend"
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
-axum-extra = { version = "0.9", features = ["typed-header"] }
-tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -48,13 +46,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "blo
 glob = "0.3"
 lazy_static = "1.4"
 serde_urlencoded = "0.7"
-validator = { version = "0.18", features = ["derive"] }
 futures = "0.3"
 mime_guess = "2"
-async-trait = "0.1"
-
-# HTTP headers
-headers = "0.4"
 
 # Geospatial
 geohash = "0.13"

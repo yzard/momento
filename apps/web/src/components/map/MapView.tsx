@@ -108,6 +108,24 @@ function MapViewportTracker({ onViewportChange }: { onViewportChange: (update: M
   return null
 }
 
+function MapZoomTracker({ onZoomChange }: { onZoomChange: (zoom: number) => void }) {
+  const rafRef = useRef<number | null>(null)
+  const map = useMapEvents({
+    zoom: () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      rafRef.current = requestAnimationFrame(() => {
+        onZoomChange(map.getZoom())
+      })
+    },
+  })
+
+  useEffect(() => () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+  }, [])
+
+  return null
+}
+
 function MapRefSetter({ onReady }: { onReady: (map: LeafletMap) => void }) {
   const map = useMap()
 
@@ -124,19 +142,21 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
   const initialZoom = savedViewport?.zoom ?? 2
   const mapRef = useRef<LeafletMap | null>(null)
   const [bounds, setBounds] = useState<BoundingBox | null>(null)
-  const [zoom, setZoom] = useState(initialZoom)
-  const { clusters, isLoading, supercluster, error } = useMapClusters({ bounds, zoom })
+  const [dataZoom, setDataZoom] = useState(initialZoom)
+  const [renderZoom, setRenderZoom] = useState(initialZoom)
+  const { clusters, isLoading, supercluster, error } = useMapClusters({ bounds, zoom: renderZoom, dataZoom })
 
   const handleViewportChange = ({ bounds: nextBounds, zoom: nextZoom }: MapViewportUpdate) => {
     setBounds(nextBounds)
-    setZoom(nextZoom)
+    setDataZoom(nextZoom)
+    setRenderZoom(nextZoom)
   }
 
   const handleClusterClick = (cluster: MapCluster, latitude: number, longitude: number) => {
     const { count, representativeId, cluster_id: clusterId, cellId } = cluster.properties
 
-    if (count > 1 && zoom < 16) {
-      const targetZoom = clusterId ? supercluster.getClusterExpansionZoom(clusterId) : Math.min(16, zoom + 2)
+    if (count > 1 && renderZoom < 16) {
+      const targetZoom = clusterId ? supercluster.getClusterExpansionZoom(clusterId) : Math.min(16, renderZoom + 2)
       mapRef.current?.setView([latitude, longitude], targetZoom, { animate: true })
       return
     }
@@ -187,6 +207,9 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
       <MapContainer
         center={initialCenter}
         zoom={initialZoom}
+        zoomAnimation
+        markerZoomAnimation
+        fadeAnimation
         style={{ height: '100%', width: '100%' }}
       >
         <MapRefSetter onReady={(map) => {
@@ -194,6 +217,7 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
         }} />
         <MapViewportPersistence />
         <MapViewportTracker onViewportChange={handleViewportChange} />
+        <MapZoomTracker onZoomChange={setRenderZoom} />
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
           url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
@@ -201,10 +225,14 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
         {clusters.map((cluster) => {
           const [lng, lat] = cluster.geometry.coordinates as [number, number]
           const { count, representativeId } = cluster.properties
+          const fallbackKey = `${lat}-${lng}`
+          const clusterKey = cluster.properties.cluster
+            ? `cluster-${cluster.properties.cluster_id ?? fallbackKey}`
+            : `cell-${cluster.properties.cellId ?? representativeId ?? fallbackKey}`
 
           return (
             <ClusterMarker
-              key={`${lat}-${lng}-${count}-${representativeId ?? 'cluster'}`}
+              key={clusterKey}
               latitude={lat}
               longitude={lng}
               count={count}

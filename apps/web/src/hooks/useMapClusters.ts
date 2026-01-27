@@ -6,6 +6,7 @@ import { mapApi, type BoundingBox } from '../api/map'
 interface UseMapClustersProps {
   bounds: BoundingBox | null
   zoom: number
+  dataZoom: number
 }
 
 export type ClusterProperties = {
@@ -20,7 +21,7 @@ export type ClusterProperties = {
 
 export type MapCluster = Supercluster.ClusterFeature<ClusterProperties> | Supercluster.PointFeature<ClusterProperties>
 
-export function useMapClusters({ bounds, zoom }: UseMapClustersProps) {
+export function useMapClusters({ bounds, zoom, dataZoom }: UseMapClustersProps) {
   const [clusters, setClusters] = useState<MapCluster[]>([])
   const superclusterRef = useRef<Supercluster<ClusterProperties, ClusterProperties>>(
     new Supercluster({
@@ -43,12 +44,12 @@ export function useMapClusters({ bounds, zoom }: UseMapClustersProps) {
 
   // Fetch cluster data from backend
   const { data: backendData, isLoading, error } = useQuery({
-    queryKey: ['map-clusters', bounds, zoom],
+    queryKey: ['map-clusters', bounds, dataZoom],
     queryFn: () => {
       if (!bounds) return { clusters: [], totalCount: 0 }
       // Only fetch from backend if zoom is low enough to need server-side aggregation
       // or if we need fresh data for the viewport
-      return mapApi.getClusters(bounds, zoom)
+      return mapApi.getClusters(bounds, dataZoom)
     },
     enabled: !!bounds,
     staleTime: 5000, // Keep data fresh for 5s
