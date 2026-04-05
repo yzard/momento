@@ -1,18 +1,13 @@
 FROM node:20-alpine AS frontend-builder
 
-WORKDIR /app
+WORKDIR /app/build/web/workspace
 
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY src/web/package.json ./src/web/
-
-RUN pnpm install --frozen-lockfile
-
 COPY src/web ./src/web
 
-WORKDIR /app/src/web
-RUN pnpm build
+RUN pnpm install --frozen-lockfile && pnpm --dir /app/build/web/workspace/src/web build && mkdir -p /app/dist/web && cp -R /app/build/web/workspace/src/web/dist/. /app/dist/web/
 
 FROM rust:1-alpine AS backend-builder
 
@@ -20,11 +15,9 @@ WORKDIR /app
 
 RUN apk add --no-cache musl-dev
 
-COPY src/api/Cargo.toml src/api/Cargo.lock ./src/api/
 COPY src/api ./src/api
 
-WORKDIR /app/src/api
-RUN cargo build --release
+RUN CARGO_TARGET_DIR=/app/build/api/target cargo build --release --manifest-path /app/src/api/Cargo.toml && mkdir -p /app/dist/api && cp /app/build/api/target/release/momento-api /app/dist/api/momento-api
 
 FROM alpine:latest
 
@@ -38,9 +31,8 @@ RUN apk add --no-cache \
     tzdata \
     libheif
 
-COPY --from=backend-builder /app/src/api/target/release/momento-api /app/momento-api
-
-COPY --from=frontend-builder /app/src/web/dist ./static
+COPY --from=backend-builder /app/dist/api/momento-api /app/momento-api
+COPY --from=frontend-builder /app/dist/web ./static
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

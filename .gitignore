@@ -8,6 +8,7 @@ dist-node/
 build/
 .next/
 .turbo/
+.vite-temp/
 target/
 **/target/
 *.tsbuildinfo
