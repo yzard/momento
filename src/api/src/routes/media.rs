@@ -21,9 +21,7 @@ use crate::models::{
     MediaListRequest, MediaListResponse, MediaResponse, MediaUpdateRequest, PreviewBatchRequest,
     PreviewBatchResponse, ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
 };
-use crate::processor::media_processor::{
-    calculate_geohash, delete_from_rtree, insert_into_rtree,
-};
+use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
 use crate::processor::thumbnails::generate_image_preview;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -186,7 +184,24 @@ async fn list_media(
 
     if let Some(group_by) = request.group_by.as_deref() {
         let limit = request.limit.unwrap_or(100);
-        let rows = fetch_timeline_rows(&conn, current_user.id, limit, request.cursor.as_deref())?;
+        let mut rows = fetch_timeline_rows(&conn, current_user.id, limit, request.cursor.as_deref())?;
+
+        if rows.is_empty() && request.cursor.is_none() {
+            let fallback_items = fetch_all(
+                &conn,
+                queries::media::SELECT_ALL_FOR_USER,
+                &[&current_user.id],
+                map_media_row,
+            )?;
+            rows = fallback_items
+                .into_iter()
+                .map(|media| {
+                    let date_taken = media.date_taken.clone();
+                    (media, date_taken)
+                })
+                .collect();
+        }
+
         let has_more = rows.len() > limit as usize;
         let rows: Vec<_> = rows.into_iter().take(limit as usize).collect();
 
@@ -331,30 +346,27 @@ async fn update_media(
         return Err(AppError::NotFound("Media not found".to_string()));
     }
 
-    let mut updates = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-    if let Some(ref date_taken) = request.date_taken {
-        updates.push("date_taken = ?");
-        params.push(Box::new(date_taken.clone()));
-    }
-
-    if let Some(gps_latitude) = request.gps_latitude {
-        updates.push("gps_latitude = ?");
-        params.push(Box::new(gps_latitude));
-    }
-
-    if let Some(gps_longitude) = request.gps_longitude {
-        updates.push("gps_longitude = ?");
-        params.push(Box::new(gps_longitude));
-    }
-
-    if !updates.is_empty() {
-        params.push(Box::new(request.media_id));
-
-        let sql = format!("UPDATE media SET {} WHERE id = ?", updates.join(", "));
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        execute_query(&conn, &sql, &param_refs)?;
+    if request.date_taken.is_some()
+        || request.gps_latitude.is_some()
+        || request.gps_longitude.is_some()
+    {
+        execute_query(
+            &conn,
+            r#"
+            INSERT INTO media_metadata (media_id, date_taken, gps_latitude, gps_longitude)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(media_id) DO UPDATE SET
+                date_taken = COALESCE(excluded.date_taken, media_metadata.date_taken),
+                gps_latitude = COALESCE(excluded.gps_latitude, media_metadata.gps_latitude),
+                gps_longitude = COALESCE(excluded.gps_longitude, media_metadata.gps_longitude)
+            "#,
+            &[
+                &request.media_id,
+                &request.date_taken,
+                &request.gps_latitude,
+                &request.gps_longitude,
+            ],
+        )?;
     }
 
     let media = fetch_one(
@@ -373,8 +385,13 @@ async fn update_media(
 
         execute_query(
             &conn,
-            "UPDATE media SET geohash = ? WHERE id = ?",
-            &[&geohash, &media.id],
+            r#"
+            INSERT INTO media_metadata (media_id, geohash)
+            VALUES (?, ?)
+            ON CONFLICT(media_id) DO UPDATE SET
+                geohash = excluded.geohash
+            "#,
+            &[&media.id, &geohash],
         )?;
 
         delete_from_rtree(&conn, media.id).map_err(AppError::Database)?;

@@ -7,6 +7,12 @@ dist/
 build/
 .next/
 .turbo/
+target/
+**/target/
+
+# Rust
+.cargo/
+*.rs.bk
 
 # Python
 __pycache__/
@@ -60,8 +66,4 @@ pnpm-debug.log*
 *.sln
 
 # Sample data directory (for development)
-/sample_data/database.sqlite
-/sample_data/originals/*
-/sample_data/thumbnails/*
-/sample_data/imports/*
-!sample_data/config.yaml
+sample_data/

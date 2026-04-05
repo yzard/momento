@@ -26,7 +26,6 @@ fn zoom_to_geohash_precision(zoom: u8) -> usize {
     }
 }
 
-
 struct MediaRowData {
     id: i64,
     filename: String,

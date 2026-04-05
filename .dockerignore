@@ -12,6 +12,12 @@ eggs/
 .eggs/
 *.egg-info/
 *.egg
+target/
+**/target/
+
+# Rust
+.cargo/
+*.rs.bk
 
 # IDE and editor
 .idea/
@@ -46,7 +52,7 @@ venv*/
 .ai-todo.md
 AGENTS.md
 *.md
-!apps/api/schema.sql
+!src/api/schema.sql
 
 # Node modules (will be installed fresh in build)
 node_modules/

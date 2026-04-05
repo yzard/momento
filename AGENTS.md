@@ -5,8 +5,8 @@
 ## Project Overview
 
 Momento is a self-hosted photo management application with:
-- **Backend**: Axum + SQLite (Rust) in `apps/api/`
-- **Frontend**: React + TypeScript + Vite + Tailwind in `apps/web/`
+- **Backend**: Axum + SQLite (Rust) in `src/api/`
+- **Frontend**: React + TypeScript + Vite + Tailwind in `src/web/`
 - **Shared**: TypeScript constants in `packages/shared/`
 
 Monorepo managed with pnpm workspaces and Turborepo.
@@ -24,9 +24,9 @@ pnpm lint                 # Lint all packages
 pnpm test                 # Run all tests
 ```
 
-### Backend (apps/api)
+### Backend (src/api)
 ```bash
-cd apps/api
+cd src/api
 
 # Build
 cargo build                # Debug build
@@ -44,9 +44,9 @@ cargo test                 # Run all tests
 cargo test auth            # Run tests matching "auth"
 ```
 
-### Frontend (apps/web)
+### Frontend (src/web)
 ```bash
-cd apps/web
+cd src/web
 
 pnpm dev                  # Dev server (Vite)
 pnpm build                # Production build (tsc + vite)
@@ -142,7 +142,7 @@ const MediaCard: React.FC<{ media: Media }> = ({ media }) => { ... }
 ```
 
 **API Calls**:
-- Use `apiClient` from `apps/web/src/api/client.ts`
+- Use `apiClient` from `src/web/src/api/client.ts`
 - API methods return typed responses
 - URLs relative to baseURL (`/api`)
 
@@ -151,7 +151,7 @@ const MediaCard: React.FC<{ media: Media }> = ({ media }) => { ... }
 ## Project Structure
 
 ```
-apps/
+src/
 ├── api/
 │   ├── src/
 │   │   ├── auth/           # JWT, password, extractors
@@ -206,7 +206,7 @@ packages/
 ## Database
 
 - SQLite with r2d2 connection pooling
-- Schema in `apps/api/schema.sql`
+- Schema in `src/api/schema.sql`
 - Helper functions in `src/database/mod.rs`:
   - `fetch_one()`, `fetch_all()` for queries
   - `execute_query()` for mutations

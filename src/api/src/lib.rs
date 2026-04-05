@@ -11,5 +11,4 @@ pub mod routes;
 pub mod utils;
 pub mod webdav;
 
-
 pub const VERSION: &str = "0.1.0";

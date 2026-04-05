@@ -11,19 +11,31 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS media (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
     filename TEXT NOT NULL,
     original_filename TEXT NOT NULL,
     file_path TEXT NOT NULL,
-    thumbnail_path TEXT,
     media_type TEXT CHECK(media_type IN ('image', 'video')) NOT NULL,
     mime_type TEXT,
+    file_size INTEGER,
+    content_hash TEXT UNIQUE,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS media_metadata (
+    media_id INTEGER PRIMARY KEY,
+    thumbnail_path TEXT,
     width INTEGER,
     height INTEGER,
-    file_size INTEGER,
     duration_seconds REAL,
     date_taken TEXT,
     gps_latitude REAL,
     gps_longitude REAL,
+    gps_altitude REAL,
+    geohash TEXT,
+    location_city TEXT,
+    location_state TEXT,
+    location_country TEXT,
     camera_make TEXT,
     camera_model TEXT,
     lens_make TEXT,
@@ -33,15 +45,9 @@ CREATE TABLE IF NOT EXISTS media (
     f_number REAL,
     focal_length REAL,
     focal_length_35mm REAL,
-    gps_altitude REAL,
-    location_state TEXT,
-    location_country TEXT,
-    location_city TEXT,
     video_codec TEXT,
     keywords TEXT,
-    content_hash TEXT UNIQUE,
-    created_at TEXT DEFAULT (datetime('now')),
-    geohash TEXT
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS albums (
@@ -138,13 +144,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_rtree USING rtree (
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_pagination
-    ON media (date_taken DESC, id DESC);
-
-CREATE INDEX IF NOT EXISTS idx_media_date_taken
-    ON media (date_taken DESC, id DESC);
+    ON media_metadata (date_taken DESC, media_id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_media_gps
-    ON media (gps_latitude, gps_longitude)
+    ON media_metadata (gps_latitude, gps_longitude)
     WHERE gps_latitude IS NOT NULL
       AND gps_longitude IS NOT NULL;
 
@@ -184,4 +187,4 @@ CREATE INDEX IF NOT EXISTS idx_album_access_user
     ON album_access (user_id);
 
 CREATE INDEX IF NOT EXISTS idx_media_geohash
-    ON media (geohash);
+    ON media_metadata (geohash);

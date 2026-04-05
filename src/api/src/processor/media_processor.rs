@@ -427,33 +427,10 @@ pub async fn process_media_file(
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown"),
             &relative_path.to_string_lossy().to_string(),
-            &thumbnail_relative,
             &media_type,
             &metadata.mime_type,
-            &metadata.width,
-            &metadata.height,
             &file_size,
-            &metadata.duration_seconds,
-            &metadata.date_taken.map(|dt| dt.to_rfc3339()),
-            &metadata.gps_latitude,
-            &metadata.gps_longitude,
-            &metadata.camera_make,
-            &metadata.camera_model,
-            &metadata.lens_make,
-            &metadata.lens_model,
-            &metadata.iso,
-            &metadata.exposure_time,
-            &metadata.f_number,
-            &metadata.focal_length,
-            &metadata.focal_length_35mm,
-            &metadata.gps_altitude,
-            &metadata.location_city,
-            &metadata.location_state,
-            &metadata.location_country,
-            &metadata.video_codec,
-            &metadata.keywords,
             &content_hash,
-            &geohash,
         ],
     );
 
@@ -469,6 +446,37 @@ pub async fn process_media_file(
             return None;
         }
     };
+
+    let _ = execute_query(
+        &conn,
+        queries::media::INSERT_METADATA,
+        &[
+            &media_id,
+            &thumbnail_relative,
+            &metadata.width,
+            &metadata.height,
+            &metadata.duration_seconds,
+            &metadata.date_taken.map(|dt| dt.to_rfc3339()),
+            &metadata.gps_latitude,
+            &metadata.gps_longitude,
+            &metadata.gps_altitude,
+            &geohash,
+            &metadata.location_city,
+            &metadata.location_state,
+            &metadata.location_country,
+            &metadata.camera_make,
+            &metadata.camera_model,
+            &metadata.lens_make,
+            &metadata.lens_model,
+            &metadata.iso,
+            &metadata.exposure_time,
+            &metadata.f_number,
+            &metadata.focal_length,
+            &metadata.focal_length_35mm,
+            &metadata.video_codec,
+            &metadata.keywords,
+        ],
+    );
 
     let _ = execute_query(
         &conn,

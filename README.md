@@ -94,13 +94,13 @@ pnpm build --filter @momento/web
 
 **3. Build the backend:**
 ```bash
-cd apps/api
+cd src/api
 cargo build --release
 ```
 
 **4. Run the application:**
 ```bash
-# From the apps/api directory
+# From the src/api directory
 ./target/release/momento-api
 ```
 

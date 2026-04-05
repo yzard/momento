@@ -470,6 +470,7 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                         let _ = conn.execute(
                             queries::regenerator::UPDATE_METADATA,
                             rusqlite::params![
+                                row_id,
                                 width,
                                 height,
                                 date_taken,
@@ -490,8 +491,7 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                                 location_country,
                                 video_codec,
                                 update_keywords,
-                                duration_seconds,
-                                row_id
+                                duration_seconds
                             ],
                         );
 
@@ -501,8 +501,8 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                         };
 
                         if let Err(err) = conn.execute(
-                            "UPDATE media SET geohash = ? WHERE id = ?",
-                            rusqlite::params![geohash, row_id],
+                            "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash",
+                            rusqlite::params![row_id, geohash],
                         ) {
                             error!("Failed to update geohash for {}: {}", row_id, err);
                         }
