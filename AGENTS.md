@@ -7,7 +7,6 @@
 Momento is a self-hosted photo management application with:
 - **Backend**: Axum + SQLite (Rust) in `src/api/`
 - **Frontend**: React + TypeScript + Vite + Tailwind in `src/web/`
-- **Shared**: TypeScript constants in `packages/shared/`
 
 Monorepo managed with pnpm workspaces and Turborepo.
 
@@ -177,10 +176,6 @@ src/
 │   │   ├── hooks/          # Custom hooks
 │   │   └── pages/          # Route pages
 │   └── package.json
-│
-packages/
-└── shared/
-    └── src/constants.ts    # Shared API route constants
 ```
 
 ---

@@ -4,11 +4,13 @@ node_modules/
 
 # Build outputs
 dist/
+dist-node/
 build/
 .next/
 .turbo/
 target/
 **/target/
+*.tsbuildinfo
 
 # Rust
 .cargo/
@@ -49,6 +51,7 @@ coverage/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
+test-results/
 
 # Logs
 *.log

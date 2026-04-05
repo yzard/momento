@@ -14,9 +14,6 @@ importers:
 
   src/web:
     dependencies:
-      '@momento/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
       '@tanstack/react-query':
         specifier: ^5.62.0
         version: 5.90.19(react@18.3.1)
@@ -102,24 +99,6 @@ importers:
       vite:
         specifier: ^6.0.5
         version: 6.4.1(jiti@1.21.7)
-
-  packages/shared:
-    devDependencies:
-      '@eslint/js':
-        specifier: ^9.17.0
-        version: 9.39.2
-      eslint:
-        specifier: ^9.17.0
-        version: 9.39.2(jiti@1.21.7)
-      globals:
-        specifier: ^15.14.0
-        version: 15.15.0
-      typescript:
-        specifier: ~5.7.2
-        version: 5.7.3
-      typescript-eslint:
-        specifier: ^8.18.0
-        version: 8.53.0(eslint@9.39.2(jiti@1.21.7))(typescript@5.7.3)
 
 packages:
 
