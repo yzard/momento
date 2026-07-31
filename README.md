@@ -45,7 +45,7 @@ volumes:
 **2. Start the application:**
 
 ```bash
-docker-compose up -d
+docker compose -f docker/docker-compose.yml up -d
 ```
 
 **3. Access the web interface at `http://localhost:8000`.**
@@ -94,17 +94,23 @@ pnpm build --filter @momento/web
 
 **3. Build the backend:**
 ```bash
-cd src/api
-cargo build --release
+cargo build --release --manifest-path src/backend/Cargo.toml
 ```
 
 **4. Run the application:**
 ```bash
-# From the src/api directory
-./target/release/momento-api
+./src/backend/target/release/momento-api
 ```
 
 The application will be available at `http://localhost:8000`.
+
+### Playground
+
+Run the local playground with its E2E configuration and data:
+
+```bash
+./run_playground.sh
+```
 
 ## Configuration
 

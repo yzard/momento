@@ -184,7 +184,8 @@ async fn list_media(
 
     if let Some(group_by) = request.group_by.as_deref() {
         let limit = request.limit.unwrap_or(100);
-        let mut rows = fetch_timeline_rows(&conn, current_user.id, limit, request.cursor.as_deref())?;
+        let mut rows =
+            fetch_timeline_rows(&conn, current_user.id, limit, request.cursor.as_deref())?;
 
         if rows.is_empty() && request.cursor.is_none() {
             let fallback_items = fetch_all(

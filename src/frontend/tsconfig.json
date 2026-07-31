@@ -17,9 +17,9 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./*"]
     }
   },
-  "include": ["src"],
+  "include": ["*.ts", "*.tsx", "api", "components", "context", "hooks", "lib", "pages", "styles", "utils"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

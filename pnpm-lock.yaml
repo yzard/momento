@@ -12,7 +12,7 @@ importers:
         specifier: ^2.3.0
         version: 2.7.5
 
-  src/web:
+  src/frontend:
     dependencies:
       '@tanstack/react-query':
         specifier: ^5.62.0

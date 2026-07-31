@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "Self-hosted photo management backend"
 
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "momento-api"
+path = "main.rs"
+
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
@@ -59,3 +66,7 @@ http-body-util = "0.1"
 [dev-dependencies]
 axum-test = "15"
 tempfile = "3"
+
+[[test]]
+name = "integration"
+path = "../../tests/backend/main.rs"

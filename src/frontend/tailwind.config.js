@@ -4,7 +4,8 @@ import defaultTheme from 'tailwindcss/defaultTheme';
 export default {
   content: [
     "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
+    "./*.{js,ts,jsx,tsx}",
+    "./{api,components,context,hooks,lib,pages,styles,utils}/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
     container: {

@@ -45,20 +45,22 @@ venv*/
 .gitignore
 
 # Docker (don't include in context recursively)
-.dockerignore
+docker/Dockerfile.dockerignore
 
 # Documentation and planning
 .sisyphus/
 .ai-todo.md
 AGENTS.md
 *.md
-!src/api/schema.sql
+!src/backend/database/schema.sql
 
 # Node modules (will be installed fresh in build)
 node_modules/
 
 # Data directory
 data/
+playground/data/
+playground/output/
 
 # Test files
 tests/

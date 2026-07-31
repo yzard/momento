@@ -1,16 +1,16 @@
 #!/bin/bash
+set -euo pipefail
 
-# Get current date in YYYYMMDD format
 TAG=$(date +%Y%m%d)
 IMAGE_NAME="zhuoyin/momento"
 
-echo "Building Docker image: ${IMAGE_NAME}:${TAG}..."
+cd "$(dirname "$0")/docker"
 
-docker build -t "${IMAGE_NAME}:${TAG}" -t "${IMAGE_NAME}:latest" .
+echo "Building Docker image: ${IMAGE_NAME}:${TAG}..."
+docker build -f Dockerfile -t "${IMAGE_NAME}:${TAG}" -t "${IMAGE_NAME}:latest" ..
 
 echo "Build complete: ${IMAGE_NAME}:${TAG}"
 
-# Uncomment to push to registry
 echo "Pushing Docker images to registry..."
 docker push "${IMAGE_NAME}:${TAG}"
 docker push "${IMAGE_NAME}:latest"
