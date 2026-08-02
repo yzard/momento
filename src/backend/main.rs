@@ -1,9 +1,7 @@
 use momento_api::app::create_app;
 use momento_api::auth::hash_password;
 use momento_api::config::{load_config, save_default_config};
-use momento_api::constants::{
-    CONFIG_PATH, DATA_DIR, IMPORTS_DIR, ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR, WEBDAV_DIR,
-};
+use momento_api::constants::{init_paths, paths};
 use momento_api::database::{create_pool, init_database, queries};
 use momento_api::logging::{init_logging, install_panic_hook};
 use momento_api::processor::importer::start_webdav_import_job;
@@ -12,24 +10,52 @@ use momento_api::routes::cleanup_expired_trash;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-fn init_directories() {
-    for dir in [
-        &*DATA_DIR,
-        &*ORIGINALS_DIR,
-        &*THUMBNAILS_DIR,
-        &*PREVIEWS_DIR,
-        &*IMPORTS_DIR,
-        &*WEBDAV_DIR,
-    ] {
-        std::fs::create_dir_all(dir).ok();
-    }
+struct Cli {
+    config_path: std::path::PathBuf,
+    init_config: bool,
 }
 
-fn ensure_backtrace_enabled() {
-    let has_backtrace = std::env::var_os("RUST_LIB_BACKTRACE").is_some()
-        || std::env::var_os("RUST_BACKTRACE").is_some();
-    if !has_backtrace {
-        std::env::set_var("RUST_LIB_BACKTRACE", "1");
+fn parse_cli() -> Result<Cli, String> {
+    let mut args = std::env::args().skip(1);
+    let mut config_path: Option<std::path::PathBuf> = None;
+    let mut init_config = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-c" | "--config" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a config path"))?;
+                config_path = Some(std::path::PathBuf::from(path));
+            }
+            "--init-config" => init_config = true,
+            "-h" | "--help" => {
+                println!("Usage: momento-api -c|--config PATH [--init-config]");
+                std::process::exit(0);
+            }
+            _ => return Err(format!("unknown argument: {arg}")),
+        }
+    }
+
+    let config_path = config_path.ok_or("missing required argument: -c|--config PATH")?;
+
+    Ok(Cli {
+        config_path,
+        init_config,
+    })
+}
+
+fn init_directories() {
+    let paths = paths();
+    for dir in [
+        &paths.data,
+        &paths.originals,
+        &paths.thumbnails,
+        &paths.previews,
+        &paths.imports,
+        &paths.webdav,
+    ] {
+        std::fs::create_dir_all(dir).ok();
     }
 }
 
@@ -90,10 +116,18 @@ fn start_background_tasks(
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().any(|arg| arg == "--init-config") {
-        match save_default_config(&CONFIG_PATH) {
+    let cli = match parse_cli() {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+
+    if cli.init_config {
+        match save_default_config(&cli.config_path) {
             Ok(_) => {
-                println!("Default configuration saved to {:?}", *CONFIG_PATH);
+                println!("Default configuration saved to {:?}", cli.config_path);
                 std::process::exit(0);
             }
             Err(e) => {
@@ -103,14 +137,21 @@ async fn main() {
         }
     }
 
-    ensure_backtrace_enabled();
-
     // Initialize logging
     init_logging();
     install_panic_hook();
 
     // Load configuration
-    let config = Arc::new(load_config(&CONFIG_PATH));
+    let config = match load_config(&cli.config_path) {
+        Ok(config) => Arc::new(config),
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Derive every filesystem location from the configured data directory
+    init_paths(&config.storage.data_dir);
 
     // Initialize directories
     init_directories();

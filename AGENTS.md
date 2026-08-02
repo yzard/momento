@@ -21,7 +21,7 @@ source of truth, and this file only records what is specific to Momento.
 |-------|---------|
 | `project-structure` | Where every file goes: `src/`, `tests/` mirroring it 1:1, `docs/`, `playground/`, `docker/` |
 | `add-modify-codebase` | How changes land: breaking changes over shims, refactor over copy-paste, unit tests for touched code |
-| `general-coding` | Guard clauses, no broad catch, no default arguments, no backward-compat layers |
+| `general-coding` | Guard clauses, no broad catch, no default arguments, no backward-compat layers, no environment variables in source |
 | `naming-conventions` | Cross-layer name consistency (database → Rust → TypeScript) |
 | `axum-server` | Backend module layout and Axum patterns |
 | `restful-api-design` | Endpoint paths and HTTP methods |
@@ -33,6 +33,32 @@ Three rules are worth repeating because they are the ones most often violated:
 1. **Break the signature, don't add a default.** New argument means every caller is found and updated to pass it explicitly. No default values, no compatibility shims, no deprecated wrappers.
 2. **Extract before you copy.** Implementing something similar to existing code means refactoring the existing code into a shared function first, then calling it from both places.
 3. **Tests ship with the change.** Every added or modified path gets a unit test at its mirrored location under `tests/`, in the same change.
+
+---
+
+## Configuration
+
+Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH` and read **no**
+environment variables. A missing or malformed config is a hard startup failure — it never
+falls back to defaults, because that would silently start the server against the wrong
+data directory.
+
+Every filesystem location derives from one config value:
+
+```yaml
+storage:
+  data_dir: /data          # database.sqlite, originals/, thumbnails/, previews/, imports/, webdav/, ...
+  static_dir: /app/static  # built frontend served as a fallback
+```
+
+`main` calls `constants::init_paths(&config.storage.data_dir)` once after parsing the
+config; everything else reads `constants::paths()`. Never hardcode a path under the data
+directory and never add a new `std::env::var` call — add a config field instead.
+
+`docker/Dockerfile` and `docker/entrypoint.sh` are the one place environment variables
+belong (`PUID`/`PGID`/`UMASK`/`TZ`); they translate into the config file the entrypoint
+generates, and `CMD` passes `-c /data/config.yaml`. `RUST_LOG` and `RUST_BACKTRACE` are
+ecosystem-standard runtime knobs read by `tracing-subscriber`, not application config.
 
 ---
 

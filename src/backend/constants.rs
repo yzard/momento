@@ -1,25 +1,72 @@
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
-    std::env::var("MOMENTO_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/data"))
-});
+/// Every filesystem location the backend writes to, derived from the configured
+/// `storage.data_dir`.
+#[derive(Debug)]
+pub struct Paths {
+    pub data: PathBuf,
+    pub database: PathBuf,
+    pub originals: PathBuf,
+    pub thumbnails: PathBuf,
+    pub thumbnails_tiny: PathBuf,
+    pub previews: PathBuf,
+    pub imports: PathBuf,
+    pub albums: PathBuf,
+    pub trash: PathBuf,
+    pub webdav: PathBuf,
+}
 
-pub static CONFIG_PATH: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("config.yaml"));
-pub static DATABASE_PATH: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("database.sqlite"));
-pub static ORIGINALS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("originals"));
-pub static THUMBNAILS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("thumbnails"));
-pub static THUMBNAILS_TINY_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("thumbnails_tiny"));
-pub static PREVIEWS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("previews"));
-pub static IMPORTS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("imports"));
-pub static ALBUMS_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("albums"));
-pub static TRASH_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("trash"));
-pub static WEBDAV_DIR: Lazy<PathBuf> = Lazy::new(|| DATA_DIR.join("webdav"));
+impl Paths {
+    fn new(data_dir: &Path) -> Self {
+        Self {
+            data: data_dir.to_path_buf(),
+            database: data_dir.join("database.sqlite"),
+            originals: data_dir.join("originals"),
+            thumbnails: data_dir.join("thumbnails"),
+            thumbnails_tiny: data_dir.join("thumbnails_tiny"),
+            previews: data_dir.join("previews"),
+            imports: data_dir.join("imports"),
+            albums: data_dir.join("albums"),
+            trash: data_dir.join("trash"),
+            webdav: data_dir.join("webdav"),
+        }
+    }
+}
+
+static PATHS: OnceLock<Paths> = OnceLock::new();
+
+/// Derives the process-wide paths from the configured data directory.
+///
+/// Call exactly once, from the executable entry point, after the config is parsed and
+/// before anything touches the filesystem.
+pub fn init_paths(data_dir: &Path) {
+    PATHS
+        .set(Paths::new(data_dir))
+        .expect("init_paths called more than once");
+}
+
+/// Returns the process-wide paths. Panics if [`init_paths`] has not run.
+pub fn paths() -> &'static Paths {
+    PATHS
+        .get()
+        .expect("init_paths must run before any filesystem access")
+}
 
 pub const TRASH_RETENTION_DAYS: i64 = 30;
+
+pub const OCR_PLUGIN_ID: i64 = 1;
+pub const OBJECT_DETECTION_PLUGIN_ID: i64 = 2;
+
+pub fn image_text_plugin_name(plugin_id: i64) -> Option<&'static str> {
+    match plugin_id {
+        OCR_PLUGIN_ID => Some("OCR"),
+        OBJECT_DETECTION_PLUGIN_ID => Some("Object Detection"),
+        _ => None,
+    }
+}
 
 pub static IMAGE_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [

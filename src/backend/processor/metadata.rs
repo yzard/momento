@@ -339,10 +339,11 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
             metadata.duration_seconds = duration.parse().ok();
         }
 
-        // Tags
-        if let Some(tags) = format.tags {
+        if let Some(container_metadata) = format.container_metadata {
             // Creation time
-            let creation_time = tags.creation_time.or(tags.com_apple_quicktime_creationdate);
+            let creation_time = container_metadata
+                .creation_time
+                .or(container_metadata.com_apple_quicktime_creationdate);
             if let Some(ct) = creation_time {
                 let clean_ct = ct.replace("Z", "+00:00");
                 if let Ok(dt) = DateTime::parse_from_rfc3339(&clean_ct) {
@@ -351,7 +352,9 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
             }
 
             // Location
-            let location = tags.location.or(tags.com_apple_quicktime_location_iso6709);
+            let location = container_metadata
+                .location
+                .or(container_metadata.com_apple_quicktime_location_iso6709);
             if let Some(loc) = location {
                 if let Some((lat, lon)) = parse_iso6709_location(&loc) {
                     metadata.gps_latitude = Some(lat);
@@ -407,11 +410,12 @@ struct FfprobeStream {
 #[derive(Debug, Deserialize)]
 struct FfprobeFormat {
     duration: Option<String>,
-    tags: Option<FfprobeTags>,
+    #[serde(rename = "tags")]
+    container_metadata: Option<FfprobeContainerMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
-struct FfprobeTags {
+struct FfprobeContainerMetadata {
     creation_time: Option<String>,
     #[serde(rename = "com.apple.quicktime.creationdate")]
     com_apple_quicktime_creationdate: Option<String>,

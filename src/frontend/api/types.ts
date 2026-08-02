@@ -36,11 +36,6 @@ export interface Album {
   createdAt: string
 }
 
-export interface Tag {
-  id: number
-  name: string
-}
-
 export interface ShareLink {
   id: number
   token: string

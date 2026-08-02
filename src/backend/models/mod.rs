@@ -4,7 +4,6 @@ mod imports;
 mod map;
 mod media;
 mod share;
-mod tag;
 mod trash;
 mod user;
 
@@ -14,6 +13,5 @@ pub use imports::*;
 pub use map::*;
 pub use media::*;
 pub use share::*;
-pub use tag::*;
 pub use trash::*;
 pub use user::*;

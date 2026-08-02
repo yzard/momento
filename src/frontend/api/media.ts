@@ -5,6 +5,7 @@ interface MediaListRequest {
   cursor?: string
   limit?: number
   groupBy?: GroupBy
+  search?: string
 }
 
 interface MediaBatchRequest {
@@ -31,6 +32,15 @@ interface TimelineListResponse {
   groups: TimelineGroup[]
   nextCursor: string | null
   hasMore: boolean
+}
+
+interface ImageTextSearchResult {
+  imageId: number
+  plugins: string[]
+}
+
+interface ImageTextSearchResponse {
+  results: ImageTextSearchResult[]
 }
 
 export type { GroupBy }
@@ -214,6 +224,11 @@ export const mediaApi = {
 
   listTimeline: async (params: MediaListRequest = {}): Promise<TimelineListResponse> => {
     const response = await apiClient.post<TimelineListResponse>('/media/list', params)
+    return response.data
+  },
+
+  search: async (search: string): Promise<ImageTextSearchResponse> => {
+    const response = await apiClient.post<ImageTextSearchResponse>('/media/search', { search })
     return response.data
   },
 

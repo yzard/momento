@@ -5,7 +5,7 @@ use std::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::constants::{IMPORTS_DIR, SUPPORTED_EXTENSIONS, WEBDAV_DIR};
+use crate::constants::{paths, SUPPORTED_EXTENSIONS};
 use crate::database::{fetch_one, DbPool};
 use crate::processor::media_processor::{process_media_file, MediaProcessingContext};
 
@@ -164,7 +164,7 @@ use tokio::task::JoinSet;
 pub async fn run_local_import(settings: ImportSettings) {
     start_import_job();
 
-    let files_to_import = collect_import_files(&IMPORTS_DIR);
+    let files_to_import = collect_import_files(&paths().imports);
     update_job_totals(files_to_import.len() as i64);
 
     let effective_concurrency = if settings.concurrency > 0 {
@@ -234,7 +234,7 @@ pub async fn start_webdav_import_job(config: Arc<Config>, pool: DbPool) {
     info!(
         "Starting WebDAV import job: polling every {}s, root={}",
         config.webdav.processing.poll_interval_seconds,
-        WEBDAV_DIR.display()
+        paths().webdav.display()
     );
 
     loop {
@@ -244,18 +244,18 @@ pub async fn start_webdav_import_job(config: Arc<Config>, pool: DbPool) {
 }
 
 async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
-    if !WEBDAV_DIR.exists() {
+    if !paths().webdav.exists() {
         warn!(
             "WebDAV root directory missing, skipping import cycle: {}",
-            WEBDAV_DIR.display()
+            paths().webdav.display()
         );
         return;
     }
 
-    let Ok(entries) = std::fs::read_dir(&*WEBDAV_DIR) else {
+    let Ok(entries) = std::fs::read_dir(&paths().webdav) else {
         error!(
             "Failed to read WebDAV root directory: {}",
-            WEBDAV_DIR.display()
+            paths().webdav.display()
         );
         return;
     };
@@ -329,7 +329,7 @@ async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
     if user_dir_count == 0 {
         debug!(
             "WebDAV import: no user directories found under {}",
-            WEBDAV_DIR.display()
+            paths().webdav.display()
         );
         return;
     }
@@ -383,6 +383,7 @@ async fn process_webdav_file(
         user_id,
         thumbnails: config.thumbnails.clone(),
         reverse_geocoding: Some(config.reverse_geocoding.clone()),
+        llm: config.llm.clone(),
         pool: pool.clone(),
     };
     let result = process_media_file(&processing_path, &processing).await;

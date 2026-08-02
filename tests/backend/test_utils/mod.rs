@@ -1,16 +1,25 @@
 use axum::Router;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
 use momento_api::app::create_app;
 use momento_api::config::Config;
+use momento_api::constants::init_paths;
 use momento_api::database::{init_database, DbPool};
 
 static MEDIA_ID_COUNTER: AtomicI64 = AtomicI64::new(1);
 static USER_ID_COUNTER: AtomicI64 = AtomicI64::new(1);
+static PATHS_INIT: Once = Once::new();
+
+/// Points the process-wide paths at a scratch directory. `init_paths` may only run once
+/// per process, so every test that reaches path-using code goes through this.
+pub fn init_test_paths() {
+    PATHS_INIT.call_once(|| init_paths(Path::new("/tmp/momento-test-data")));
+}
 
 pub fn create_test_db() -> DbPool {
     let manager = SqliteConnectionManager::memory().with_init(|conn| {
@@ -30,6 +39,7 @@ pub fn create_test_db() -> DbPool {
 }
 
 pub fn create_test_app() -> (Router, DbPool) {
+    init_test_paths();
     let pool = create_test_db();
     let config = Arc::new(Config::default());
     let app = create_app(config, pool.clone());

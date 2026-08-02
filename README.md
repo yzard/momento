@@ -104,6 +104,35 @@ cargo build --release --manifest-path src/backend/Cargo.toml
 
 The application will be available at `http://localhost:8000`.
 
+### Image OCR Service
+
+Momento can send imported images to the standalone Rust LLM service in
+`src/backend_llm`. Build and run it separately:
+
+```bash
+cargo build --release --manifest-path src/backend_llm/Cargo.toml
+./src/backend_llm/target/release/llm-service -c /data/config_llm.yaml
+```
+
+The stable inference endpoint is `POST /v1/infer` with multipart `task` and
+`file` fields. Responses contain `task`, `provider`, `model`, `text`, and
+`markdown`; provider adapters own model-specific output normalization.
+
+The service supports `baidu` and `local` providers in `config_llm.yaml`. The
+playground uses the local provider and starts
+`vllm/vllm-openai:unlimited-ocr` through Docker, so Docker with the NVIDIA
+runtime and a GPU are required. On Linux, verify the NVIDIA Container Toolkit
+is configured for Docker before running the playground:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.9.1-base-ubuntu24.04 nvidia-smi
+```
+
+Momento's `llm.enabled` setting controls whether imported images are submitted
+for OCR. Object detection has a
+reserved endpoint and storage plugin, but remains disabled until a detector is
+configured.
+
 ### Playground
 
 Run the local playground with its E2E configuration and data:
@@ -111,6 +140,10 @@ Run the local playground with its E2E configuration and data:
 ```bash
 ./run_playground.sh
 ```
+
+The playground reads `playground/config.yaml` and `playground/config_llm.yaml`
+directly. Runtime data remains under `playground/data`; the runner does not
+copy configuration files into that directory.
 
 ## Configuration
 
@@ -153,7 +186,9 @@ openssl rand -hex 32
 
 ## Environment Variables
 
-When running via Docker, the following environment variables are available:
+The server itself reads no environment variables — it is configured entirely by the
+config file passed with `-c`. The variables below are consumed by the container's
+entrypoint script, not by the application:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -161,8 +196,14 @@ When running via Docker, the following environment variables are available:
 | `PGID` | 1000 | Group ID for file permissions |
 | `UMASK` | 022 | Umask for created files |
 | `TZ` | UTC | System timezone (e.g., `America/New_York`) |
-| `MOMENTO_DATA_DIR` | /data | Path to data storage directory |
-| `MOMENTO_STATIC_DIR` | /app/static | Path to frontend static files |
+
+Storage locations are set in the config file instead:
+
+```yaml
+storage:
+  data_dir: /data          # database and all media directories
+  static_dir: /app/static  # built frontend served as a fallback
+```
 
 ## Default Credentials
 

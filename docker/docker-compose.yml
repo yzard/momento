@@ -1,4 +1,19 @@
 services:
+  llm-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.llm
+    ports:
+      - "8100:8100"
+    volumes:
+      - ../playground/config_llm.yaml:/data/config_llm.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   momento:
     build:
       context: ..
@@ -12,6 +27,9 @@ services:
       - TZ=UTC
     volumes:
       - momento_data:/data
+    depends_on:
+      llm-service:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/api/v1/healthcheck"]

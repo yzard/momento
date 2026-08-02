@@ -26,7 +26,7 @@ mkdir -p /data/originals /data/thumbnails /data/imports /data/previews /data/tra
 chown -R momento:momento /data
 
 if [ ! -f /data/config.yaml ]; then
-    su-exec momento:momento /app/momento-api --init-config
+    su-exec momento:momento /app/momento-api -c /data/config.yaml --init-config
 fi
 
 echo "Running as user momento ($(id -u momento):$(id -g momento))"

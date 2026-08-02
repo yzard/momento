@@ -13,13 +13,14 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::{ORIGINALS_DIR, PREVIEWS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR};
+use crate::constants::{image_text_plugin_name, paths};
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DeleteMediaResponse, MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest,
-    MediaListRequest, MediaListResponse, MediaResponse, MediaUpdateRequest, PreviewBatchRequest,
-    PreviewBatchResponse, ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
+    DeleteMediaResponse, ImageTextSearchRequest, ImageTextSearchResponse, ImageTextSearchResult,
+    MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaListRequest, MediaListResponse,
+    MediaResponse, MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse,
+    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
 };
 use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
 use crate::processor::thumbnails::generate_image_preview;
@@ -31,6 +32,7 @@ use std::path::PathBuf;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/media/list", post(list_media))
+        .route("/media/search", post(search_media))
         .route("/media/get-batch", post(get_media_batch))
         .route("/media/update", post(update_media))
         .route("/media/delete", post(delete_media))
@@ -181,17 +183,23 @@ async fn list_media(
     Json(request): Json<MediaListRequest>,
 ) -> AppResult<Json<MediaListResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
+    let search = normalize_image_text_search(request.search.as_deref());
 
     if let Some(group_by) = request.group_by.as_deref() {
         let limit = request.limit.unwrap_or(100);
-        let mut rows =
-            fetch_timeline_rows(&conn, current_user.id, limit, request.cursor.as_deref())?;
+        let mut rows = fetch_timeline_rows(
+            &conn,
+            current_user.id,
+            limit,
+            request.cursor.as_deref(),
+            &search,
+        )?;
 
-        if rows.is_empty() && request.cursor.is_none() {
+        if rows.is_empty() && request.cursor.is_none() && search.is_empty() {
             let fallback_items = fetch_all(
                 &conn,
                 queries::media::SELECT_ALL_FOR_USER,
-                &[&current_user.id],
+                &[&current_user.id, &search, &search],
                 map_media_row,
             )?;
             rows = fallback_items
@@ -236,7 +244,7 @@ async fn list_media(
         let items = fetch_all(
             &conn,
             queries::media::SELECT_ALL_FOR_USER,
-            &[&current_user.id],
+            &[&current_user.id, &search, &search],
             map_media_row,
         )?;
 
@@ -259,6 +267,8 @@ async fn list_media(
                 queries::media::SELECT_PAGINATED_FOR_USER,
                 &[
                     &current_user.id,
+                    &search,
+                    &search,
                     &cursor_date,
                     &cursor_date,
                     &cursor_id,
@@ -267,10 +277,10 @@ async fn list_media(
                 map_media_row,
             )?
         } else {
-            fetch_default_media(&conn, current_user.id, limit)?
+            fetch_default_media(&conn, current_user.id, limit, &search)?
         }
     } else {
-        fetch_default_media(&conn, current_user.id, limit)?
+        fetch_default_media(&conn, current_user.id, limit, &search)?
     };
 
     let has_more = rows.len() > limit as usize;
@@ -291,6 +301,62 @@ async fn list_media(
         has_more,
         groups: None,
     }))
+}
+
+async fn search_media(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<ImageTextSearchRequest>,
+) -> AppResult<Json<ImageTextSearchResponse>> {
+    let search = normalize_image_text_search(Some(request.search.as_str()));
+    if search.is_empty() {
+        return Ok(Json(ImageTextSearchResponse {
+            results: Vec::new(),
+        }));
+    }
+
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let matches: Vec<(i64, i64)> = fetch_all(
+        &conn,
+        queries::image_text::SEARCH_FOR_USER,
+        &[&search, &current_user.id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let mut results: HashMap<i64, Vec<String>> = HashMap::new();
+    for (image_id, plugin_id) in matches {
+        let Some(plugin_name) = image_text_plugin_name(plugin_id) else {
+            continue;
+        };
+
+        let plugins = results.entry(image_id).or_default();
+        if !plugins.iter().any(|name| name == plugin_name) {
+            plugins.push(plugin_name.to_string());
+        }
+    }
+
+    let mut results: Vec<ImageTextSearchResult> = results
+        .into_iter()
+        .map(|(image_id, plugins)| ImageTextSearchResult { image_id, plugins })
+        .collect();
+    results.sort_by_key(|result| result.image_id);
+
+    Ok(Json(ImageTextSearchResponse { results }))
+}
+
+fn normalize_image_text_search(search: Option<&str>) -> String {
+    let search = search.unwrap_or_default().trim();
+    if search.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "%{}%",
+        search
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
 }
 
 async fn get_media_batch(
@@ -457,7 +523,7 @@ async fn get_media_file(
     )?
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
-    let full_path = ORIGINALS_DIR.join(&media.file_path);
+    let full_path = paths().originals.join(&media.file_path);
     if !full_path.exists() {
         return Err(AppError::NotFound("File not found".to_string()));
     }
@@ -477,12 +543,15 @@ fn fetch_default_media(
     conn: &crate::database::DbConn,
     user_id: i64,
     limit: i32,
+    search: &str,
 ) -> AppResult<Vec<MediaResponse>> {
     fetch_all(
         conn,
         queries::media::SELECT_PAGINATED_FOR_USER,
         &[
             &user_id,
+            &search,
+            &search,
             &Utc::now().to_rfc3339(),
             &Utc::now().to_rfc3339(),
             &i64::MAX,
@@ -497,6 +566,8 @@ fn fetch_default_media(
             queries::media::SELECT_PAGINATED_FOR_USER,
             &[
                 &user_id,
+                &search,
+                &search,
                 &future_date,
                 &future_date,
                 &i64::MAX,
@@ -550,6 +621,7 @@ fn fetch_timeline_rows(
     user_id: i64,
     limit: i32,
     cursor: Option<&str>,
+    search: &str,
 ) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
     if let Some(cursor) = cursor {
         let parts: Vec<&str> = cursor.split('_').collect();
@@ -561,6 +633,8 @@ fn fetch_timeline_rows(
                 queries::timeline::SELECT_PAGINATED,
                 &[
                     &user_id,
+                    &search,
+                    &search,
                     &cursor_date,
                     &cursor_date,
                     &cursor_id,
@@ -571,18 +645,19 @@ fn fetch_timeline_rows(
         }
     }
 
-    fetch_default_timeline(conn, user_id, limit)
+    fetch_default_timeline(conn, user_id, limit, search)
 }
 
 fn fetch_default_timeline(
     conn: &crate::database::DbConn,
     user_id: i64,
     limit: i32,
+    search: &str,
 ) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
     fetch_all(
         conn,
         queries::timeline::SELECT_DEFAULT,
-        &[&user_id, &(limit + 1)],
+        &[&user_id, &search, &search, &(limit + 1)],
         map_timeline_row,
     )
 }
@@ -614,8 +689,8 @@ async fn get_media_thumbnail_batch(
     }
 
     let thumbnail_base_dir = match request.size {
-        ThumbnailSize::Normal => &*THUMBNAILS_DIR,
-        ThumbnailSize::Tiny => &*THUMBNAILS_TINY_DIR,
+        ThumbnailSize::Normal => &paths().thumbnails,
+        ThumbnailSize::Tiny => &paths().thumbnails_tiny,
     };
 
     let rows: Vec<(i64, Option<String>, String, String, i64)> = fetch_all(
@@ -705,7 +780,7 @@ async fn get_media_preview_batch(
     let mut previews: HashMap<i64, Option<String>> = HashMap::new();
 
     for (media_id, file_path, media_type, mime_type) in rows {
-        let original_path = ORIGINALS_DIR.join(&file_path);
+        let original_path = paths().originals.join(&file_path);
         if !original_path.exists() {
             previews.insert(media_id, None);
             continue;
@@ -731,7 +806,8 @@ async fn get_media_preview_batch(
             "{}_preview.jpg",
             original_path.file_stem().unwrap().to_string_lossy()
         );
-        let preview_path = PREVIEWS_DIR
+        let preview_path = paths()
+            .previews
             .join(current_user.id.to_string())
             .join(&preview_filename);
 

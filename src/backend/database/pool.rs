@@ -1,4 +1,4 @@
-use crate::constants::DATABASE_PATH;
+use crate::constants::paths;
 use crate::database::schema::sql;
 use crate::error::{AppError, AppResult};
 use r2d2::{Pool, PooledConnection};
@@ -9,7 +9,7 @@ pub type DbPool = Pool<SqliteConnectionManager>;
 pub type DbConn = PooledConnection<SqliteConnectionManager>;
 
 pub fn create_pool() -> AppResult<DbPool> {
-    let manager = SqliteConnectionManager::file(&*DATABASE_PATH).with_init(|conn| {
+    let manager = SqliteConnectionManager::file(&paths().database).with_init(|conn| {
         conn.execute_batch(sql::PRAGMA_FOREIGN_KEYS_ON)?;
         Ok(())
     });

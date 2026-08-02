@@ -12,7 +12,7 @@ use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
 use crate::auth::{verify_password, AppState};
-use crate::constants::{ORIGINALS_DIR, THUMBNAILS_DIR};
+use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries, DbConn};
 use crate::error::{AppError, AppResult};
 use crate::models::{MediaResponse, ShareVerifyRequest};
@@ -262,7 +262,7 @@ async fn get_shared_media_file(
     )?
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
-    let full_path = ORIGINALS_DIR.join(&media.file_path);
+    let full_path = paths().originals.join(&media.file_path);
     if !full_path.exists() {
         return Err(AppError::NotFound("File not found".to_string()));
     }
@@ -327,7 +327,7 @@ async fn get_shared_thumbnail(
     let thumbnail_path =
         thumbnail_path.ok_or_else(|| AppError::NotFound("Thumbnail not available".to_string()))?;
 
-    let full_path = THUMBNAILS_DIR.join(&thumbnail_path);
+    let full_path = paths().thumbnails.join(&thumbnail_path);
     if !full_path.exists() {
         return Err(AppError::NotFound("Thumbnail file not found".to_string()));
     }

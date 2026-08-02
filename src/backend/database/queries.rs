@@ -1,12 +1,3 @@
-pub mod schema {
-    pub const TABLE_EXISTS: &str = r#"
-    SELECT COUNT(*)
-      FROM sqlite_master
-     WHERE type = 'table'
-       AND name = ?
-    "#;
-}
-
 pub mod media {
     pub const INSERT: &str = r#"
     INSERT INTO media (
@@ -91,7 +82,15 @@ pub mod media {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
-     ORDER BY mm.date_taken DESC, m.id DESC
+       AND (
+            ? = ''
+         OR m.id IN (
+                SELECT image_text.image_id
+                  FROM image_text
+                  WHERE image_text.string LIKE ? ESCAPE '\'
+            )
+       )
+      ORDER BY mm.date_taken DESC, m.id DESC
     "#;
 
     pub const SELECT_PAGINATED_FOR_USER: &str = r#"
@@ -128,9 +127,17 @@ pub mod media {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND (
+            ? = ''
+         OR m.id IN (
+                SELECT image_text.image_id
+                  FROM image_text
+                  WHERE image_text.string LIKE ? ESCAPE '\'
+            )
+       )
        AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
-     ORDER BY mm.date_taken DESC, m.id DESC
-     LIMIT ?
+      ORDER BY mm.date_taken DESC, m.id DESC
+      LIMIT ?
     "#;
 
     pub const SELECT_BY_ID: &str = r#"
@@ -383,8 +390,16 @@ pub mod timeline {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
-     ORDER BY mm.date_taken DESC, m.id DESC
-     LIMIT ?
+       AND (
+            ? = ''
+         OR m.id IN (
+                SELECT image_text.image_id
+                  FROM image_text
+                  WHERE image_text.string LIKE ? ESCAPE '\'
+            )
+       )
+      ORDER BY mm.date_taken DESC, m.id DESC
+      LIMIT ?
     "#;
 
     pub const SELECT_PAGINATED: &str = r#"
@@ -421,29 +436,73 @@ pub mod timeline {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND (
+            ? = ''
+         OR m.id IN (
+                SELECT image_text.image_id
+                  FROM image_text
+                  WHERE image_text.string LIKE ? ESCAPE '\'
+            )
+       )
        AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
-     ORDER BY mm.date_taken DESC, m.id DESC
-     LIMIT ?
+      ORDER BY mm.date_taken DESC, m.id DESC
+      LIMIT ?
+     "#;
+}
+
+pub mod image_text {
+    pub const INSERT: &str = r#"
+    INSERT INTO image_text (
+        image_id
+      , plugin_id
+      , string
+    ) VALUES (?, ?, ?)
+    "#;
+
+    pub const DELETE_BY_IMAGE_ID: &str = r#"
+    DELETE FROM image_text
+     WHERE image_id = ?
+    "#;
+
+    pub const DELETE_BY_IMAGE_ID_AND_PLUGIN: &str = r#"
+    DELETE FROM image_text
+     WHERE image_id = ?
+       AND plugin_id = ?
+    "#;
+
+    pub const SELECT_MISSING_FOR_PLUGIN: &str = r#"
+    SELECT m.id
+         , m.file_path
+      FROM media AS m
+     WHERE m.media_type = 'image'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM image_text
+             WHERE image_text.image_id = m.id
+               AND image_text.plugin_id = ?
+       )
+     ORDER BY m.id
+    "#;
+
+    pub const SEARCH_FOR_USER: &str = r#"
+    SELECT image_text.image_id
+         , image_text.plugin_id
+      FROM image_text
+     WHERE image_text.string LIKE ? ESCAPE '\'
+       AND EXISTS (
+            SELECT 1
+              FROM media_access AS ma
+             WHERE ma.media_id = image_text.image_id
+               AND ma.user_id = ?
+               AND ma.deleted_at IS NULL
+       )
+     GROUP BY image_text.image_id
+            , image_text.plugin_id
+     ORDER BY image_text.image_id
     "#;
 }
 
 pub mod regenerator {
-    pub const SELECT_TAG_ID: &str = r#"
-    SELECT id
-      FROM tags
-     WHERE name = ?
-    "#;
-
-    pub const INSERT_TAG: &str = r#"
-    INSERT INTO tags (name)
-    VALUES (?)
-    "#;
-
-    pub const INSERT_MEDIA_TAG: &str = r#"
-    INSERT OR IGNORE INTO media_tags (media_id, tag_id)
-    VALUES (?, ?)
-    "#;
-
     pub const SELECT_THUMBNAILS: &str = r#"
     SELECT m.id
          , mm.thumbnail_path
@@ -779,57 +838,6 @@ pub mod map {
             geohash_clause = geohash_clause
         )
     }
-}
-
-pub mod tags {
-    pub const SELECT_ALL: &str = r#"
-    SELECT id
-         , name
-         , created_at
-      FROM tags
-     ORDER BY name
-    "#;
-
-    pub const SELECT_ID_BY_NAME: &str = r#"
-    SELECT id
-      FROM tags
-     WHERE name = ?
-    "#;
-
-    pub const INSERT: &str = r#"
-    INSERT INTO tags (name)
-    VALUES (?)
-    "#;
-
-    pub const SELECT_BY_ID: &str = r#"
-    SELECT id
-         , name
-         , created_at
-      FROM tags
-     WHERE id = ?
-    "#;
-
-    pub const CHECK_EXISTS: &str = r#"
-    SELECT id
-      FROM tags
-     WHERE id = ?
-    "#;
-
-    pub const DELETE: &str = r#"
-    DELETE FROM tags
-     WHERE id = ?
-    "#;
-
-    pub const ADD_TO_MEDIA: &str = r#"
-    INSERT OR IGNORE INTO media_tags (media_id, tag_id)
-    VALUES (?, ?)
-    "#;
-
-    pub const REMOVE_FROM_MEDIA: &str = r#"
-    DELETE FROM media_tags
-     WHERE media_id = ?
-       AND tag_id = ?
-    "#;
 }
 
 pub mod users {

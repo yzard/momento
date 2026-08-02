@@ -5,11 +5,14 @@ import { cn } from '../../lib/utils'
 
 interface RegenerationStatus {
   status: string
-  totalMedia: number
-  processedMedia: number
-  updatedMetadata: number
-  generatedThumbnails: number
-  updatedTags: number
+  totalJobs: number
+  completedJobs: number
+  metadataJobs: number
+  metadataCompleted: number
+  thumbnailJobs: number
+  thumbnailsCompleted: number
+  imageTextJobs: number
+  imageTextCompleted: number
   startedAt: string | null
   completedAt: string | null
   errors: string[]
@@ -68,8 +71,8 @@ export default function MetadataPanel() {
   }
 
   const isRunning = status?.status === 'running'
-  const progress = status && status.totalMedia > 0
-    ? Math.round((status.processedMedia / status.totalMedia) * 100)
+  const progress = status && status.totalJobs > 0
+    ? Math.round((status.completedJobs / status.totalJobs) * 100)
     : 0
 
   return (
@@ -77,7 +80,7 @@ export default function MetadataPanel() {
       <h3 className="text-lg font-medium mb-4 text-foreground">Regenerate Metadata</h3>
 
       <p className="text-muted-foreground mb-6 font-light">
-        Generate or regenerate metadata and thumbnails for your media library.
+        Generate or regenerate metadata, OCR text, object-detection text, and thumbnails for your media library.
       </p>
 
       <div className="flex flex-col sm:flex-row gap-4">
@@ -90,7 +93,7 @@ export default function MetadataPanel() {
           )}
         >
           {isTriggering ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          Generate Metadata & Thumbnails
+          Generate
         </button>
 
         <button
@@ -107,7 +110,7 @@ export default function MetadataPanel() {
       </div>
 
       <p className="text-xs text-muted-foreground text-center mt-4">
-        "Generate Metadata & Thumbnails" generates metadata and thumbnails for files that don't have them. "Clean & Regenerate All" clears all metadata and thumbnails first, then regenerates everything.
+         "Generate" queues missing metadata, thumbnails, OCR text, and configured object-detection text. "Clean & Regenerate All" clears all metadata, image text, and thumbnails first, then queues regeneration jobs.
       </p>
 
       {status && status.status !== 'idle' && (
@@ -116,12 +119,12 @@ export default function MetadataPanel() {
             <span className="text-muted-foreground">
               Status: <span className="font-medium text-foreground uppercase tracking-wide">{status.status}</span>
             </span>
-            {status.totalMedia > 0 && (
-              <span className="text-muted-foreground font-mono">{status.processedMedia} / {status.totalMedia} files</span>
+            {status.totalJobs > 0 && (
+              <span className="text-muted-foreground font-mono">{status.completedJobs} / {status.totalJobs} jobs</span>
             )}
           </div>
 
-          {isRunning && status.totalMedia > 0 && (
+          {isRunning && status.totalJobs > 0 && (
             <div className="flex items-center gap-3 mb-6">
               <div className="flex-1 bg-muted/50 rounded-full h-2 overflow-hidden">
                 <div
@@ -142,15 +145,15 @@ export default function MetadataPanel() {
           <div className="grid grid-cols-3 gap-4 text-sm">
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Metadata</span>
-              <span className="font-bold text-lg text-foreground">{status.updatedMetadata}</span>
+              <span className="font-bold text-lg text-foreground">{status.metadataCompleted} / {status.metadataJobs}</span>
             </div>
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Thumbnails</span>
-              <span className="font-bold text-lg text-foreground">{status.generatedThumbnails}</span>
+              <span className="font-bold text-lg text-foreground">{status.thumbnailsCompleted} / {status.thumbnailJobs}</span>
             </div>
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
-              <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Tags</span>
-              <span className="font-bold text-lg text-foreground">{status.updatedTags}</span>
+              <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Image Text</span>
+              <span className="font-bold text-lg text-foreground">{status.imageTextCompleted} / {status.imageTextJobs}</span>
             </div>
           </div>
 

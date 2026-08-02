@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use crate::config::Config;
-use crate::constants::{ORIGINALS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR};
+use crate::constants::paths;
 use crate::database::execute_query;
-use crate::database::{fetch_all, queries, DbPool};
+use crate::database::{fetch_all, queries, DbConn, DbPool};
+use crate::llm_client::{generate_missing_object_detection, generate_missing_ocr};
 use crate::processor::media_processor::{
     calculate_geohash, delete_from_rtree, generate_complete_metadata, insert_into_rtree,
 };
@@ -41,11 +42,14 @@ impl fmt::Display for RegenerationStatus {
 #[derive(Debug, Clone)]
 pub struct RegenerationJob {
     pub status: RegenerationStatus,
-    pub total_media: i64,
-    pub processed_media: i64,
-    pub updated_metadata: i64,
-    pub generated_thumbnails: i64,
-    pub updated_tags: i64,
+    pub total_jobs: i64,
+    pub completed_jobs: i64,
+    pub metadata_jobs: i64,
+    pub metadata_completed: i64,
+    pub thumbnail_jobs: i64,
+    pub thumbnails_completed: i64,
+    pub image_text_jobs: i64,
+    pub image_text_completed: i64,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub errors: Vec<String>,
@@ -55,11 +59,14 @@ impl Default for RegenerationJob {
     fn default() -> Self {
         Self {
             status: RegenerationStatus::Idle,
-            total_media: 0,
-            processed_media: 0,
-            updated_metadata: 0,
-            generated_thumbnails: 0,
-            updated_tags: 0,
+            total_jobs: 0,
+            completed_jobs: 0,
+            metadata_jobs: 0,
+            metadata_completed: 0,
+            thumbnail_jobs: 0,
+            thumbnails_completed: 0,
+            image_text_jobs: 0,
+            image_text_completed: 0,
             started_at: None,
             completed_at: None,
             errors: Vec::new(),
@@ -134,76 +141,86 @@ fn push_job_error(errors: &mut Vec<String>, message: &str) {
     }
 }
 
+pub(crate) fn record_regeneration_error(message: &str) {
+    let mut job = CURRENT_JOB.write().unwrap();
+    push_job_error(&mut job.errors, message);
+}
+
+pub(crate) fn record_image_text_job_completed() {
+    let mut job = CURRENT_JOB.write().unwrap();
+    job.image_text_completed += 1;
+    job.completed_jobs += 1;
+}
+
 fn finalize_job_cancelled() {
     let mut job = CURRENT_JOB.write().unwrap();
     job.status = RegenerationStatus::Cancelled;
     job.completed_at = Some(Utc::now());
 }
 
-fn update_job_totals(total_media: i64) {
+async fn generate_missing_llm_metadata(config: &Config, pool: &DbPool) {
+    if is_cancel_requested() {
+        return;
+    }
+    generate_missing_ocr(config, pool).await;
+    if is_cancel_requested() {
+        return;
+    }
+    generate_missing_object_detection(config, pool).await;
+}
+
+fn update_job_totals(metadata_jobs: i64, thumbnail_jobs: i64, image_text_jobs: i64) {
     let mut job = CURRENT_JOB.write().unwrap();
-    job.total_media = total_media;
+    job.metadata_jobs = metadata_jobs;
+    job.thumbnail_jobs = thumbnail_jobs;
+    job.image_text_jobs = image_text_jobs;
+    job.total_jobs = metadata_jobs + thumbnail_jobs + image_text_jobs;
 }
 
 fn update_job_progress(
-    metadata_updated: bool,
-    thumbnail_generated: bool,
-    tags_updated: i64,
+    metadata_job_completed: bool,
+    thumbnail_job_completed: bool,
     error: Option<&str>,
 ) {
     let mut job = CURRENT_JOB.write().unwrap();
-    job.processed_media += 1;
-    if metadata_updated {
-        job.updated_metadata += 1;
+    if metadata_job_completed {
+        job.metadata_completed += 1;
+        job.completed_jobs += 1;
     }
-    if thumbnail_generated {
-        job.generated_thumbnails += 1;
+    if thumbnail_job_completed {
+        job.thumbnails_completed += 1;
+        job.completed_jobs += 1;
     }
-    job.updated_tags += tags_updated;
     if let Some(msg) = error {
         push_job_error(&mut job.errors, msg);
     }
 }
 
-fn merge_keyword_tags(conn: &rusqlite::Connection, media_id: i64, keywords: Option<&str>) -> i64 {
-    let keywords = match keywords {
-        Some(kw) if !kw.is_empty() => kw,
-        _ => return 0,
-    };
-
-    let tags: Vec<&str> = keywords
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if tags.is_empty() {
+fn count_missing_image_text_jobs(conn: &DbConn, config: &Config) -> i64 {
+    if !config.llm.enabled {
         return 0;
     }
 
-    let mut inserted_count = 0;
-    for tag in tags {
-        // Check if tag exists
-        let existing: Option<i64> = conn
-            .query_row(queries::regenerator::SELECT_TAG_ID, [tag], |row| row.get(0))
-            .ok();
-
-        let tag_id = match existing {
-            Some(id) => id,
-            None => {
-                conn.execute(queries::regenerator::INSERT_TAG, [tag]).ok();
-                conn.last_insert_rowid()
-            }
-        };
-
-        conn.execute(
-            queries::regenerator::INSERT_MEDIA_TAG,
-            rusqlite::params![media_id, tag_id],
+    let mut total = 0;
+    for plugin_id in [
+        crate::constants::OCR_PLUGIN_ID,
+        crate::constants::OBJECT_DETECTION_PLUGIN_ID,
+    ] {
+        if plugin_id == crate::constants::OBJECT_DETECTION_PLUGIN_ID
+            && !config.llm.object_detection_enabled
+        {
+            continue;
+        }
+        total += fetch_all(
+            conn,
+            queries::image_text::SELECT_MISSING_FOR_PLUGIN,
+            &[&plugin_id],
+            |row| row.get::<_, i64>(0),
         )
-        .ok();
-        inserted_count += 1;
+        .map(|rows| rows.len() as i64)
+        .unwrap_or(0);
     }
-
-    inserted_count
+    total
 }
 
 pub fn clear_all_metadata_and_thumbnails(pool: &DbPool) -> i64 {
@@ -223,11 +240,12 @@ pub fn clear_all_metadata_and_thumbnails(pool: &DbPool) -> i64 {
 
     for (id, thumbnail_path) in rows {
         if let Some(thumb_path) = thumbnail_path {
-            let thumb_file = THUMBNAILS_DIR.join(&thumb_path);
+            let thumb_file = paths().thumbnails.join(&thumb_path);
             let _ = std::fs::remove_file(&thumb_file);
         }
 
         let _ = conn.execute(queries::regenerator::CLEAR_METADATA, [id]);
+        let _ = conn.execute(queries::image_text::DELETE_BY_IMAGE_ID, [id]);
         cleared_count += 1;
     }
 
@@ -302,7 +320,7 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                 let sem = hash_semaphore.clone();
                 async move {
                     let _permit = sem.acquire().await.unwrap();
-                    let full_path = ORIGINALS_DIR.join(&path);
+                    let full_path = paths().originals.join(&path);
                     if let Ok(hash) = calculate_file_hash(&full_path).await {
                         let _ = tokio::task::spawn_blocking(move || {
                             if let Ok(c) = pool.get() {
@@ -379,9 +397,13 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
         missing_metadata,
         missing_thumbnails
     );
-    update_job_totals(count as i64);
+    let metadata_jobs = missing_metadata as i64;
+    let thumbnail_jobs = missing_thumbnails as i64;
+    let image_text_jobs = count_missing_image_text_jobs(&conn, config);
+    update_job_totals(metadata_jobs, thumbnail_jobs, image_text_jobs);
 
     if count == 0 {
+        generate_missing_llm_metadata(config, pool).await;
         finalize_job_success();
         return;
     }
@@ -409,11 +431,11 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                     return None;
                 }
 
-                let original_path = ORIGINALS_DIR.join(&row.file_path);
+                let original_path = paths().originals.join(&row.file_path);
                 if !original_path.exists() {
                     let msg = format!("Missing file: {}", row.file_path);
                     error!("{}", msg);
-                    update_job_progress(false, false, 0, Some(&msg));
+                    update_job_progress(false, false, Some(&msg));
                     return Some(());
                 }
 
@@ -456,7 +478,6 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                 let location_country =
                     choose(row.location_country.clone(), metadata.location_country);
                 let keywords = choose(row.keywords.clone(), metadata.keywords);
-                let kw_clone = keywords.clone();
                 let duration_seconds = choose(row.duration_seconds, metadata.duration_seconds);
                 let focal_length_35mm = choose(row.focal_length_35mm, metadata.focal_length_35mm);
                 let video_codec = choose(row.video_codec.clone(), metadata.video_codec);
@@ -524,14 +545,12 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                     error!("Failed to update metadata DB for {}: {}", row_id, e);
                 }
 
-                let metadata_updated = row.width.is_none() || row.height.is_none();
-                let mut thumbnail_generated = false;
-
+                let metadata_job = row.width.is_none() || row.height.is_none();
                 let thumbnail_missing = row.thumbnail_path.is_none()
                     || row
                         .thumbnail_path
                         .as_ref()
-                        .map(|p| !THUMBNAILS_DIR.join(p).exists())
+                        .map(|p| !paths().thumbnails.join(p).exists())
                         .unwrap_or(true);
 
                 if thumbnail_missing {
@@ -548,14 +567,14 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                             .to_string()
                     });
 
-                    let thumbnail_output = THUMBNAILS_DIR.join(&thumbnail_relative);
-                    let tiny_thumbnail_output = THUMBNAILS_TINY_DIR.join(&thumbnail_relative);
+                    let thumbnail_output = paths().thumbnails.join(&thumbnail_relative);
+                    let tiny_thumbnail_output = paths().thumbnails_tiny.join(&thumbnail_relative);
 
                     if let Some(parent) = tiny_thumbnail_output.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
 
-                    thumbnail_generated = if row.media_type == "image" {
+                    let thumbnail_generated = if row.media_type == "image" {
                         let normal_ok = generate_image_thumbnail(
                             &original_path,
                             &thumbnail_output,
@@ -612,20 +631,7 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                     }
                 }
 
-                let pool_clone = pool.clone();
-                let row_id = row.id;
-
-                let tags_updated = tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = pool_clone.get() {
-                        merge_keyword_tags(&conn, row_id, kw_clone.as_deref())
-                    } else {
-                        0
-                    }
-                })
-                .await
-                .unwrap_or(0);
-
-                update_job_progress(metadata_updated, thumbnail_generated, tags_updated, None);
+                update_job_progress(metadata_job, thumbnail_missing, None);
                 Some(())
             }
         })
@@ -633,20 +639,18 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
 
     while (stream.next().await).is_some() {}
 
-    let job = get_regeneration_status();
-    info!(
-        "Generation completed. Metadata updated: {}, Thumbnails generated: {}",
-        job.updated_metadata, job.generated_thumbnails
-    );
+    generate_missing_llm_metadata(&config, &pool).await;
 
     let job = get_regeneration_status();
     info!(
-        "Generation completed. Metadata updated: {}, Thumbnails generated: {}",
-        job.updated_metadata, job.generated_thumbnails
+        "Generation completed. Metadata updated: {}, Thumbnails generated: {}, image text updated: {}",
+        job.metadata_completed, job.thumbnails_completed, job.image_text_completed
     );
 
     if is_cancel_requested() {
         finalize_job_cancelled();
+    } else if !job.errors.is_empty() {
+        finalize_job_failure("Regeneration completed with errors");
     } else {
         finalize_job_success();
     }

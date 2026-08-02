@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS albums (
     FOREIGN KEY (cover_media_id) REFERENCES media(id) ON DELETE SET NULL
 );
 
+DROP TABLE IF EXISTS media_tags;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS schema_version;
+
 CREATE TABLE IF NOT EXISTS album_media (
     album_id INTEGER NOT NULL,
     media_id INTEGER NOT NULL,
@@ -69,20 +73,6 @@ CREATE TABLE IF NOT EXISTS album_media (
     PRIMARY KEY (album_id, media_id),
     FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS media_tags (
-    media_id INTEGER NOT NULL,
-    tag_id INTEGER NOT NULL,
-    PRIMARY KEY (media_id, tag_id),
-    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
-    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS share_links (
@@ -143,6 +133,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_rtree USING rtree (
     max_lon
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS image_text USING fts5 (
+    image_id UNINDEXED,
+    plugin_id UNINDEXED,
+    string,
+    tokenize = 'unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS delete_image_text_after_media_delete
+    AFTER DELETE ON media
+BEGIN
+    DELETE FROM image_text
+     WHERE image_id = OLD.id;
+END;
+
 CREATE INDEX IF NOT EXISTS idx_media_pagination
     ON media_metadata (date_taken DESC, media_id DESC);
 
@@ -163,12 +167,6 @@ CREATE INDEX IF NOT EXISTS idx_albums_user
 
 CREATE INDEX IF NOT EXISTS idx_album_media_order
     ON album_media (album_id, position);
-
-CREATE INDEX IF NOT EXISTS idx_tags_name
-    ON tags (name);
-
-CREATE INDEX IF NOT EXISTS idx_media_tags_tag
-    ON media_tags (tag_id);
 
 CREATE INDEX IF NOT EXISTS idx_share_token
     ON share_links (token);

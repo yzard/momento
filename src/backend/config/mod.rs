@@ -6,7 +6,7 @@ use crate::constants::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -32,6 +32,33 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             debug: false,
+        }
+    }
+}
+
+/// Filesystem locations. `data_dir` is the root every media directory and the database
+/// are derived from; `static_dir` holds the built frontend the server falls back to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    #[serde(default = "default_static_dir")]
+    pub static_dir: PathBuf,
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("/data")
+}
+
+fn default_static_dir() -> PathBuf {
+    PathBuf::from("/app/static")
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            static_dir: default_static_dir(),
         }
     }
 }
@@ -294,10 +321,81 @@ impl Default for RegenerateConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_llm_service_url")]
+    pub service_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_llm_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_llm_startup_timeout_seconds")]
+    pub startup_timeout_seconds: u64,
+    #[serde(default = "default_llm_ready_poll_interval_seconds")]
+    pub ready_poll_interval_seconds: u64,
+    #[serde(default = "default_llm_ready_connection_timeout_seconds")]
+    pub ready_connection_timeout_seconds: u64,
+    #[serde(default = "default_llm_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+    #[serde(default)]
+    pub object_detection_enabled: bool,
+    #[serde(default = "default_object_detection_endpoint")]
+    pub object_detection_endpoint: String,
+}
+
+fn default_llm_service_url() -> String {
+    "http://127.0.0.1:8100".to_string()
+}
+
+fn default_llm_timeout_seconds() -> u64 {
+    180
+}
+
+fn default_llm_startup_timeout_seconds() -> u64 {
+    1800
+}
+
+fn default_llm_ready_poll_interval_seconds() -> u64 {
+    5
+}
+
+fn default_llm_ready_connection_timeout_seconds() -> u64 {
+    5
+}
+
+fn default_llm_max_concurrent_requests() -> usize {
+    1
+}
+
+fn default_object_detection_endpoint() -> String {
+    "/v1/infer".to_string()
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_url: default_llm_service_url(),
+            api_key: String::new(),
+            timeout_seconds: default_llm_timeout_seconds(),
+            startup_timeout_seconds: default_llm_startup_timeout_seconds(),
+            ready_poll_interval_seconds: default_llm_ready_poll_interval_seconds(),
+            ready_connection_timeout_seconds: default_llm_ready_connection_timeout_seconds(),
+            max_concurrent_requests: default_llm_max_concurrent_requests(),
+            object_detection_enabled: false,
+            object_detection_endpoint: default_object_detection_endpoint(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
     #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
@@ -310,17 +408,25 @@ pub struct Config {
     pub reverse_geocoding: ReverseGeocodingConfig,
     #[serde(default)]
     pub regenerate: RegenerateConfig,
+    #[serde(default)]
+    pub llm: LlmConfig,
 }
 
-pub fn load_config(config_path: &Path) -> Config {
+/// Reads and parses the config file. A missing or malformed file is an error: silently
+/// falling back to defaults would start the server against the wrong data directory.
+pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     if !config_path.exists() {
-        return Config::default();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("config file not found: {}", config_path.display()),
+        ));
     }
 
-    match fs::read_to_string(config_path) {
-        Ok(content) => serde_yaml::from_str(&content).unwrap_or_default(),
-        Err(_) => Config::default(),
-    }
+    let content = fs::read_to_string(config_path)?;
+
+    serde_yaml::from_str(&content).map_err(|e| {
+        std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
+    })
 }
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {

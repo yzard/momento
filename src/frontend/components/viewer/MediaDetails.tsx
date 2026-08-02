@@ -1,4 +1,4 @@
-import { Calendar, Camera, MapPin, FileType, Tag, Smartphone } from 'lucide-react'
+import { Calendar, Camera, MapPin, FileType, KeyRound, Smartphone } from 'lucide-react'
 import type { Media } from '../../api/types'
 import { cn } from '../../lib/utils'
 
@@ -136,7 +136,7 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
       value: (locationName || coords) ? <LocationValue /> : null 
     },
     {
-      icon: Tag,
+      icon: KeyRound,
       label: 'Keywords',
       value: keywordsList.length > 0 ? (
         <div className="flex flex-wrap gap-1.5 pt-1">

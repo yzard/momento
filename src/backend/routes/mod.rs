@@ -5,7 +5,6 @@ mod map;
 mod media;
 mod public;
 mod share;
-mod tags;
 mod trash;
 mod users;
 
@@ -22,7 +21,6 @@ pub fn api_router() -> Router<AppState> {
         .merge(media::thumbnail_router())
         .merge(media::preview_router())
         .merge(albums::router())
-        .merge(tags::router())
         .merge(map::router())
         .merge(share::router())
         .merge(public::router())

@@ -41,6 +41,7 @@ pub struct MediaListRequest {
     #[serde(default)]
     pub limit: Option<i32>,
     pub group_by: Option<String>,
+    pub search: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +64,25 @@ pub struct MediaListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MediaBatchResponse {
     pub items: Vec<MediaResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTextSearchRequest {
+    pub search: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTextSearchResult {
+    pub image_id: i64,
+    pub plugins: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTextSearchResponse {
+    pub results: Vec<ImageTextSearchResult>,
 }
 
 #[derive(Debug, Deserialize)]

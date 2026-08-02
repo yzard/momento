@@ -8,7 +8,7 @@ use axum::{
 };
 
 use crate::auth::AppState;
-use crate::constants::WEBDAV_DIR;
+use crate::constants::paths;
 
 pub use auth::WebDAVUser;
 use auth::{basic_auth_middleware, path_guard_middleware};
@@ -53,7 +53,7 @@ async fn webdav_handler(request: Request<Body>) -> Response {
     parts.uri = uri;
     let request = Request::from_parts(parts, body);
 
-    let user_root = WEBDAV_DIR.join(&user.username);
+    let user_root = paths().webdav.join(&user.username);
     let dav_handler = create_dav_handler(&user_root);
 
     handle_webdav_request(dav_handler, request).await
@@ -67,7 +67,7 @@ pub fn webdav_router(app_state: AppState) -> Router<AppState> {
 
     tracing::info!(
         "WebDAV server enabled at /webdav, root: {}/<username>",
-        WEBDAV_DIR.display()
+        paths().webdav.display()
     );
 
     Router::new()

@@ -43,11 +43,11 @@ ENV PUID=1000 \
     PGID=1000 \
     UMASK=022 \
     TZ=UTC \
-    RUST_BACKTRACE=full \
-    MOMENTO_DATA_DIR=/data \
-    MOMENTO_STATIC_DIR=/app/static
+    RUST_BACKTRACE=full
 
 EXPOSE 8000
 
+# The server reads no environment variables: storage.data_dir (/data) and
+# storage.static_dir (/app/static) come from the config file the entrypoint generates.
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/app/momento-api"]
+CMD ["/app/momento-api", "-c", "/data/config.yaml"]

@@ -23,11 +23,14 @@ interface ImportStatus {
 
 interface RegenerationStatus {
   status: string
-  totalMedia: number
-  processedMedia: number
-  updatedMetadata: number
-  generatedThumbnails: number
-  updatedTags: number
+  totalJobs: number
+  completedJobs: number
+  metadataJobs: number
+  metadataCompleted: number
+  thumbnailJobs: number
+  thumbnailsCompleted: number
+  imageTextJobs: number
+  imageTextCompleted: number
   startedAt: string | null
   completedAt: string | null
   errors: string[]

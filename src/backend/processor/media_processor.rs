@@ -5,10 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::config::{ReverseGeocodingConfig, ThumbnailConfig};
-use crate::constants::{
-    IMAGE_EXTENSIONS, ORIGINALS_DIR, THUMBNAILS_DIR, THUMBNAILS_TINY_DIR, VIDEO_EXTENSIONS,
-};
+use crate::config::{LlmConfig, ReverseGeocodingConfig, ThumbnailConfig};
+use crate::constants::{paths, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
 use crate::database::{execute_query, fetch_one, insert_returning_id, queries, DbConn, DbPool};
 use crate::processor::metadata::{extract_image_metadata, extract_video_metadata, MediaMetadata};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
@@ -19,6 +17,7 @@ pub struct MediaProcessingContext {
     pub user_id: i64,
     pub thumbnails: ThumbnailConfig,
     pub reverse_geocoding: Option<ReverseGeocodingConfig>,
+    pub llm: LlmConfig,
     pub pool: DbPool,
 }
 
@@ -69,7 +68,7 @@ fn save_original_file(
     );
 
     let relative_path = PathBuf::from(&year_month).join(&new_filename);
-    let dest_path = ORIGINALS_DIR.join(&relative_path);
+    let dest_path = paths().originals.join(&relative_path);
 
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent)?;
@@ -104,7 +103,7 @@ pub async fn generate_thumbnails(
 
     let thumbnail_relative = PathBuf::from(parent_name).join(&thumbnail_filename);
 
-    let thumbnail_path = THUMBNAILS_DIR.join(&thumbnail_relative);
+    let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
     if let Some(parent) = thumbnail_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -128,7 +127,7 @@ pub async fn generate_thumbnails(
         .await
     };
 
-    let tiny_thumbnail_path = THUMBNAILS_TINY_DIR.join(&thumbnail_relative);
+    let tiny_thumbnail_path = paths().thumbnails_tiny.join(&thumbnail_relative);
     if let Some(parent) = tiny_thumbnail_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -253,16 +252,13 @@ pub async fn generate_complete_metadata(
 
     if let Some(geo_config) = reverse_geo_config {
         if geo_config.enabled
-            && metadata.gps_latitude.is_some()
-            && metadata.gps_longitude.is_some()
             && (metadata.location_state.is_none() || metadata.location_country.is_none())
         {
-            let (city, state, country) = reverse_geocode(
-                geo_config,
-                metadata.gps_latitude.unwrap(),
-                metadata.gps_longitude.unwrap(),
-            )
-            .await;
+            let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude)
+            else {
+                return metadata;
+            };
+            let (city, state, country) = reverse_geocode(geo_config, latitude, longitude).await;
             if city.is_some() {
                 metadata.location_city = city;
             }
@@ -490,6 +486,22 @@ pub async fn process_media_file(
         }
     }
 
+    if media_type == "image" && context.llm.enabled {
+        match crate::llm_client::LlmClient::new(&context.llm) {
+            Ok(client) => {
+                if let Err(error) = client
+                    .ocr_and_store(&context.pool, media_id, &dest_path)
+                    .await
+                {
+                    tracing::warn!("OCR failed for media {}: {}", media_id, error);
+                }
+            }
+            Err(error) => {
+                tracing::warn!("failed to initialize OCR for media {}: {}", media_id, error)
+            }
+        }
+    }
+
     tracing::info!(
         "Media processing completed for {} in {:?}",
         source_path.display(),
@@ -499,13 +511,13 @@ pub async fn process_media_file(
 }
 
 pub fn delete_media_files(file_path: &str, thumbnail_path: Option<&str>) {
-    let raw_file = ORIGINALS_DIR.join(file_path);
+    let raw_file = paths().originals.join(file_path);
     if raw_file.exists() {
         let _ = fs::remove_file(&raw_file);
     }
 
     if let Some(thumb_path) = thumbnail_path {
-        let thumb_file = THUMBNAILS_DIR.join(thumb_path);
+        let thumb_file = paths().thumbnails.join(thumb_path);
         if thumb_file.exists() {
             let _ = fs::remove_file(&thumb_file);
         }
