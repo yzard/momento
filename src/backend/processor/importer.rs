@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::constants::{paths, SUPPORTED_EXTENSIONS};
 use crate::database::{fetch_one, DbPool};
 use crate::processor::media_processor::{process_media_file, MediaProcessingContext};
+use crate::processor::metadata::supplemental_metadata_path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportStatus {
@@ -167,11 +168,13 @@ pub async fn run_local_import(settings: ImportSettings) {
     let files_to_import = collect_import_files(&paths().imports);
     update_job_totals(files_to_import.len() as i64);
 
-    let effective_concurrency = if settings.concurrency > 0 {
+    let requested_concurrency = if settings.concurrency > 0 {
         settings.concurrency
     } else {
         num_cpus::get()
     };
+    let pool_capacity = settings.processing.pool.max_size() as usize;
+    let effective_concurrency = requested_concurrency.min(pool_capacity.saturating_sub(1).max(1));
     let semaphore = Arc::new(Semaphore::new(effective_concurrency));
     let delete_after_import = settings.delete_after_import;
     let processing = settings.processing;
@@ -209,6 +212,19 @@ pub async fn run_local_import(settings: ImportSettings) {
                             Some(&format!("Failed to delete {}: {}", file_path.display(), e)),
                         );
                         return;
+                    }
+                    if let Some(sidecar_path) = supplemental_metadata_path(&file_path) {
+                        if let Err(e) = tokio::fs::remove_file(sidecar_path).await {
+                            update_job_progress(
+                                false,
+                                Some(&format!(
+                                    "Failed to delete supplemental metadata for {}: {}",
+                                    file_path.display(),
+                                    e
+                                )),
+                            );
+                            return;
+                        }
                     }
                 }
 
@@ -353,6 +369,7 @@ async fn process_webdav_file(
         .unwrap_or("unknown");
 
     info!("WebDAV processing: {} for user {}", filename, user_id);
+    let supplemental_path = supplemental_metadata_path(file_path);
 
     let processing_dir = user_dir.join(".processing");
     if let Err(e) = std::fs::create_dir_all(&processing_dir) {
@@ -403,6 +420,11 @@ async fn process_webdav_file(
                 }
                 Err(e) => {
                     warn!("Failed to cleanup processed file: {}", e);
+                }
+            }
+            if let Some(supplemental_path) = supplemental_path {
+                if let Err(e) = tokio::fs::remove_file(supplemental_path).await {
+                    warn!("Failed to cleanup supplemental metadata: {}", e);
                 }
             }
         }

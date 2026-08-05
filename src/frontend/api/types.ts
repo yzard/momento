@@ -13,6 +13,8 @@ export interface Media {
   gpsLongitude: number | null
   cameraMake: string | null
   cameraModel: string | null
+  lensMake: string | null
+  lensModel: string | null
   iso: number | null
   exposureTime: string | null
   fNumber: number | null
@@ -24,6 +26,7 @@ export interface Media {
   videoCodec: string | null
   focalLength35mm: number | null
   keywords: string | null
+  contentHash: string | null
   createdAt: string
 }
 

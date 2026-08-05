@@ -111,14 +111,15 @@ Momento can send imported images to the standalone Rust LLM service in
 
 ```bash
 cargo build --release --manifest-path src/backend_llm/Cargo.toml
-./src/backend_llm/target/release/llm-service -c /data/config_llm.yaml
+./src/backend_llm/target/release/llm-service -c /data/config_llm.toml
 ```
 
 The stable inference endpoint is `POST /v1/infer` with multipart `task` and
-`file` fields. Responses contain `task`, `provider`, `model`, `text`, and
-`markdown`; provider adapters own model-specific output normalization.
+`file` fields. Responses contain `task`, `provider`, `modelType`,
+`modelVersion`, `text`, `markdown`, and task-specific fields such as `tags`;
+provider adapters own model-specific output normalization.
 
-The service supports `baidu` and `local` providers in `config_llm.yaml`. The
+The service supports `baidu` and `local` providers in `config_llm.toml`. The
 playground uses the local provider and starts
 `vllm/vllm-openai:unlimited-ocr` through Docker, so Docker with the NVIDIA
 runtime and a GPU are required. On Linux, verify the NVIDIA Container Toolkit
@@ -129,9 +130,9 @@ docker run --rm --gpus all nvidia/cuda:12.9.1-base-ubuntu24.04 nvidia-smi
 ```
 
 Momento's `llm.enabled` setting controls whether imported images are submitted
-for OCR. Object detection has a
-reserved endpoint and storage plugin, but remains disabled until a detector is
-configured.
+for OCR and image tagging. Image tagging uses a RAM++ adapter configured in
+`playground/config_llm.toml`; it returns a broad list of image tags through the
+same `/v1/infer` endpoint with `modelVersion` set to `ram++`.
 
 ### Playground
 
@@ -141,42 +142,42 @@ Run the local playground with its E2E configuration and data:
 ./run_playground.sh
 ```
 
-The playground reads `playground/config.yaml` and `playground/config_llm.yaml`
-directly. Runtime data remains under `playground/data`; the runner does not
+The playground reads `playground/config.toml` and `playground/config_llm.toml`
+directly. Runtime data remains alongside the configs under `playground`; the runner does not
 copy configuration files into that directory.
 
 ## Configuration
 
-Momento is configured via a `config.yaml` file located in your data directory (`/data` in Docker, or the current directory when running from source). A default configuration is generated on first run.
+Momento is configured via a `config.toml` file located in your data directory (`/data` in Docker, or the current directory when running from source). A default configuration is generated on first run.
 
-```yaml
-server:
-  host: "0.0.0.0"
-  port: 8000
-  debug: false
+```toml
+[server]
+host = "0.0.0.0"
+port = 8000
+debug = false
 
-security:
-  secret_key: "change-me-in-production-use-openssl-rand-hex-32"
-  access_token_expire_minutes: 30
-  refresh_token_expire_days: 7
+[logging]
+file_path = "/data/logs/momento-api.log"
 
-admin:
-  username: "admin"
-  password: "admin"
+[security]
+secret_key = "change-me-in-production-use-openssl-rand-hex-32"
+access_token_expire_minutes = 30
+refresh_token_expire_days = 7
 
-thumbnails:
-  max_size: 400
-  quality: 90
+[admin]
+username = "admin"
+password = "admin"
 
-reverse_geocoding:
-  enabled: true
+[thumbnails]
+max_size = 400
+quality = 90
 
-webdav:
-  enabled: false
-  hostname: ""
-  username: ""
-  password: ""
-  remote_path: "/"
+[reverse_geocoding]
+enabled = true
+
+[webdav]
+enabled = false
+mount_path = "/webdav"
 ```
 
 **Important:** Change the `secret_key` to a secure random value in production. Generate one with:
@@ -199,10 +200,10 @@ entrypoint script, not by the application:
 
 Storage locations are set in the config file instead:
 
-```yaml
-storage:
-  data_dir: /data          # database and all media directories
-  static_dir: /app/static  # built frontend served as a fallback
+```toml
+[storage]
+data_dir = "/data"          # database and all media directories
+static_dir = "/app/static"  # built frontend served as a fallback
 ```
 
 ## Default Credentials
@@ -218,8 +219,9 @@ All application data is stored within the data directory, organized as follows:
 
 ```
 /data
-├── config.yaml      # Application configuration
+├── config.toml      # Application configuration
 ├── database.sqlite  # SQLite database
+├── logs/             # Application and model-service logs
 ├── originals/       # Original unmodified media files
 ├── thumbnails/      # Generated thumbnails for gallery views
 ├── previews/        # Web-optimized preview images

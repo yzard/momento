@@ -18,26 +18,26 @@ fn enabled_config(service_url: String) -> LlmConfig {
         ready_poll_interval_seconds: 1,
         ready_connection_timeout_seconds: 5,
         max_concurrent_requests: 1,
-        object_detection_enabled: false,
-        object_detection_endpoint: "/v1/infer".to_string(),
+        image_tagging_enabled: false,
+        image_tagging_endpoint: "/v1/infer".to_string(),
     }
 }
 
 fn image_text(pool: &DbPool, media_id: i64) -> String {
     let conn = pool.get().expect("Failed to get database connection");
     conn.query_row(
-        "SELECT string FROM image_text WHERE image_id = ? AND plugin_id = ?",
-        rusqlite::params![media_id, momento_api::constants::OCR_PLUGIN_ID],
+        "SELECT string FROM image_text WHERE image_id = ? AND model_type = ?",
+        rusqlite::params![media_id, momento_api::constants::OCR_MODEL_TYPE],
         |row| row.get(0),
     )
     .expect("Failed to query OCR text")
 }
 
-fn image_text_for_plugin(pool: &DbPool, media_id: i64, plugin_id: i64) -> String {
+fn image_text_for_model(pool: &DbPool, media_id: i64, model_type: &str) -> String {
     let conn = pool.get().expect("Failed to get database connection");
     conn.query_row(
-        "SELECT string FROM image_text WHERE image_id = ? AND plugin_id = ?",
-        rusqlite::params![media_id, plugin_id],
+        "SELECT string FROM image_text WHERE image_id = ? AND model_type = ?",
+        rusqlite::params![media_id, model_type],
         |row| row.get(0),
     )
     .expect("Failed to query plugin text")
@@ -50,7 +50,9 @@ async fn ocr_client_sends_image_and_stores_text() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "text": "recognized words",
             "markdown": "recognized words",
-            "provider": "local"
+            "provider": "local",
+            "modelType": "ocr",
+            "modelVersion": "test-ocr"
         })))
         .expect(1)
         .mount(&server)
@@ -101,14 +103,17 @@ async fn disabled_ocr_client_does_not_call_service() {
 }
 
 #[tokio::test]
-async fn object_detection_hook_stores_returned_text_under_detection_plugin() {
+async fn image_tagging_hook_stores_returned_tags_under_tagging_model() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/infer"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "text": "person bicycle",
-            "markdown": "person bicycle",
-            "provider": "configured-detector"
+            "text": "person\nbicycle",
+            "markdown": "person\nbicycle",
+            "tags": ["person", "bicycle"],
+            "provider": "ram++",
+            "modelType": "image_tagging",
+            "modelVersion": "ram++"
         })))
         .expect(1)
         .mount(&server)
@@ -121,31 +126,29 @@ async fn object_detection_hook_stores_returned_text_under_detection_plugin() {
 
     let pool = create_test_db();
     let mut config = enabled_config(server.uri());
-    config.object_detection_enabled = true;
+    config.image_tagging_enabled = true;
     let client = LlmClient::new(&config).expect("Failed to create client");
     client
-        .object_detection_and_store(&pool, 43, image.path())
+        .image_tagging_and_store(&pool, 43, image.path())
         .await
-        .expect("Object detection hook should succeed");
+        .expect("Image tagging hook should succeed");
 
     assert_eq!(
-        image_text_for_plugin(
-            &pool,
-            43,
-            momento_api::constants::OBJECT_DETECTION_PLUGIN_ID
-        ),
-        "person bicycle"
+        image_text_for_model(&pool, 43, momento_api::constants::IMAGE_TAGGING_MODEL_TYPE),
+        "person\nbicycle"
     );
 }
 
 #[tokio::test]
-async fn empty_ocr_response_does_not_store_text() {
+async fn empty_ocr_response_is_stored_as_completed_text() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "text": "",
             "markdown": "",
-            "provider": "local"
+            "provider": "local",
+            "modelType": "ocr",
+            "modelVersion": "test-ocr"
         })))
         .expect(1)
         .mount(&server)
@@ -158,18 +161,26 @@ async fn empty_ocr_response_does_not_store_text() {
     let pool = create_test_db();
     let client = LlmClient::new(&enabled_config(server.uri())).expect("Failed to create client");
 
-    assert!(!client
+    assert!(client
         .ocr_and_store(&pool, 44, image.path())
         .await
-        .expect("Empty OCR should be a no-op"));
+        .expect("Empty OCR should be stored"));
 
     let conn = pool.get().expect("Failed to get database connection");
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM image_text WHERE image_id = ? AND plugin_id = ?",
-            rusqlite::params![44, momento_api::constants::OCR_PLUGIN_ID],
+            "SELECT COUNT(*) FROM image_text WHERE image_id = ? AND model_type = ?",
+            rusqlite::params![44, momento_api::constants::OCR_MODEL_TYPE],
             |row| row.get(0),
         )
         .expect("Failed to query OCR text");
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
+    let text: String = conn
+        .query_row(
+            "SELECT string FROM image_text WHERE image_id = ? AND model_type = ?",
+            rusqlite::params![44, momento_api::constants::OCR_MODEL_TYPE],
+            |row| row.get(0),
+        )
+        .expect("Failed to query empty OCR text");
+    assert!(text.is_empty());
 }

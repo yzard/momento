@@ -8,10 +8,11 @@ use crate::config::Config;
 use crate::constants::paths;
 use crate::database::execute_query;
 use crate::database::{fetch_all, queries, DbConn, DbPool};
-use crate::llm_client::{generate_missing_object_detection, generate_missing_ocr};
+use crate::llm_client::{generate_missing_image_tagging, generate_missing_ocr};
 use crate::processor::media_processor::{
     calculate_geohash, delete_from_rtree, generate_complete_metadata, insert_into_rtree,
 };
+use crate::processor::metadata::{normalize_gps_coordinates, MediaMetadata};
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 use crate::utils::hash::calculate_file_hash;
 use futures::stream::{self, StreamExt};
@@ -166,7 +167,7 @@ async fn generate_missing_llm_metadata(config: &Config, pool: &DbPool) {
     if is_cancel_requested() {
         return;
     }
-    generate_missing_object_detection(config, pool).await;
+    generate_missing_image_tagging(config, pool).await;
 }
 
 fn update_job_totals(metadata_jobs: i64, thumbnail_jobs: i64, image_text_jobs: i64) {
@@ -202,19 +203,19 @@ fn count_missing_image_text_jobs(conn: &DbConn, config: &Config) -> i64 {
     }
 
     let mut total = 0;
-    for plugin_id in [
-        crate::constants::OCR_PLUGIN_ID,
-        crate::constants::OBJECT_DETECTION_PLUGIN_ID,
+    for model_type in [
+        crate::constants::OCR_MODEL_TYPE,
+        crate::constants::IMAGE_TAGGING_MODEL_TYPE,
     ] {
-        if plugin_id == crate::constants::OBJECT_DETECTION_PLUGIN_ID
-            && !config.llm.object_detection_enabled
+        if model_type == crate::constants::IMAGE_TAGGING_MODEL_TYPE
+            && !config.llm.image_tagging_enabled
         {
             continue;
         }
         total += fetch_all(
             conn,
-            queries::image_text::SELECT_MISSING_FOR_PLUGIN,
-            &[&plugin_id],
+            queries::image_text::SELECT_MISSING_FOR_MODEL_TYPE,
+            &[&model_type],
             |row| row.get::<_, i64>(0),
         )
         .map(|rows| rows.len() as i64)
@@ -385,7 +386,14 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
     let count = rows.len();
     let missing_metadata = rows
         .iter()
-        .filter(|row| row.width.is_none() || row.height.is_none())
+        .filter(|row| {
+            row.width.is_none()
+                || row.height.is_none()
+                || matches!(
+                    (row.gps_latitude, row.gps_longitude),
+                    (Some(latitude), Some(longitude)) if latitude == 0.0 && longitude == 0.0
+                )
+        })
         .count();
     let missing_thumbnails = rows
         .iter()
@@ -462,8 +470,14 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
                     .date_taken
                     .clone()
                     .or(metadata.date_taken.map(|dt| dt.to_rfc3339()));
-                let gps_latitude = metadata.gps_latitude.or(row.gps_latitude);
-                let gps_longitude = metadata.gps_longitude.or(row.gps_longitude);
+                let mut gps_metadata = MediaMetadata {
+                    gps_latitude: metadata.gps_latitude.or(row.gps_latitude),
+                    gps_longitude: metadata.gps_longitude.or(row.gps_longitude),
+                    ..MediaMetadata::default()
+                };
+                normalize_gps_coordinates(&mut gps_metadata);
+                let gps_latitude = gps_metadata.gps_latitude;
+                let gps_longitude = gps_metadata.gps_longitude;
                 let gps_altitude = metadata.gps_altitude.or(row.gps_altitude);
                 let camera_make = choose(row.camera_make.clone(), metadata.camera_make);
                 let camera_model = choose(row.camera_model.clone(), metadata.camera_model);

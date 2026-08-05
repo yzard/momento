@@ -137,10 +137,6 @@ async fn main() {
         }
     }
 
-    // Initialize logging
-    init_logging();
-    install_panic_hook();
-
     // Load configuration
     let config = match load_config(&cli.config_path) {
         Ok(config) => Arc::new(config),
@@ -149,6 +145,12 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if let Err(error) = init_logging(&config.logging.file_path) {
+        eprintln!("Failed to initialize logging: {error}");
+        std::process::exit(1);
+    }
+    install_panic_hook();
 
     // Derive every filesystem location from the configured data directory
     init_paths(&config.storage.data_dir);
@@ -176,7 +178,7 @@ async fn main() {
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
-    println!("Starting Momento API on {}", addr);
+    tracing::info!("Starting Momento API on {}", addr);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr)

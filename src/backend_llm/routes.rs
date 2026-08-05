@@ -7,12 +7,13 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::ServiceError;
-use crate::provider::{InferenceResponse, Provider};
+use crate::provider::{InferenceResponse, Provider, RamProvider};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub provider: Arc<Provider>,
+    pub image_tagging: Option<Arc<RamProvider>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -20,7 +21,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/infer", post(infer))
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .layer(DefaultBodyLimit::max(state.config.limits.max_request_bytes))
+        .layer(DefaultBodyLimit::max(
+            state.config.general.max_request_bytes,
+        ))
         .with_state(state)
 }
 
@@ -49,7 +52,7 @@ async fn infer(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<InferenceResponse>, ServiceError> {
-    validate_api_key(&headers, &state.config.server.api_key)?;
+    validate_api_key(&headers, &state.config.general.api_key)?;
 
     let mut task = None;
     let mut filename = None;
@@ -77,13 +80,6 @@ async fn infer(
         }
     }
 
-    let task = task.ok_or_else(|| ServiceError::BadRequest("missing task field".to_string()))?;
-    if task != "ocr" {
-        return Err(ServiceError::NotImplemented(format!(
-            "inference task `{task}` has no configured model provider"
-        )));
-    }
-
     let filename = filename.unwrap_or_else(|| "image.jpg".to_string());
     let image = image.ok_or_else(|| ServiceError::BadRequest("missing file field".to_string()))?;
     if image.is_empty() {
@@ -95,6 +91,21 @@ async fn infer(
         return Err(ServiceError::BadRequest(
             "only image files are supported".to_string(),
         ));
+    }
+
+    let task = task.ok_or_else(|| ServiceError::BadRequest("missing task field".to_string()))?;
+    if task == "image_tagging" {
+        let tagger = state.image_tagging.as_ref().ok_or_else(|| {
+            ServiceError::NotImplemented(
+                "image tagging has no configured model provider".to_string(),
+            )
+        })?;
+        return Ok(Json(tagger.infer(&image).await?));
+    }
+    if task != "ocr" {
+        return Err(ServiceError::NotImplemented(format!(
+            "inference task `{task}` has no configured model provider"
+        )));
     }
 
     let result = state.provider.infer(&image, &filename).await?;

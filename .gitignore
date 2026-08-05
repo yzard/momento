@@ -70,7 +70,14 @@ pnpm-debug.log*
 *.sln
 
 # End-to-end development data and generated output
-/playground/data/
-/playground/output/
-/playground/upload/*
-!/playground/upload/.gitkeep
+/playground/logs/
+/playground/upload/
+/playground/database.sqlite
+/playground/imports/
+/playground/originals/
+/playground/previews/
+/playground/thumbnails/
+/playground/thumbnails_tiny/
+/playground/albums/
+/playground/trash/
+/playground/webdav/

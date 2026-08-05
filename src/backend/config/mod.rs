@@ -36,6 +36,24 @@ impl Default for ServerConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_file_path")]
+    pub file_path: PathBuf,
+}
+
+fn default_log_file_path() -> PathBuf {
+    PathBuf::from("/data/logs/momento-api.log")
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            file_path: default_log_file_path(),
+        }
+    }
+}
+
 /// Filesystem locations. `data_dir` is the root every media directory and the database
 /// are derived from; `static_dir` holds the built frontend the server falls back to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,9 +358,9 @@ pub struct LlmConfig {
     #[serde(default = "default_llm_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
     #[serde(default)]
-    pub object_detection_enabled: bool,
-    #[serde(default = "default_object_detection_endpoint")]
-    pub object_detection_endpoint: String,
+    pub image_tagging_enabled: bool,
+    #[serde(default = "default_image_tagging_endpoint")]
+    pub image_tagging_endpoint: String,
 }
 
 fn default_llm_service_url() -> String {
@@ -369,7 +387,7 @@ fn default_llm_max_concurrent_requests() -> usize {
     1
 }
 
-fn default_object_detection_endpoint() -> String {
+fn default_image_tagging_endpoint() -> String {
     "/v1/infer".to_string()
 }
 
@@ -384,8 +402,8 @@ impl Default for LlmConfig {
             ready_poll_interval_seconds: default_llm_ready_poll_interval_seconds(),
             ready_connection_timeout_seconds: default_llm_ready_connection_timeout_seconds(),
             max_concurrent_requests: default_llm_max_concurrent_requests(),
-            object_detection_enabled: false,
-            object_detection_endpoint: default_object_detection_endpoint(),
+            image_tagging_enabled: false,
+            image_tagging_endpoint: default_image_tagging_endpoint(),
         }
     }
 }
@@ -394,6 +412,8 @@ impl Default for LlmConfig {
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
@@ -424,7 +444,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
 
     let content = fs::read_to_string(config_path)?;
 
-    serde_yaml::from_str(&content).map_err(|e| {
+    toml::from_str(&content).map_err(|e| {
         std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
     })
 }
@@ -435,6 +455,6 @@ pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
     }
 
     let config = Config::default();
-    let yaml = serde_yaml::to_string(&config).map_err(|e| std::io::Error::other(e.to_string()))?;
-    fs::write(config_path, yaml)
+    let toml = toml::to_string_pretty(&config).map_err(|e| std::io::Error::other(e.to_string()))?;
+    fs::write(config_path, toml)
 }

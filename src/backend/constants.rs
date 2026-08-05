@@ -57,13 +57,13 @@ pub fn paths() -> &'static Paths {
 
 pub const TRASH_RETENTION_DAYS: i64 = 30;
 
-pub const OCR_PLUGIN_ID: i64 = 1;
-pub const OBJECT_DETECTION_PLUGIN_ID: i64 = 2;
+pub const OCR_MODEL_TYPE: &str = "ocr";
+pub const IMAGE_TAGGING_MODEL_TYPE: &str = "image_tagging";
 
-pub fn image_text_plugin_name(plugin_id: i64) -> Option<&'static str> {
-    match plugin_id {
-        OCR_PLUGIN_ID => Some("OCR"),
-        OBJECT_DETECTION_PLUGIN_ID => Some("Object Detection"),
+pub fn image_text_model_name(model_type: &str) -> Option<&'static str> {
+    match model_type {
+        OCR_MODEL_TYPE => Some("OCR"),
+        IMAGE_TAGGING_MODEL_TYPE => Some("Image Tags"),
         _ => None,
     }
 }

@@ -10,6 +10,14 @@ pub mod media {
       , file_size
       , content_hash
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(content_hash) DO NOTHING
+    "#;
+
+    pub const UPDATE_FILE_LOCATION: &str = r#"
+    UPDATE media
+       SET filename = ?
+         , file_path = ?
+     WHERE id = ?
     "#;
 
     pub const INSERT_METADATA: &str = r#"
@@ -454,9 +462,10 @@ pub mod image_text {
     pub const INSERT: &str = r#"
     INSERT INTO image_text (
         image_id
-      , plugin_id
+      , model_type
+      , model_version
       , string
-    ) VALUES (?, ?, ?)
+    ) VALUES (?, ?, ?, ?)
     "#;
 
     pub const DELETE_BY_IMAGE_ID: &str = r#"
@@ -464,13 +473,13 @@ pub mod image_text {
      WHERE image_id = ?
     "#;
 
-    pub const DELETE_BY_IMAGE_ID_AND_PLUGIN: &str = r#"
+    pub const DELETE_BY_IMAGE_ID_AND_MODEL_TYPE: &str = r#"
     DELETE FROM image_text
      WHERE image_id = ?
-       AND plugin_id = ?
+       AND model_type = ?
     "#;
 
-    pub const SELECT_MISSING_FOR_PLUGIN: &str = r#"
+    pub const SELECT_MISSING_FOR_MODEL_TYPE: &str = r#"
     SELECT m.id
          , m.file_path
       FROM media AS m
@@ -478,15 +487,16 @@ pub mod image_text {
        AND NOT EXISTS (
             SELECT 1
               FROM image_text
-             WHERE image_text.image_id = m.id
-               AND image_text.plugin_id = ?
+              WHERE image_text.image_id = m.id
+                AND image_text.model_type = ?
+                AND image_text.model_version <> 'legacy'
        )
      ORDER BY m.id
     "#;
 
     pub const SEARCH_FOR_USER: &str = r#"
     SELECT image_text.image_id
-         , image_text.plugin_id
+         , image_text.model_type
       FROM image_text
      WHERE image_text.string LIKE ? ESCAPE '\'
        AND EXISTS (
@@ -497,7 +507,7 @@ pub mod image_text {
                AND ma.deleted_at IS NULL
        )
      GROUP BY image_text.image_id
-            , image_text.plugin_id
+             , image_text.model_type
      ORDER BY image_text.image_id
     "#;
 }
@@ -544,11 +554,12 @@ pub mod regenerator {
          , mm.keywords
       FROM media AS m
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
-     WHERE mm.media_id IS NULL
-        OR mm.thumbnail_path IS NULL
-        OR mm.width IS NULL
-        OR mm.height IS NULL
-     ORDER BY m.id
+      WHERE mm.media_id IS NULL
+         OR mm.thumbnail_path IS NULL
+         OR mm.width IS NULL
+         OR mm.height IS NULL
+         OR (mm.gps_latitude = 0 AND mm.gps_longitude = 0)
+      ORDER BY m.id
     "#;
 
     pub const UPDATE_METADATA: &str = r#"
@@ -764,6 +775,8 @@ pub mod map {
                    AND ma.deleted_at IS NULL
                    AND mm.gps_latitude BETWEEN ? AND ?
                    AND {longitude_clause}
+                   AND mm.gps_latitude <> 0
+                   AND mm.gps_longitude <> 0
                    AND mm.geohash IS NOT NULL
                   GROUP BY cell
             )
@@ -826,9 +839,11 @@ pub mod map {
               JOIN media_metadata AS mm ON m.id = mm.media_id
              WHERE ma.user_id = ?
                AND ma.deleted_at IS NULL
-               AND mm.gps_latitude BETWEEN ? AND ?
-               AND {longitude_clause}
-               AND mm.gps_latitude IS NOT NULL
+                AND mm.gps_latitude BETWEEN ? AND ?
+                AND {longitude_clause}
+                AND mm.gps_latitude <> 0
+                AND mm.gps_longitude <> 0
+                AND mm.gps_latitude IS NOT NULL
                AND mm.gps_longitude IS NOT NULL
                AND mm.geohash IS NOT NULL{geohash_clause}
              ORDER BY COALESCE(mm.date_taken, m.created_at) DESC

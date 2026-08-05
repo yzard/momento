@@ -66,13 +66,12 @@ fn validate_share_token(conn: &DbConn, token: &str, password: Option<&str>) -> A
     }
 
     // Check password
-    if share.password_hash.is_some() {
-        if let Some(pwd) = password {
-            if !verify_password(pwd, share.password_hash.as_ref().unwrap()) {
-                return Err(AppError::Authentication("Invalid password".to_string()));
-            }
-        } else {
+    if let Some(password_hash) = &share.password_hash {
+        let Some(pwd) = password else {
             return Err(AppError::Authentication("Password required".to_string()));
+        };
+        if !verify_password(pwd, password_hash) {
+            return Err(AppError::Authentication("Invalid password".to_string()));
         }
     }
 

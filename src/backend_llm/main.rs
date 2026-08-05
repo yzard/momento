@@ -1,10 +1,12 @@
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::writer::MakeWriterExt, EnvFilter};
 
 use llm_service::config::Config;
-use llm_service::provider::Provider;
+use llm_service::provider::{Provider, RamProvider};
 use llm_service::routes::{serve, AppState};
 
 fn config_path() -> Result<PathBuf, String> {
@@ -31,10 +33,6 @@ fn config_path() -> Result<PathBuf, String> {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-
     let path = match config_path() {
         Ok(path) => path,
         Err(error) => {
@@ -49,36 +47,71 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(error) = init_logging(&config.logging.file_path) {
+        eprintln!("Failed to initialize logging: {error}");
+        std::process::exit(1);
+    }
     let provider = match Provider::build(&config).await {
         Ok(provider) => Arc::new(provider),
         Err(error) => {
-            eprintln!(
+            tracing::error!(
                 "Failed to initialize {} provider: {error}",
                 provider_name(&config)
             );
             std::process::exit(1);
         }
     };
-    let address = format!("{}:{}", config.server.host, config.server.port);
+    let image_tagging = if let Some(service) = config.service_for("image_tagging") {
+        match RamProvider::new(service).await {
+            Ok(provider) => Some(Arc::new(provider)),
+            Err(error) => {
+                tracing::error!("Failed to initialize image tagging: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let address = format!("{}:{}", config.general.host, config.general.port);
     let listener = match tokio::net::TcpListener::bind(&address).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("Failed to bind {address}: {error}");
+            tracing::error!("Failed to bind {address}: {error}");
             std::process::exit(1);
         }
     };
 
     info!("Starting LLM service on {}", listener.local_addr().unwrap());
-    let state = AppState { config, provider };
+    let state = AppState {
+        config,
+        provider,
+        image_tagging,
+    };
     if let Err(error) = serve(listener, state).await {
-        eprintln!("LLM service failed: {error}");
+        tracing::error!("LLM service failed: {error}");
         std::process::exit(1);
     }
 }
 
+fn init_logging(file_path: &Path) -> io::Result<()> {
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file_path)?;
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_writer(file.and(std::io::stdout))
+        .init();
+    Ok(())
+}
+
 fn provider_name(config: &Config) -> &'static str {
-    match &config.provider {
-        llm_service::config::ProviderKind::Baidu => "baidu",
-        llm_service::config::ProviderKind::Local => "local",
+    match config.service_for("ocr").map(|service| &service.provider) {
+        Some(llm_service::config::ProviderKind::Baidu) => "baidu",
+        Some(llm_service::config::ProviderKind::Local) => "local",
+        None => "unknown",
     }
 }

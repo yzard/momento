@@ -102,6 +102,21 @@ fn test_map_clusters_single_media() {
 }
 
 #[test]
+fn test_map_clusters_excludes_zero_coordinates() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "testuser", "test@example.com");
+
+    let media_id = create_test_media_with_gps(&pool, "photo.jpg", 0.0, 0.0);
+    grant_media_access(&pool, media_id, user_id);
+
+    let req = make_request((1.0, -1.0, 1.0, -1.0), 10);
+    let response = get_clusters_sync(&pool, user_id, &req).unwrap();
+
+    assert!(response.clusters.is_empty());
+    assert_eq!(response.total_count, 0);
+}
+
+#[test]
 fn test_map_clusters_media_outside_bounds_excluded() {
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "testuser", "test@example.com");
@@ -205,7 +220,7 @@ fn test_map_clusters_antimeridian_bounds() {
     let response = get_clusters_sync(&pool, user_id, &req).unwrap();
 
     assert_eq!(response.total_count, 2);
-    assert!(response.clusters.len() >= 1);
+    assert!(!response.clusters.is_empty());
 }
 
 #[test]

@@ -19,7 +19,7 @@ source of truth, and this file only records what is specific to Momento.
 
 | Skill | Governs |
 |-------|---------|
-| `project-structure` | Where every file goes: `src/`, `tests/` mirroring it 1:1, `docs/`, `playground/`, `docker/` |
+| `project-structure` | Where every file goes: `src/`, `tests/` mirroring it 1:1, `docs/`, `playground/`, `build/`, `dist/`, `docker/` |
 | `add-modify-codebase` | How changes land: breaking changes over shims, refactor over copy-paste, unit tests for touched code |
 | `general-coding` | Guard clauses, no broad catch, no default arguments, no backward-compat layers, no environment variables in source |
 | `naming-conventions` | Cross-layer name consistency (database → Rust → TypeScript) |
@@ -57,7 +57,7 @@ directory and never add a new `std::env::var` call — add a config field instea
 
 `docker/Dockerfile` and `docker/entrypoint.sh` are the one place environment variables
 belong (`PUID`/`PGID`/`UMASK`/`TZ`); they translate into the config file the entrypoint
-generates, and `CMD` passes `-c /data/config.yaml`. `RUST_LOG` and `RUST_BACKTRACE` are
+generates, and `CMD` passes `-c /data/config.toml`. `RUST_LOG` and `RUST_BACKTRACE` are
 ecosystem-standard runtime knobs read by `tracing-subscriber`, not application config.
 
 ---
@@ -72,12 +72,32 @@ pnpm dev                  # Dev servers (backend + frontend)
 pnpm lint                 # Lint all packages
 pnpm test                 # Run all tests
 
-./run_playground.sh       # Full stack against playground/config.yaml
+./run_playground.sh       # Full stack against playground/config.toml
 ./build_docker.sh         # Build the Docker image (cds into docker/)
 ```
 
 `run_playground.sh` and `build_docker.sh` are the only scripts at the git root. Both
 resolve paths from their own location, so they work from any working directory.
+
+### Where build output goes
+
+`run_playground.sh` writes nothing into `src/` or `playground/`. Intermediate artifacts
+go to `build/`, final artifacts to `dist/`, both at the git root, one subdirectory per
+component:
+
+| Component | Intermediate | Final |
+|-----------|--------------|-------|
+| `momento-api` | `build/backend/target/` (`CARGO_TARGET_DIR`) | `dist/backend/momento-api` |
+| `llm-service` | `build/llm/target/` (`CARGO_TARGET_DIR`) | `dist/llm/llm-service` |
+| frontend | `build/frontend/workspace/` (staged pnpm workspace) | `dist/frontend/` |
+
+The script starts both binaries from `dist/`, never from `build/` and never from
+`src/backend/target/release/`, and `storage.static_dir` in `playground/config.toml` is
+`dist/frontend`. It removes each component's `build/` and `dist/` subdirectory before
+building, so a run can never pick up a stale binary. Both trees are gitignored.
+
+`playground/logs/` holds the append-only logs from the *running* stack. Build artifacts
+do not belong there.
 
 ### Backend (src/backend)
 ```bash
@@ -232,6 +252,8 @@ src/
 │   ├── main.rs             # Entry point
 │   └── Cargo.toml          # Rust dependencies
 │
+├── backend_llm/            # llm-service binary (separate crate)
+│
 └── frontend/
     ├── api/                # API client modules
     ├── components/         # React components
@@ -248,6 +270,7 @@ tests/                      # Mirrors src/ 1:1 — see below
 │   ├── processor/
 │   ├── routes/
 │   └── test_utils/
+├── backend_llm/
 └── frontend/
 
 docs/                       # All project documentation
@@ -258,14 +281,29 @@ docker/
 ├── docker-compose.yml
 └── entrypoint.sh
 
-playground/                 # End-to-end config, data, and generated output
-├── config.yaml             # The one config run_playground.sh starts the stack with
-├── data/                   # SQLite database, originals, previews, thumbnails
-├── upload/                 # WebDAV upload landing zone
-└── output/                 # Generated build and dist artifacts
+playground/                 # End-to-end config and data
+├── config.toml             # The one config run_playground.sh starts the stack with
+├── config_llm.toml         # Config for the LLM service
+├── database.sqlite         # SQLite database
+├── originals/              # Original media files
+├── previews/               # Generated previews
+├── thumbnails/             # Generated thumbnails
+├── imports/                # Import staging area
+├── webdav/                 # WebDAV processing area
+└── logs/                   # Runtime logs from momento-api and llm-service
+
+build/                      # Intermediate build artifacts, never run from
+├── backend/                # CARGO_TARGET_DIR for momento-api
+├── llm/                    # CARGO_TARGET_DIR for llm-service
+└── frontend/               # Staged pnpm workspace and Vite intermediates
+
+dist/                       # What run_playground.sh actually executes and serves
+├── backend/momento-api
+├── llm/llm-service
+└── frontend/               # Built frontend — storage.static_dir points here
 
 build_docker.sh             # Builds the Docker image
-run_playground.sh           # Runs the full stack against playground/
+run_playground.sh           # Builds into build/ and dist/, runs against playground/
 ```
 
 ### The `tests/` mirror

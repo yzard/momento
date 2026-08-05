@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::{image_text_plugin_name, paths};
+use crate::constants::{image_text_model_name, paths};
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -316,7 +316,7 @@ async fn search_media(
     }
 
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let matches: Vec<(i64, i64)> = fetch_all(
+    let matches: Vec<(i64, String)> = fetch_all(
         &conn,
         queries::image_text::SEARCH_FOR_USER,
         &[&search, &current_user.id],
@@ -324,20 +324,23 @@ async fn search_media(
     )?;
 
     let mut results: HashMap<i64, Vec<String>> = HashMap::new();
-    for (image_id, plugin_id) in matches {
-        let Some(plugin_name) = image_text_plugin_name(plugin_id) else {
+    for (image_id, model_type) in matches {
+        let Some(model_name) = image_text_model_name(&model_type) else {
             continue;
         };
 
-        let plugins = results.entry(image_id).or_default();
-        if !plugins.iter().any(|name| name == plugin_name) {
-            plugins.push(plugin_name.to_string());
+        let models = results.entry(image_id).or_default();
+        if !models.iter().any(|name| name == model_name) {
+            models.push(model_name.to_string());
         }
     }
 
     let mut results: Vec<ImageTextSearchResult> = results
         .into_iter()
-        .map(|(image_id, plugins)| ImageTextSearchResult { image_id, plugins })
+        .map(|(image_id, mut models)| {
+            models.sort();
+            ImageTextSearchResult { image_id, models }
+        })
         .collect();
     results.sort_by_key(|result| result.image_id);
 

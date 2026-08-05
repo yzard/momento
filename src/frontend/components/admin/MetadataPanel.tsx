@@ -162,14 +162,13 @@ export default function MetadataPanel() {
               <h4 className="text-sm font-bold text-destructive mb-2 uppercase tracking-wide flex items-center gap-2">
                 Errors
               </h4>
-              <ul className="text-xs text-destructive/80 max-h-32 overflow-y-auto bg-destructive/5 p-4 rounded-lg border border-destructive/10 font-mono">
-                {status.errors.slice(0, 10).map((err, i) => (
-                  <li key={i} className="truncate mb-1 last:mb-0 border-b border-destructive/10 pb-1 last:border-0 last:pb-0">{err}</li>
-                ))}
-                {status.errors.length > 10 && (
-                  <li className="mt-2 italic opacity-70">... and {status.errors.length - 10} more</li>
-                )}
-              </ul>
+              <textarea
+                readOnly
+                aria-label="Regeneration errors"
+                value={status.errors.join('\n')}
+                rows={8}
+                className="w-full resize-y overflow-auto whitespace-pre bg-destructive/5 p-4 rounded-lg border border-destructive/10 text-xs text-destructive/80 font-mono focus:outline-none focus:ring-2 focus:ring-destructive/30"
+              />
             </div>
           )}
         </div>

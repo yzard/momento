@@ -1,5 +1,6 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
+use std::fs;
 use std::path::Path;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -30,12 +31,151 @@ pub struct MediaMetadata {
     pub focal_length_35mm: Option<f64>,
 }
 
-fn fallback_to_mtime(file_path: &Path) -> Option<DateTime<Utc>> {
-    file_path
-        .metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .map(DateTime::<Utc>::from)
+pub fn supplemental_metadata_path(file_path: &Path) -> Option<std::path::PathBuf> {
+    let file_name = file_path.file_name()?.to_str()?;
+    let parent = file_path.parent()?;
+    if let Some(path) = find_supplemental_metadata_in_directory(parent, file_name) {
+        return Some(path);
+    }
+    None
+}
+
+fn find_supplemental_metadata_in_directory(
+    directory: &Path,
+    file_name: &str,
+) -> Option<std::path::PathBuf> {
+    let exact_name = format!("{}.supplemental-metadata.json", file_name);
+    let exact_path = directory.join(exact_name);
+    if exact_path.is_file() {
+        return Some(exact_path);
+    }
+
+    let prefix = format!("{}.supplemental-metadata", file_name);
+    let mut candidates = fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".json"))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+pub fn load_supplemental_metadata(file_path: &Path) -> Option<serde_json::Value> {
+    let metadata_path = supplemental_metadata_path(file_path)?;
+    let content = fs::read_to_string(&metadata_path).ok()?;
+    match serde_json::from_str(&content) {
+        Ok(metadata) => Some(metadata),
+        Err(error) => {
+            warn!(
+                "Failed to parse supplemental metadata {:?}: {}",
+                metadata_path.file_name().unwrap_or_default(),
+                error
+            );
+            None
+        }
+    }
+}
+
+pub fn apply_supplemental_metadata(metadata: &mut MediaMetadata, data: &serde_json::Value) {
+    if metadata.gps_latitude == Some(0.0) && metadata.gps_longitude == Some(0.0) {
+        metadata.gps_latitude = None;
+        metadata.gps_longitude = None;
+    }
+
+    if metadata.date_taken.is_none() {
+        metadata.date_taken = data
+            .get("photoTakenTime")
+            .and_then(|value| value.get("timestamp"))
+            .and_then(parse_unix_timestamp)
+            .or_else(|| {
+                data.get("creationTime")
+                    .and_then(|value| value.get("timestamp"))
+                    .and_then(parse_unix_timestamp)
+            });
+    }
+
+    let geo_data_exif = data.get("geoDataExif");
+    let geo_data = data.get("geoData");
+    let coordinates = geo_data_exif
+        .and_then(gps_pair_from_json)
+        .or_else(|| geo_data.and_then(gps_pair_from_json));
+    if let Some((latitude, longitude)) = coordinates {
+        if metadata.gps_latitude.is_none() {
+            metadata.gps_latitude = Some(latitude);
+        }
+        if metadata.gps_longitude.is_none() {
+            metadata.gps_longitude = Some(longitude);
+        }
+    }
+    if metadata.gps_altitude.is_none() {
+        metadata.gps_altitude = geo_data_exif
+            .and_then(|data| json_f64(data.get("altitude")))
+            .or_else(|| geo_data.and_then(|data| json_f64(data.get("altitude"))));
+    }
+
+    if metadata.keywords.is_none() {
+        metadata.keywords = data
+            .get("description")
+            .and_then(|value| value.as_str())
+            .filter(|description| !description.is_empty())
+            .map(str::to_string);
+    }
+}
+
+fn parse_unix_timestamp(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let timestamp = value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))?;
+    DateTime::from_timestamp(timestamp, 0)
+}
+
+fn json_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+    value
+        .and_then(|value| value.as_f64())
+        .or_else(|| value.and_then(|value| value.as_str()?.parse().ok()))
+}
+
+fn gps_pair_from_json(data: &serde_json::Value) -> Option<(f64, f64)> {
+    let latitude = json_f64(data.get("latitude"))?;
+    let longitude = json_f64(data.get("longitude"))?;
+    if !is_valid_gps_pair(latitude, longitude) {
+        return None;
+    }
+
+    Some((latitude, longitude))
+}
+
+fn is_valid_gps_pair(latitude: f64, longitude: f64) -> bool {
+    latitude.is_finite()
+        && longitude.is_finite()
+        && (-90.0..=90.0).contains(&latitude)
+        && (-180.0..=180.0).contains(&longitude)
+        && latitude != 0.0
+        && longitude != 0.0
+}
+
+pub fn normalize_gps_coordinates(metadata: &mut MediaMetadata) {
+    if metadata.gps_latitude.is_some() != metadata.gps_longitude.is_some() {
+        metadata.gps_latitude = None;
+        metadata.gps_longitude = None;
+        return;
+    }
+    let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude) else {
+        return;
+    };
+    if is_valid_gps_pair(latitude, longitude) {
+        return;
+    }
+
+    metadata.gps_latitude = None;
+    metadata.gps_longitude = None;
 }
 
 pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
@@ -52,6 +192,7 @@ pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
                 Ok(exif_data) => {
                     if let Some(data) = exif_data.first() {
                         apply_exif_data(&mut metadata, data);
+                        normalize_gps_coordinates(&mut metadata);
                     }
                 }
                 Err(e) => {
@@ -85,10 +226,6 @@ pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
                 e
             );
         }
-    }
-
-    if metadata.date_taken.is_none() {
-        metadata.date_taken = fallback_to_mtime(file_path);
     }
 
     if metadata.mime_type.is_none() {
@@ -246,6 +383,7 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
                 Ok(exif_data) => {
                     if let Some(data) = exif_data.first() {
                         apply_exif_data(&mut metadata, data);
+                        normalize_gps_coordinates(&mut metadata);
                     }
                 }
                 Err(e) => {
@@ -298,7 +436,6 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
     let output = match output {
         Ok(o) if o.status.success() => o,
         _ => {
-            metadata.date_taken = fallback_to_mtime(file_path);
             metadata.duration_seconds = Some(0.0);
             return metadata;
         }
@@ -307,7 +444,6 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
     let json_str = match String::from_utf8(output.stdout) {
         Ok(s) => s,
         Err(_) => {
-            metadata.date_taken = fallback_to_mtime(file_path);
             return metadata;
         }
     };
@@ -315,7 +451,6 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
     let ffprobe_data: FfprobeOutput = match serde_json::from_str(&json_str) {
         Ok(d) => d,
         Err(_) => {
-            metadata.date_taken = fallback_to_mtime(file_path);
             return metadata;
         }
     };
@@ -357,16 +492,15 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
                 .or(container_metadata.com_apple_quicktime_location_iso6709);
             if let Some(loc) = location {
                 if let Some((lat, lon)) = parse_iso6709_location(&loc) {
-                    metadata.gps_latitude = Some(lat);
-                    metadata.gps_longitude = Some(lon);
+                    if metadata.gps_latitude.is_none() {
+                        metadata.gps_latitude = Some(lat);
+                    }
+                    if metadata.gps_longitude.is_none() {
+                        metadata.gps_longitude = Some(lon);
+                    }
                 }
             }
         }
-    }
-
-    // Fallback date
-    if metadata.date_taken.is_none() {
-        metadata.date_taken = fallback_to_mtime(file_path);
     }
 
     // MIME type from extension

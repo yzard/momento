@@ -7,12 +7,13 @@ use serde_json::json;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::adapters::{normalize_baidu_unlimited_ocr_text, BAIDU_UNLIMITED_OCR_MODEL};
-use crate::config::{BaiduConfig, Config, LocalConfig, ProviderKind};
+use crate::config::{Config, ProviderKind, ServiceConfig};
 use crate::error::ServiceError;
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,7 +23,10 @@ pub struct InferenceResponse {
     pub text: String,
     pub markdown: String,
     pub provider: String,
-    pub model: String,
+    pub model_type: String,
+    pub model_version: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[async_trait]
@@ -38,9 +42,12 @@ pub enum Provider {
 
 impl Provider {
     pub async fn build(config: &Config) -> Result<Self, ServiceError> {
-        match &config.provider {
-            ProviderKind::Baidu => Ok(Self::Baidu(BaiduProvider::new(&config.baidu)?)),
-            ProviderKind::Local => Ok(Self::Local(LocalProvider::new(&config.local).await?)),
+        let service = config.service_for("ocr").ok_or_else(|| {
+            ServiceError::Configuration("an enabled ocr service is required".to_string())
+        })?;
+        match service.provider {
+            ProviderKind::Baidu => Ok(Self::Baidu(BaiduProvider::new(service)?)),
+            ProviderKind::Local => Ok(Self::Local(LocalProvider::new(service).await?)),
         }
     }
 
@@ -65,7 +72,7 @@ impl Provider {
 
 pub struct BaiduProvider {
     client: Client,
-    config: BaiduConfig,
+    config: ServiceConfig,
     token: Mutex<Option<CachedToken>>,
 }
 
@@ -95,7 +102,7 @@ struct BaiduWord {
 }
 
 impl BaiduProvider {
-    fn new(config: &BaiduConfig) -> Result<Self, ServiceError> {
+    fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
@@ -220,7 +227,9 @@ impl OcrProvider for BaiduProvider {
             text: text.clone(),
             markdown: text,
             provider: self.name().to_string(),
-            model: BAIDU_UNLIMITED_OCR_MODEL.to_string(),
+            model_type: "ocr".to_string(),
+            model_version: self.config.model_version.clone(),
+            tags: Vec::new(),
         })
     }
 
@@ -231,7 +240,7 @@ impl OcrProvider for BaiduProvider {
 
 pub struct LocalProvider {
     client: Client,
-    config: LocalConfig,
+    config: ServiceConfig,
     child: Arc<Mutex<Child>>,
 }
 
@@ -259,25 +268,14 @@ struct OpenAiMessage {
 }
 
 impl LocalProvider {
-    async fn new(config: &LocalConfig) -> Result<Self, ServiceError> {
+    async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|error| {
                 ServiceError::Internal(format!("failed to build HTTP client: {error}"))
             })?;
-        let mut command = Command::new(&config.command);
-        command
-            .args(&config.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-        let child = command.spawn().map_err(|error| {
-            ServiceError::Configuration(format!(
-                "failed to start local OCR command `{}`: {error}",
-                config.command
-            ))
-        })?;
+        let child = spawn_service_command(config)?;
         let provider = Self {
             client,
             config: config.clone(),
@@ -318,7 +316,14 @@ impl LocalProvider {
 #[async_trait]
 impl OcrProvider for LocalProvider {
     async fn infer(&self, image: &[u8], filename: &str) -> Result<InferenceResponse, ServiceError> {
-        let mime_type = mime_guess::from_path(filename)
+        let (image, filename) = normalize_local_image(
+            image,
+            filename,
+            self.config.max_image_width,
+            self.config.max_image_height,
+        )
+        .await?;
+        let mime_type = mime_guess::from_path(&filename)
             .first_raw()
             .filter(|value| value.starts_with("image/"))
             .unwrap_or("image/jpeg");
@@ -387,7 +392,9 @@ impl OcrProvider for LocalProvider {
             text: text.clone(),
             markdown: text,
             provider: self.name().to_string(),
-            model: self.config.model.clone(),
+            model_type: "ocr".to_string(),
+            model_version: self.config.model_version.clone(),
+            tags: Vec::new(),
         })
     }
 
@@ -396,10 +403,224 @@ impl OcrProvider for LocalProvider {
     }
 }
 
+pub struct RamProvider {
+    client: Client,
+    config: ServiceConfig,
+    child: Arc<Mutex<Child>>,
+}
+
+impl Drop for RamProvider {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TaggingResponse {
+    tags: Vec<String>,
+}
+
+impl RamProvider {
+    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(config.request_timeout_seconds))
+            .build()
+            .map_err(|error| {
+                ServiceError::Internal(format!("failed to build RAM++ HTTP client: {error}"))
+            })?;
+        let child = spawn_service_command(config)?;
+        let provider = Self {
+            client,
+            config: config.clone(),
+            child: Arc::new(Mutex::new(child)),
+        };
+        provider.wait_until_ready().await?;
+        Ok(provider)
+    }
+
+    async fn wait_until_ready(&self) -> Result<(), ServiceError> {
+        let started = Instant::now();
+        let url = format!("{}/ready", self.config.base_url.trim_end_matches('/'));
+        loop {
+            if let Ok(response) = self.client.get(&url).send().await {
+                if response.status().is_success() {
+                    info!("RAM++ runtime is ready at {}", self.config.base_url);
+                    return Ok(());
+                }
+            }
+            if let Ok(Some(status)) = self.child.lock().await.try_wait() {
+                return Err(ServiceError::Internal(format!(
+                    "RAM++ runtime exited during startup with {status}"
+                )));
+            }
+            if started.elapsed() >= Duration::from_secs(self.config.startup_timeout_seconds) {
+                return Err(ServiceError::Internal(format!(
+                    "RAM++ runtime did not become ready within {} seconds",
+                    self.config.startup_timeout_seconds
+                )));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
+        let encoded = STANDARD.encode(image);
+        let url = format!("{}/infer", self.config.base_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(url)
+            .json(&json!({ "image": encoded }))
+            .send()
+            .await
+            .map_err(|error| ServiceError::Upstream(format!("RAM++ request failed: {error}")))?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            ServiceError::Upstream(format!("failed to read RAM++ response: {error}"))
+        })?;
+        if !status.is_success() {
+            return Err(ServiceError::BadRequest(format!(
+                "RAM++ runtime returned {status}: {body}"
+            )));
+        }
+        let result: TaggingResponse = serde_json::from_str(&body)
+            .map_err(|error| ServiceError::Upstream(format!("invalid RAM++ response: {error}")))?;
+        let text = result.tags.join("\n");
+        Ok(InferenceResponse {
+            task: "image_tagging".to_string(),
+            text: text.clone(),
+            markdown: text,
+            provider: "ram++".to_string(),
+            model_type: "image_tagging".to_string(),
+            model_version: self.config.model_version.clone(),
+            tags: result.tags,
+        })
+    }
+}
+
+fn spawn_service_command(config: &ServiceConfig) -> Result<Child, ServiceError> {
+    let executable = config.docker_command.first().ok_or_else(|| {
+        ServiceError::Configuration(format!(
+            "{} service docker_command must not be empty",
+            config.model_type
+        ))
+    })?;
+    let script_path = if config.script_path.is_empty() {
+        String::new()
+    } else {
+        std::fs::canonicalize(&config.script_path)
+            .map_err(|error| {
+                ServiceError::Configuration(format!(
+                    "failed to resolve {} service script {}: {error}",
+                    config.model_type, config.script_path
+                ))
+            })?
+            .to_string_lossy()
+            .into_owned()
+    };
+    let args = config
+        .docker_command
+        .iter()
+        .skip(1)
+        .map(|arg| {
+            arg.replace("{script_path}", &script_path)
+                .replace("{device}", &config.device)
+        })
+        .collect::<Vec<_>>();
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        ServiceError::Configuration(format!(
+            "failed to start {} service command `{executable}`: {error}",
+            config.model_type
+        ))
+    })?;
+    forward_child_output(&mut child, &config.model_type);
+    Ok(child)
+}
+
+fn forward_child_output(child: &mut Child, service_type: &str) {
+    let service_type = service_type.to_string();
+    if let Some(stdout) = child.stdout.take() {
+        forward_child_stream(stdout, service_type.clone(), "stdout");
+    }
+    if let Some(stderr) = child.stderr.take() {
+        forward_child_stream(stderr, service_type, "stderr");
+    }
+}
+
+fn forward_child_stream<R>(stream: R, service_type: String, stream_name: &'static str)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!(
+                target: "llm_runtime",
+                service = %service_type,
+                stream = stream_name,
+                "{}",
+                line
+            );
+        }
+    });
+}
+
+async fn normalize_local_image(
+    image: &[u8],
+    filename: &str,
+    max_width: u32,
+    max_height: u32,
+) -> Result<(Vec<u8>, String), ServiceError> {
+    let resize = format!("{max_width}x{max_height}>");
+    let mut process = Command::new("magick")
+        .args(["-", "-auto-orient", "-resize", &resize, "jpg:-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            ServiceError::Internal(format!(
+                "failed to start ImageMagick for {filename}: {error}"
+            ))
+        })?;
+    let mut stdin = process
+        .stdin
+        .take()
+        .ok_or_else(|| ServiceError::Internal("ImageMagick stdin was not available".to_string()))?;
+    stdin.write_all(image).await.map_err(|error| {
+        ServiceError::Internal(format!("failed to send image to ImageMagick: {error}"))
+    })?;
+    drop(stdin);
+
+    let output = process.wait_with_output().await.map_err(|error| {
+        ServiceError::Internal(format!("ImageMagick failed to finish: {error}"))
+    })?;
+    if !output.status.success() {
+        return Err(ServiceError::BadRequest(format!(
+            "ImageMagick could not decode the image: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if output.stdout.is_empty() {
+        return Err(ServiceError::BadRequest(
+            "ImageMagick returned an empty normalized image".to_string(),
+        ));
+    }
+
+    Ok((output.stdout, "normalized.jpg".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BaiduProvider, OcrProvider};
-    use crate::config::BaiduConfig;
+    use crate::config::{ProviderKind, ServiceConfig};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -428,12 +649,25 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = BaiduProvider::new(&BaiduConfig {
+        let provider = BaiduProvider::new(&ServiceConfig {
+            enabled: true,
+            model_type: "ocr".to_string(),
+            model_version: "unlimited_ocr".to_string(),
+            provider: ProviderKind::Baidu,
+            docker_command: vec!["docker".to_string()],
+            device: "auto".to_string(),
+            base_url: String::new(),
+            model: String::new(),
+            script_path: String::new(),
             token_url: format!("{}/token", server.uri()),
             ocr_url: format!("{}/ocr", server.uri()),
             api_key: "test-key".to_string(),
             secret_key: "test-secret".to_string(),
+            max_image_width: 4096,
+            max_image_height: 16384,
+            startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
+            max_tokens: 100,
         })
         .expect("Failed to create Baidu provider");
         let response = provider

@@ -36,7 +36,7 @@ interface TimelineListResponse {
 
 interface ImageTextSearchResult {
   imageId: number
-  plugins: string[]
+  models: string[]
 }
 
 interface ImageTextSearchResponse {

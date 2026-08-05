@@ -50,4 +50,4 @@ EXPOSE 8000
 # The server reads no environment variables: storage.data_dir (/data) and
 # storage.static_dir (/app/static) come from the config file the entrypoint generates.
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/app/momento-api", "-c", "/data/config.yaml"]
+CMD ["/app/momento-api", "-c", "/data/config.toml"]

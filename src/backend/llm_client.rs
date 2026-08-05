@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use crate::config::{Config, LlmConfig};
-use crate::constants::{image_text_plugin_name, paths, OBJECT_DETECTION_PLUGIN_ID, OCR_PLUGIN_ID};
+use crate::constants::{image_text_model_name, paths, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
 use crate::database::{execute_query, fetch_all, queries, DbPool};
 use crate::processor::regenerator::{record_image_text_job_completed, record_regeneration_error};
 
@@ -24,6 +24,12 @@ pub struct LlmClient {
 struct InferenceResponse {
     text: String,
     markdown: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(rename = "modelType")]
+    model_type: String,
+    #[serde(rename = "modelVersion")]
+    model_version: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,18 +66,11 @@ impl LlmClient {
         media_id: i64,
         image_path: &Path,
     ) -> Result<bool, LlmClientError> {
-        self.infer_and_store(
-            pool,
-            media_id,
-            image_path,
-            OCR_PLUGIN_ID,
-            "ocr",
-            "/v1/infer",
-        )
-        .await
+        self.infer_and_store(pool, media_id, image_path, "ocr", "/v1/infer")
+            .await
     }
 
-    pub async fn object_detection_and_store(
+    pub async fn image_tagging_and_store(
         &self,
         pool: &DbPool,
         media_id: i64,
@@ -81,9 +80,8 @@ impl LlmClient {
             pool,
             media_id,
             image_path,
-            OBJECT_DETECTION_PLUGIN_ID,
-            "object_detection",
-            &self.config.object_detection_endpoint,
+            "image_tagging",
+            &self.config.image_tagging_endpoint,
         )
         .await
     }
@@ -133,7 +131,6 @@ impl LlmClient {
         pool: &DbPool,
         media_id: i64,
         image_path: &Path,
-        plugin_id: i64,
         task: &str,
         endpoint: &str,
     ) -> Result<bool, LlmClientError> {
@@ -192,15 +189,16 @@ impl LlmClient {
 
         let result: InferenceResponse = serde_json::from_str(&body)
             .map_err(|error| LlmClientError::Response(error.to_string()))?;
-        let text = if result.text.trim().is_empty() {
-            result.markdown.trim().to_string()
-        } else {
+        let text = if !result.text.trim().is_empty() {
             result.text.trim().to_string()
+        } else if !result.tags.is_empty() {
+            result.tags.join("\n")
+        } else {
+            result.markdown.trim().to_string()
         };
-        if text.is_empty() {
-            return Ok(false);
-        }
-
+        let model_type = result.model_type.clone();
+        let model_version = result.model_version.clone();
+        let stored_model_type = model_type.clone();
         let pool = pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool
@@ -208,14 +206,14 @@ impl LlmClient {
                 .map_err(|error| LlmClientError::Database(error.to_string()))?;
             execute_query(
                 &conn,
-                queries::image_text::DELETE_BY_IMAGE_ID_AND_PLUGIN,
-                &[&media_id, &plugin_id],
+                queries::image_text::DELETE_BY_IMAGE_ID_AND_MODEL_TYPE,
+                &[&media_id, &stored_model_type],
             )
             .map_err(|error| LlmClientError::Database(error.to_string()))?;
             execute_query(
                 &conn,
                 queries::image_text::INSERT,
-                &[&media_id, &plugin_id, &text],
+                &[&media_id, &stored_model_type, &model_version, &text],
             )
             .map_err(|error| LlmClientError::Database(error.to_string()))?;
             Ok::<(), LlmClientError>(())
@@ -225,7 +223,7 @@ impl LlmClient {
 
         info!(
             "stored {} text for media {}",
-            image_text_plugin_name(plugin_id).unwrap_or("LLM"),
+            image_text_model_name(&model_type).unwrap_or("LLM"),
             media_id
         );
         Ok(true)
@@ -287,29 +285,29 @@ fn is_heic_filename(filename: &str) -> bool {
 }
 
 pub async fn generate_missing_ocr(config: &Config, pool: &DbPool) {
-    generate_missing_plugin(config, pool, OCR_PLUGIN_ID, "ocr", "/v1/infer", "OCR").await;
+    generate_missing_model(config, pool, OCR_MODEL_TYPE, "ocr", "/v1/infer", "OCR").await;
 }
 
-pub async fn generate_missing_object_detection(config: &Config, pool: &DbPool) {
-    if !config.llm.object_detection_enabled {
+pub async fn generate_missing_image_tagging(config: &Config, pool: &DbPool) {
+    if !config.llm.image_tagging_enabled {
         return;
     }
-    let endpoint = config.llm.object_detection_endpoint.clone();
-    generate_missing_plugin(
+    let endpoint = config.llm.image_tagging_endpoint.clone();
+    generate_missing_model(
         config,
         pool,
-        OBJECT_DETECTION_PLUGIN_ID,
-        "object_detection",
+        IMAGE_TAGGING_MODEL_TYPE,
+        "image_tagging",
         &endpoint,
-        "object detection",
+        "image tagging",
     )
     .await;
 }
 
-async fn generate_missing_plugin(
+async fn generate_missing_model(
     config: &Config,
     pool: &DbPool,
-    plugin_id: i64,
+    model_type: &str,
     task: &str,
     endpoint: &str,
     plugin_name: &str,
@@ -325,8 +323,8 @@ async fn generate_missing_plugin(
     let rows = match pool.get() {
         Ok(conn) => fetch_all(
             &conn,
-            queries::image_text::SELECT_MISSING_FOR_PLUGIN,
-            &[&plugin_id],
+            queries::image_text::SELECT_MISSING_FOR_MODEL_TYPE,
+            &[&model_type],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         ),
         Err(error) => {
@@ -393,7 +391,7 @@ async fn generate_missing_plugin(
                 };
                 let path = paths().originals.join(file_path);
                 match client
-                    .infer_and_store(&pool, media_id, &path, plugin_id, &task, &endpoint)
+                    .infer_and_store(&pool, media_id, &path, &task, &endpoint)
                     .await
                 {
                     Ok(true) => {

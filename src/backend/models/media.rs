@@ -76,7 +76,7 @@ pub struct ImageTextSearchRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ImageTextSearchResult {
     pub image_id: i64,
-    pub plugins: Vec<String>,
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

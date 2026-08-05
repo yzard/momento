@@ -11,8 +11,6 @@ interface PhotoGridProps {
   onDelete?: (media: Media) => void
 }
 
-const ANIMATED_FORMATS = ['gif', 'apng', 'webp']
-
 function getFormatBadge(mimeType: string | null, filename: string, mediaType: 'image' | 'video'): string | null {
   const lowerMime = mimeType ? mimeType.toLowerCase() : ''
   const ext = filename.split('.').pop()?.toLowerCase() || ''
@@ -41,12 +39,6 @@ function getFormatBadge(mimeType: string | null, filename: string, mediaType: 'i
   if (lowerMime.includes('nef') || ext === 'nef') return 'RAW'
 
   return null
-}
-
-function isAnimatedFormat(mimeType: string | null): boolean {
-  if (!mimeType) return false
-  const lower = mimeType.toLowerCase()
-  return ANIMATED_FORMATS.some(fmt => lower.includes(fmt))
 }
 
 export default function PhotoGrid({ media, onPhotoClick, onAddToAlbum, onDelete }: PhotoGridProps) {
@@ -86,8 +78,8 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
   const containerRef = useRef<HTMLDivElement>(null)
 
   const isVideo = item.mediaType === 'video'
-  const isAnimated = isAnimatedFormat(item.mimeType)
-  const shouldPreview = isVideo || isAnimated
+  const isGif = item.mimeType?.toLowerCase().includes('gif') || item.originalFilename.toLowerCase().endsWith('.gif')
+  const shouldPreview = isVideo || isGif
   const formatBadge = getFormatBadge(item.mimeType, item.originalFilename, item.mediaType)
 
   // Load thumbnail with IntersectionObserver for lazy loading
@@ -129,7 +121,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         // Load preview URL if not already loaded
         if (!previewUrl) {
           try {
-            if (item.mediaType === 'video') {
+            if (item.mediaType === 'video' || isGif) {
               setPreviewUrl(mediaApi.getFileStreamUrl(item.id))
             } else {
               const url = await previewBatchLoader.load(item.id)
@@ -142,7 +134,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         setShowVideo(true)
       }, 500)
     }
-  }, [shouldPreview, previewUrl, item.id, item.mediaType])
+  }, [shouldPreview, previewUrl, item.id, item.mediaType, isGif])
 
   const handleMouseLeave = useCallback(() => {
     setIsHovering(false)
@@ -192,17 +184,25 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
       )}
 
       {isHovering && showVideo && shouldPreview && previewUrl && (
-        <video
-          ref={videoRef}
-          src={previewUrl}
-          className="absolute inset-0 w-full h-full object-cover"
-          autoPlay
-          muted
-          loop={false}
-          playsInline
-          onPlay={() => setIsVideoPlaying(true)}
-          onTimeUpdate={handleVideoTimeUpdate}
-        />
+        isGif ? (
+          <img
+            src={previewUrl}
+            alt={item.originalFilename}
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        ) : (
+          <video
+            ref={videoRef}
+            src={previewUrl}
+            className="absolute inset-0 w-full h-full object-cover"
+            autoPlay
+            muted
+            loop={false}
+            playsInline
+            onPlay={() => setIsVideoPlaying(true)}
+            onTimeUpdate={handleVideoTimeUpdate}
+          />
+        )
       )}
 
       {isVideo && (!isHovering || !showVideo) && (
@@ -261,4 +261,3 @@ function formatDuration(seconds: number): string {
   const secs = Math.floor(seconds % 60)
   return `${mins}:${secs.toString().padStart(2, '0')}`
 }
-

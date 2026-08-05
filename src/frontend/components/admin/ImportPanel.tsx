@@ -53,7 +53,7 @@ export default function ImportPanel() {
       <h3 className="text-lg font-medium mb-4 text-foreground">Import Photos</h3>
 
       <p className="text-muted-foreground mb-6 font-light">
-        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import. WebDAV uploads are processed automatically when enabled in <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/config.yaml</code>.
+        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import. WebDAV uploads are processed automatically when enabled in <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/config.toml</code>.
       </p>
 
       <div className="flex flex-wrap gap-3">

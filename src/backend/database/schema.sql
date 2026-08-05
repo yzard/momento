@@ -135,7 +135,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_rtree USING rtree (
 
 CREATE VIRTUAL TABLE IF NOT EXISTS image_text USING fts5 (
     image_id UNINDEXED,
-    plugin_id UNINDEXED,
+    model_type UNINDEXED,
+    model_version UNINDEXED,
     string,
     tokenize = 'unicode61'
 );

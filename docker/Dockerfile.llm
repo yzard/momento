@@ -10,7 +10,7 @@ RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --manifest-path /ap
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates wget
+RUN apk add --no-cache ca-certificates imagemagick libheif wget
 
 WORKDIR /app
 
@@ -23,4 +23,4 @@ ENV RUST_BACKTRACE=full
 EXPOSE 8100
 
 ENTRYPOINT ["/app/llm-service"]
-CMD ["-c", "/data/config_llm.yaml"]
+CMD ["-c", "/data/config_llm.toml"]

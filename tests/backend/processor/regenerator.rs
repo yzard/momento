@@ -1,17 +1,17 @@
 use crate::test_utils::{create_test_app, create_test_media};
-use momento_api::constants::{OBJECT_DETECTION_PLUGIN_ID, OCR_PLUGIN_ID};
+use momento_api::constants::{IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
 use momento_api::database::queries;
 use rusqlite::params;
 
 #[test]
-fn clearing_metadata_also_clears_llm_text_plugins() {
+fn clearing_metadata_also_clears_llm_text_models() {
     let (_app, pool) = create_test_app();
     let media_id = create_test_media(&pool, "metadata.jpg");
     let conn = pool.get().expect("Failed to get database connection");
-    for plugin_id in [OCR_PLUGIN_ID, OBJECT_DETECTION_PLUGIN_ID] {
+    for model_type in [OCR_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE] {
         conn.execute(
             queries::image_text::INSERT,
-            params![media_id, plugin_id, "generated text"],
+            params![media_id, model_type, "test-version", "generated text"],
         )
         .expect("Failed to insert LLM text");
     }
