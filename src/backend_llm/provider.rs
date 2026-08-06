@@ -41,10 +41,7 @@ pub enum Provider {
 }
 
 impl Provider {
-    pub async fn build(config: &Config) -> Result<Self, ServiceError> {
-        let service = config.service_for("ocr").ok_or_else(|| {
-            ServiceError::Configuration("an enabled ocr service is required".to_string())
-        })?;
+    pub async fn build(service: &ServiceConfig) -> Result<Self, ServiceError> {
         match service.provider {
             ProviderKind::Baidu => Ok(Self::Baidu(BaiduProvider::new(service)?)),
             ProviderKind::Local => Ok(Self::Local(LocalProvider::new(service).await?)),
@@ -67,6 +64,138 @@ impl Provider {
             Self::Baidu(provider) => provider.name(),
             Self::Local(provider) => provider.name(),
         }
+    }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        if let Self::Local(provider) = self {
+            provider.shutdown().await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceType {
+    Ocr,
+    ImageTagging,
+}
+
+impl ServiceType {
+    fn from_task(task: &str) -> Result<Self, ServiceError> {
+        match task {
+            "ocr" => Ok(Self::Ocr),
+            "image_tagging" => Ok(Self::ImageTagging),
+            _ => Err(ServiceError::NotImplemented(format!(
+                "inference task `{task}` has no configured model provider"
+            ))),
+        }
+    }
+
+    fn config_key(self) -> &'static str {
+        match self {
+            Self::Ocr => "ocr",
+            Self::ImageTagging => "image_tagging",
+        }
+    }
+}
+
+enum ActiveService {
+    Ocr(Provider),
+    ImageTagging(RamProvider),
+}
+
+impl ActiveService {
+    fn service_type(&self) -> ServiceType {
+        match self {
+            Self::Ocr(_) => ServiceType::Ocr,
+            Self::ImageTagging(_) => ServiceType::ImageTagging,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Ocr(provider) => provider.name(),
+            Self::ImageTagging(_) => "ram++",
+        }
+    }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        match self {
+            Self::Ocr(provider) => provider.shutdown().await,
+            Self::ImageTagging(provider) => provider.shutdown().await,
+        }
+    }
+}
+
+pub struct ServiceManager {
+    config: Arc<Config>,
+    active: Option<ActiveService>,
+}
+
+impl ServiceManager {
+    pub fn new(config: Arc<Config>) -> Self {
+        Self {
+            config,
+            active: None,
+        }
+    }
+
+    pub fn active_name(&self) -> &'static str {
+        self.active
+            .as_ref()
+            .map(ActiveService::name)
+            .unwrap_or("on-demand")
+    }
+
+    pub async fn infer(
+        &mut self,
+        task: &str,
+        image: &[u8],
+        filename: &str,
+    ) -> Result<InferenceResponse, ServiceError> {
+        let service_type = ServiceType::from_task(task)?;
+        self.activate(service_type).await?;
+        match self.active.as_ref() {
+            Some(ActiveService::Ocr(provider)) => provider.infer(image, filename).await,
+            Some(ActiveService::ImageTagging(provider)) => provider.infer(image).await,
+            None => Err(ServiceError::Internal(
+                "LLM service was not activated".to_string(),
+            )),
+        }
+    }
+
+    async fn activate(&mut self, service_type: ServiceType) -> Result<(), ServiceError> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.service_type() == service_type)
+        {
+            return Ok(());
+        }
+
+        if let Some(active) = self.active.take() {
+            active.shutdown().await?;
+        }
+
+        let service = self
+            .config
+            .service_for(service_type.config_key())
+            .cloned()
+            .ok_or_else(|| {
+                ServiceError::NotImplemented(format!(
+                    "inference task `{}` has no configured model provider",
+                    service_type.config_key()
+                ))
+            })?;
+        let active = match service_type {
+            ServiceType::Ocr => ActiveService::Ocr(Provider::build(&service).await?),
+            ServiceType::ImageTagging => {
+                ActiveService::ImageTagging(RamProvider::new(&service).await?)
+            }
+        };
+        self.active = Some(active);
+        Ok(())
     }
 }
 
@@ -311,6 +440,26 @@ impl LocalProvider {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        let mut child = self.child.lock().await;
+        if child
+            .try_wait()
+            .map_err(|error| {
+                ServiceError::Internal(format!("failed to inspect OCR runtime: {error}"))
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+        child.start_kill().map_err(|error| {
+            ServiceError::Internal(format!("failed to stop OCR runtime: {error}"))
+        })?;
+        child.wait().await.map_err(|error| {
+            ServiceError::Internal(format!("failed to wait for OCR runtime: {error}"))
+        })?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -463,6 +612,26 @@ impl RamProvider {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        let mut child = self.child.lock().await;
+        if child
+            .try_wait()
+            .map_err(|error| {
+                ServiceError::Internal(format!("failed to inspect image tagging runtime: {error}"))
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+        child.start_kill().map_err(|error| {
+            ServiceError::Internal(format!("failed to stop image tagging runtime: {error}"))
+        })?;
+        child.wait().await.map_err(|error| {
+            ServiceError::Internal(format!("failed to wait for image tagging runtime: {error}"))
+        })?;
+        Ok(())
     }
 
     pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
@@ -619,8 +788,9 @@ async fn normalize_local_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{BaiduProvider, OcrProvider};
+    use super::{BaiduProvider, OcrProvider, ServiceManager, ServiceType};
     use crate::config::{ProviderKind, ServiceConfig};
+    use std::sync::Arc;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -676,5 +846,21 @@ mod tests {
             .expect("Baidu OCR should succeed");
 
         assert_eq!(response.text, "recognized text");
+    }
+
+    #[test]
+    fn service_manager_starts_without_an_active_runtime() {
+        let manager = ServiceManager::new(Arc::new(crate::config::Config {
+            general: Default::default(),
+            logging: Default::default(),
+            service: Vec::new(),
+        }));
+        assert_eq!(manager.active_name(), "on-demand");
+    }
+
+    #[test]
+    fn service_type_rejects_unknown_tasks() {
+        assert!(ServiceType::from_task("object_detection").is_err());
+        assert_eq!(ServiceType::from_task("ocr").unwrap(), ServiceType::Ocr);
     }
 }

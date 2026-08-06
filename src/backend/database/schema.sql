@@ -179,6 +179,10 @@ CREATE INDEX IF NOT EXISTS idx_media_access_user_deleted
     ON media_access (user_id, deleted_at)
     WHERE deleted_at IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS idx_media_access_user_active
+    ON media_access (user_id, media_id)
+    WHERE deleted_at IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_media_access_media
     ON media_access (media_id);
 

@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::constants::paths;
 use crate::database::execute_query;
 use crate::database::{fetch_all, queries, DbConn, DbPool};
-use crate::llm_client::{generate_missing_image_tagging, generate_missing_ocr};
+use crate::llm_client::generate_missing_batches;
 use crate::processor::media_processor::{
     calculate_geohash, delete_from_rtree, generate_complete_metadata, insert_into_rtree,
 };
@@ -101,7 +101,7 @@ pub fn cancel_regeneration() -> bool {
     true
 }
 
-fn is_cancel_requested() -> bool {
+pub(crate) fn is_cancel_requested() -> bool {
     CANCEL_REQUESTED.load(Ordering::SeqCst)
 }
 
@@ -163,11 +163,7 @@ async fn generate_missing_llm_metadata(config: &Config, pool: &DbPool) {
     if is_cancel_requested() {
         return;
     }
-    generate_missing_ocr(config, pool).await;
-    if is_cancel_requested() {
-        return;
-    }
-    generate_missing_image_tagging(config, pool).await;
+    generate_missing_batches(config, pool).await;
 }
 
 fn update_job_totals(metadata_jobs: i64, thumbnail_jobs: i64, image_text_jobs: i64) {

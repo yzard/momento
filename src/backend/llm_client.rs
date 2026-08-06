@@ -1,12 +1,15 @@
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
+use std::collections::VecDeque;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 
 use crate::config::{Config, LlmConfig};
@@ -48,6 +51,101 @@ pub enum LlmClientError {
     Database(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuedServiceType {
+    Ocr,
+    ImageTagging,
+}
+
+type InferenceJob = Pin<Box<dyn Future<Output = Result<bool, LlmClientError>> + Send>>;
+
+struct QueuedInference {
+    service_type: QueuedServiceType,
+    operation: InferenceJob,
+    response: oneshot::Sender<Result<bool, LlmClientError>>,
+}
+
+#[derive(Clone)]
+struct LlmScheduler {
+    sender: mpsc::Sender<QueuedInference>,
+}
+
+impl LlmScheduler {
+    fn new() -> Arc<Self> {
+        let (sender, receiver) = mpsc::channel(64);
+        let scheduler = Arc::new(Self { sender });
+        std::thread::Builder::new()
+            .name("llm-scheduler".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("LLM scheduler runtime should build");
+                runtime.block_on(run_inference_batches(receiver));
+            })
+            .expect("LLM scheduler thread should start");
+        scheduler
+    }
+
+    async fn submit(
+        &self,
+        service_type: QueuedServiceType,
+        operation: InferenceJob,
+    ) -> Result<bool, LlmClientError> {
+        let (response, result) = oneshot::channel();
+        self.sender
+            .send(QueuedInference {
+                service_type,
+                operation,
+                response,
+            })
+            .await
+            .map_err(|_| LlmClientError::Request("LLM scheduler stopped".to_string()))?;
+        result
+            .await
+            .map_err(|_| LlmClientError::Request("LLM scheduler dropped the result".to_string()))?
+    }
+}
+
+async fn run_inference_batches(mut receiver: mpsc::Receiver<QueuedInference>) {
+    let Some(mut current) = receiver.recv().await else {
+        return;
+    };
+    let mut pending = VecDeque::new();
+
+    loop {
+        let current_type = current.service_type;
+        let result = current.operation.await;
+        let _ = current.response.send(result);
+
+        while let Ok(job) = receiver.try_recv() {
+            pending.push_back(job);
+        }
+        if let Some(index) = pending
+            .iter()
+            .position(|job| job.service_type == current_type)
+        {
+            current = pending
+                .remove(index)
+                .expect("queued job index should remain valid");
+            continue;
+        }
+        if let Some(job) = pending.pop_front() {
+            current = job;
+            continue;
+        }
+        let Some(job) = receiver.recv().await else {
+            return;
+        };
+        current = job;
+    }
+}
+
+fn llm_scheduler() -> &'static Arc<LlmScheduler> {
+    static SCHEDULER: std::sync::OnceLock<Arc<LlmScheduler>> = std::sync::OnceLock::new();
+    SCHEDULER.get_or_init(LlmScheduler::new)
+}
+
 impl LlmClient {
     pub fn new(config: &LlmConfig) -> Result<Self, LlmClientError> {
         let client = reqwest::Client::builder()
@@ -66,8 +164,15 @@ impl LlmClient {
         media_id: i64,
         image_path: &Path,
     ) -> Result<bool, LlmClientError> {
-        self.infer_and_store(pool, media_id, image_path, "ocr", "/v1/infer")
-            .await
+        self.submit_inference(
+            QueuedServiceType::Ocr,
+            pool,
+            media_id,
+            image_path,
+            "ocr",
+            "/v1/infer",
+        )
+        .await
     }
 
     pub async fn image_tagging_and_store(
@@ -76,7 +181,8 @@ impl LlmClient {
         media_id: i64,
         image_path: &Path,
     ) -> Result<bool, LlmClientError> {
-        self.infer_and_store(
+        self.submit_inference(
+            QueuedServiceType::ImageTagging,
             pool,
             media_id,
             image_path,
@@ -84,6 +190,32 @@ impl LlmClient {
             &self.config.image_tagging_endpoint,
         )
         .await
+    }
+
+    async fn submit_inference(
+        &self,
+        service_type: QueuedServiceType,
+        pool: &DbPool,
+        media_id: i64,
+        image_path: &Path,
+        task: &str,
+        endpoint: &str,
+    ) -> Result<bool, LlmClientError> {
+        let client = self.clone();
+        let pool = pool.clone();
+        let image_path = image_path.to_path_buf();
+        let task = task.to_string();
+        let endpoint = endpoint.to_string();
+        llm_scheduler()
+            .submit(
+                service_type,
+                Box::pin(async move {
+                    client
+                        .infer_and_store_direct(&pool, media_id, &image_path, &task, &endpoint)
+                        .await
+                }),
+            )
+            .await
     }
 
     pub async fn wait_until_ready(&self) -> Result<(), LlmClientError> {
@@ -126,7 +258,7 @@ impl LlmClient {
         }
     }
 
-    async fn infer_and_store(
+    async fn infer_and_store_direct(
         &self,
         pool: &DbPool,
         media_id: i64,
@@ -284,11 +416,15 @@ fn is_heic_filename(filename: &str) -> bool {
     )
 }
 
-pub async fn generate_missing_ocr(config: &Config, pool: &DbPool) {
+pub async fn generate_missing_batches(config: &Config, pool: &DbPool) {
+    // Complete one service-type batch before starting the next one. The LLM
+    // service owns only one model runtime, so interleaving these batches would
+    // force an unnecessary shutdown/startup cycle for every request.
     generate_missing_model(config, pool, OCR_MODEL_TYPE, "ocr", "/v1/infer", "OCR").await;
-}
 
-pub async fn generate_missing_image_tagging(config: &Config, pool: &DbPool) {
+    if crate::processor::regenerator::is_cancel_requested() {
+        return;
+    }
     if !config.llm.image_tagging_enabled {
         return;
     }
@@ -375,6 +511,14 @@ async fn generate_missing_model(
     let endpoint = endpoint.to_string();
     let task = task.to_string();
     let plugin_name = plugin_name.to_string();
+    let service_type = match task.as_str() {
+        "ocr" => QueuedServiceType::Ocr,
+        "image_tagging" => QueuedServiceType::ImageTagging,
+        _ => {
+            record_regeneration_error(&format!("unsupported LLM task: {task}"));
+            return;
+        }
+    };
     let mut workers = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
         let client = Arc::clone(&client);
@@ -391,7 +535,7 @@ async fn generate_missing_model(
                 };
                 let path = paths().originals.join(file_path);
                 match client
-                    .infer_and_store(&pool, media_id, &path, &task, &endpoint)
+                    .submit_inference(service_type, &pool, media_id, &path, &task, &endpoint)
                     .await
                 {
                     Ok(true) => {
@@ -424,12 +568,86 @@ async fn generate_missing_model(
 
 #[cfg(test)]
 mod tests {
-    use super::is_heic_filename;
+    use super::{is_heic_filename, LlmScheduler, QueuedServiceType};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::Notify;
 
     #[test]
     fn recognizes_heic_extensions_for_in_memory_conversion() {
         assert!(is_heic_filename("photo.HEIC"));
         assert!(is_heic_filename("photo.heif"));
         assert!(!is_heic_filename("photo.jpg"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_finishes_queued_same_type_before_switching() {
+        let scheduler = LlmScheduler::new();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let first_order = Arc::clone(&order);
+        let first_started = Arc::clone(&started);
+        let first_release = Arc::clone(&release);
+        let first_scheduler = scheduler.clone();
+        let first = tokio::spawn(async move {
+            first_scheduler
+                .submit(
+                    QueuedServiceType::Ocr,
+                    Box::pin(async move {
+                        first_order.lock().unwrap().push(QueuedServiceType::Ocr);
+                        first_started.notify_one();
+                        first_release.notified().await;
+                        Ok(true)
+                    }),
+                )
+                .await
+        });
+        started.notified().await;
+
+        let second_order = Arc::clone(&order);
+        let second_scheduler = scheduler.clone();
+        let second = tokio::spawn(async move {
+            second_scheduler
+                .submit(
+                    QueuedServiceType::ImageTagging,
+                    Box::pin(async move {
+                        second_order
+                            .lock()
+                            .unwrap()
+                            .push(QueuedServiceType::ImageTagging);
+                        Ok(true)
+                    }),
+                )
+                .await
+        });
+        let third_order = Arc::clone(&order);
+        let third_scheduler = scheduler.clone();
+        let third = tokio::spawn(async move {
+            third_scheduler
+                .submit(
+                    QueuedServiceType::Ocr,
+                    Box::pin(async move {
+                        third_order.lock().unwrap().push(QueuedServiceType::Ocr);
+                        Ok(true)
+                    }),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        release.notify_one();
+
+        assert!(first.await.unwrap().unwrap());
+        assert!(second.await.unwrap().unwrap());
+        assert!(third.await.unwrap().unwrap());
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                QueuedServiceType::Ocr,
+                QueuedServiceType::Ocr,
+                QueuedServiceType::ImageTagging
+            ]
+        );
     }
 }

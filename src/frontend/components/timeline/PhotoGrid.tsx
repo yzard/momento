@@ -180,7 +180,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
           className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${isVideoPlaying ? 'opacity-0' : 'opacity-100'}`}
         />
       ) : (
-        <div className="w-full h-full animate-pulse" />
+        <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
       )}
 
       {isHovering && showVideo && shouldPreview && previewUrl && (

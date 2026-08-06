@@ -51,7 +51,9 @@ function AppRoutes() {
         }
       >
         <Route index element={<Navigate to="/timeline" replace />} />
-        <Route path="timeline" element={<Timeline />} />
+        <Route path="timeline" element={<Timeline mediaType={null} />} />
+        <Route path="timeline/photos" element={<Timeline mediaType="image" />} />
+        <Route path="timeline/videos" element={<Timeline mediaType="video" />} />
         <Route path="albums" element={<Albums />} />
         <Route path="map" element={<Map />} />
         <Route path="settings" element={<Settings />} />

@@ -4,16 +4,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::config::Config;
 use crate::error::ServiceError;
-use crate::provider::{InferenceResponse, Provider, RamProvider};
+use crate::provider::{InferenceResponse, ServiceManager};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub provider: Arc<Provider>,
-    pub image_tagging: Option<Arc<RamProvider>>,
+    pub manager: Arc<Mutex<ServiceManager>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -34,16 +34,18 @@ struct HealthResponse {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let provider = state.manager.lock().await.active_name();
     Json(HealthResponse {
         status: "healthy",
-        provider: state.provider.name(),
+        provider,
     })
 }
 
 async fn ready(State(state): State<AppState>) -> Json<HealthResponse> {
+    let provider = state.manager.lock().await.active_name();
     Json(HealthResponse {
         status: "ready",
-        provider: state.provider.name(),
+        provider,
     })
 }
 
@@ -94,21 +96,12 @@ async fn infer(
     }
 
     let task = task.ok_or_else(|| ServiceError::BadRequest("missing task field".to_string()))?;
-    if task == "image_tagging" {
-        let tagger = state.image_tagging.as_ref().ok_or_else(|| {
-            ServiceError::NotImplemented(
-                "image tagging has no configured model provider".to_string(),
-            )
-        })?;
-        return Ok(Json(tagger.infer(&image).await?));
-    }
-    if task != "ocr" {
-        return Err(ServiceError::NotImplemented(format!(
-            "inference task `{task}` has no configured model provider"
-        )));
-    }
-
-    let result = state.provider.infer(&image, &filename).await?;
+    let result = state
+        .manager
+        .lock()
+        .await
+        .infer(&task, &image, &filename)
+        .await?;
     Ok(Json(result))
 }
 

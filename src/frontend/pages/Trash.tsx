@@ -113,10 +113,6 @@ export default function Trash() {
       <div className="max-w-7xl mx-auto animate-fade-in px-6 md:px-10 py-6 md:py-10">
         <div className="mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-display font-bold text-foreground tracking-tight flex items-center gap-3">
-              <Trash2 className="w-8 h-8" />
-              Trash
-            </h1>
             <p className="mt-1 text-muted-foreground font-medium">
               Items are automatically deleted after 30 days.
             </p>

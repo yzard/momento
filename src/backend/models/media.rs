@@ -40,8 +40,8 @@ pub struct MediaListRequest {
     pub cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<i32>,
-    pub group_by: Option<String>,
     pub search: Option<String>,
+    pub media_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,8 +56,54 @@ pub struct MediaListResponse {
     pub items: Vec<MediaResponse>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub groups: Option<Vec<TimelineGroup>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineListRequest {
+    pub cursor: Option<String>,
+    pub group_by: String,
+    pub search: String,
+    pub media_type: Option<String>,
+    pub direction: TimelineDirection,
+    pub anchor_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineDirection {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineMarkersRequest {
+    pub media_type: Option<String>,
+    pub search: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineMarker {
+    pub label: String,
+    pub anchor_date: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineMarkersResponse {
+    pub markers: Vec<TimelineMarker>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineListResponse {
+    pub groups: Vec<TimelineGroup>,
+    pub next_cursor: Option<String>,
+    pub previous_cursor: Option<String>,
+    pub has_older: bool,
+    pub has_newer: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -6,7 +6,7 @@ use tracing::info;
 use tracing_subscriber::{fmt::writer::MakeWriterExt, EnvFilter};
 
 use llm_service::config::Config;
-use llm_service::provider::{Provider, RamProvider};
+use llm_service::provider::ServiceManager;
 use llm_service::routes::{serve, AppState};
 
 fn config_path() -> Result<PathBuf, String> {
@@ -51,27 +51,6 @@ async fn main() {
         eprintln!("Failed to initialize logging: {error}");
         std::process::exit(1);
     }
-    let provider = match Provider::build(&config).await {
-        Ok(provider) => Arc::new(provider),
-        Err(error) => {
-            tracing::error!(
-                "Failed to initialize {} provider: {error}",
-                provider_name(&config)
-            );
-            std::process::exit(1);
-        }
-    };
-    let image_tagging = if let Some(service) = config.service_for("image_tagging") {
-        match RamProvider::new(service).await {
-            Ok(provider) => Some(Arc::new(provider)),
-            Err(error) => {
-                tracing::error!("Failed to initialize image tagging: {error}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
-    };
     let address = format!("{}:{}", config.general.host, config.general.port);
     let listener = match tokio::net::TcpListener::bind(&address).await {
         Ok(listener) => listener,
@@ -83,9 +62,10 @@ async fn main() {
 
     info!("Starting LLM service on {}", listener.local_addr().unwrap());
     let state = AppState {
+        manager: Arc::new(tokio::sync::Mutex::new(ServiceManager::new(Arc::clone(
+            &config,
+        )))),
         config,
-        provider,
-        image_tagging,
     };
     if let Err(error) = serve(listener, state).await {
         tracing::error!("LLM service failed: {error}");
@@ -106,12 +86,4 @@ fn init_logging(file_path: &Path) -> io::Result<()> {
         .with_writer(file.and(std::io::stdout))
         .init();
     Ok(())
-}
-
-fn provider_name(config: &Config) -> &'static str {
-    match config.service_for("ocr").map(|service| &service.provider) {
-        Some(llm_service::config::ProviderKind::Baidu) => "baidu",
-        Some(llm_service::config::ProviderKind::Local) => "local",
-        None => "unknown",
-    }
 }

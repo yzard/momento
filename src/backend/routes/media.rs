@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{Datelike, NaiveDateTime, Utc};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
 use indexmap::IndexMap;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -20,7 +20,9 @@ use crate::models::{
     DeleteMediaResponse, ImageTextSearchRequest, ImageTextSearchResponse, ImageTextSearchResult,
     MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaListRequest, MediaListResponse,
     MediaResponse, MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse,
-    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize,
+    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize, TimelineDirection,
+    TimelineListRequest, TimelineListResponse, TimelineMarker, TimelineMarkersRequest,
+    TimelineMarkersResponse,
 };
 use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
 use crate::processor::thumbnails::generate_image_preview;
@@ -29,9 +31,14 @@ use base64::Engine;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+const TIMELINE_START_DATE: &str = "0000-01-01T00:00:00";
+const TIMELINE_END_DATE: &str = "9999-12-31T23:59:59";
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/media/list", post(list_media))
+        .route("/timeline/list", post(list_timeline))
+        .route("/timeline/markers", post(get_timeline_markers))
         .route("/media/search", post(search_media))
         .route("/media/get-batch", post(get_media_batch))
         .route("/media/update", post(update_media))
@@ -185,61 +192,6 @@ async fn list_media(
     let conn = state.pool.get().map_err(AppError::Pool)?;
     let search = normalize_image_text_search(request.search.as_deref());
 
-    if let Some(group_by) = request.group_by.as_deref() {
-        let limit = request.limit.unwrap_or(100);
-        let mut rows = fetch_timeline_rows(
-            &conn,
-            current_user.id,
-            limit,
-            request.cursor.as_deref(),
-            &search,
-        )?;
-
-        if rows.is_empty() && request.cursor.is_none() && search.is_empty() {
-            let fallback_items = fetch_all(
-                &conn,
-                queries::media::SELECT_ALL_FOR_USER,
-                &[&current_user.id, &search, &search],
-                map_media_row,
-            )?;
-            rows = fallback_items
-                .into_iter()
-                .map(|media| {
-                    let date_taken = media.date_taken.clone();
-                    (media, date_taken)
-                })
-                .collect();
-        }
-
-        let has_more = rows.len() > limit as usize;
-        let rows: Vec<_> = rows.into_iter().take(limit as usize).collect();
-
-        let mut grouped: IndexMap<String, Vec<MediaResponse>> = IndexMap::new();
-        for (media, date_taken) in &rows {
-            let key = timeline_group_key(date_taken.as_deref(), group_by);
-            grouped.entry(key).or_default().push(media.clone());
-        }
-
-        let groups: Vec<crate::models::TimelineGroup> = grouped
-            .into_iter()
-            .map(|(date, media)| crate::models::TimelineGroup { date, media })
-            .collect();
-
-        let next_cursor = if has_more && !rows.is_empty() {
-            let (last, last_date) = rows.last().unwrap();
-            last_date.as_ref().map(|dt| format!("{}_{}", dt, last.id))
-        } else {
-            None
-        };
-
-        return Ok(Json(MediaListResponse {
-            items: vec![],
-            next_cursor,
-            has_more,
-            groups: Some(groups),
-        }));
-    }
-
     if request.limit.is_none() && request.cursor.is_none() {
         let items = fetch_all(
             &conn,
@@ -252,7 +204,6 @@ async fn list_media(
             items,
             next_cursor: None,
             has_more: false,
-            groups: None,
         }));
     }
 
@@ -299,8 +250,187 @@ async fn list_media(
         items,
         next_cursor,
         has_more,
-        groups: None,
     }))
+}
+
+async fn list_timeline(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<TimelineListRequest>,
+) -> AppResult<Json<TimelineListResponse>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let search = normalize_image_text_search(Some(&request.search));
+    let response = query_timeline(&conn, current_user.id, &request, &search)?;
+    Ok(Json(response))
+}
+
+fn query_timeline(
+    conn: &crate::database::DbConn,
+    user_id: i64,
+    request: &TimelineListRequest,
+    search: &str,
+) -> AppResult<TimelineListResponse> {
+    if request.direction == TimelineDirection::Newer && request.cursor.is_none() {
+        return Err(AppError::BadRequest(
+            "newer timeline requests require a cursor".to_string(),
+        ));
+    }
+    let media_type = validate_media_type(request.media_type.as_deref())?;
+
+    let page = fetch_timeline_page(
+        conn,
+        TimelineQuery {
+            user_id,
+            cursor: request.cursor.as_deref(),
+            search,
+            media_type,
+            start_date: TIMELINE_START_DATE,
+            end_date: TIMELINE_END_DATE,
+            direction: request.direction,
+            anchor_date: request.anchor_date.as_deref(),
+            group_by: &request.group_by,
+        },
+    )?;
+    let TimelinePage { rows, has_more } = page;
+
+    let mut grouped: IndexMap<String, Vec<MediaResponse>> = IndexMap::new();
+    for (media, date_taken) in &rows {
+        let key = timeline_group_key(date_taken.as_deref(), &request.group_by);
+        grouped.entry(key).or_default().push(media.clone());
+    }
+    let groups = grouped
+        .into_iter()
+        .map(|(date, media)| crate::models::TimelineGroup { date, media })
+        .collect();
+
+    let first_cursor = rows
+        .first()
+        .and_then(|(media, date)| date.as_ref().map(|date| format!("{}_{}", date, media.id)));
+    let last_cursor = rows
+        .last()
+        .and_then(|(media, date)| date.as_ref().map(|date| format!("{}_{}", date, media.id)));
+    let has_older = if request.direction == TimelineDirection::Older {
+        has_more
+    } else {
+        first_cursor.is_some()
+    };
+    let has_newer = if request.direction == TimelineDirection::Newer {
+        has_more
+    } else if request.cursor.is_some() {
+        true
+    } else if let Some(cursor) = first_cursor.as_deref() {
+        let filter = TimelineFilter {
+            user_id,
+            search,
+            media_type: media_type.unwrap_or(""),
+            start_date: TIMELINE_START_DATE,
+            end_date: TIMELINE_END_DATE,
+        };
+        !fetch_timeline_candidate(conn, filter, TimelineDirection::Newer, Some(cursor), None)?
+            .is_empty()
+    } else {
+        false
+    };
+
+    Ok(TimelineListResponse {
+        groups,
+        next_cursor: if has_older {
+            if request.direction == TimelineDirection::Older {
+                last_cursor.clone()
+            } else {
+                first_cursor.clone()
+            }
+        } else {
+            None
+        },
+        previous_cursor: if has_newer {
+            if request.direction == TimelineDirection::Older {
+                first_cursor.clone()
+            } else {
+                last_cursor.clone()
+            }
+        } else {
+            None
+        },
+        has_older,
+        has_newer,
+    })
+}
+
+async fn get_timeline_markers(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<TimelineMarkersRequest>,
+) -> AppResult<Json<TimelineMarkersResponse>> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let search = normalize_image_text_search(Some(&request.search));
+    let media_type = validate_media_type(request.media_type.as_deref())?;
+    let media_type_value = media_type.unwrap_or("");
+    let rows: Vec<(String, String)> = fetch_all(
+        &conn,
+        queries::timeline::SELECT_MONTH_MARKERS,
+        &[
+            &current_user.id,
+            &search,
+            &search,
+            &media_type_value,
+            &media_type_value,
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let markers = rows
+        .into_iter()
+        .map(|(label, anchor_date)| TimelineMarker { label, anchor_date })
+        .collect::<Vec<_>>();
+
+    Ok(Json(TimelineMarkersResponse { markers }))
+}
+
+fn validate_media_type(media_type: Option<&str>) -> AppResult<Option<&str>> {
+    match media_type {
+        None | Some("image") | Some("video") => Ok(media_type),
+        Some(_) => Err(AppError::BadRequest(
+            "mediaType must be either image or video".to_string(),
+        )),
+    }
+}
+
+fn timeline_period_bounds(date_taken: &str, group_by: &str) -> AppResult<(String, String)> {
+    if date_taken.len() < 10 {
+        return Err(AppError::BadRequest("Invalid timeline date".to_string()));
+    }
+    let date = NaiveDate::parse_from_str(&date_taken[..10], "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest("Invalid timeline date".to_string()))?;
+    let start = match group_by {
+        "year" => NaiveDate::from_ymd_opt(date.year(), 1, 1),
+        "month" => NaiveDate::from_ymd_opt(date.year(), date.month(), 1),
+        "week" => {
+            let iso_week = date.iso_week();
+            NaiveDate::from_isoywd_opt(iso_week.year(), iso_week.week(), Weekday::Mon)
+        }
+        "day" => Some(date),
+        _ => return Err(AppError::BadRequest("Invalid groupBy".to_string())),
+    }
+    .ok_or_else(|| AppError::BadRequest("Invalid timeline period".to_string()))?;
+    let end = match group_by {
+        "year" => NaiveDate::from_ymd_opt(date.year() + 1, 1, 1),
+        "month" => {
+            let next_month = start
+                .checked_add_months(chrono::Months::new(1))
+                .ok_or_else(|| AppError::BadRequest("Invalid timeline period".to_string()))?;
+            Some(next_month)
+        }
+        "week" => start.checked_add_signed(Duration::days(7)),
+        "day" => start.checked_add_signed(Duration::days(1)),
+        _ => return Err(AppError::BadRequest("Invalid groupBy".to_string())),
+    }
+    .ok_or_else(|| AppError::BadRequest("Invalid timeline period".to_string()))?;
+
+    Ok((
+        format!("{}T00:00:00", start.format("%Y-%m-%d")),
+        format!("{}T00:00:00", end.format("%Y-%m-%d")),
+    ))
 }
 
 async fn search_media(
@@ -619,48 +749,218 @@ fn timeline_group_key(date_taken: Option<&str>, group_by: &str) -> String {
     }
 }
 
-fn fetch_timeline_rows(
-    conn: &crate::database::DbConn,
+struct TimelineQuery<'a> {
     user_id: i64,
-    limit: i32,
-    cursor: Option<&str>,
-    search: &str,
-) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
-    if let Some(cursor) = cursor {
-        let parts: Vec<&str> = cursor.split('_').collect();
-        if parts.len() == 2 {
-            let cursor_date = parts[0];
-            let cursor_id: i64 = parts[1].parse().unwrap_or(0);
-            return fetch_all(
-                conn,
-                queries::timeline::SELECT_PAGINATED,
-                &[
-                    &user_id,
-                    &search,
-                    &search,
-                    &cursor_date,
-                    &cursor_date,
-                    &cursor_id,
-                    &(limit + 1),
-                ],
-                map_timeline_row,
-            );
-        }
-    }
-
-    fetch_default_timeline(conn, user_id, limit, search)
+    cursor: Option<&'a str>,
+    search: &'a str,
+    media_type: Option<&'a str>,
+    start_date: &'a str,
+    end_date: &'a str,
+    direction: TimelineDirection,
+    anchor_date: Option<&'a str>,
+    group_by: &'a str,
 }
 
-fn fetch_default_timeline(
-    conn: &crate::database::DbConn,
+struct TimelinePage {
+    rows: Vec<(MediaResponse, Option<String>)>,
+    has_more: bool,
+}
+
+#[derive(Clone, Copy)]
+struct TimelineFilter<'a> {
     user_id: i64,
-    limit: i32,
-    search: &str,
+    search: &'a str,
+    media_type: &'a str,
+    start_date: &'a str,
+    end_date: &'a str,
+}
+
+fn fetch_timeline_page(
+    conn: &crate::database::DbConn,
+    query: TimelineQuery<'_>,
+) -> AppResult<TimelinePage> {
+    let TimelineQuery {
+        user_id,
+        cursor,
+        search,
+        media_type,
+        start_date,
+        end_date,
+        direction,
+        anchor_date,
+        group_by,
+    } = query;
+    let media_type = media_type.unwrap_or("");
+    let filter = TimelineFilter {
+        user_id,
+        search,
+        media_type,
+        start_date,
+        end_date,
+    };
+    let candidate = fetch_timeline_candidate(conn, filter, direction, cursor, anchor_date)?;
+    let Some((_, Some(candidate_date))) = candidate.first() else {
+        return Ok(TimelinePage {
+            rows: Vec::new(),
+            has_more: false,
+        });
+    };
+
+    let (period_start, period_end) = timeline_period_bounds(candidate_date, group_by)?;
+    let rows = fetch_timeline_period(
+        conn,
+        user_id,
+        search,
+        media_type,
+        &period_start,
+        &period_end,
+        direction,
+    )?;
+    let Some((last_media, Some(last_date))) = rows.last() else {
+        return Ok(TimelinePage {
+            rows,
+            has_more: false,
+        });
+    };
+    let last_cursor = format!("{}_{}", last_date, last_media.id);
+    let has_more =
+        !fetch_timeline_candidate(conn, filter, direction, Some(&last_cursor), None)?.is_empty();
+
+    Ok(TimelinePage { rows, has_more })
+}
+
+fn fetch_timeline_candidate(
+    conn: &crate::database::DbConn,
+    filter: TimelineFilter<'_>,
+    direction: TimelineDirection,
+    cursor: Option<&str>,
+    anchor_date: Option<&str>,
 ) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
+    let TimelineFilter {
+        user_id,
+        search,
+        media_type,
+        start_date,
+        end_date,
+    } = filter;
+    let query_params = [
+        &user_id as &dyn rusqlite::ToSql,
+        &start_date,
+        &end_date,
+        &search,
+        &search,
+        &media_type,
+        &media_type,
+    ];
+
+    if let Some(cursor) = cursor {
+        let parts: Vec<&str> = cursor.split('_').collect();
+        if parts.len() != 2 {
+            return Ok(Vec::new());
+        }
+        let cursor_date = parts[0];
+        let cursor_id: i64 = parts[1].parse().unwrap_or(0);
+        let query = if direction == TimelineDirection::Older {
+            queries::timeline::SELECT_PAGINATED_WINDOW
+        } else {
+            queries::timeline::SELECT_PAGINATED_WINDOW_ASC
+        };
+        return fetch_all(
+            conn,
+            query,
+            &[
+                query_params[0],
+                query_params[1],
+                query_params[2],
+                query_params[3],
+                query_params[4],
+                query_params[5],
+                query_params[6],
+                &cursor_date,
+                &cursor_date,
+                &cursor_id,
+                &1_i64,
+            ],
+            map_timeline_row,
+        );
+    }
+
+    let anchor = anchor_date.ok_or_else(|| {
+        AppError::BadRequest("initial timeline requests require anchorDate".to_string())
+    })?;
     fetch_all(
         conn,
-        queries::timeline::SELECT_DEFAULT,
-        &[&user_id, &search, &search, &(limit + 1)],
+        queries::timeline::SELECT_WINDOW,
+        &[
+            query_params[0],
+            query_params[1],
+            query_params[2],
+            query_params[3],
+            query_params[4],
+            query_params[5],
+            query_params[6],
+            &anchor,
+            &1_i64,
+        ],
+        map_timeline_row,
+    )
+}
+
+fn fetch_timeline_period(
+    conn: &crate::database::DbConn,
+    user_id: i64,
+    search: &str,
+    media_type: &str,
+    period_start: &str,
+    period_end: &str,
+    direction: TimelineDirection,
+) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
+    let max_rows = i64::MAX;
+    let query_params = [
+        &user_id as &dyn rusqlite::ToSql,
+        &period_start,
+        &period_end,
+        &search,
+        &search,
+        &media_type,
+        &media_type,
+    ];
+
+    if direction == TimelineDirection::Older {
+        return fetch_all(
+            conn,
+            queries::timeline::SELECT_WINDOW,
+            &[
+                query_params[0],
+                query_params[1],
+                query_params[2],
+                query_params[3],
+                query_params[4],
+                query_params[5],
+                query_params[6],
+                &period_end,
+                &max_rows,
+            ],
+            map_timeline_row,
+        );
+    }
+
+    fetch_all(
+        conn,
+        queries::timeline::SELECT_PAGINATED_WINDOW_ASC,
+        &[
+            query_params[0],
+            query_params[1],
+            query_params[2],
+            query_params[3],
+            query_params[4],
+            query_params[5],
+            query_params[6],
+            &period_start,
+            &period_start,
+            &-1_i64,
+            &max_rows,
+        ],
         map_timeline_row,
     )
 }

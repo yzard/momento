@@ -49,7 +49,6 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
     <div className="animate-fade-in py-8">
       <div className="flex justify-between items-center mb-10 pb-6 border-b border-border/50">
         <div>
-          <h2 className="text-4xl font-display font-medium text-foreground tracking-tight">Albums</h2>
           <p className="text-muted-foreground mt-2 font-light text-lg">Organize your favorite moments</p>
         </div>
         <button
@@ -125,4 +124,3 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
     </div>
   )
 }
-

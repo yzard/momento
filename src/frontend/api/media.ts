@@ -4,8 +4,17 @@ import type { Media, TimelineGroup } from './types'
 interface MediaListRequest {
   cursor?: string
   limit?: number
-  groupBy?: GroupBy
   search?: string
+  mediaType?: MediaTypeFilter
+}
+
+interface TimelineListRequest {
+  cursor?: string
+  groupBy: GroupBy
+  search: string
+  mediaType?: MediaTypeFilter
+  direction: TimelineDirection
+  anchorDate?: string
 }
 
 interface MediaBatchRequest {
@@ -13,9 +22,11 @@ interface MediaBatchRequest {
 }
 
 type GroupBy = 'year' | 'month' | 'week' | 'day'
+type MediaTypeFilter = 'image' | 'video'
+type TimelineDirection = 'older' | 'newer'
 type ThumbnailSize = 'normal' | 'tiny'
 
-export type { ThumbnailSize }
+export type { MediaTypeFilter, ThumbnailSize }
 
 
 interface MediaListResponse {
@@ -31,7 +42,18 @@ interface MediaBatchResponse {
 interface TimelineListResponse {
   groups: TimelineGroup[]
   nextCursor: string | null
-  hasMore: boolean
+  previousCursor: string | null
+  hasOlder: boolean
+  hasNewer: boolean
+}
+
+interface TimelineMarker {
+  label: string
+  anchorDate: string
+}
+
+interface TimelineMarkersResponse {
+  markers: TimelineMarker[]
 }
 
 interface ImageTextSearchResult {
@@ -43,7 +65,7 @@ interface ImageTextSearchResponse {
   results: ImageTextSearchResult[]
 }
 
-export type { GroupBy }
+export type { GroupBy, TimelineDirection, TimelineListRequest, TimelineListResponse, TimelineMarker, TimelineMarkersResponse }
 
 // Cache for blob URLs to avoid re-fetching
 const blobUrlCache = new Map<string, string>()
@@ -222,8 +244,16 @@ export const mediaApi = {
     return response.data
   },
 
-  listTimeline: async (params: MediaListRequest = {}): Promise<TimelineListResponse> => {
-    const response = await apiClient.post<TimelineListResponse>('/media/list', params)
+  listTimeline: async (params: TimelineListRequest): Promise<TimelineListResponse> => {
+    const response = await apiClient.post<TimelineListResponse>('/timeline/list', params)
+    return response.data
+  },
+
+  getTimelineMarkers: async (mediaType: MediaTypeFilter | null, search: string): Promise<TimelineMarkersResponse> => {
+    const response = await apiClient.post<TimelineMarkersResponse>('/timeline/markers', {
+      mediaType: mediaType ?? undefined,
+      search,
+    })
     return response.data
   },
 

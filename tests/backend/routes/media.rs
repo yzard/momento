@@ -134,13 +134,23 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
 
     let server = TestServer::new(app).expect("Failed to create test server");
     let token = access_token(user_id);
+    let markers_response = server
+        .post("/api/v1/timeline/markers")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({ "search": "mountain" }))
+        .await;
+    markers_response.assert_status_ok();
+    let markers_body: Value = markers_response.json();
+    assert_eq!(markers_body["markers"].as_array().unwrap().len(), 1);
+
     let response = server
-        .post("/api/v1/media/list")
+        .post("/api/v1/timeline/list")
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
-            "limit": 1,
-            "search": "mountain"
+            "search": "mountain",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
         }))
         .await;
     response.assert_status_ok();
@@ -149,16 +159,427 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
     assert_eq!(body["groups"].as_array().unwrap().len(), 1);
     assert_eq!(body["groups"][0]["media"].as_array().unwrap().len(), 1);
     assert_eq!(body["groups"][0]["media"][0]["id"], json!(matching_media));
-    assert_eq!(body["hasMore"], json!(false));
+    assert_eq!(body["hasOlder"], json!(false));
 
     let no_match_response = server
-        .post("/api/v1/media/list")
+        .post("/api/v1/timeline/list")
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
-        .json(&json!({ "groupBy": "day", "search": "not-indexed" }))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "not-indexed",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
+        }))
         .await;
     no_match_response.assert_status_ok();
     let no_match_body: Value = no_match_response.json();
     assert!(no_match_body["groups"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_timeline_media_type_filter() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "testuser", "media-type@example.com");
+    let photo_id = create_test_media_with_gps_and_date(
+        &pool,
+        "photo.jpg",
+        40.7128,
+        -74.0060,
+        "2024-01-15T10:30:00",
+    );
+    let video_id = create_test_media_with_gps_and_date(
+        &pool,
+        "video.mp4",
+        40.7128,
+        -74.0060,
+        "2024-01-15T10:31:00",
+    );
+    let conn = pool.get().expect("Failed to get database connection");
+    conn.execute(
+        "UPDATE media SET media_type = 'video', mime_type = 'video/mp4' WHERE id = ?",
+        [video_id],
+    )
+    .expect("Failed to update test media type");
+    grant_media_access(&pool, photo_id, user_id);
+    grant_media_access(&pool, video_id, user_id);
+
+    let server = TestServer::new(app).expect("Failed to create test server");
+    let token = access_token(user_id);
+
+    let all_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
+        }))
+        .await;
+    all_response.assert_status_ok();
+    let all_body: Value = all_response.json();
+    assert_eq!(all_body["groups"][0]["media"].as_array().unwrap().len(), 2);
+
+    let photos_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "mediaType": "image",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
+        }))
+        .await;
+    photos_response.assert_status_ok();
+    let photos_body: Value = photos_response.json();
+    assert_eq!(
+        photos_body["groups"][0]["media"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(photos_body["groups"][0]["media"][0]["id"], json!(photo_id));
+
+    let videos_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "mediaType": "video",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
+        }))
+        .await;
+    videos_response.assert_status_ok();
+    let videos_body: Value = videos_response.json();
+    assert_eq!(
+        videos_body["groups"][0]["media"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(videos_body["groups"][0]["media"][0]["id"], json!(video_id));
+}
+
+#[tokio::test]
+async fn test_timeline_page_contains_the_complete_group_period() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "testuser", "timeline-period@example.com");
+    for index in 0..101 {
+        let media_id = create_test_media_with_gps_and_date(
+            &pool,
+            &format!("same-day-{index}.jpg"),
+            40.7128,
+            -74.0060,
+            "2024-01-15T10:30:00",
+        );
+        grant_media_access(&pool, media_id, user_id);
+    }
+
+    let server = TestServer::new(app).expect("Failed to create test server");
+    let token = access_token(user_id);
+    let response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": "2024-01-15T10:30:00",
+            "direction": "older"
+        }))
+        .await;
+    response.assert_status_ok();
+
+    let body: Value = response.json();
+    assert_eq!(body["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(body["groups"][0]["media"].as_array().unwrap().len(), 101);
+    assert!(!body["hasOlder"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn test_timeline_markers_respect_media_type() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "testuser", "timeline-range@example.com");
+    let photo_id = create_test_media_with_gps_and_date(
+        &pool,
+        "photo.jpg",
+        40.7128,
+        -74.0060,
+        "2024-01-15T10:30:00",
+    );
+    let video_id = create_test_media_with_gps_and_date(
+        &pool,
+        "video.mp4",
+        40.7128,
+        -74.0060,
+        "2023-06-15T10:30:00",
+    );
+    let conn = pool.get().expect("Failed to get database connection");
+    conn.execute(
+        "UPDATE media SET media_type = 'video', mime_type = 'video/mp4' WHERE id = ?",
+        [video_id],
+    )
+    .expect("Failed to update test media type");
+    grant_media_access(&pool, photo_id, user_id);
+    grant_media_access(&pool, video_id, user_id);
+
+    let server = TestServer::new(app).expect("Failed to create test server");
+    let token = access_token(user_id);
+    let response = server
+        .post("/api/v1/timeline/markers")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({ "mediaType": "video", "search": "" }))
+        .await;
+    response.assert_status_ok();
+
+    let body: Value = response.json();
+    assert_eq!(body["markers"][0]["label"], json!("2023-06"));
+    assert_eq!(body["markers"].as_array().unwrap().len(), 1);
+
+    let selected_month_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": body["markers"][0]["anchorDate"],
+            "direction": "older"
+        }))
+        .await;
+    selected_month_response.assert_status_ok();
+    let selected_month_body: Value = selected_month_response.json();
+    assert_eq!(
+        selected_month_body["groups"][0]["media"][0]["id"],
+        json!(video_id)
+    );
+}
+
+#[tokio::test]
+async fn test_timeline_marker_query_stays_within_selected_month() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "testuser", "timeline-marker@example.com");
+    let december_id = create_test_media_with_gps_and_date(
+        &pool,
+        "december.jpg",
+        40.7128,
+        -74.0060,
+        "2010-12-24T10:30:00",
+    );
+    let early_december_id = create_test_media_with_gps_and_date(
+        &pool,
+        "early-december.jpg",
+        40.7128,
+        -74.0060,
+        "2010-12-01T10:30:00",
+    );
+    let old_id = create_test_media_with_gps_and_date(
+        &pool,
+        "old.jpg",
+        40.7128,
+        -74.0060,
+        "2005-10-24T10:30:00",
+    );
+    grant_media_access(&pool, december_id, user_id);
+    grant_media_access(&pool, early_december_id, user_id);
+    grant_media_access(&pool, old_id, user_id);
+
+    let server = TestServer::new(app).expect("Failed to create test server");
+    let token = access_token(user_id);
+    let markers_response = server
+        .post("/api/v1/timeline/markers")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({ "search": "" }))
+        .await;
+    markers_response.assert_status_ok();
+
+    let markers_body: Value = markers_response.json();
+    let marker = markers_body["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|marker| marker["label"] == "2010-12")
+        .expect("December 2010 marker missing");
+
+    let response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": marker["anchorDate"],
+            "direction": "older",
+        }))
+        .await;
+    response.assert_status_ok();
+
+    let body: Value = response.json();
+    assert_eq!(body["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(body["groups"][0]["media"][0]["id"], json!(december_id));
+    assert_ne!(body["groups"][0]["media"][0]["id"], json!(old_id));
+
+    let next_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "cursor": body["nextCursor"],
+            "direction": "older"
+        }))
+        .await;
+    next_response.assert_status_ok();
+    let next_body: Value = next_response.json();
+    assert_eq!(
+        next_body["groups"][0]["media"][0]["id"],
+        json!(early_december_id)
+    );
+    assert_ne!(next_body["groups"][0]["media"][0]["id"], json!(old_id));
+}
+
+#[tokio::test]
+async fn test_timeline_reverse_pagination_does_not_repeat_media() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "testuser", "timeline-pagination@example.com");
+    let newest_id = create_test_media_with_gps_and_date(
+        &pool,
+        "newest.jpg",
+        40.7128,
+        -74.0060,
+        "2024-01-15T10:30:00",
+    );
+    let middle_id = create_test_media_with_gps_and_date(
+        &pool,
+        "middle.jpg",
+        40.7128,
+        -74.0060,
+        "2010-01-15T10:30:00",
+    );
+    let oldest_id = create_test_media_with_gps_and_date(
+        &pool,
+        "oldest.jpg",
+        40.7128,
+        -74.0060,
+        "2005-01-15T10:30:00",
+    );
+    grant_media_access(&pool, newest_id, user_id);
+    grant_media_access(&pool, middle_id, user_id);
+    grant_media_access(&pool, oldest_id, user_id);
+
+    let server = TestServer::new(app).expect("Failed to create test server");
+    let token = access_token(user_id);
+    let request = |cursor: Option<&Value>| {
+        let mut body = json!({
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older",
+        });
+        if let Some(cursor) = cursor {
+            body["cursor"] = cursor.clone();
+        }
+        body
+    };
+
+    let first_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&request(None))
+        .await;
+    first_response.assert_status_ok();
+    let first_body: Value = first_response.json();
+    assert_eq!(first_body["groups"][0]["media"][0]["id"], json!(newest_id));
+
+    let second_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&request(Some(&first_body["nextCursor"])))
+        .await;
+    second_response.assert_status_ok();
+    let second_body: Value = second_response.json();
+    assert_eq!(second_body["groups"][0]["media"][0]["id"], json!(middle_id));
+
+    let third_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&request(Some(&second_body["nextCursor"])))
+        .await;
+    third_response.assert_status_ok();
+    let third_body: Value = third_response.json();
+    assert_eq!(third_body["groups"][0]["media"][0]["id"], json!(oldest_id));
+    assert!(!third_body["hasOlder"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn test_timeline_jump_can_page_newer_media() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "testuser", "timeline-direction@example.com");
+    let newer_id = create_test_media_with_gps_and_date(
+        &pool,
+        "newer.jpg",
+        40.7128,
+        -74.0060,
+        "2024-02-15T10:30:00",
+    );
+    let newest_id = create_test_media_with_gps_and_date(
+        &pool,
+        "newest.jpg",
+        40.7128,
+        -74.0060,
+        "2024-03-15T10:30:00",
+    );
+    let older_id = create_test_media_with_gps_and_date(
+        &pool,
+        "older.jpg",
+        40.7128,
+        -74.0060,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, newer_id, user_id);
+    grant_media_access(&pool, newest_id, user_id);
+    grant_media_access(&pool, older_id, user_id);
+
+    let server = TestServer::new(app).expect("Failed to create test server");
+    let token = access_token(user_id);
+    let older_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "cursor": format!("2024-02-15T10:30:00_{}", newer_id),
+            "direction": "older",
+        }))
+        .await;
+    older_response.assert_status_ok();
+    let older_body: Value = older_response.json();
+    assert_eq!(older_body["groups"][0]["media"][0]["id"], json!(older_id));
+
+    let newer_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "cursor": older_body["previousCursor"],
+            "direction": "newer",
+        }))
+        .await;
+    newer_response.assert_status_ok();
+    let newer_body: Value = newer_response.json();
+    assert_eq!(newer_body["groups"][0]["media"][0]["id"], json!(newer_id));
+
+    let newest_response = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token))
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "cursor": newer_body["previousCursor"],
+            "direction": "newer",
+        }))
+        .await;
+    newest_response.assert_status_ok();
+    let newest_body: Value = newest_response.json();
+    assert_eq!(newest_body["groups"][0]["media"][0]["id"], json!(newest_id));
+    assert!(!newest_body["hasNewer"].as_bool().unwrap());
 }
 
 #[test]

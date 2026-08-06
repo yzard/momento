@@ -36,6 +36,20 @@ Three rules are worth repeating because they are the ones most often violated:
 
 ---
 
+## LLM Task Scheduling
+
+The standalone `llm-service` keeps only one model runtime active because OCR and image-tagging
+models may reserve the same accelerator or CPU memory. The API must therefore group queued work
+by LLM service type and finish one type's batch before starting the next type's batch. Do not
+interleave OCR, image-tagging, or any future service type in the same queue. When adding a new
+service type, add it as an explicit batch in the API scheduler and add the corresponding on-demand
+runtime transition in `src/backend_llm/provider.rs`.
+
+The LLM service starts a model only when its first request arrives, reuses that model for
+consecutive requests of the same type, and shuts it down before activating another type.
+
+---
+
 ## Configuration
 
 Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH` and read **no**

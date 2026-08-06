@@ -96,7 +96,7 @@ pub mod media {
                 SELECT image_text.image_id
                   FROM image_text
                   WHERE image_text.string LIKE ? ESCAPE '\'
-            )
+             )
        )
       ORDER BY mm.date_taken DESC, m.id DESC
     "#;
@@ -141,7 +141,7 @@ pub mod media {
                 SELECT image_text.image_id
                   FROM image_text
                   WHERE image_text.string LIKE ? ESCAPE '\'
-            )
+             )
        )
        AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
       ORDER BY mm.date_taken DESC, m.id DESC
@@ -364,7 +364,29 @@ pub mod media {
 }
 
 pub mod timeline {
-    pub const SELECT_DEFAULT: &str = r#"
+    pub const SELECT_MONTH_MARKERS: &str = r#"
+     SELECT substr(mm.date_taken, 1, 7)
+          , MAX(mm.date_taken)
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+      JOIN media_metadata AS mm ON m.id = mm.media_id
+       WHERE ma.user_id = ?
+        AND ma.deleted_at IS NULL
+        AND mm.date_taken IS NOT NULL
+        AND (
+             ? = ''
+          OR m.id IN (
+                 SELECT image_text.image_id
+                   FROM image_text
+                   WHERE image_text.string LIKE ? ESCAPE '\'
+             )
+        )
+        AND (? = '' OR m.media_type = ?)
+     GROUP BY substr(mm.date_taken, 1, 7)
+     ORDER BY substr(mm.date_taken, 1, 7) DESC
+     "#;
+
+    pub const SELECT_WINDOW: &str = r#"
     SELECT m.id
          , m.filename
          , m.original_filename
@@ -398,6 +420,8 @@ pub mod timeline {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND mm.date_taken >= ?
+        AND mm.date_taken <= ?
        AND (
             ? = ''
          OR m.id IN (
@@ -406,11 +430,13 @@ pub mod timeline {
                   WHERE image_text.string LIKE ? ESCAPE '\'
             )
        )
+        AND (? = '' OR m.media_type = ?)
+         AND mm.date_taken <= ?
       ORDER BY mm.date_taken DESC, m.id DESC
-      LIMIT ?
+     LIMIT ?
     "#;
 
-    pub const SELECT_PAGINATED: &str = r#"
+    pub const SELECT_PAGINATED_WINDOW: &str = r#"
     SELECT m.id
          , m.filename
          , m.original_filename
@@ -444,6 +470,8 @@ pub mod timeline {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND mm.date_taken >= ?
+       AND mm.date_taken <= ?
        AND (
             ? = ''
          OR m.id IN (
@@ -452,10 +480,61 @@ pub mod timeline {
                   WHERE image_text.string LIKE ? ESCAPE '\'
             )
        )
+       AND (? = '' OR m.media_type = ?)
        AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
-      ORDER BY mm.date_taken DESC, m.id DESC
-      LIMIT ?
-     "#;
+     ORDER BY mm.date_taken DESC, m.id DESC
+     LIMIT ?
+    "#;
+
+    pub const SELECT_PAGINATED_WINDOW_ASC: &str = r#"
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , mm.width
+         , mm.height
+         , m.file_size
+         , mm.duration_seconds
+         , mm.date_taken
+         , mm.gps_latitude
+         , mm.gps_longitude
+         , mm.camera_make
+         , mm.camera_model
+         , mm.lens_make
+         , mm.lens_model
+         , mm.iso
+         , mm.exposure_time
+         , mm.f_number
+         , mm.focal_length
+         , mm.focal_length_35mm
+         , mm.gps_altitude
+         , mm.location_city
+         , mm.location_state
+         , mm.location_country
+         , mm.video_codec
+         , mm.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND mm.date_taken >= ?
+       AND mm.date_taken <= ?
+       AND (
+            ? = ''
+         OR m.id IN (
+                SELECT image_text.image_id
+                  FROM image_text
+                  WHERE image_text.string LIKE ? ESCAPE '\'
+           )
+       )
+       AND (? = '' OR m.media_type = ?)
+       AND (mm.date_taken > ? OR (mm.date_taken = ? AND m.id > ?))
+     ORDER BY mm.date_taken ASC, m.id ASC
+     LIMIT ?
+    "#;
 }
 
 pub mod image_text {

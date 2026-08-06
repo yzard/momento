@@ -3,61 +3,40 @@ import type { GroupBy } from '../../api/media'
 interface DateHeaderProps {
   date: string
   count: number
-  groupBy?: GroupBy
+  groupBy: GroupBy
 }
 
-export default function DateHeader({ date, count, groupBy = 'day' }: DateHeaderProps) {
+export default function DateHeader({ date, count, groupBy }: DateHeaderProps) {
   const formatDate = (dateStr: string, mode: GroupBy) => {
     if (dateStr === 'Unknown') return 'Unknown Date'
 
-    try {
-      if (mode === 'year') {
-        return dateStr // Backend already returns "YYYY"
-      }
+    if (mode === 'year') return dateStr
 
-      if (mode === 'month') {
-        const [year, month] = dateStr.split('-')
-        if (year && month) {
-          // Manually create a date to avoid browser-specific parsing issues
-          const monthName = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(
-            new Date(parseInt(year), parseInt(month) - 1, 1)
-          )
-          return `${monthName} ${year}`
-        }
+    if (mode === 'month') {
+      const [year, month] = dateStr.split('-')
+      if (year && month) {
+        const monthName = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(
+          new Date(Number(year), Number(month) - 1, 1)
+        )
+        return `${monthName} ${year}`
       }
-
-      if (mode === 'week') {
-        const [year, weekPart] = dateStr.split('-')
-        if (year && weekPart) {
-          const weekNum = weekPart.replace('W', '')
-          return `Week ${weekNum}, ${year}`
-        }
-      }
-
-      // Default or 'day' mode: dateStr is "YYYY-MM-DD"
-      const [year, month, day] = dateStr.split('-')
-      if (year && month && day) {
-        const d = new Date(parseInt(year), parseInt(month) - 1, parseInt(day))
-        return d.toLocaleDateString('en-US', {
-          weekday: 'long',
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric',
-        })
-      }
-
-      // Fallback for unexpected formats
-      const d = new Date(dateStr)
-      if (isNaN(d.getTime())) return dateStr
-      return d.toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      })
-    } catch {
-      return dateStr
     }
+
+    if (mode === 'week') {
+      const [year, weekPart] = dateStr.split('-')
+      if (year && weekPart) {
+        return `Week ${weekPart.replace('W', '')}, ${year}`
+      }
+    }
+
+    const [year, month, day] = dateStr.split('-')
+    if (!year || !month || !day) return dateStr
+    return new Date(Number(year), Number(month) - 1, Number(day)).toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
   }
 
   return (
@@ -70,4 +49,3 @@ export default function DateHeader({ date, count, groupBy = 'day' }: DateHeaderP
     </div>
   )
 }
-
