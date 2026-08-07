@@ -12,7 +12,13 @@ describe('deduplicateApi', () => {
   beforeEach(() => post.mockReset())
 
   it('lists groups with the cursor contract', async () => {
-    const response = { groups: [], nextCursor: null, hasMore: false }
+    const response = {
+      groups: [],
+      nextCursor: null,
+      hasMore: false,
+      totalGroups: 0,
+      totalMedia: 0,
+    }
     post.mockResolvedValue({ data: response })
 
     await expect(deduplicateApi.groups({ cursor: '12', limit: 20 })).resolves.toEqual(response)

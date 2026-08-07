@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -35,11 +36,128 @@ struct SimilarityRow {
     capture_time_seconds: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CandidateMatch {
     media_id: i64,
     cosine_similarity: f32,
     perceptual_hash_distance: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ClusterKind {
+    NearDuplicate,
+    Burst,
+}
+
+impl ClusterKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NearDuplicate => "near_duplicate",
+            Self::Burst => "burst",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingClusterMember {
+    media_id: i64,
+    cosine_similarity: f32,
+    perceptual_hash_distance: u32,
+}
+
+#[derive(Debug)]
+struct PendingCluster {
+    kind: ClusterKind,
+    representative_media_id: i64,
+    members: Vec<PendingClusterMember>,
+}
+
+#[derive(Debug, Default)]
+struct PendingClusters {
+    clusters: Vec<PendingCluster>,
+    cluster_by_member: HashMap<(ClusterKind, i64), usize>,
+}
+
+impl PendingClusters {
+    fn attach(
+        &mut self,
+        pool: &DbPool,
+        source: &SimilarityRow,
+        candidate: CandidateMatch,
+        kind: ClusterKind,
+    ) -> AppResult<()> {
+        let candidate_media_id = candidate.media_id;
+        if let Some(&cluster_index) = self.cluster_by_member.get(&(kind, candidate_media_id)) {
+            let representative_media_id = self.clusters[cluster_index].representative_media_id;
+            let Some(representative) = load_similarity_row(pool, representative_media_id)? else {
+                return Ok(());
+            };
+            let Some((similarity, hash_distance)) =
+                representative_match(source, &representative, kind)
+            else {
+                return Ok(());
+            };
+            self.clusters[cluster_index]
+                .members
+                .push(PendingClusterMember {
+                    media_id: source.media_id,
+                    cosine_similarity: similarity,
+                    perceptual_hash_distance: hash_distance,
+                });
+            self.cluster_by_member
+                .insert((kind, source.media_id), cluster_index);
+            return Ok(());
+        }
+
+        let cluster_index = self.clusters.len();
+        let members = vec![
+            PendingClusterMember {
+                media_id: candidate_media_id,
+                cosine_similarity: 1.0,
+                perceptual_hash_distance: 0,
+            },
+            PendingClusterMember {
+                media_id: source.media_id,
+                cosine_similarity: candidate.cosine_similarity,
+                perceptual_hash_distance: candidate.perceptual_hash_distance,
+            },
+        ];
+        self.clusters.push(PendingCluster {
+            kind,
+            representative_media_id: candidate_media_id,
+            members,
+        });
+        self.cluster_by_member
+            .insert((kind, candidate_media_id), cluster_index);
+        self.cluster_by_member
+            .insert((kind, source.media_id), cluster_index);
+        Ok(())
+    }
+
+    fn canonicalize(self) -> Vec<PendingCluster> {
+        let mut canonical = BTreeMap::<Vec<i64>, PendingCluster>::new();
+        for cluster in self.clusters {
+            let mut signature = cluster
+                .members
+                .iter()
+                .map(|member| member.media_id)
+                .collect::<Vec<_>>();
+            signature.sort_unstable();
+            match canonical.entry(signature) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(cluster);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry)
+                    if entry.get().kind == ClusterKind::Burst
+                        && cluster.kind == ClusterKind::NearDuplicate =>
+                {
+                    entry.insert(cluster);
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+        canonical.into_values().collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -355,7 +473,7 @@ async fn extract_first_video_frame(media_id: i64, source_path: &Path) -> AppResu
     Ok(output_path)
 }
 
-fn generate_clusters(pool: &DbPool, run_id: i64) -> AppResult<()> {
+pub fn generate_clusters(pool: &DbPool, run_id: i64) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let dirty_count = fetch_one(&connection, queries::deduplicate::COUNT_DIRTY, &[], |row| {
         row.get::<_, i64>(0)
@@ -366,47 +484,40 @@ fn generate_clusters(pool: &DbPool, run_id: i64) -> AppResult<()> {
     }
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(queries::deduplicate::CLEAN_DIRTY, [])?;
-    transaction.execute(queries::deduplicate::CLEAN_CLUSTERS, [])?;
     transaction.commit()?;
     drop(connection);
 
     let mut cursor = 0_i64;
+    let mut pending_clusters = PendingClusters::default();
     loop {
         if cancellation_requested(pool, run_id)? {
             return Ok(());
         }
         let index_rows = load_current_index_page(pool, cursor, INDEX_PAGE_SIZE)?;
         if index_rows.is_empty() {
-            return Ok(());
+            break;
         }
         let mut processed_media = 0_i64;
         let mut candidate_comparisons = 0_i64;
-        let mut clusters_created = 0_i64;
         for source in index_rows {
             cursor = source.media_id;
             let (near_duplicate, burst, comparison_count) = find_best_candidates(pool, &source)?;
             candidate_comparisons += comparison_count;
             if let Some(candidate) = near_duplicate {
-                if attach_to_cluster(pool, &source, &candidate, "near_duplicate")? {
-                    clusters_created += 1;
-                }
+                pending_clusters.attach(pool, &source, candidate, ClusterKind::NearDuplicate)?;
             }
             if let Some(candidate) = burst {
-                if attach_to_cluster(pool, &source, &candidate, "burst")? {
-                    clusters_created += 1;
-                }
+                pending_clusters.attach(pool, &source, candidate, ClusterKind::Burst)?;
             }
             processed_media += 1;
         }
-        update_run_progress(
-            pool,
-            run_id,
-            0,
-            processed_media,
-            candidate_comparisons,
-            clusters_created,
-        )?;
+        update_run_progress(pool, run_id, 0, processed_media, candidate_comparisons, 0)?;
     }
+
+    if cancellation_requested(pool, run_id)? {
+        return Ok(());
+    }
+    replace_clusters(pool, run_id, pending_clusters.canonicalize())
 }
 
 fn load_current_index_page(
@@ -431,6 +542,16 @@ fn map_similarity_row(row: &rusqlite::Row) -> rusqlite::Result<SimilarityRow> {
         perceptual_hash: row.get::<_, i64>(2)? as u64,
         capture_time_seconds: row.get(3)?,
     })
+}
+
+fn load_similarity_row(pool: &DbPool, media_id: i64) -> AppResult<Option<SimilarityRow>> {
+    let connection = pool.get().map_err(AppError::Pool)?;
+    fetch_one(
+        &connection,
+        queries::deduplicate::SELECT_CURRENT_INDEX_BY_MEDIA_ID,
+        &[&media_id],
+        map_similarity_row,
+    )
 }
 
 fn find_best_candidates(
@@ -559,86 +680,74 @@ fn replace_if_better(current: &mut Option<CandidateMatch>, candidate: CandidateM
     *current = Some(candidate);
 }
 
-fn attach_to_cluster(
-    pool: &DbPool,
+fn representative_match(
     source: &SimilarityRow,
-    candidate: &CandidateMatch,
-    kind: &str,
-) -> AppResult<bool> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let existing_cluster = fetch_one(
-        &connection,
-        queries::deduplicate::SELECT_CLUSTER_FOR_MEMBER_AND_KIND,
-        &[&candidate.media_id, &kind],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    if let Some((cluster_id, representative_media_id)) = existing_cluster {
-        let representative = fetch_one(
-            &connection,
-            queries::deduplicate::SELECT_INDEX_BY_MEDIA_ID,
-            &[&representative_media_id],
-            |row| {
-                let blob: Vec<u8> = row.get(0)?;
-                Ok((
-                    blob_to_embedding(&blob),
-                    row.get::<_, i64>(1)? as u64,
-                    row.get::<_, Option<i64>>(2)?,
-                ))
-            },
-        )?;
-        if let Some((embedding, perceptual_hash, capture_time_seconds)) = representative {
-            let similarity = cosine_similarity(&source.embedding, &embedding).unwrap_or(-1.0);
-            let distance = (source.perceptual_hash ^ perceptual_hash).count_ones();
-            let threshold = if kind == "near_duplicate" {
-                NEAR_DUPLICATE_COSINE_SIMILARITY
-            } else {
-                BURST_COSINE_SIMILARITY
-            };
-            let maximum_hash_distance = if kind == "near_duplicate" {
-                PERCEPTUAL_HASH_DISTANCE
-            } else {
-                PERCEPTUAL_HASH_DISTANCE.saturating_mul(2)
-            };
-            let time_matches = kind != "burst"
-                || source
-                    .capture_time_seconds
-                    .zip(capture_time_seconds)
-                    .is_some_and(|(source_time, representative_time)| {
-                        (source_time - representative_time).abs() <= BURST_WINDOW_SECONDS
-                    });
-            if similarity >= threshold && distance <= maximum_hash_distance && time_matches {
-                execute_query(
-                    &connection,
-                    queries::deduplicate::INSERT_CLUSTER_MEMBER,
-                    &[&cluster_id, &source.media_id, &similarity, &distance],
-                )?;
-                return Ok(false);
-            }
-        }
-        return Ok(false);
+    representative: &SimilarityRow,
+    kind: ClusterKind,
+) -> Option<(f32, u32)> {
+    let similarity = cosine_similarity(&source.embedding, &representative.embedding)?;
+    let distance = (source.perceptual_hash ^ representative.perceptual_hash).count_ones();
+    let (threshold, maximum_hash_distance) = match kind {
+        ClusterKind::NearDuplicate => (NEAR_DUPLICATE_COSINE_SIMILARITY, PERCEPTUAL_HASH_DISTANCE),
+        ClusterKind::Burst => (
+            BURST_COSINE_SIMILARITY,
+            PERCEPTUAL_HASH_DISTANCE.saturating_mul(2),
+        ),
+    };
+    if similarity < threshold || distance > maximum_hash_distance {
+        return None;
     }
+    if kind != ClusterKind::Burst {
+        return Some((similarity, distance));
+    }
+    let time_matches = source
+        .capture_time_seconds
+        .zip(representative.capture_time_seconds)
+        .is_some_and(|(source_time, representative_time)| {
+            (source_time - representative_time).abs() <= BURST_WINDOW_SECONDS
+        });
+    time_matches.then_some((similarity, distance))
+}
 
+fn replace_clusters(pool: &DbPool, run_id: i64, clusters: Vec<PendingCluster>) -> AppResult<()> {
+    let connection = pool.get().map_err(AppError::Pool)?;
     let transaction = connection.unchecked_transaction()?;
+    let locked_run =
+        transaction.execute(queries::deduplicate::LOCK_RUN_FOR_REPLACEMENT, [run_id])?;
+    if locked_run == 0 {
+        transaction.rollback()?;
+        return Ok(());
+    }
+    transaction.execute(queries::deduplicate::CLEAN_CLUSTERS, [])?;
+    let cluster_count = clusters.len() as i64;
+    for cluster in clusters {
+        transaction.execute(
+            queries::deduplicate::INSERT_CLUSTER,
+            rusqlite::params![cluster.kind.as_str(), cluster.representative_media_id],
+        )?;
+        let cluster_id = transaction.last_insert_rowid();
+        for member in cluster.members {
+            transaction.execute(
+                queries::deduplicate::INSERT_CLUSTER_MEMBER,
+                rusqlite::params![
+                    cluster_id,
+                    member.media_id,
+                    member.cosine_similarity,
+                    member.perceptual_hash_distance,
+                ],
+            )?;
+        }
+    }
     transaction.execute(
-        queries::deduplicate::INSERT_CLUSTER,
-        rusqlite::params![kind, candidate.media_id],
+        queries::deduplicate::UPDATE_RUN_PROGRESS,
+        rusqlite::params![0_i64, 0_i64, 0_i64, cluster_count, run_id],
     )?;
-    let cluster_id = transaction.last_insert_rowid();
     transaction.execute(
-        queries::deduplicate::INSERT_CLUSTER_MEMBER,
-        rusqlite::params![cluster_id, candidate.media_id, 1.0_f32, 0_u32],
-    )?;
-    transaction.execute(
-        queries::deduplicate::INSERT_CLUSTER_MEMBER,
-        rusqlite::params![
-            cluster_id,
-            source.media_id,
-            candidate.cosine_similarity,
-            candidate.perceptual_hash_distance,
-        ],
+        queries::deduplicate::COMPLETE_RUN,
+        rusqlite::params!["completed", Option::<String>::None, run_id],
     )?;
     transaction.commit()?;
-    Ok(true)
+    Ok(())
 }
 
 fn cancellation_requested(pool: &DbPool, run_id: i64) -> AppResult<bool> {

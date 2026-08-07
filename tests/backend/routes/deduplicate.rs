@@ -51,6 +51,73 @@ async fn groups_only_return_clusters_with_two_visible_items() {
     assert_eq!(body["groups"][0]["items"].as_array().unwrap().len(), 2);
     assert_eq!(body["nextCursor"], Value::Null);
     assert_eq!(body["hasMore"], false);
+    assert_eq!(body["totalGroups"], 1);
+    assert_eq!(body["totalMedia"], 2);
+}
+
+#[tokio::test]
+async fn groups_canonicalize_identical_sets_before_cursor_pagination() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "paged-viewer", "paged-viewer@example.com");
+    let first = create_test_media(&pool, "first.jpg");
+    let second = create_test_media(&pool, "second.jpg");
+    let third = create_test_media(&pool, "third.jpg");
+    let fourth = create_test_media(&pool, "fourth.jpg");
+    for media_id in [first, second, third, fourth] {
+        grant_media_access(&pool, media_id, user_id);
+    }
+    let connection = pool.get().expect("Failed to get connection");
+    let mut cluster_ids = Vec::new();
+    for (kind, members) in [
+        ("near_duplicate", vec![first, second]),
+        ("burst", vec![first, second]),
+        ("near_duplicate", vec![second, third]),
+        ("near_duplicate", vec![third, fourth]),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO media_similarity_clusters (kind, representative_media_id) VALUES (?, ?)",
+                rusqlite::params![kind, members[0]],
+            )
+            .expect("Failed to create cluster");
+        let cluster_id = connection.last_insert_rowid();
+        cluster_ids.push(cluster_id);
+        for media_id in members {
+            connection
+                .execute(
+                    "INSERT INTO media_similarity_cluster_members (cluster_id, media_id, cosine_similarity, perceptual_hash_distance) VALUES (?, ?, 1.0, 0)",
+                    rusqlite::params![cluster_id, media_id],
+                )
+                .expect("Failed to create cluster member");
+        }
+    }
+    drop(connection);
+    let server = TestServer::new(app).expect("Failed to create server");
+
+    let first_page = server
+        .post("/api/v1/deduplicate/groups")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
+        .json(&json!({"cursor": null, "limit": 1}))
+        .await;
+    first_page.assert_status_ok();
+    let first_body: Value = first_page.json();
+    assert_eq!(first_body["groups"][0]["clusterId"], cluster_ids[0]);
+    assert_eq!(first_body["nextCursor"], cluster_ids[0].to_string());
+    assert_eq!(first_body["hasMore"], true);
+    assert_eq!(first_body["totalGroups"], 3);
+    assert_eq!(first_body["totalMedia"], 4);
+
+    let second_page = server
+        .post("/api/v1/deduplicate/groups")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
+        .json(&json!({"cursor": first_body["nextCursor"], "limit": 1}))
+        .await;
+    second_page.assert_status_ok();
+    let second_body: Value = second_page.json();
+    assert_eq!(second_body["groups"][0]["clusterId"], cluster_ids[2]);
+    assert_eq!(second_body["totalGroups"], 3);
+    assert_eq!(second_body["totalMedia"], 4);
+    assert_ne!(second_body["groups"][0]["clusterId"], cluster_ids[1]);
 }
 
 #[tokio::test]

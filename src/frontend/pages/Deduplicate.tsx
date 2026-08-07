@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
   Check,
-  Copy,
   ImageOff,
   Loader2,
   Play,
@@ -13,6 +12,7 @@ import {
 import { deduplicateApi, type DeduplicateGroup } from '../api/deduplicate'
 import { mediaApi } from '../api/media'
 import type { Media } from '../api/types'
+import Lightbox from '../components/viewer/Lightbox'
 import { useAuth } from '../hooks/useAuth'
 import { cn } from '../lib/utils'
 import { batchLoader } from '../utils/batcher'
@@ -35,6 +35,13 @@ export default function Deduplicate() {
   const { user } = useAuth()
   const queryClient = useQueryClient()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [viewer, setViewer] = useState<{ mediaIds: number[]; currentIndex: number } | null>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const loadMoreRef = useRef<HTMLDivElement>(null)
+  const closeViewer = useCallback(() => setViewer(null), [])
+  const changeViewerIndex = useCallback((currentIndex: number) => {
+    setViewer((current) => current ? { ...current, currentIndex } : null)
+  }, [])
 
   const groupsQuery = useInfiniteQuery({
     queryKey: ['deduplicate', 'groups', user?.id],
@@ -44,6 +51,30 @@ export default function Deduplicate() {
       ? lastPage.nextCursor
       : undefined,
   })
+  const {
+    fetchNextPage,
+    hasNextPage,
+    isFetchNextPageError,
+    isFetchingNextPage,
+  } = groupsQuery
+
+  useEffect(() => {
+    const target = loadMoreRef.current
+    const root = scrollContainerRef.current
+    if (!target || !root || !hasNextPage || isFetchNextPageError) return
+
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries[0]?.isIntersecting || isFetchingNextPage) return
+      void fetchNextPage()
+    }, { root, rootMargin: '0px 0px 320px 0px' })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [
+    fetchNextPage,
+    hasNextPage,
+    isFetchNextPageError,
+    isFetchingNextPage,
+  ])
 
   const trashMutation = useMutation({
     mutationFn: (mediaIds: number[]) => mediaApi.delete(mediaIds),
@@ -61,7 +92,7 @@ export default function Deduplicate() {
   })
 
   const groups = groupsQuery.data?.pages.flatMap((page) => page.groups) ?? []
-  const mediaCount = groups.reduce((count, group) => count + group.items.length, 0)
+  const totals = groupsQuery.data?.pages[0]
 
   const toggleSelection = (mediaId: number) => {
     setSelectedIds((currentIds) => {
@@ -84,31 +115,27 @@ export default function Deduplicate() {
     trashMutation.mutate(Array.from(selectedIds))
   }
 
+  const handleInspect = (media: Media, groupItems: Media[]) => {
+    const currentIndex = groupItems.findIndex((item) => item.id === media.id)
+    setViewer({
+      mediaIds: groupItems.map((item) => item.id),
+      currentIndex: currentIndex >= 0 ? currentIndex : 0,
+    })
+  }
+
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
       <div className="container max-w-[1800px] mx-auto px-4 py-6 sm:px-6 md:px-10 md:py-10 animate-fade-in pb-28">
-        <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div className="mb-2 flex items-center gap-3 text-primary">
-              <Copy className="h-5 w-5" />
-              <span className="text-xs font-bold uppercase tracking-[0.2em]">Utility</span>
-            </div>
-            <h1 className="text-3xl font-display font-bold tracking-tight text-foreground">Deduplicate</h1>
-            <p className="mt-2 max-w-2xl text-sm font-medium text-muted-foreground">
-              Compare similar media, choose what you no longer need, and move only your selections to Trash.
-            </p>
+        {!groupsQuery.isLoading && !groupsQuery.isError && totals && (
+          <div className="mb-8 flex flex-wrap gap-3 text-sm text-muted-foreground" aria-label="Deduplicate totals">
+            <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
+              Total {totals.totalGroups} Similar Groups
+            </span>
+            <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
+              Total {totals.totalMedia} Media
+            </span>
           </div>
-          {!groupsQuery.isLoading && !groupsQuery.isError && groups.length > 0 && (
-            <div className="flex gap-3 text-sm text-muted-foreground">
-              <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
-                {groups.length} {groups.length === 1 ? 'group' : 'groups'} loaded
-              </span>
-              <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
-                {mediaCount} items
-              </span>
-            </div>
-          )}
-        </header>
+        )}
 
         {groupsQuery.isLoading ? (
           <PageState icon={<Loader2 className="h-9 w-9 animate-spin text-primary" />} title="Loading duplicate groups" description="Checking your accessible media..." />
@@ -137,20 +164,28 @@ export default function Deduplicate() {
                 group={group}
                 selectedIds={selectedIds}
                 onToggle={toggleSelection}
+                onInspect={handleInspect}
               />
             ))}
 
-            {groupsQuery.hasNextPage && (
-              <div className="flex justify-center pt-2">
-                <button
-                  type="button"
-                  onClick={() => groupsQuery.fetchNextPage()}
-                  disabled={groupsQuery.isFetchingNextPage}
-                  className="flex min-h-11 items-center gap-2 rounded-lg border border-border bg-card px-6 py-2.5 text-sm font-bold text-foreground shadow-sm transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {groupsQuery.isFetchingNextPage && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {groupsQuery.isFetchingNextPage ? 'Loading groups...' : 'Load more groups'}
-                </button>
+            {(hasNextPage || isFetchNextPageError) && (
+              <div ref={loadMoreRef} className="flex min-h-11 justify-center pt-2" role="status" aria-live="polite">
+                {isFetchNextPageError ? (
+                  <button
+                    type="button"
+                    onClick={() => fetchNextPage()}
+                    className="min-h-11 rounded-lg border border-border bg-card px-6 py-2.5 text-sm font-bold text-foreground shadow-sm transition-colors hover:bg-muted/40"
+                  >
+                    Retry loading groups
+                  </button>
+                ) : isFetchingNextPage ? (
+                  <span className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading more groups...
+                  </span>
+                ) : (
+                  <span className="sr-only">More groups load automatically while scrolling</span>
+                )}
               </div>
             )}
           </div>
@@ -191,6 +226,14 @@ export default function Deduplicate() {
           </div>
         )}
       </div>
+      {viewer && (
+        <Lightbox
+          mediaIds={viewer.mediaIds}
+          currentIndex={viewer.currentIndex}
+          onClose={closeViewer}
+          onIndexChange={changeViewerIndex}
+        />
+      )}
     </div>
   )
 }
@@ -199,9 +242,10 @@ interface DuplicateGroupSectionProps {
   group: DeduplicateGroup
   selectedIds: Set<number>
   onToggle: (mediaId: number) => void
+  onInspect: (media: Media, groupItems: Media[]) => void
 }
 
-function DuplicateGroupSection({ group, selectedIds, onToggle }: DuplicateGroupSectionProps) {
+function DuplicateGroupSection({ group, selectedIds, onToggle, onInspect }: DuplicateGroupSectionProps) {
   const selectedCount = group.items.filter((media) => selectedIds.has(media.id)).length
 
   return (
@@ -228,6 +272,7 @@ function DuplicateGroupSection({ group, selectedIds, onToggle }: DuplicateGroupS
             media={media}
             selected={selectedIds.has(media.id)}
             onToggle={() => onToggle(media.id)}
+            onInspect={() => onInspect(media, group.items)}
           />
         ))}
       </div>
@@ -239,10 +284,11 @@ interface DuplicateMediaCardProps {
   media: Media
   selected: boolean
   onToggle: () => void
+  onInspect: () => void
 }
 
-function DuplicateMediaCard({ media, selected, onToggle }: DuplicateMediaCardProps) {
-  const cardRef = useRef<HTMLButtonElement>(null)
+function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateMediaCardProps) {
+  const cardRef = useRef<HTMLDivElement>(null)
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => mediaApi.getCachedThumbnailUrl(media.id) ?? null)
 
   useEffect(() => {
@@ -269,44 +315,50 @@ function DuplicateMediaCard({ media, selected, onToggle }: DuplicateMediaCardPro
   }, [media.id, thumbnailUrl])
 
   return (
-    <button
+    <div
       ref={cardRef}
-      type="button"
-      aria-pressed={selected}
-      aria-label={`${selected ? 'Deselect' : 'Select'} ${media.originalFilename}`}
-      onClick={onToggle}
       className={cn(
         'group relative min-h-11 overflow-hidden rounded-lg border bg-background text-left transition-all focus-visible:ring-offset-2',
         selected ? 'border-primary ring-2 ring-primary' : 'border-border hover:border-primary/50 hover:shadow-md',
       )}
     >
-      <div className="relative aspect-square overflow-hidden bg-muted">
-        {thumbnailUrl ? (
-          <img src={thumbnailUrl} alt="" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
-        ) : (
-          <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
-        )}
-        <span
-          aria-hidden="true"
-          className={cn(
-            'absolute left-2 top-2 flex h-7 w-7 items-center justify-center rounded-md border-2 shadow-sm transition-colors',
-            selected ? 'border-primary bg-primary text-primary-foreground' : 'border-white/80 bg-black/40 text-white',
+      <button
+        type="button"
+        aria-label={`Inspect ${media.originalFilename}`}
+        onClick={onInspect}
+        className="block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset"
+      >
+        <div className="relative aspect-square overflow-hidden bg-muted">
+          {thumbnailUrl ? (
+            <img src={thumbnailUrl} alt="" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+          ) : (
+            <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
           )}
-        >
-          {selected ? <Check className="h-4 w-4" /> : <Square className="h-3.5 w-3.5" />}
-        </span>
-        {media.mediaType === 'video' && (
-          <span className="absolute right-2 top-2 rounded-md border border-white/20 bg-black/60 p-1.5 text-white backdrop-blur-sm">
-            <Play className="h-3.5 w-3.5 fill-current" />
-          </span>
+          {media.mediaType === 'video' && (
+            <span className="absolute right-2 top-2 rounded-md border border-white/20 bg-black/60 p-1.5 text-white backdrop-blur-sm">
+              <Play className="h-3.5 w-3.5 fill-current" />
+            </span>
+          )}
+        </div>
+        <div className="space-y-1 p-3">
+          <p className="truncate text-xs font-bold text-foreground" title={media.originalFilename}>{media.originalFilename}</p>
+          <p className="truncate text-[11px] font-medium text-muted-foreground">{formatFileSize(media.fileSize)}</p>
+          <p className="truncate text-[11px] text-muted-foreground">{formatDimensions(media)}</p>
+        </div>
+      </button>
+      <button
+        type="button"
+        aria-pressed={selected}
+        aria-label={`${selected ? 'Deselect' : 'Select'} ${media.originalFilename}`}
+        onClick={onToggle}
+        className={cn(
+          'absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-md border-2 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2',
+          selected ? 'border-primary bg-primary text-primary-foreground' : 'border-white/80 bg-black/40 text-white hover:bg-black/60',
         )}
-      </div>
-      <div className="space-y-1 p-3">
-        <p className="truncate text-xs font-bold text-foreground" title={media.originalFilename}>{media.originalFilename}</p>
-        <p className="truncate text-[11px] font-medium text-muted-foreground">{formatFileSize(media.fileSize)}</p>
-        <p className="truncate text-[11px] text-muted-foreground">{formatDimensions(media)}</p>
-      </div>
-    </button>
+      >
+        {selected ? <Check className="h-4 w-4" /> : <Square className="h-3.5 w-3.5" />}
+      </button>
+    </div>
   )
 }
 

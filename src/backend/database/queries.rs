@@ -1425,6 +1425,13 @@ pub mod deduplicate {
      WHERE id = ?
     "#;
 
+    pub const LOCK_RUN_FOR_REPLACEMENT: &str = r#"
+    UPDATE media_similarity_runs
+       SET status = status
+     WHERE id = ?
+       AND status = 'running'
+    "#;
+
     pub const COMPLETE_RUN: &str = r#"
     UPDATE media_similarity_runs
        SET status = ?
@@ -1558,6 +1565,16 @@ pub mod deduplicate {
      LIMIT ?
     "#;
 
+    pub const SELECT_CURRENT_INDEX_BY_MEDIA_ID: &str = r#"
+    SELECT media_id
+         , embedding
+         , perceptual_hash
+         , capture_time_seconds
+      FROM media_similarity_index
+     WHERE media_id = ?
+       AND processing_status = 1
+    "#;
+
     pub const UPDATE_CAPTURE_TIME: &str = r#"
     UPDATE media_similarity_index
        SET capture_time_seconds = ?
@@ -1596,49 +1613,6 @@ pub mod deduplicate {
      LIMIT ?
     "#;
 
-    pub const SELECT_CLUSTERS_FOR_MEDIA: &str = r#"
-    SELECT DISTINCT cluster_id
-      FROM media_similarity_cluster_members
-     WHERE media_id = ?
-    "#;
-
-    pub const SELECT_CLUSTER_MEMBERS_EXCEPT: &str = r#"
-    SELECT media_id
-      FROM media_similarity_cluster_members
-     WHERE cluster_id = ?
-       AND media_id <> ?
-    "#;
-
-    pub const DELETE_CLUSTER: &str = r#"
-    DELETE FROM media_similarity_clusters
-     WHERE id = ?
-    "#;
-
-    pub const DELETE_DIRTY: &str = r#"
-    DELETE FROM media_similarity_dirty
-     WHERE media_id = ?
-    "#;
-
-    pub const SELECT_CLUSTER_FOR_MEMBER_AND_KIND: &str = r#"
-    SELECT clusters.id
-         , clusters.representative_media_id
-      FROM media_similarity_clusters AS clusters
-      JOIN media_similarity_cluster_members AS members ON members.cluster_id = clusters.id
-     WHERE members.media_id = ?
-       AND clusters.kind = ?
-     ORDER BY clusters.id
-     LIMIT 1
-    "#;
-
-    pub const SELECT_INDEX_BY_MEDIA_ID: &str = r#"
-    SELECT embedding
-         , perceptual_hash
-         , capture_time_seconds
-      FROM media_similarity_index
-     WHERE media_id = ?
-       AND processing_status = 1
-    "#;
-
     pub const INSERT_CLUSTER: &str = r#"
     INSERT INTO media_similarity_clusters (
         kind
@@ -1655,18 +1629,50 @@ pub mod deduplicate {
     ) VALUES (?, ?, ?, ?)
     "#;
 
-    pub const SELECT_VISIBLE_CLUSTER_IDS: &str = r#"
-    SELECT clusters.id
-      FROM media_similarity_clusters AS clusters
-      JOIN media_similarity_cluster_members AS members ON members.cluster_id = clusters.id
-      JOIN media_access ON media_access.media_id = members.media_id
-     WHERE media_access.user_id = ?
-       AND media_access.deleted_at IS NULL
-       AND clusters.id > ?
-     GROUP BY clusters.id
-    HAVING COUNT(DISTINCT members.media_id) >= 2
-     ORDER BY clusters.id
-     LIMIT ?
+    pub const SELECT_VISIBLE_CLUSTER_PAGE: &str = r#"
+    WITH ordered_visible_members AS (
+        SELECT members.cluster_id
+             , members.media_id
+          FROM media_similarity_cluster_members AS members
+          JOIN media_access ON media_access.media_id = members.media_id
+         WHERE media_access.user_id = ?
+           AND media_access.deleted_at IS NULL
+         GROUP BY members.cluster_id
+                , members.media_id
+         ORDER BY members.cluster_id
+                , members.media_id
+    ), visible_clusters AS (
+        SELECT cluster_id
+             , group_concat(media_id, ',') AS media_ids
+          FROM ordered_visible_members
+         GROUP BY cluster_id
+        HAVING COUNT(*) >= 2
+    ), canonical_clusters AS (
+        SELECT MIN(cluster_id) AS cluster_id
+             , media_ids
+          FROM visible_clusters
+         GROUP BY media_ids
+    ), cluster_page AS (
+        SELECT cluster_id
+          FROM canonical_clusters
+         WHERE cluster_id > ?
+         ORDER BY cluster_id
+         LIMIT ?
+    ), totals AS (
+        SELECT COUNT(*) AS total_groups
+          FROM canonical_clusters
+    ), media_totals AS (
+        SELECT COUNT(DISTINCT members.media_id) AS total_media
+          FROM ordered_visible_members AS members
+          JOIN canonical_clusters AS clusters ON clusters.cluster_id = members.cluster_id
+    )
+    SELECT cluster_page.cluster_id
+         , totals.total_groups
+         , media_totals.total_media
+      FROM totals
+      CROSS JOIN media_totals
+      LEFT JOIN cluster_page ON TRUE
+     ORDER BY cluster_page.cluster_id
     "#;
 
     pub const SELECT_VISIBLE_CLUSTER_MEDIA: &str = r#"

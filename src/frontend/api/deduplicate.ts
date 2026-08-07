@@ -15,6 +15,8 @@ export interface DeduplicateGroupsResponse {
   groups: DeduplicateGroup[]
   nextCursor: string | null
   hasMore: boolean
+  totalGroups: number
+  totalMedia: number
 }
 
 export interface DeduplicateActionResponse {

@@ -1,10 +1,40 @@
 use momento_api::database::queries;
 use momento_api::processor::deduplicator::{
-    blob_to_embedding, cosine_similarity, create_run, embedding_to_blob, latest_run,
-    recover_interrupted_runs,
+    blob_to_embedding, cosine_similarity, create_run, embedding_to_blob, generate_clusters,
+    latest_run, recover_interrupted_runs, request_cancel,
 };
 
 use crate::test_utils::{create_test_db, create_test_media};
+
+fn insert_similarity_index(
+    pool: &momento_api::database::DbPool,
+    media_id: i64,
+    embedding: &[f32],
+    band_value: i64,
+    capture_time: i64,
+) {
+    let connection = pool.get().expect("Failed to get connection");
+    connection
+        .execute(
+            queries::deduplicate::UPSERT_INDEX,
+            rusqlite::params![
+                media_id,
+                format!("hash_{media_id}"),
+                "model",
+                "preprocess",
+                embedding_to_blob(embedding),
+                0_i64,
+                capture_time,
+            ],
+        )
+        .expect("Failed to insert similarity index");
+    connection
+        .execute(
+            queries::deduplicate::INSERT_BAND,
+            rusqlite::params![media_id, 0_i64, band_value],
+        )
+        .expect("Failed to insert similarity hash band");
+}
 
 #[test]
 fn float32_embedding_blob_round_trips() {
@@ -118,4 +148,111 @@ fn run_progress_updates_all_page_counters_atomically() {
     assert_eq!(run.processed_media, 64);
     assert_eq!(run.candidate_comparisons, 1_024);
     assert_eq!(run.clusters_created, 2);
+}
+
+#[test]
+fn identical_near_duplicate_and_burst_sets_are_persisted_once() {
+    let pool = create_test_db();
+    let first = create_test_media(&pool, "first.jpg");
+    let second = create_test_media(&pool, "second.jpg");
+    insert_similarity_index(&pool, first, &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
+    let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
+
+    generate_clusters(&pool, run_id).expect("Failed to generate clusters");
+
+    let connection = pool.get().expect("Failed to get connection");
+    let (cluster_count, kind, member_count): (i64, String, i64) = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT clusters.id), MIN(clusters.kind), COUNT(members.media_id) \
+             FROM media_similarity_clusters AS clusters \
+             JOIN media_similarity_cluster_members AS members ON members.cluster_id = clusters.id",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("Failed to inspect generated clusters");
+    assert_eq!(cluster_count, 1);
+    assert_eq!(kind, "near_duplicate");
+    assert_eq!(member_count, 2);
+    let run = latest_run(&pool).unwrap().unwrap();
+    assert_eq!(run.clusters_created, 1);
+    assert_eq!(run.status, "completed");
+    assert!(!request_cancel(&pool).expect("Completed replacement must reject cancellation"));
+}
+
+#[test]
+fn distinct_media_sets_remain_separate_after_canonicalization() {
+    let pool = create_test_db();
+    let first = create_test_media(&pool, "first-set-a.jpg");
+    let second = create_test_media(&pool, "first-set-b.jpg");
+    let third = create_test_media(&pool, "second-set-a.jpg");
+    let fourth = create_test_media(&pool, "second-set-b.jpg");
+    insert_similarity_index(&pool, first, &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
+    insert_similarity_index(&pool, third, &[0.0, 1.0], 8, 2_000);
+    insert_similarity_index(&pool, fourth, &[0.0, 1.0], 8, 2_005);
+    let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
+
+    generate_clusters(&pool, run_id).expect("Failed to generate clusters");
+
+    let connection = pool.get().expect("Failed to get connection");
+    let cluster_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_clusters",
+            [],
+            |row| row.get(0),
+        )
+        .expect("Failed to count generated clusters");
+    assert_eq!(cluster_count, 2);
+    assert_eq!(latest_run(&pool).unwrap().unwrap().clusters_created, 2);
+}
+
+#[test]
+fn cancelled_generation_keeps_the_previous_complete_clusters() {
+    let pool = create_test_db();
+    let first = create_test_media(&pool, "existing-a.jpg");
+    let second = create_test_media(&pool, "existing-b.jpg");
+    insert_similarity_index(&pool, first, &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
+    let connection = pool.get().expect("Failed to get connection");
+    connection
+        .execute(
+            queries::deduplicate::INSERT_CLUSTER,
+            rusqlite::params!["burst", first],
+        )
+        .expect("Failed to create existing cluster");
+    let existing_cluster_id = connection.last_insert_rowid();
+    for media_id in [first, second] {
+        connection
+            .execute(
+                queries::deduplicate::INSERT_CLUSTER_MEMBER,
+                rusqlite::params![existing_cluster_id, media_id, 1.0_f32, 0_u32],
+            )
+            .expect("Failed to create existing cluster member");
+    }
+    drop(connection);
+    let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
+    let connection = pool.get().expect("Failed to get connection");
+    connection
+        .execute(
+            "UPDATE media_similarity_runs SET status = 'cancelling' WHERE id = ?",
+            [run_id],
+        )
+        .expect("Failed to request cancellation");
+    drop(connection);
+
+    generate_clusters(&pool, run_id).expect("Cancelled generation should stop cleanly");
+
+    let connection = pool.get().expect("Failed to get connection");
+    let remaining_cluster: (i64, String) = connection
+        .query_row(
+            "SELECT id, kind FROM media_similarity_clusters",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("Previous cluster should remain available");
+    assert_eq!(
+        remaining_cluster,
+        (existing_cluster_id, "burst".to_string())
+    );
 }

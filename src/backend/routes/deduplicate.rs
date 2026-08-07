@@ -140,12 +140,26 @@ async fn groups(
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest("cursor must be a cluster ID".to_string()))?;
     let connection = state.pool.get().map_err(AppError::Pool)?;
-    let cluster_ids = fetch_all(
+    let page_rows = fetch_all(
         &connection,
-        queries::deduplicate::SELECT_VISIBLE_CLUSTER_IDS,
+        queries::deduplicate::SELECT_VISIBLE_CLUSTER_PAGE,
         &[&current_user.id, &cursor, &(request.limit + 1)],
-        |row| row.get::<_, i64>(0),
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
     )?;
+    let (total_groups, total_media) = page_rows
+        .first()
+        .map(|row| (row.1, row.2))
+        .unwrap_or((0, 0));
+    let cluster_ids = page_rows
+        .into_iter()
+        .filter_map(|row| row.0)
+        .collect::<Vec<_>>();
     let has_more = cluster_ids.len() > request.limit as usize;
     let selected_ids = cluster_ids
         .into_iter()
@@ -174,5 +188,7 @@ async fn groups(
         groups: result_groups,
         next_cursor,
         has_more,
+        total_groups,
+        total_media,
     }))
 }

@@ -22,6 +22,8 @@ pub struct DeduplicateGroupsResponse {
     pub groups: Vec<DeduplicateGroup>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    pub total_groups: i64,
+    pub total_media: i64,
 }
 
 #[derive(Debug, Serialize)]
