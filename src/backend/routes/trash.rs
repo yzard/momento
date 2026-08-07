@@ -3,12 +3,12 @@ use chrono::{Duration, Utc};
 
 use crate::auth::{AppState, CurrentUser};
 use crate::constants::TRASH_RETENTION_DAYS;
-use crate::database::{execute_query, fetch_all, fetch_one, queries};
+use crate::database::{execute_query, fetch_all, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     TrashDeleteRequest, TrashListResponse, TrashMediaResponse, TrashResponse, TrashRestoreRequest,
 };
-use crate::processor::media_processor::{delete_from_rtree, delete_media_files};
+use crate::processor::media_deletion::permanently_delete_for_user;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -132,24 +132,13 @@ async fn permanently_delete(
 
     let mut deleted_count = 0;
     for row in rows {
-        execute_query(
+        permanently_delete_for_user(
             &conn,
-            queries::trash::DELETE_ACCESS,
-            &[&row.id, &current_user.id],
+            row.id,
+            current_user.id,
+            &row.file_path,
+            row.thumbnail_path.as_deref(),
         )?;
-
-        let access_count: i64 =
-            fetch_one(&conn, queries::trash::CHECK_ACCESS_COUNT, &[&row.id], |r| {
-                r.get(0)
-            })?
-            .unwrap_or(0);
-
-        if access_count == 0 {
-            let _ = delete_from_rtree(&conn, row.id);
-            delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-            execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
-        }
-
         deleted_count += 1;
     }
 
@@ -186,24 +175,13 @@ async fn empty_trash(
 
     let mut deleted_count = 0;
     for row in rows {
-        execute_query(
+        permanently_delete_for_user(
             &conn,
-            queries::trash::DELETE_ACCESS,
-            &[&row.id, &current_user.id],
+            row.id,
+            current_user.id,
+            &row.file_path,
+            row.thumbnail_path.as_deref(),
         )?;
-
-        let access_count: i64 =
-            fetch_one(&conn, queries::trash::CHECK_ACCESS_COUNT, &[&row.id], |r| {
-                r.get(0)
-            })?
-            .unwrap_or(0);
-
-        if access_count == 0 {
-            let _ = delete_from_rtree(&conn, row.id);
-            delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-            execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
-        }
-
         deleted_count += 1;
     }
 
@@ -232,24 +210,13 @@ pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
 
     let mut deleted_count = 0;
     for row in rows {
-        execute_query(
+        permanently_delete_for_user(
             conn,
-            queries::trash::DELETE_ACCESS,
-            &[&row.id, &row.user_id],
+            row.id,
+            row.user_id,
+            &row.file_path,
+            row.thumbnail_path.as_deref(),
         )?;
-
-        let access_count: i64 =
-            fetch_one(conn, queries::trash::CHECK_ACCESS_COUNT, &[&row.id], |r| {
-                r.get(0)
-            })?
-            .unwrap_or(0);
-
-        if access_count == 0 {
-            let _ = delete_from_rtree(conn, row.id);
-            delete_media_files(&row.file_path, row.thumbnail_path.as_deref());
-            execute_query(conn, queries::trash::DELETE_PERMANENTLY, &[&row.id])?;
-        }
-
         deleted_count += 1;
     }
 

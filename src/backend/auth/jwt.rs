@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::AppResult;
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,7 +33,7 @@ pub fn create_access_token(
     };
 
     let token = encode(
-        &Header::default(),
+        &Header::new(Algorithm::HS256),
         &claims,
         &EncodingKey::from_secret(config.security.secret_key.as_bytes()),
     )?;
@@ -58,7 +58,7 @@ pub fn create_refresh_token(
 }
 
 pub fn decode_access_token(token: &str, config: &Config) -> Option<Claims> {
-    let validation = Validation::default();
+    let validation = Validation::new(Algorithm::HS256);
 
     match decode::<Claims>(
         token,

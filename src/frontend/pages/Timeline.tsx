@@ -43,6 +43,7 @@ export default function Timeline({ mediaType }: TimelineProps) {
       queryClient.invalidateQueries({ queryKey: ['timeline'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
       queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
     },
   })
 
@@ -58,7 +59,7 @@ export default function Timeline({ mediaType }: TimelineProps) {
   }
 
   const handleDelete = (media: Media) => {
-    deleteMutation.mutate(media.id)
+    deleteMutation.mutate([media.id])
   }
 
   const currentGroupByLabel = groupByOptions.find((o) => o.value === groupBy)?.label || 'Day'

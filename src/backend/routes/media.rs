@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::{image_text_model_name, paths};
+use crate::constants::{media_text_model_name, paths};
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -28,7 +28,7 @@ use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, in
 use crate::processor::thumbnails::generate_image_preview;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 const TIMELINE_START_DATE: &str = "0000-01-01T00:00:00";
@@ -190,7 +190,7 @@ async fn list_media(
     Json(request): Json<MediaListRequest>,
 ) -> AppResult<Json<MediaListResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let search = normalize_image_text_search(request.search.as_deref());
+    let search = normalize_media_text_search(request.search.as_deref());
 
     if request.limit.is_none() && request.cursor.is_none() {
         let items = fetch_all(
@@ -259,7 +259,7 @@ async fn list_timeline(
     Json(request): Json<TimelineListRequest>,
 ) -> AppResult<Json<TimelineListResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let search = normalize_image_text_search(Some(&request.search));
+    let search = normalize_media_text_search(Some(&request.search));
     let response = query_timeline(&conn, current_user.id, &request, &search)?;
     Ok(Json(response))
 }
@@ -363,7 +363,7 @@ async fn get_timeline_markers(
     Json(request): Json<TimelineMarkersRequest>,
 ) -> AppResult<Json<TimelineMarkersResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let search = normalize_image_text_search(Some(&request.search));
+    let search = normalize_media_text_search(Some(&request.search));
     let media_type = validate_media_type(request.media_type.as_deref())?;
     let media_type_value = media_type.unwrap_or("");
     let rows: Vec<(String, String)> = fetch_all(
@@ -438,7 +438,7 @@ async fn search_media(
     current_user: CurrentUser,
     Json(request): Json<ImageTextSearchRequest>,
 ) -> AppResult<Json<ImageTextSearchResponse>> {
-    let search = normalize_image_text_search(Some(request.search.as_str()));
+    let search = normalize_media_text_search(Some(request.search.as_str()));
     if search.is_empty() {
         return Ok(Json(ImageTextSearchResponse {
             results: Vec::new(),
@@ -448,14 +448,14 @@ async fn search_media(
     let conn = state.pool.get().map_err(AppError::Pool)?;
     let matches: Vec<(i64, String)> = fetch_all(
         &conn,
-        queries::image_text::SEARCH_FOR_USER,
+        queries::media_text::SEARCH_FOR_USER,
         &[&search, &current_user.id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
     let mut results: HashMap<i64, Vec<String>> = HashMap::new();
     for (image_id, model_type) in matches {
-        let Some(model_name) = image_text_model_name(&model_type) else {
+        let Some(model_name) = media_text_model_name(&model_type) else {
             continue;
         };
 
@@ -477,7 +477,7 @@ async fn search_media(
     Ok(Json(ImageTextSearchResponse { results }))
 }
 
-fn normalize_image_text_search(search: Option<&str>) -> String {
+fn normalize_media_text_search(search: Option<&str>) -> String {
     let search = search.unwrap_or_default().trim();
     if search.is_empty() {
         return String::new();
@@ -594,10 +594,10 @@ async fn update_media(
             &[&media.id, &geohash],
         )?;
 
-        delete_from_rtree(&conn, media.id).map_err(AppError::Database)?;
+        delete_from_rtree(&conn, media.id).map_err(AppError::from)?;
 
         if let (Some(lat), Some(lon)) = (media.gps_latitude, media.gps_longitude) {
-            insert_into_rtree(&conn, media.id, lat, lon).map_err(AppError::Database)?;
+            insert_into_rtree(&conn, media.id, lat, lon).map_err(AppError::from)?;
         }
     }
 
@@ -609,28 +609,31 @@ async fn delete_media(
     current_user: CurrentUser,
     Json(request): Json<MediaDeleteRequest>,
 ) -> AppResult<Json<DeleteMediaResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let exists = fetch_one(
-        &conn,
-        queries::media::CHECK_EXISTS,
-        &[&request.media_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
-    )?;
-
-    if exists.is_none() {
-        return Err(AppError::NotFound("Media not found".to_string()));
+    if request.media_ids.is_empty() {
+        return Ok(Json(DeleteMediaResponse {
+            message: "No media to delete".to_string(),
+        }));
     }
-
+    let media_ids = request.media_ids.into_iter().collect::<HashSet<_>>();
+    if media_ids.len() > 500 {
+        return Err(AppError::BadRequest(
+            "mediaIds must contain at most 500 unique IDs".to_string(),
+        ));
+    }
+    let conn = state.pool.get().map_err(AppError::Pool)?;
     let deleted_at = Utc::now().to_rfc3339();
-    execute_query(
-        &conn,
-        queries::media::UPDATE_DELETED_AT,
-        &[&deleted_at, &request.media_id, &current_user.id],
-    )?;
+    let transaction = conn.unchecked_transaction()?;
+    let mut deleted_count = 0;
+    for media_id in media_ids {
+        deleted_count += transaction.execute(
+            queries::media::UPDATE_DELETED_AT,
+            rusqlite::params![deleted_at, media_id, current_user.id],
+        )?;
+    }
+    transaction.commit()?;
 
     Ok(Json(DeleteMediaResponse {
-        message: "Media deleted".to_string(),
+        message: format!("{} media moved to trash", deleted_count),
     }))
 }
 
@@ -711,7 +714,7 @@ fn fetch_default_media(
     })
 }
 
-fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
+pub(crate) fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
     let media_row = MediaRowData::from_row(row)?;
     Ok(row_to_media_response(media_row))
 }

@@ -1,5 +1,6 @@
 mod albums;
 mod auth;
+mod deduplicate;
 mod imports;
 mod map;
 mod media;
@@ -16,6 +17,7 @@ pub use trash::cleanup_expired_trash;
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .merge(auth::router())
+        .merge(deduplicate::router())
         .merge(users::router())
         .merge(media::router())
         .merge(media::thumbnail_router())

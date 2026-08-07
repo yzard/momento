@@ -60,7 +60,7 @@ pub const TRASH_RETENTION_DAYS: i64 = 30;
 pub const OCR_MODEL_TYPE: &str = "ocr";
 pub const IMAGE_TAGGING_MODEL_TYPE: &str = "image_tagging";
 
-pub fn image_text_model_name(model_type: &str) -> Option<&'static str> {
+pub fn media_text_model_name(model_type: &str) -> Option<&'static str> {
     match model_type {
         OCR_MODEL_TYPE => Some("OCR"),
         IMAGE_TAGGING_MODEL_TYPE => Some("Image Tags"),

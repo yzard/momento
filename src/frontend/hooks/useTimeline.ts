@@ -16,6 +16,7 @@ interface TimelineWindowOptions {
   mediaType: MediaTypeFilter | null
   marker: TimelineMarker | null
   preloadKey: number
+  refreshKey: number
 }
 
 interface TimelinePageEntry {
@@ -69,12 +70,14 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     mediaType,
     marker,
     preloadKey,
+    refreshKey,
   } = options
   const normalizedSearch = search.trim()
   const contextKey = JSON.stringify([
     groupBy,
     normalizedSearch,
     mediaType,
+    refreshKey,
   ])
   const pageCacheRef = useRef<Map<string, CachedPage>>(new Map())
   const generationRef = useRef(0)

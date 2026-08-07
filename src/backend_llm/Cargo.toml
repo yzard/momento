@@ -2,7 +2,7 @@
 name = "llm-service"
 version = "0.1.0"
 edition = "2021"
-description = "Standalone image OCR service for Momento"
+description = "Standalone on-demand image inference service for Momento"
 
 [lib]
 path = "lib.rs"

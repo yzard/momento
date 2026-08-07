@@ -82,11 +82,10 @@ impl Default for StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     #[serde(default = "default_secret_key")]
     pub secret_key: String,
-    #[serde(default = "default_algorithm")]
-    pub algorithm: String,
     #[serde(default = "default_access_token_expire_minutes")]
     pub access_token_expire_minutes: i64,
     #[serde(default = "default_refresh_token_expire_days")]
@@ -95,10 +94,6 @@ pub struct SecurityConfig {
 
 fn default_secret_key() -> String {
     "change-me-in-production-use-openssl-rand-hex-32".to_string()
-}
-
-fn default_algorithm() -> String {
-    "HS256".to_string()
 }
 
 fn default_access_token_expire_minutes() -> i64 {
@@ -113,7 +108,6 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             secret_key: default_secret_key(),
-            algorithm: default_algorithm(),
             access_token_expire_minutes: default_access_token_expire_minutes(),
             refresh_token_expire_days: default_refresh_token_expire_days(),
         }
@@ -340,6 +334,7 @@ impl Default for RegenerateConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LlmConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -359,8 +354,37 @@ pub struct LlmConfig {
     pub max_concurrent_requests: usize,
     #[serde(default)]
     pub image_tagging_enabled: bool,
-    #[serde(default = "default_image_tagging_endpoint")]
-    pub image_tagging_endpoint: String,
+    #[serde(default)]
+    pub deduplicate_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CronjobConfig {
+    pub timezone: String,
+    pub deduplicate_cron: String,
+}
+
+impl Default for CronjobConfig {
+    fn default() -> Self {
+        Self {
+            timezone: "Etc/UTC".to_string(),
+            deduplicate_cron: "0 3 * * *".to_string(),
+        }
+    }
+}
+
+impl CronjobConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        self.timezone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|error| std::io::Error::other(format!("invalid cronjob timezone: {error}")))?;
+        let normalized_cron = format!("0 {} *", self.deduplicate_cron);
+        normalized_cron.parse::<cron::Schedule>().map_err(|error| {
+            std::io::Error::other(format!("invalid deduplicate cronjob: {error}"))
+        })?;
+        Ok(())
+    }
 }
 
 fn default_llm_service_url() -> String {
@@ -387,10 +411,6 @@ fn default_llm_max_concurrent_requests() -> usize {
     1
 }
 
-fn default_image_tagging_endpoint() -> String {
-    "/v1/infer".to_string()
-}
-
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -403,12 +423,27 @@ impl Default for LlmConfig {
             ready_connection_timeout_seconds: default_llm_ready_connection_timeout_seconds(),
             max_concurrent_requests: default_llm_max_concurrent_requests(),
             image_tagging_enabled: false,
-            image_tagging_endpoint: default_image_tagging_endpoint(),
+            deduplicate_enabled: false,
         }
     }
 }
 
+impl LlmConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.service_url.trim().is_empty() {
+            return Err(std::io::Error::other(
+                "llm service_url is required when LLM is enabled",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -430,6 +465,8 @@ pub struct Config {
     pub regenerate: RegenerateConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub cronjob: CronjobConfig,
 }
 
 /// Reads and parses the config file. A missing or malformed file is an error: silently
@@ -444,9 +481,12 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
 
     let content = fs::read_to_string(config_path)?;
 
-    toml::from_str(&content).map_err(|e| {
+    let config: Config = toml::from_str(&content).map_err(|e| {
         std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
-    })
+    })?;
+    config.llm.validate()?;
+    config.cronjob.validate()?;
+    Ok(config)
 }
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {

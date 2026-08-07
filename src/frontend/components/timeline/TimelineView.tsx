@@ -144,7 +144,8 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
   const [selectedMarker, setSelectedMarker] = useState<TimelineMarker | null>(null)
   const [activeMarkerIndex, setActiveMarkerIndex] = useState(0)
   const [markerJumpKey, setMarkerJumpKey] = useState(0)
-  const { data: markerData, isLoading: isLoadingMarkers, error: markerError } = useTimelineMarkers(mediaType, search)
+  const markerQuery = useTimelineMarkers(mediaType, search)
+  const { data: markerData, isLoading: isLoadingMarkers, error: markerError } = markerQuery
   const markers = markerData?.markers ?? EMPTY_MARKERS
 
   useEffect(() => {
@@ -162,6 +163,7 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
     mediaType,
     marker: selectedMarker,
     preloadKey: markerJumpKey,
+    refreshKey: markerQuery.dataUpdatedAt,
   })
 
   const {

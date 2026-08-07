@@ -93,9 +93,9 @@ pub mod media {
        AND (
             ? = ''
          OR m.id IN (
-                SELECT image_text.image_id
-                  FROM image_text
-                  WHERE image_text.string LIKE ? ESCAPE '\'
+                SELECT media_text.media_id
+                  FROM media_text
+                  WHERE media_text.string LIKE ? ESCAPE '\'
              )
        )
       ORDER BY mm.date_taken DESC, m.id DESC
@@ -138,9 +138,9 @@ pub mod media {
        AND (
             ? = ''
          OR m.id IN (
-                SELECT image_text.image_id
-                  FROM image_text
-                  WHERE image_text.string LIKE ? ESCAPE '\'
+                SELECT media_text.media_id
+                  FROM media_text
+                  WHERE media_text.string LIKE ? ESCAPE '\'
              )
        )
        AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
@@ -244,6 +244,7 @@ pub mod media {
       JOIN media_access AS ma ON m.id = ma.media_id
      WHERE m.id = ?
        AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
     "#;
 
     pub const SELECT_FOR_MAP: &str = r#"
@@ -294,6 +295,7 @@ pub mod media {
       JOIN media_access AS ma ON m.id = ma.media_id
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
     "#;
 
     pub const SELECT_PREVIEW_BATCH: &str = r#"
@@ -304,6 +306,7 @@ pub mod media {
       FROM media AS m
       JOIN media_access AS ma ON m.id = ma.media_id
      WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
     "#;
 
     pub const UPDATE_CONTENT_HASH: &str = r#"
@@ -376,9 +379,9 @@ pub mod timeline {
         AND (
              ? = ''
           OR m.id IN (
-                 SELECT image_text.image_id
-                   FROM image_text
-                   WHERE image_text.string LIKE ? ESCAPE '\'
+                 SELECT media_text.media_id
+                   FROM media_text
+                   WHERE media_text.string LIKE ? ESCAPE '\'
              )
         )
         AND (? = '' OR m.media_type = ?)
@@ -425,9 +428,9 @@ pub mod timeline {
        AND (
             ? = ''
          OR m.id IN (
-                SELECT image_text.image_id
-                  FROM image_text
-                  WHERE image_text.string LIKE ? ESCAPE '\'
+                SELECT media_text.media_id
+                  FROM media_text
+                  WHERE media_text.string LIKE ? ESCAPE '\'
             )
        )
         AND (? = '' OR m.media_type = ?)
@@ -475,9 +478,9 @@ pub mod timeline {
        AND (
             ? = ''
          OR m.id IN (
-                SELECT image_text.image_id
-                  FROM image_text
-                  WHERE image_text.string LIKE ? ESCAPE '\'
+                SELECT media_text.media_id
+                  FROM media_text
+                  WHERE media_text.string LIKE ? ESCAPE '\'
             )
        )
        AND (? = '' OR m.media_type = ?)
@@ -525,9 +528,9 @@ pub mod timeline {
        AND (
             ? = ''
          OR m.id IN (
-                SELECT image_text.image_id
-                  FROM image_text
-                  WHERE image_text.string LIKE ? ESCAPE '\'
+                SELECT media_text.media_id
+                  FROM media_text
+                  WHERE media_text.string LIKE ? ESCAPE '\'
            )
        )
        AND (? = '' OR m.media_type = ?)
@@ -537,25 +540,25 @@ pub mod timeline {
     "#;
 }
 
-pub mod image_text {
+pub mod media_text {
+    pub const DELETE_BY_MEDIA_ID_AND_MODEL_TYPE: &str = r#"
+    DELETE FROM media_text
+     WHERE media_id = ?
+       AND model_type = ?
+    "#;
+
     pub const INSERT: &str = r#"
-    INSERT INTO image_text (
-        image_id
+    INSERT INTO media_text (
+        media_id
       , model_type
       , model_version
       , string
     ) VALUES (?, ?, ?, ?)
     "#;
 
-    pub const DELETE_BY_IMAGE_ID: &str = r#"
-    DELETE FROM image_text
-     WHERE image_id = ?
-    "#;
-
-    pub const DELETE_BY_IMAGE_ID_AND_MODEL_TYPE: &str = r#"
-    DELETE FROM image_text
-     WHERE image_id = ?
-       AND model_type = ?
+    pub const DELETE_BY_MEDIA_ID: &str = r#"
+    DELETE FROM media_text
+     WHERE media_id = ?
     "#;
 
     pub const SELECT_MISSING_FOR_MODEL_TYPE: &str = r#"
@@ -565,29 +568,28 @@ pub mod image_text {
      WHERE m.media_type = 'image'
        AND NOT EXISTS (
             SELECT 1
-              FROM image_text
-              WHERE image_text.image_id = m.id
-                AND image_text.model_type = ?
-                AND image_text.model_version <> 'legacy'
+              FROM media_text
+              WHERE media_text.media_id = m.id
+                AND media_text.model_type = ?
        )
      ORDER BY m.id
     "#;
 
     pub const SEARCH_FOR_USER: &str = r#"
-    SELECT image_text.image_id
-         , image_text.model_type
-      FROM image_text
-     WHERE image_text.string LIKE ? ESCAPE '\'
+    SELECT media_text.media_id
+         , media_text.model_type
+      FROM media_text
+     WHERE media_text.string LIKE ? ESCAPE '\'
        AND EXISTS (
             SELECT 1
               FROM media_access AS ma
-             WHERE ma.media_id = image_text.image_id
+             WHERE ma.media_id = media_text.media_id
                AND ma.user_id = ?
                AND ma.deleted_at IS NULL
        )
-     GROUP BY image_text.image_id
-             , image_text.model_type
-     ORDER BY image_text.image_id
+     GROUP BY media_text.media_id
+             , media_text.model_type
+     ORDER BY media_text.media_id
     "#;
 }
 
@@ -1302,6 +1304,7 @@ pub mod trash {
     DELETE FROM media_access
      WHERE media_id = ?
        AND user_id = ?
+       AND deleted_at IS NOT NULL
     "#;
 
     pub const CHECK_ACCESS_COUNT: &str = r#"
@@ -1364,5 +1367,365 @@ pub mod access {
 
     pub const DELETE_MEDIA_PERMANENTLY: &str = r#"
     DELETE FROM media WHERE id = ?
+    "#;
+}
+
+pub mod deduplicate {
+    pub const INTERRUPT_RUNNING: &str = r#"
+    UPDATE media_similarity_runs
+       SET status = 'interrupted'
+         , completed_at = datetime('now')
+         , error = 'momento-api restarted while the scan was running'
+     WHERE status IN ('running', 'cancelling')
+    "#;
+
+    pub const INSERT_RUN: &str = r#"
+    INSERT INTO media_similarity_runs (
+        trigger
+      , status
+      , scheduled_for
+    ) VALUES (?, 'running', ?)
+    "#;
+
+    pub const SELECT_LATEST_RUN: &str = r#"
+    SELECT id
+         , trigger
+         , status
+         , scheduled_for
+         , started_at
+         , completed_at
+         , indexed_media
+         , processed_media
+         , candidate_comparisons
+         , clusters_created
+         , error
+      FROM media_similarity_runs
+     ORDER BY id DESC
+     LIMIT 1
+    "#;
+
+    pub const SELECT_LAST_SCHEDULED_FOR: &str = r#"
+    SELECT COALESCE(scheduled_for, started_at)
+      FROM media_similarity_runs
+     WHERE status = 'completed'
+     ORDER BY id DESC
+     LIMIT 1
+    "#;
+
+    pub const REQUEST_CANCEL: &str = r#"
+    UPDATE media_similarity_runs
+       SET status = 'cancelling'
+     WHERE id = ?
+       AND status = 'running'
+    "#;
+
+    pub const SELECT_RUN_STATUS: &str = r#"
+    SELECT status
+      FROM media_similarity_runs
+     WHERE id = ?
+    "#;
+
+    pub const COMPLETE_RUN: &str = r#"
+    UPDATE media_similarity_runs
+       SET status = ?
+         , completed_at = datetime('now')
+         , error = ?
+     WHERE id = ?
+    "#;
+
+    pub const UPDATE_RUN_PROGRESS: &str = r#"
+    UPDATE media_similarity_runs
+       SET indexed_media = indexed_media + ?
+         , processed_media = processed_media + ?
+         , candidate_comparisons = candidate_comparisons + ?
+         , clusters_created = clusters_created + ?
+     WHERE id = ?
+    "#;
+
+    pub const SELECT_INDEX_PAGE: &str = r#"
+    SELECT media.id
+         , media.file_path
+         , media.media_type
+         , media.content_hash
+         , media_metadata.date_taken
+      FROM media
+       LEFT JOIN media_metadata ON media_metadata.media_id = media.id
+       LEFT JOIN media_similarity_index ON media_similarity_index.media_id = media.id
+     WHERE media.id > ?
+       AND media.content_hash IS NOT NULL
+       AND media_similarity_index.media_id IS NULL
+     ORDER BY media.id
+     LIMIT ?
+    "#;
+
+    pub const UPSERT_FAILED_INDEX: &str = r#"
+    INSERT INTO media_similarity_index (
+        media_id
+      , content_hash
+      , model_version
+      , preprocessing_version
+      , embedding
+      , perceptual_hash
+      , indexed_at
+      , processing_status
+      , processing_error
+    ) VALUES (?, ?, 'unavailable', 'unavailable', X'', -1, datetime('now'), -1, ?)
+    ON CONFLICT(media_id) DO UPDATE SET
+        content_hash = excluded.content_hash
+      , model_version = excluded.model_version
+      , preprocessing_version = excluded.preprocessing_version
+      , embedding = excluded.embedding
+      , perceptual_hash = excluded.perceptual_hash
+      , capture_time_seconds = NULL
+      , indexed_at = excluded.indexed_at
+      , processing_status = excluded.processing_status
+      , processing_error = excluded.processing_error
+    "#;
+
+    pub const UPSERT_INDEX: &str = r#"
+    INSERT INTO media_similarity_index (
+        media_id
+      , content_hash
+      , model_version
+      , preprocessing_version
+      , embedding
+      , perceptual_hash
+      , capture_time_seconds
+      , indexed_at
+      , processing_status
+      , processing_error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 1, NULL)
+    ON CONFLICT(media_id) DO UPDATE SET
+        content_hash = excluded.content_hash
+      , model_version = excluded.model_version
+      , preprocessing_version = excluded.preprocessing_version
+      , embedding = excluded.embedding
+      , perceptual_hash = excluded.perceptual_hash
+      , capture_time_seconds = excluded.capture_time_seconds
+      , indexed_at = excluded.indexed_at
+      , processing_status = 1
+      , processing_error = NULL
+    "#;
+
+    pub const DELETE_BANDS: &str = r#"
+    DELETE FROM media_similarity_hash_bands
+     WHERE media_id = ?
+    "#;
+
+    pub const INSERT_BAND: &str = r#"
+    INSERT INTO media_similarity_hash_bands (
+        media_id
+      , band_index
+      , band_value
+    ) VALUES (?, ?, ?)
+    "#;
+
+    pub const MARK_DIRTY: &str = r#"
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (?, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at
+    "#;
+
+    pub const SELECT_DIRTY_PAGE: &str = r#"
+    SELECT dirty.media_id
+         , similarity_index.embedding
+         , similarity_index.perceptual_hash
+         , similarity_index.capture_time_seconds
+         , media_metadata.date_taken
+      FROM media_similarity_dirty AS dirty
+      JOIN media_similarity_index AS similarity_index ON similarity_index.media_id = dirty.media_id
+      LEFT JOIN media_metadata ON media_metadata.media_id = dirty.media_id
+     WHERE dirty.media_id > ?
+       AND similarity_index.processing_status = 1
+     ORDER BY dirty.media_id
+     LIMIT ?
+    "#;
+
+    pub const COUNT_DIRTY: &str = r#"
+    SELECT COUNT(*)
+      FROM media_similarity_dirty
+    "#;
+
+    pub const SELECT_CURRENT_INDEX_PAGE: &str = r#"
+    SELECT media_id
+         , embedding
+         , perceptual_hash
+         , capture_time_seconds
+     FROM media_similarity_index
+     WHERE media_id > ?
+       AND processing_status = 1
+     ORDER BY media_id
+     LIMIT ?
+    "#;
+
+    pub const UPDATE_CAPTURE_TIME: &str = r#"
+    UPDATE media_similarity_index
+       SET capture_time_seconds = ?
+     WHERE media_id = ?
+    "#;
+
+    pub const SELECT_BAND_CANDIDATES: &str = r#"
+    SELECT DISTINCT candidate_index.media_id
+         , candidate_index.embedding
+         , candidate_index.perceptual_hash
+         , candidate_index.capture_time_seconds
+      FROM media_similarity_hash_bands AS source_band
+      JOIN media_similarity_hash_bands AS candidate_band
+        ON candidate_band.band_index = source_band.band_index
+       AND candidate_band.band_value = source_band.band_value
+      JOIN media_similarity_index AS candidate_index ON candidate_index.media_id = candidate_band.media_id
+     WHERE source_band.media_id = ?
+       AND candidate_index.media_id < ?
+       AND candidate_index.media_id > ?
+       AND candidate_index.processing_status = 1
+     ORDER BY candidate_index.media_id
+     LIMIT ?
+    "#;
+
+    pub const SELECT_TIME_CANDIDATES: &str = r#"
+    SELECT media_id
+         , embedding
+         , perceptual_hash
+         , capture_time_seconds
+      FROM media_similarity_index
+     WHERE capture_time_seconds BETWEEN ? AND ?
+       AND media_id < ?
+       AND media_id > ?
+       AND processing_status = 1
+     ORDER BY media_id
+     LIMIT ?
+    "#;
+
+    pub const SELECT_CLUSTERS_FOR_MEDIA: &str = r#"
+    SELECT DISTINCT cluster_id
+      FROM media_similarity_cluster_members
+     WHERE media_id = ?
+    "#;
+
+    pub const SELECT_CLUSTER_MEMBERS_EXCEPT: &str = r#"
+    SELECT media_id
+      FROM media_similarity_cluster_members
+     WHERE cluster_id = ?
+       AND media_id <> ?
+    "#;
+
+    pub const DELETE_CLUSTER: &str = r#"
+    DELETE FROM media_similarity_clusters
+     WHERE id = ?
+    "#;
+
+    pub const DELETE_DIRTY: &str = r#"
+    DELETE FROM media_similarity_dirty
+     WHERE media_id = ?
+    "#;
+
+    pub const SELECT_CLUSTER_FOR_MEMBER_AND_KIND: &str = r#"
+    SELECT clusters.id
+         , clusters.representative_media_id
+      FROM media_similarity_clusters AS clusters
+      JOIN media_similarity_cluster_members AS members ON members.cluster_id = clusters.id
+     WHERE members.media_id = ?
+       AND clusters.kind = ?
+     ORDER BY clusters.id
+     LIMIT 1
+    "#;
+
+    pub const SELECT_INDEX_BY_MEDIA_ID: &str = r#"
+    SELECT embedding
+         , perceptual_hash
+         , capture_time_seconds
+      FROM media_similarity_index
+     WHERE media_id = ?
+       AND processing_status = 1
+    "#;
+
+    pub const INSERT_CLUSTER: &str = r#"
+    INSERT INTO media_similarity_clusters (
+        kind
+      , representative_media_id
+    ) VALUES (?, ?)
+    "#;
+
+    pub const INSERT_CLUSTER_MEMBER: &str = r#"
+    INSERT OR IGNORE INTO media_similarity_cluster_members (
+        cluster_id
+      , media_id
+      , cosine_similarity
+      , perceptual_hash_distance
+    ) VALUES (?, ?, ?, ?)
+    "#;
+
+    pub const SELECT_VISIBLE_CLUSTER_IDS: &str = r#"
+    SELECT clusters.id
+      FROM media_similarity_clusters AS clusters
+      JOIN media_similarity_cluster_members AS members ON members.cluster_id = clusters.id
+      JOIN media_access ON media_access.media_id = members.media_id
+     WHERE media_access.user_id = ?
+       AND media_access.deleted_at IS NULL
+       AND clusters.id > ?
+     GROUP BY clusters.id
+    HAVING COUNT(DISTINCT members.media_id) >= 2
+     ORDER BY clusters.id
+     LIMIT ?
+    "#;
+
+    pub const SELECT_VISIBLE_CLUSTER_MEDIA: &str = r#"
+    SELECT media.id
+         , media.filename
+         , media.original_filename
+         , media.media_type
+         , media.mime_type
+         , media_metadata.width
+         , media_metadata.height
+         , media.file_size
+         , media_metadata.duration_seconds
+         , media_metadata.date_taken
+         , media_metadata.gps_latitude
+         , media_metadata.gps_longitude
+         , media_metadata.camera_make
+         , media_metadata.camera_model
+         , media_metadata.lens_make
+         , media_metadata.lens_model
+         , media_metadata.iso
+         , media_metadata.exposure_time
+         , media_metadata.f_number
+         , media_metadata.focal_length
+         , media_metadata.focal_length_35mm
+         , media_metadata.gps_altitude
+         , media_metadata.location_city
+         , media_metadata.location_state
+         , media_metadata.location_country
+         , media_metadata.video_codec
+         , media_metadata.keywords
+         , media.created_at
+      FROM media_similarity_cluster_members AS members
+      JOIN media ON media.id = members.media_id
+      JOIN media_access ON media_access.media_id = media.id
+      LEFT JOIN media_metadata ON media_metadata.media_id = media.id
+     WHERE members.cluster_id = ?
+       AND media_access.user_id = ?
+       AND media_access.deleted_at IS NULL
+     ORDER BY media.id
+    "#;
+
+    pub const CLEAN_CLUSTERS: &str = "DELETE FROM media_similarity_clusters";
+    pub const CLEAN_BANDS: &str = "DELETE FROM media_similarity_hash_bands";
+    pub const CLEAN_INDEX: &str = "DELETE FROM media_similarity_index";
+    pub const CLEAN_DIRTY: &str = "DELETE FROM media_similarity_dirty";
+    pub const CLEAN_RUNS: &str = "DELETE FROM media_similarity_runs";
+    pub const LOCK_RUNS: &str = r#"
+    UPDATE media_similarity_runs
+       SET status = status
+     WHERE status IN ('running', 'cancelling')
+    "#;
+    pub const COUNT_ACTIVE_RUNS: &str = r#"
+    SELECT COUNT(*)
+      FROM media_similarity_runs
+     WHERE status IN ('running', 'cancelling')
+    "#;
+    pub const MARK_ALL_DIRTY: &str = r#"
+    INSERT OR IGNORE INTO media_similarity_dirty (media_id)
+    SELECT id
+      FROM media
     "#;
 }

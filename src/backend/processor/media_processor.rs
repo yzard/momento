@@ -668,7 +668,7 @@ pub async fn process_media_file(
     Some(media_id)
 }
 
-pub fn delete_media_files(file_path: &str, thumbnail_path: Option<&str>) {
+pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option<&str>) {
     let raw_file = paths().originals.join(file_path);
     if raw_file.exists() {
         let _ = fs::remove_file(&raw_file);
@@ -679,6 +679,36 @@ pub fn delete_media_files(file_path: &str, thumbnail_path: Option<&str>) {
         if thumb_file.exists() {
             let _ = fs::remove_file(&thumb_file);
         }
+        let tiny_thumbnail_file = paths().thumbnails_tiny.join(thumb_path);
+        if tiny_thumbnail_file.exists() {
+            let _ = fs::remove_file(&tiny_thumbnail_file);
+        }
+    }
+
+    let original_stem = Path::new(file_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str());
+    if let Some(original_stem) = original_stem {
+        let escaped_stem = glob::Pattern::escape(original_stem);
+        let preview_pattern = paths()
+            .previews
+            .join("*")
+            .join(format!("{escaped_stem}_preview.jpg"));
+        if let Some(preview_pattern) = preview_pattern.to_str() {
+            if let Ok(preview_paths) = glob::glob(preview_pattern) {
+                for preview_path in preview_paths.flatten() {
+                    let _ = fs::remove_file(preview_path);
+                }
+            }
+        }
+    }
+
+    let clustering_frame = paths()
+        .previews
+        .join("deduplicate")
+        .join(format!("{media_id}.jpg"));
+    if clustering_frame.exists() {
+        let _ = fs::remove_file(clustering_frame);
     }
 }
 

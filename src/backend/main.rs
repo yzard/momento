@@ -2,6 +2,7 @@ use momento_api::app::create_app;
 use momento_api::auth::hash_password;
 use momento_api::config::{load_config, save_default_config};
 use momento_api::constants::{init_paths, paths};
+use momento_api::cronjob::run_cronjobs;
 use momento_api::database::{create_pool, init_database, queries};
 use momento_api::logging::{init_logging, install_panic_hook};
 use momento_api::processor::importer::start_webdav_import_job;
@@ -103,6 +104,8 @@ fn start_background_tasks(
         if let Ok(conn) = pool_clone.get() {
             let _ = cleanup_expired_trash(&conn);
         }
+
+        run_cronjobs(config_clone, pool_clone).await;
     });
 
     if config.webdav.enabled {
@@ -166,6 +169,9 @@ async fn main() {
         let conn = pool.get().expect("Failed to get connection");
         init_database(&conn).expect("Failed to initialize database");
     }
+
+    momento_api::processor::deduplicator::recover_interrupted_runs(&pool)
+        .expect("Failed to recover interrupted deduplicate scans");
 
     // Create default admin if needed
     create_default_admin(&pool, &config);

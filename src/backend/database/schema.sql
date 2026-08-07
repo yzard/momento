@@ -61,10 +61,6 @@ CREATE TABLE IF NOT EXISTS albums (
     FOREIGN KEY (cover_media_id) REFERENCES media(id) ON DELETE SET NULL
 );
 
-DROP TABLE IF EXISTS media_tags;
-DROP TABLE IF EXISTS tags;
-DROP TABLE IF EXISTS schema_version;
-
 CREATE TABLE IF NOT EXISTS album_media (
     album_id INTEGER NOT NULL,
     media_id INTEGER NOT NULL,
@@ -133,19 +129,142 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_rtree USING rtree (
     max_lon
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS image_text USING fts5 (
-    image_id UNINDEXED,
-    model_type UNINDEXED,
-    model_version UNINDEXED,
-    string,
-    tokenize = 'unicode61'
+CREATE TABLE IF NOT EXISTS media_text (
+    media_id INTEGER NOT NULL,
+    model_type TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    string TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (media_id, model_type),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
-CREATE TRIGGER IF NOT EXISTS delete_image_text_after_media_delete
+CREATE TABLE IF NOT EXISTS media_similarity_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger TEXT NOT NULL CHECK(trigger IN ('startup', 'scheduled', 'manual')),
+    status TEXT NOT NULL CHECK(status IN ('running', 'cancelling', 'completed', 'failed', 'cancelled', 'interrupted')),
+    scheduled_for TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    indexed_media INTEGER NOT NULL DEFAULT 0,
+    processed_media INTEGER NOT NULL DEFAULT 0,
+    candidate_comparisons INTEGER NOT NULL DEFAULT 0,
+    clusters_created INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS media_similarity_index (
+    media_id INTEGER PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    preprocessing_version TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    perceptual_hash INTEGER NOT NULL,
+    capture_time_seconds INTEGER,
+    indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processing_status INTEGER NOT NULL DEFAULT 1 CHECK(processing_status IN (-1, 1)),
+    processing_error TEXT,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_similarity_hash_bands (
+    media_id INTEGER NOT NULL,
+    band_index INTEGER NOT NULL,
+    band_value INTEGER NOT NULL,
+    PRIMARY KEY (media_id, band_index),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_similarity_dirty (
+    media_id INTEGER PRIMARY KEY,
+    marked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_similarity_clusters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK(kind IN ('near_duplicate', 'burst')),
+    representative_media_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (representative_media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_similarity_cluster_members (
+    cluster_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL,
+    cosine_similarity REAL NOT NULL,
+    perceptual_hash_distance INTEGER NOT NULL,
+    PRIMARY KEY (cluster_id, media_id),
+    FOREIGN KEY (cluster_id) REFERENCES media_similarity_clusters(id) ON DELETE CASCADE,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TRIGGER IF NOT EXISTS delete_media_rtree_after_media_delete
     AFTER DELETE ON media
 BEGIN
-    DELETE FROM image_text
-     WHERE image_id = OLD.id;
+    DELETE FROM media_rtree
+     WHERE media_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS mark_similarity_dirty_after_media_insert
+    AFTER INSERT ON media
+BEGIN
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (NEW.id, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS mark_similarity_dirty_after_metadata_insert
+    AFTER INSERT ON media_metadata
+BEGIN
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (NEW.media_id, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS mark_similarity_dirty_after_metadata_update
+    AFTER UPDATE ON media_metadata
+BEGIN
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (NEW.media_id, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS mark_similarity_dirty_after_access_insert
+    AFTER INSERT ON media_access
+BEGIN
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (NEW.media_id, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS mark_similarity_dirty_after_access_update
+    AFTER UPDATE ON media_access
+BEGIN
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (NEW.media_id, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS remove_similarity_clusters_before_media_delete
+    BEFORE DELETE ON media
+BEGIN
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    SELECT members.media_id
+         , datetime('now')
+      FROM media_similarity_cluster_members AS deleted_member
+      JOIN media_similarity_cluster_members AS members
+        ON members.cluster_id = deleted_member.cluster_id
+     WHERE deleted_member.media_id = OLD.id
+       AND members.media_id <> OLD.id
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at;
+
+    DELETE FROM media_similarity_clusters
+     WHERE id IN (
+        SELECT cluster_id
+          FROM media_similarity_cluster_members
+         WHERE media_id = OLD.id
+     );
 END;
 
 CREATE INDEX IF NOT EXISTS idx_media_pagination
@@ -191,3 +310,28 @@ CREATE INDEX IF NOT EXISTS idx_album_access_user
 
 CREATE INDEX IF NOT EXISTS idx_media_geohash
     ON media_metadata (geohash);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_similarity_single_running
+    ON media_similarity_runs ((1))
+    WHERE status IN ('running', 'cancelling');
+
+CREATE INDEX IF NOT EXISTS idx_media_similarity_index_versions
+    ON media_similarity_index (content_hash, model_version, preprocessing_version);
+
+CREATE INDEX IF NOT EXISTS idx_media_similarity_bands_lookup
+    ON media_similarity_hash_bands (band_index, band_value, media_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_similarity_capture_time
+    ON media_similarity_index (capture_time_seconds, media_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_similarity_members_media
+    ON media_similarity_cluster_members (media_id, cluster_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_similarity_members_cluster
+    ON media_similarity_cluster_members (cluster_id, media_id);
+
+INSERT OR IGNORE INTO media_similarity_dirty (media_id)
+SELECT media.id
+  FROM media
+  LEFT JOIN media_similarity_index ON media_similarity_index.media_id = media.id
+ WHERE media_similarity_index.media_id IS NULL;

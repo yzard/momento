@@ -20,6 +20,7 @@ export default function Trash() {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       queryClient.invalidateQueries({ queryKey: ['timeline'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
+      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
       setSelectedIds(new Set())
     },
   })
@@ -28,6 +29,9 @@ export default function Trash() {
     mutationFn: trashApi.permanentlyDelete,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: ['timeline'] })
+      queryClient.invalidateQueries({ queryKey: ['media'] })
+      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
       setSelectedIds(new Set())
     },
   })
@@ -36,6 +40,9 @@ export default function Trash() {
     mutationFn: trashApi.emptyTrash,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: ['timeline'] })
+      queryClient.invalidateQueries({ queryKey: ['media'] })
+      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
       setSelectedIds(new Set())
     },
   })

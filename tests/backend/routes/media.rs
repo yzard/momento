@@ -11,7 +11,7 @@ use momento_api::database::{init_database, queries};
 use rusqlite::params;
 use serde_json::{json, Value};
 
-fn insert_image_text(
+fn insert_media_text(
     pool: &momento_api::database::DbPool,
     image_id: i64,
     model_type: &str,
@@ -19,10 +19,50 @@ fn insert_image_text(
 ) {
     let conn = pool.get().expect("Failed to get database connection");
     conn.execute(
-        queries::image_text::INSERT,
+        queries::media_text::INSERT,
         params![image_id, model_type, "test-version", text],
     )
     .expect("Failed to insert image text");
+}
+
+#[tokio::test]
+async fn media_delete_accepts_media_ids_batch() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "batch-delete", "batch-delete@example.com");
+    let first_media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "delete-one.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    let second_media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "delete-two.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:31:00",
+    );
+    grant_media_access(&pool, first_media_id, user_id);
+    grant_media_access(&pool, second_media_id, user_id);
+    let server = TestServer::new(app).expect("Failed to create test server");
+
+    let response = server
+        .post("/api/v1/media/delete")
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user_id)))
+        .json(&json!({"mediaIds": [first_media_id, second_media_id]}))
+        .await;
+
+    response.assert_status_ok();
+    let connection = pool.get().expect("Failed to get connection");
+    let deleted_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE user_id = ? AND deleted_at IS NOT NULL",
+            [user_id],
+            |row| row.get(0),
+        )
+        .expect("Failed to count deleted media");
+    assert_eq!(deleted_count, 2);
 }
 
 fn access_token(user_id: i64) -> String {
@@ -49,14 +89,14 @@ async fn test_search_returns_accessible_image_and_model_names() {
         "2024-01-15T10:30:00",
     );
     grant_media_access(&pool, visible_media, user_id);
-    insert_image_text(&pool, visible_media, OCR_MODEL_TYPE, "beach sunset");
-    insert_image_text(
+    insert_media_text(&pool, visible_media, OCR_MODEL_TYPE, "beach sunset");
+    insert_media_text(
         &pool,
         visible_media,
         IMAGE_TAGGING_MODEL_TYPE,
         "beach person",
     );
-    insert_image_text(&pool, hidden_media, OCR_MODEL_TYPE, "beach hidden");
+    insert_media_text(&pool, hidden_media, OCR_MODEL_TYPE, "beach hidden");
 
     let server = TestServer::new(app).expect("Failed to create test server");
     let token = access_token(user_id);
@@ -94,7 +134,7 @@ async fn test_search_matches_chinese_prefixes() {
         "2024-01-15T10:30:00",
     );
     grant_media_access(&pool, media_id, user_id);
-    insert_image_text(&pool, media_id, OCR_MODEL_TYPE, "谈判思考的技术");
+    insert_media_text(&pool, media_id, OCR_MODEL_TYPE, "谈判思考的技术");
 
     let server = TestServer::new(app).expect("Failed to create test server");
     let token = access_token(user_id);
@@ -129,8 +169,8 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
     );
     grant_media_access(&pool, matching_media, user_id);
     grant_media_access(&pool, non_matching_media, user_id);
-    insert_image_text(&pool, matching_media, OCR_MODEL_TYPE, "mountain lake");
-    insert_image_text(&pool, non_matching_media, OCR_MODEL_TYPE, "city street");
+    insert_media_text(&pool, matching_media, OCR_MODEL_TYPE, "mountain lake");
+    insert_media_text(&pool, non_matching_media, OCR_MODEL_TYPE, "city street");
 
     let server = TestServer::new(app).expect("Failed to create test server");
     let token = access_token(user_id);
@@ -583,7 +623,7 @@ async fn test_timeline_jump_can_page_newer_media() {
 }
 
 #[test]
-fn test_image_text_is_removed_when_media_is_deleted() {
+fn test_media_text_is_removed_when_media_is_deleted() {
     let pool = create_test_db();
     let media_id = create_test_media_with_gps_and_date(
         &pool,
@@ -592,7 +632,7 @@ fn test_image_text_is_removed_when_media_is_deleted() {
         -74.0060,
         "2024-01-15T10:30:00",
     );
-    insert_image_text(&pool, media_id, OCR_MODEL_TYPE, "delete me");
+    insert_media_text(&pool, media_id, OCR_MODEL_TYPE, "delete me");
 
     let conn = pool.get().expect("Failed to get database connection");
     conn.execute("DELETE FROM media WHERE id = ?", [media_id])
@@ -600,7 +640,7 @@ fn test_image_text_is_removed_when_media_is_deleted() {
 
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM image_text WHERE image_id = ?",
+            "SELECT COUNT(*) FROM media_text WHERE media_id = ?",
             [media_id],
             |row| row.get(0),
         )
@@ -609,20 +649,20 @@ fn test_image_text_is_removed_when_media_is_deleted() {
 }
 
 #[test]
-fn test_existing_database_receives_image_text_schema() {
+fn test_existing_database_receives_media_text_schema() {
     let pool = create_test_db();
     let conn = pool.get().expect("Failed to get database connection");
-    conn.execute("DROP TABLE image_text", [])
-        .expect("Failed to remove image text table");
+    conn.execute("DROP TABLE media_text", [])
+        .expect("Failed to remove media text table");
 
     init_database(&conn).expect("Failed to reinitialize database schema");
 
     let table_exists: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'image_text'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'media_text'",
             [],
             |row| row.get(0),
         )
-        .expect("Failed to check image text table");
+        .expect("Failed to check media text table");
     assert_eq!(table_exists, 1);
 }

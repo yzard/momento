@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -9,13 +11,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
 use tracing::{info, warn};
 
 use crate::config::{Config, LlmConfig};
-use crate::constants::{image_text_model_name, paths, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
-use crate::database::{execute_query, fetch_all, queries, DbPool};
-use crate::processor::regenerator::{record_image_text_job_completed, record_regeneration_error};
+use crate::constants::{media_text_model_name, paths, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
+use crate::database::{fetch_all, queries, DbPool};
+use crate::processor::regenerator::{record_media_text_job_completed, record_regeneration_error};
+
+const INFERENCE_ENDPOINT: &str = "/v1/infer";
 
 #[derive(Debug, Clone)]
 pub struct LlmClient {
@@ -25,6 +29,7 @@ pub struct LlmClient {
 
 #[derive(Debug, Deserialize)]
 struct InferenceResponse {
+    task: String,
     text: String,
     markdown: String,
     #[serde(default)]
@@ -33,6 +38,24 @@ struct InferenceResponse {
     model_type: String,
     #[serde(rename = "modelVersion")]
     model_version: String,
+    #[serde(default)]
+    embedding: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "embeddingEncoding")]
+    embedding_encoding: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "embeddingDimensions")]
+    embedding_dimensions: Option<usize>,
+    #[serde(default)]
+    #[serde(rename = "perceptualHash")]
+    perceptual_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageClusteringResult {
+    pub embedding: Vec<f32>,
+    pub perceptual_hash: u64,
+    pub model_version: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +68,8 @@ pub enum LlmClientError {
     ConvertImage(String),
     #[error("LLM service request failed: {0}")]
     Request(String),
+    #[error("LLM service rejected an unreadable image: {0}")]
+    InvalidImage(String),
     #[error("LLM service returned an invalid response: {0}")]
     Response(String),
     #[error("failed to update LLM metadata: {0}")]
@@ -52,17 +77,33 @@ pub enum LlmClientError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueuedServiceType {
+enum InferenceTask {
     Ocr,
     ImageTagging,
+    ImageClustering,
 }
 
-type InferenceJob = Pin<Box<dyn Future<Output = Result<bool, LlmClientError>> + Send>>;
+impl InferenceTask {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ocr => "ocr",
+            Self::ImageTagging => "image_tagging",
+            Self::ImageClustering => "image_clustering",
+        }
+    }
+}
+
+enum InferenceOutput {
+    Stored(bool),
+    ImageClustering(ImageClusteringResult),
+}
+
+type InferenceJob = Pin<Box<dyn Future<Output = Result<InferenceOutput, LlmClientError>> + Send>>;
 
 struct QueuedInference {
-    service_type: QueuedServiceType,
+    task: InferenceTask,
     operation: InferenceJob,
-    response: oneshot::Sender<Result<bool, LlmClientError>>,
+    response: oneshot::Sender<Result<InferenceOutput, LlmClientError>>,
 }
 
 #[derive(Clone)]
@@ -89,13 +130,13 @@ impl LlmScheduler {
 
     async fn submit(
         &self,
-        service_type: QueuedServiceType,
+        task: InferenceTask,
         operation: InferenceJob,
-    ) -> Result<bool, LlmClientError> {
+    ) -> Result<InferenceOutput, LlmClientError> {
         let (response, result) = oneshot::channel();
         self.sender
             .send(QueuedInference {
-                service_type,
+                task,
                 operation,
                 response,
             })
@@ -114,17 +155,14 @@ async fn run_inference_batches(mut receiver: mpsc::Receiver<QueuedInference>) {
     let mut pending = VecDeque::new();
 
     loop {
-        let current_type = current.service_type;
+        let current_task = current.task;
         let result = current.operation.await;
         let _ = current.response.send(result);
 
         while let Ok(job) = receiver.try_recv() {
             pending.push_back(job);
         }
-        if let Some(index) = pending
-            .iter()
-            .position(|job| job.service_type == current_type)
-        {
+        if let Some(index) = pending.iter().position(|job| job.task == current_task) {
             current = pending
                 .remove(index)
                 .expect("queued job index should remain valid");
@@ -146,6 +184,15 @@ fn llm_scheduler() -> &'static Arc<LlmScheduler> {
     SCHEDULER.get_or_init(LlmScheduler::new)
 }
 
+fn inference_batch_lock() -> &'static Arc<Mutex<()>> {
+    static BATCH_LOCK: std::sync::OnceLock<Arc<Mutex<()>>> = std::sync::OnceLock::new();
+    BATCH_LOCK.get_or_init(|| Arc::new(Mutex::new(())))
+}
+
+pub async fn begin_inference_batch() -> OwnedMutexGuard<()> {
+    Arc::clone(inference_batch_lock()).lock_owned().await
+}
+
 impl LlmClient {
     pub fn new(config: &LlmConfig) -> Result<Self, LlmClientError> {
         let client = reqwest::Client::builder()
@@ -164,15 +211,8 @@ impl LlmClient {
         media_id: i64,
         image_path: &Path,
     ) -> Result<bool, LlmClientError> {
-        self.submit_inference(
-            QueuedServiceType::Ocr,
-            pool,
-            media_id,
-            image_path,
-            "ocr",
-            "/v1/infer",
-        )
-        .await
+        self.submit_inference(pool, media_id, image_path, InferenceTask::Ocr)
+            .await
     }
 
     pub async fn image_tagging_and_store(
@@ -181,41 +221,71 @@ impl LlmClient {
         media_id: i64,
         image_path: &Path,
     ) -> Result<bool, LlmClientError> {
-        self.submit_inference(
-            QueuedServiceType::ImageTagging,
-            pool,
-            media_id,
-            image_path,
-            "image_tagging",
-            &self.config.image_tagging_endpoint,
-        )
-        .await
+        self.submit_inference(pool, media_id, image_path, InferenceTask::ImageTagging)
+            .await
     }
 
     async fn submit_inference(
         &self,
-        service_type: QueuedServiceType,
         pool: &DbPool,
         media_id: i64,
         image_path: &Path,
-        task: &str,
-        endpoint: &str,
+        task: InferenceTask,
     ) -> Result<bool, LlmClientError> {
+        let _batch_guard = begin_inference_batch().await;
         let client = self.clone();
         let pool = pool.clone();
         let image_path = image_path.to_path_buf();
-        let task = task.to_string();
-        let endpoint = endpoint.to_string();
-        llm_scheduler()
+        let output = llm_scheduler()
             .submit(
-                service_type,
+                task,
                 Box::pin(async move {
                     client
-                        .infer_and_store_direct(&pool, media_id, &image_path, &task, &endpoint)
+                        .infer_and_store_direct(&pool, media_id, &image_path, task)
                         .await
+                        .map(InferenceOutput::Stored)
                 }),
             )
-            .await
+            .await?;
+        match output {
+            InferenceOutput::Stored(stored) => Ok(stored),
+            InferenceOutput::ImageClustering(_) => Err(LlmClientError::Response(
+                "LLM scheduler returned an embedding for a storage request".to_string(),
+            )),
+        }
+    }
+
+    pub async fn image_clustering(
+        &self,
+        image_path: &Path,
+    ) -> Result<ImageClusteringResult, LlmClientError> {
+        let _batch_guard = begin_inference_batch().await;
+        self.image_clustering_in_batch(image_path).await
+    }
+
+    pub async fn image_clustering_in_batch(
+        &self,
+        image_path: &Path,
+    ) -> Result<ImageClusteringResult, LlmClientError> {
+        let client = self.clone();
+        let image_path = image_path.to_path_buf();
+        let output = llm_scheduler()
+            .submit(
+                InferenceTask::ImageClustering,
+                Box::pin(async move {
+                    let response = client
+                        .infer_direct(&image_path, InferenceTask::ImageClustering)
+                        .await?;
+                    decode_image_clustering(response).map(InferenceOutput::ImageClustering)
+                }),
+            )
+            .await?;
+        match output {
+            InferenceOutput::ImageClustering(result) => Ok(result),
+            InferenceOutput::Stored(_) => Err(LlmClientError::Response(
+                "LLM scheduler returned a storage result for image clustering".to_string(),
+            )),
+        }
     }
 
     pub async fn wait_until_ready(&self) -> Result<(), LlmClientError> {
@@ -263,13 +333,68 @@ impl LlmClient {
         pool: &DbPool,
         media_id: i64,
         image_path: &Path,
-        task: &str,
-        endpoint: &str,
+        task: InferenceTask,
     ) -> Result<bool, LlmClientError> {
         if !self.config.enabled {
             return Ok(false);
         }
+        let result = self.infer_direct(image_path, task).await?;
+        let text = if !result.text.trim().is_empty() {
+            result.text.trim().to_string()
+        } else if !result.tags.is_empty() {
+            result.tags.join("\n")
+        } else {
+            result.markdown.trim().to_string()
+        };
+        let model_type = result.model_type.clone();
+        let model_version = result.model_version.clone();
+        let stored_model_type = model_type.clone();
+        let pool = pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool
+                .get()
+                .map_err(|error| LlmClientError::Database(error.to_string()))?;
+            let transaction = conn
+                .unchecked_transaction()
+                .map_err(|error| LlmClientError::Database(error.to_string()))?;
+            transaction
+                .execute(
+                    queries::media_text::DELETE_BY_MEDIA_ID_AND_MODEL_TYPE,
+                    rusqlite::params![media_id, stored_model_type],
+                )
+                .map_err(|error| LlmClientError::Database(error.to_string()))?;
+            transaction
+                .execute(
+                    queries::media_text::INSERT,
+                    rusqlite::params![media_id, stored_model_type, model_version, text],
+                )
+                .map_err(|error| LlmClientError::Database(error.to_string()))?;
+            transaction
+                .commit()
+                .map_err(|error| LlmClientError::Database(error.to_string()))?;
+            Ok::<(), LlmClientError>(())
+        })
+        .await
+        .map_err(|error| LlmClientError::Database(error.to_string()))??;
 
+        info!(
+            "stored {} text for media {}",
+            media_text_model_name(&model_type).unwrap_or("LLM"),
+            media_id
+        );
+        Ok(true)
+    }
+
+    async fn infer_direct(
+        &self,
+        image_path: &Path,
+        task: InferenceTask,
+    ) -> Result<InferenceResponse, LlmClientError> {
+        if !self.config.enabled {
+            return Err(LlmClientError::Request(
+                "LLM service is disabled".to_string(),
+            ));
+        }
         let source_image = tokio::fs::read(image_path)
             .await
             .map_err(|error| LlmClientError::ReadImage(error.to_string()))?;
@@ -287,9 +412,8 @@ impl LlmClient {
                     .unwrap_or("image/jpeg"),
             )
             .map_err(|error| LlmClientError::Client(error.to_string()))?;
-        let form = Form::new()
-            .text("task", task.to_string())
-            .part("file", part);
+        let form = Form::new().text("task", task.as_str()).part("file", part);
+        let endpoint = INFERENCE_ENDPOINT;
         let url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
             endpoint.to_string()
         } else {
@@ -314,52 +438,103 @@ impl LlmClient {
             .await
             .map_err(|error| LlmClientError::Request(error.to_string()))?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && (body.contains("could not decode image")
+                    || body.contains("cannot identify image")
+                    || body.contains("image must not be empty"))
+            {
+                return Err(LlmClientError::InvalidImage(body));
+            }
             return Err(LlmClientError::Request(format!(
                 "service returned {status}: {body}"
             )));
         }
 
-        let result: InferenceResponse = serde_json::from_str(&body)
+        let response: InferenceResponse = serde_json::from_str(&body)
             .map_err(|error| LlmClientError::Response(error.to_string()))?;
-        let text = if !result.text.trim().is_empty() {
-            result.text.trim().to_string()
-        } else if !result.tags.is_empty() {
-            result.tags.join("\n")
-        } else {
-            result.markdown.trim().to_string()
-        };
-        let model_type = result.model_type.clone();
-        let model_version = result.model_version.clone();
-        let stored_model_type = model_type.clone();
-        let pool = pool.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = pool
-                .get()
-                .map_err(|error| LlmClientError::Database(error.to_string()))?;
-            execute_query(
-                &conn,
-                queries::image_text::DELETE_BY_IMAGE_ID_AND_MODEL_TYPE,
-                &[&media_id, &stored_model_type],
-            )
-            .map_err(|error| LlmClientError::Database(error.to_string()))?;
-            execute_query(
-                &conn,
-                queries::image_text::INSERT,
-                &[&media_id, &stored_model_type, &model_version, &text],
-            )
-            .map_err(|error| LlmClientError::Database(error.to_string()))?;
-            Ok::<(), LlmClientError>(())
-        })
-        .await
-        .map_err(|error| LlmClientError::Database(error.to_string()))??;
-
-        info!(
-            "stored {} text for media {}",
-            image_text_model_name(&model_type).unwrap_or("LLM"),
-            media_id
-        );
-        Ok(true)
+        if response.task != task.as_str() || response.model_type != task.as_str() {
+            return Err(LlmClientError::Response(format!(
+                "service returned task `{}` and modelType `{}` for `{}` request",
+                response.task,
+                response.model_type,
+                task.as_str()
+            )));
+        }
+        Ok(response)
     }
+}
+
+fn decode_image_clustering(
+    response: InferenceResponse,
+) -> Result<ImageClusteringResult, LlmClientError> {
+    if response.task != "image_clustering" || response.model_type != "image_clustering" {
+        return Err(LlmClientError::Response(
+            "image clustering response task and modelType must be image_clustering".to_string(),
+        ));
+    }
+    let model_version = response.model_version.clone();
+    if response.embedding_encoding.as_deref() != Some("float32_le") {
+        return Err(LlmClientError::Response(
+            "image clustering embedding encoding must be float32_le".to_string(),
+        ));
+    }
+    let encoded = response.embedding.as_deref().ok_or_else(|| {
+        LlmClientError::Response("image clustering response did not contain embedding".to_string())
+    })?;
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| LlmClientError::Response(format!("invalid embedding base64: {error}")))?;
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return Err(LlmClientError::Response(
+            "embedding must contain little-endian float32 values".to_string(),
+        ));
+    }
+    let embedding = bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect::<Vec<_>>();
+    if embedding.iter().any(|component| !component.is_finite()) {
+        return Err(LlmClientError::Response(
+            "embedding contains a non-finite float32 value".to_string(),
+        ));
+    }
+    if response.embedding_dimensions != Some(embedding.len()) {
+        return Err(LlmClientError::Response(
+            "image clustering embedding dimensions do not match the payload".to_string(),
+        ));
+    }
+    if embedding.len() != 384 {
+        return Err(LlmClientError::Response(
+            "DINOv2-small embedding must contain 384 dimensions".to_string(),
+        ));
+    }
+    let norm = embedding
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>()
+        .sqrt();
+    if (norm - 1.0).abs() > 0.02 {
+        return Err(LlmClientError::Response(
+            "image clustering embedding must be L2 normalized".to_string(),
+        ));
+    }
+    let perceptual_hash_string = response.perceptual_hash.as_deref().ok_or_else(|| {
+        LlmClientError::Response(
+            "image clustering response did not contain perceptualHash".to_string(),
+        )
+    })?;
+    if perceptual_hash_string.len() != 16 {
+        return Err(LlmClientError::Response(
+            "perceptualHash must contain exactly 16 hexadecimal characters".to_string(),
+        ));
+    }
+    let perceptual_hash = u64::from_str_radix(perceptual_hash_string, 16)
+        .map_err(|error| LlmClientError::Response(format!("invalid perceptualHash: {error}")))?;
+    Ok(ImageClusteringResult {
+        embedding,
+        perceptual_hash,
+        model_version,
+    })
 }
 
 async fn prepare_image(
@@ -420,7 +595,7 @@ pub async fn generate_missing_batches(config: &Config, pool: &DbPool) {
     // Complete one service-type batch before starting the next one. The LLM
     // service owns only one model runtime, so interleaving these batches would
     // force an unnecessary shutdown/startup cycle for every request.
-    generate_missing_model(config, pool, OCR_MODEL_TYPE, "ocr", "/v1/infer", "OCR").await;
+    generate_missing_model(config, pool, OCR_MODEL_TYPE, InferenceTask::Ocr, "OCR").await;
 
     if crate::processor::regenerator::is_cancel_requested() {
         return;
@@ -428,13 +603,11 @@ pub async fn generate_missing_batches(config: &Config, pool: &DbPool) {
     if !config.llm.image_tagging_enabled {
         return;
     }
-    let endpoint = config.llm.image_tagging_endpoint.clone();
     generate_missing_model(
         config,
         pool,
         IMAGE_TAGGING_MODEL_TYPE,
-        "image_tagging",
-        &endpoint,
+        InferenceTask::ImageTagging,
         "image tagging",
     )
     .await;
@@ -444,8 +617,7 @@ async fn generate_missing_model(
     config: &Config,
     pool: &DbPool,
     model_type: &str,
-    task: &str,
-    endpoint: &str,
+    task: InferenceTask,
     plugin_name: &str,
 ) {
     if !config.llm.enabled {
@@ -459,7 +631,7 @@ async fn generate_missing_model(
     let rows = match pool.get() {
         Ok(conn) => fetch_all(
             &conn,
-            queries::image_text::SELECT_MISSING_FOR_MODEL_TYPE,
+            queries::media_text::SELECT_MISSING_FOR_MODEL_TYPE,
             &[&model_type],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         ),
@@ -508,23 +680,11 @@ async fn generate_missing_model(
     drop(sender);
 
     let receiver = Arc::new(Mutex::new(receiver));
-    let endpoint = endpoint.to_string();
-    let task = task.to_string();
     let plugin_name = plugin_name.to_string();
-    let service_type = match task.as_str() {
-        "ocr" => QueuedServiceType::Ocr,
-        "image_tagging" => QueuedServiceType::ImageTagging,
-        _ => {
-            record_regeneration_error(&format!("unsupported LLM task: {task}"));
-            return;
-        }
-    };
     let mut workers = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
         let client = Arc::clone(&client);
         let pool = pool.clone();
-        let endpoint = endpoint.clone();
-        let task = task.clone();
         let plugin_name = plugin_name.clone();
         let receiver = Arc::clone(&receiver);
         workers.push(tokio::spawn(async move {
@@ -534,18 +694,15 @@ async fn generate_missing_model(
                     break;
                 };
                 let path = paths().originals.join(file_path);
-                match client
-                    .submit_inference(service_type, &pool, media_id, &path, &task, &endpoint)
-                    .await
-                {
+                match client.submit_inference(&pool, media_id, &path, task).await {
                     Ok(true) => {
-                        record_image_text_job_completed();
+                        record_media_text_job_completed();
                     }
                     Ok(false) => {
-                        record_image_text_job_completed();
+                        record_media_text_job_completed();
                     }
                     Err(error) => {
-                        record_image_text_job_completed();
+                        record_media_text_job_completed();
                         record_regeneration_error(&format!(
                             "{} generation failed for media {}: {}",
                             plugin_name, media_id, error
@@ -568,7 +725,7 @@ async fn generate_missing_model(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_heic_filename, LlmScheduler, QueuedServiceType};
+    use super::{is_heic_filename, InferenceOutput, InferenceTask, LlmScheduler};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::Notify;
@@ -594,12 +751,12 @@ mod tests {
         let first = tokio::spawn(async move {
             first_scheduler
                 .submit(
-                    QueuedServiceType::Ocr,
+                    InferenceTask::Ocr,
                     Box::pin(async move {
-                        first_order.lock().unwrap().push(QueuedServiceType::Ocr);
+                        first_order.lock().unwrap().push(InferenceTask::Ocr);
                         first_started.notify_one();
                         first_release.notified().await;
-                        Ok(true)
+                        Ok(InferenceOutput::Stored(true))
                     }),
                 )
                 .await
@@ -611,13 +768,13 @@ mod tests {
         let second = tokio::spawn(async move {
             second_scheduler
                 .submit(
-                    QueuedServiceType::ImageTagging,
+                    InferenceTask::ImageTagging,
                     Box::pin(async move {
                         second_order
                             .lock()
                             .unwrap()
-                            .push(QueuedServiceType::ImageTagging);
-                        Ok(true)
+                            .push(InferenceTask::ImageTagging);
+                        Ok(InferenceOutput::Stored(true))
                     }),
                 )
                 .await
@@ -627,10 +784,10 @@ mod tests {
         let third = tokio::spawn(async move {
             third_scheduler
                 .submit(
-                    QueuedServiceType::Ocr,
+                    InferenceTask::Ocr,
                     Box::pin(async move {
-                        third_order.lock().unwrap().push(QueuedServiceType::Ocr);
-                        Ok(true)
+                        third_order.lock().unwrap().push(InferenceTask::Ocr);
+                        Ok(InferenceOutput::Stored(true))
                     }),
                 )
                 .await
@@ -638,15 +795,24 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         release.notify_one();
 
-        assert!(first.await.unwrap().unwrap());
-        assert!(second.await.unwrap().unwrap());
-        assert!(third.await.unwrap().unwrap());
+        assert!(matches!(
+            first.await.unwrap().unwrap(),
+            InferenceOutput::Stored(true)
+        ));
+        assert!(matches!(
+            second.await.unwrap().unwrap(),
+            InferenceOutput::Stored(true)
+        ));
+        assert!(matches!(
+            third.await.unwrap().unwrap(),
+            InferenceOutput::Stored(true)
+        ));
         assert_eq!(
             *order.lock().unwrap(),
             vec![
-                QueuedServiceType::Ocr,
-                QueuedServiceType::Ocr,
-                QueuedServiceType::ImageTagging
+                InferenceTask::Ocr,
+                InferenceTask::Ocr,
+                InferenceTask::ImageTagging
             ]
         );
     }

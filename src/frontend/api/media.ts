@@ -274,8 +274,8 @@ export const mediaApi = {
   },
 
 
-  delete: async (mediaId: number): Promise<void> => {
-    await apiClient.post('/media/delete', { mediaId })
+  delete: async (mediaIds: number[]): Promise<void> => {
+    await apiClient.post('/media/delete', { mediaIds })
   },
 
   getFileUrl: async (mediaId: number): Promise<string> => {

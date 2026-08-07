@@ -1,23 +1,48 @@
+use std::path::Path;
+use std::time::Duration;
+
 use crate::constants::paths;
 use crate::database::schema::sql;
 use crate::error::{AppError, AppResult};
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Row;
+use rusqlite::{Connection, Row};
 
 pub type DbPool = Pool<SqliteConnectionManager>;
 pub type DbConn = PooledConnection<SqliteConnectionManager>;
 
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const WAL_AUTOCHECKPOINT_PAGES: u32 = 1_000;
+
 pub fn create_pool() -> AppResult<DbPool> {
-    let manager = SqliteConnectionManager::file(&paths().database).with_init(|conn| {
-        conn.execute_batch(sql::PRAGMA_FOREIGN_KEYS_ON)?;
-        Ok(())
-    });
+    create_pool_at(&paths().database)
+}
+
+pub fn create_pool_at(database_path: &Path) -> AppResult<DbPool> {
+    initialize_database_file(database_path)?;
+    let manager = SqliteConnectionManager::file(database_path).with_init(configure_connection);
 
     Pool::builder()
         .max_size(10)
         .build(manager)
         .map_err(|e| AppError::Internal(format!("Failed to create database pool: {}", e)))
+}
+
+fn initialize_database_file(database_path: &Path) -> AppResult<()> {
+    let connection = Connection::open(database_path)?;
+    connection.busy_timeout(DATABASE_BUSY_TIMEOUT)?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
+    Ok(())
+}
+
+pub fn configure_connection(connection: &mut Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(sql::PRAGMA_FOREIGN_KEYS_ON)?;
+    connection.busy_timeout(DATABASE_BUSY_TIMEOUT)?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
+    Ok(())
 }
 
 pub fn get_connection(pool: &DbPool) -> AppResult<DbConn> {
@@ -66,7 +91,7 @@ pub fn execute_query(
     sql: &str,
     params: &[&(dyn rusqlite::ToSql + '_)],
 ) -> AppResult<usize> {
-    conn.execute(sql, params).map_err(AppError::Database)
+    conn.execute(sql, params).map_err(AppError::from)
 }
 
 pub fn insert_returning_id(

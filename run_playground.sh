@@ -103,6 +103,7 @@ handle_signal() {
 trap stop_services EXIT
 trap handle_signal INT TERM
 
+cleanup_llm_containers
 "$LLM_DIST_DIR/llm-service" -c "$LLM_CONFIG_FILE" &
 LLM_PID=$!
 

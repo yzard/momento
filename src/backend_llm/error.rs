@@ -16,7 +16,7 @@ pub enum ServiceError {
     NotImplemented(String),
     #[error("configuration error: {0}")]
     Configuration(String),
-    #[error("upstream OCR request failed: {0}")]
+    #[error("upstream inference request failed: {0}")]
     Upstream(String),
     #[error("internal error: {0}")]
     Internal(String),

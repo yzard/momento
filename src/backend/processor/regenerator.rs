@@ -49,8 +49,8 @@ pub struct RegenerationJob {
     pub metadata_completed: i64,
     pub thumbnail_jobs: i64,
     pub thumbnails_completed: i64,
-    pub image_text_jobs: i64,
-    pub image_text_completed: i64,
+    pub media_text_jobs: i64,
+    pub media_text_completed: i64,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub errors: Vec<String>,
@@ -66,8 +66,8 @@ impl Default for RegenerationJob {
             metadata_completed: 0,
             thumbnail_jobs: 0,
             thumbnails_completed: 0,
-            image_text_jobs: 0,
-            image_text_completed: 0,
+            media_text_jobs: 0,
+            media_text_completed: 0,
             started_at: None,
             completed_at: None,
             errors: Vec::new(),
@@ -147,9 +147,9 @@ pub(crate) fn record_regeneration_error(message: &str) {
     push_job_error(&mut job.errors, message);
 }
 
-pub(crate) fn record_image_text_job_completed() {
+pub(crate) fn record_media_text_job_completed() {
     let mut job = CURRENT_JOB.write().unwrap();
-    job.image_text_completed += 1;
+    job.media_text_completed += 1;
     job.completed_jobs += 1;
 }
 
@@ -166,12 +166,12 @@ async fn generate_missing_llm_metadata(config: &Config, pool: &DbPool) {
     generate_missing_batches(config, pool).await;
 }
 
-fn update_job_totals(metadata_jobs: i64, thumbnail_jobs: i64, image_text_jobs: i64) {
+fn update_job_totals(metadata_jobs: i64, thumbnail_jobs: i64, media_text_jobs: i64) {
     let mut job = CURRENT_JOB.write().unwrap();
     job.metadata_jobs = metadata_jobs;
     job.thumbnail_jobs = thumbnail_jobs;
-    job.image_text_jobs = image_text_jobs;
-    job.total_jobs = metadata_jobs + thumbnail_jobs + image_text_jobs;
+    job.media_text_jobs = media_text_jobs;
+    job.total_jobs = metadata_jobs + thumbnail_jobs + media_text_jobs;
 }
 
 fn update_job_progress(
@@ -193,7 +193,7 @@ fn update_job_progress(
     }
 }
 
-fn count_missing_image_text_jobs(conn: &DbConn, config: &Config) -> i64 {
+fn count_missing_media_text_jobs(conn: &DbConn, config: &Config) -> i64 {
     if !config.llm.enabled {
         return 0;
     }
@@ -210,7 +210,7 @@ fn count_missing_image_text_jobs(conn: &DbConn, config: &Config) -> i64 {
         }
         total += fetch_all(
             conn,
-            queries::image_text::SELECT_MISSING_FOR_MODEL_TYPE,
+            queries::media_text::SELECT_MISSING_FOR_MODEL_TYPE,
             &[&model_type],
             |row| row.get::<_, i64>(0),
         )
@@ -242,7 +242,7 @@ pub fn clear_all_metadata_and_thumbnails(pool: &DbPool) -> i64 {
         }
 
         let _ = conn.execute(queries::regenerator::CLEAR_METADATA, [id]);
-        let _ = conn.execute(queries::image_text::DELETE_BY_IMAGE_ID, [id]);
+        let _ = conn.execute(queries::media_text::DELETE_BY_MEDIA_ID, [id]);
         cleared_count += 1;
     }
 
@@ -403,8 +403,8 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
     );
     let metadata_jobs = missing_metadata as i64;
     let thumbnail_jobs = missing_thumbnails as i64;
-    let image_text_jobs = count_missing_image_text_jobs(&conn, config);
-    update_job_totals(metadata_jobs, thumbnail_jobs, image_text_jobs);
+    let media_text_jobs = count_missing_media_text_jobs(&conn, config);
+    update_job_totals(metadata_jobs, thumbnail_jobs, media_text_jobs);
 
     if count == 0 {
         generate_missing_llm_metadata(config, pool).await;
@@ -654,7 +654,7 @@ pub async fn generate_missing_metadata(config: &Config, pool: &DbPool) {
     let job = get_regeneration_status();
     info!(
         "Generation completed. Metadata updated: {}, Thumbnails generated: {}, image text updated: {}",
-        job.metadata_completed, job.thumbnails_completed, job.image_text_completed
+        job.metadata_completed, job.thumbnails_completed, job.media_text_completed
     );
 
     if is_cancel_requested() {

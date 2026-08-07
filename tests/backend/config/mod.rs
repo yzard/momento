@@ -6,6 +6,9 @@ use tempfile::TempDir;
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
+    let contents = format!(
+        "{contents}\n[cronjob]\ntimezone = \"Etc/UTC\"\ndeduplicate_cron = \"0 3 * * *\"\n"
+    );
     std::fs::write(&path, contents).expect("Failed to write test config");
     path
 }
@@ -93,4 +96,85 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.storage.data_dir, defaults.storage.data_dir);
     assert_eq!(config.storage.static_dir, defaults.storage.static_dir);
     assert_eq!(config.server.port, defaults.server.port);
+}
+
+#[test]
+fn test_load_config_uses_disabled_deduplicate_llm_default_when_section_is_missing() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[server]\nport = 9001\n").expect("Failed to write test config");
+
+    let config = load_config(&path).expect("Missing deduplicate config should use safe defaults");
+
+    assert!(!config.llm.deduplicate_enabled);
+}
+
+#[test]
+fn test_load_config_rejects_invalid_deduplicate_schedule() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "");
+    let contents = std::fs::read_to_string(&path)
+        .expect("Failed to read config")
+        .replace(
+            "deduplicate_cron = \"0 3 * * *\"",
+            "deduplicate_cron = \"invalid\"",
+        );
+    std::fs::write(&path, contents).expect("Failed to update config");
+
+    assert!(load_config(&path).is_err());
+}
+
+#[test]
+fn test_load_config_rejects_invalid_deduplicate_timezone() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "");
+    let contents = std::fs::read_to_string(&path)
+        .expect("Failed to read config")
+        .replace("timezone = \"Etc/UTC\"", "timezone = \"Mars/Olympus\"");
+    std::fs::write(&path, contents).expect("Failed to update config");
+
+    assert!(load_config(&path).is_err());
+}
+
+#[test]
+fn test_load_config_requires_llm_service_url() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[llm]\nenabled = true\nservice_url = \"\"\n");
+
+    let error = load_config(&path).expect_err("Enabled LLM must have a service URL");
+
+    assert!(error.to_string().contains("service_url"));
+}
+
+#[test]
+fn test_load_config_rejects_configurable_security_algorithm() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[security]\nalgorithm = \"HS512\"\n");
+
+    let error = load_config(&path).expect_err("JWT algorithm is not configurable");
+
+    assert!(error.to_string().contains("algorithm"));
+}
+
+#[test]
+fn test_load_config_rejects_configurable_llm_inference_endpoint() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[llm]\nenabled = true\nservice_url = \"http://127.0.0.1:8100\"\ninference_endpoint = \"/custom\"\n",
+    );
+
+    let error = load_config(&path).expect_err("LLM inference endpoint is not configurable");
+
+    assert!(error.to_string().contains("inference_endpoint"));
+}
+
+#[test]
+fn test_load_config_rejects_removed_deduplicate_section() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[deduplicate]\nenabled = true\n");
+
+    let error = load_config(&path).expect_err("Deduplicate settings moved to llm and cronjob");
+
+    assert!(error.to_string().contains("deduplicate"));
 }

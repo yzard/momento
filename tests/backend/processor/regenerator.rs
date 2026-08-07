@@ -10,7 +10,7 @@ fn clearing_metadata_also_clears_llm_text_models() {
     let conn = pool.get().expect("Failed to get database connection");
     for model_type in [OCR_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE] {
         conn.execute(
-            queries::image_text::INSERT,
+            queries::media_text::INSERT,
             params![media_id, model_type, "test-version", "generated text"],
         )
         .expect("Failed to insert LLM text");
@@ -23,7 +23,7 @@ fn clearing_metadata_also_clears_llm_text_models() {
     let conn = pool.get().expect("Failed to get database connection");
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM image_text WHERE image_id = ?",
+            "SELECT COUNT(*) FROM media_text WHERE media_id = ?",
             [media_id],
             |row| row.get(0),
         )

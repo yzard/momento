@@ -9,10 +9,12 @@ import {
   Folder,
   Image as ImageIcon,
   Map as MapIcon,
+  ScanSearch,
   Settings,
   Trash2,
   User,
   Video,
+  Wrench,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
@@ -36,21 +38,32 @@ const navItems: NavItem[] = [
   },
   { to: '/albums', label: 'Albums', icon: Folder },
   { to: '/map', label: 'Map', icon: MapIcon },
+  {
+    to: '/utility',
+    label: 'Utility',
+    icon: Wrench,
+    children: [
+      { to: '/utility/deduplicate', label: 'Deduplicate', icon: ScanSearch },
+    ],
+  },
   { to: '/trash', label: 'Trash', icon: Trash2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
 interface SidebarProps {
   isCollapsed: boolean
+  isMobileOpen: boolean
   toggleCollapse: () => void
+  onNavigate: () => void
 }
 
 interface NavSectionProps {
   item: NavItem
   isCollapsed: boolean
+  onNavigate: () => void
 }
 
-function NavSection({ item, isCollapsed }: NavSectionProps) {
+function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
   const location = useLocation()
   const [manuallyCollapsed, setManuallyCollapsed] = useState(false)
   const isFocused = location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
@@ -61,6 +74,7 @@ function NavSection({ item, isCollapsed }: NavSectionProps) {
       <div className="flex items-center">
         <NavLink
           to={item.to}
+          onClick={onNavigate}
           className={({ isActive }) =>
             cn(
               "flex flex-1 rounded-lg transition-all duration-200 group font-medium border border-transparent",
@@ -110,6 +124,7 @@ function NavSection({ item, isCollapsed }: NavSectionProps) {
             <NavLink
               key={child.to}
               to={child.to}
+              onClick={onNavigate}
               title={child.label}
               className={({ isActive }) =>
                 cn(
@@ -135,14 +150,15 @@ function NavSection({ item, isCollapsed }: NavSectionProps) {
   )
 }
 
-export default function Sidebar({ isCollapsed, toggleCollapse }: SidebarProps) {
+export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onNavigate }: SidebarProps) {
   const { user } = useAuth()
 
   return (
     <aside
       className={cn(
-        "bg-background border-r border-border flex flex-col h-full transition-all duration-300 ease-in-out z-20",
-        isCollapsed ? "w-20" : "w-72"
+        "fixed inset-y-0 left-0 z-40 flex h-full w-72 flex-col border-r border-border bg-background transition-transform duration-300 ease-in-out md:relative md:z-20 md:translate-x-0",
+        isMobileOpen ? "translate-x-0" : "-translate-x-full",
+        isCollapsed ? "md:w-20" : "md:w-72"
       )}
     >
       <div className={cn("flex items-center", isCollapsed ? "justify-center p-4 py-6" : "p-8 pb-10")}>
@@ -156,7 +172,7 @@ export default function Sidebar({ isCollapsed, toggleCollapse }: SidebarProps) {
       <nav className={cn("flex-1 overflow-y-auto", isCollapsed ? "px-2 space-y-4" : "px-6 space-y-8")}>
         <div className="space-y-2">
           {navItems.map((item) => (
-            <NavSection key={item.to} item={item} isCollapsed={isCollapsed} />
+            <NavSection key={item.to} item={item} isCollapsed={isCollapsed} onNavigate={onNavigate} />
           ))}
         </div>
 
@@ -165,6 +181,7 @@ export default function Sidebar({ isCollapsed, toggleCollapse }: SidebarProps) {
             <div className="border-t border-border/50 pt-2" aria-hidden="true" />
             <NavLink
               to="/admin"
+              onClick={onNavigate}
               className={({ isActive }) =>
                 cn(
                   "flex rounded-lg transition-all duration-200 font-medium border border-transparent",

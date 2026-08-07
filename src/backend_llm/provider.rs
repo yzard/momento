@@ -16,6 +16,8 @@ use crate::adapters::{normalize_baidu_unlimited_ocr_text, BAIDU_UNLIMITED_OCR_MO
 use crate::config::{Config, ProviderKind, ServiceConfig};
 use crate::error::ServiceError;
 
+const UV_BOOTSTRAP_COMMAND: &str = "UV_VERSION=0.8.22; UV_MACHINE=$(uname -m); if [ \"$UV_MACHINE\" = \"x86_64\" ]; then UV_TARGET=x86_64-unknown-linux-gnu; elif [ \"$UV_MACHINE\" = \"aarch64\" ] || [ \"$UV_MACHINE\" = \"arm64\" ]; then UV_TARGET=aarch64-unknown-linux-gnu; else echo \"Unsupported uv architecture: $UV_MACHINE\" >&2; exit 1; fi; python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \"https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz\" /tmp/uv.tar.gz && tar -xzf /tmp/uv.tar.gz -C /tmp && install \"/tmp/uv-$UV_TARGET/uv\" /usr/local/bin/uv";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceResponse {
@@ -27,6 +29,16 @@ pub struct InferenceResponse {
     pub model_version: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_encoding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_dimensions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perceptual_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<f32>,
 }
 
 #[async_trait]
@@ -73,12 +85,20 @@ impl Provider {
             Ok(())
         }
     }
+
+    async fn is_alive(&self) -> Result<bool, ServiceError> {
+        match self {
+            Self::Baidu(_) => Ok(true),
+            Self::Local(provider) => provider.is_alive().await,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceType {
     Ocr,
     ImageTagging,
+    ImageClustering,
 }
 
 impl ServiceType {
@@ -86,6 +106,7 @@ impl ServiceType {
         match task {
             "ocr" => Ok(Self::Ocr),
             "image_tagging" => Ok(Self::ImageTagging),
+            "image_clustering" => Ok(Self::ImageClustering),
             _ => Err(ServiceError::NotImplemented(format!(
                 "inference task `{task}` has no configured model provider"
             ))),
@@ -96,6 +117,7 @@ impl ServiceType {
         match self {
             Self::Ocr => "ocr",
             Self::ImageTagging => "image_tagging",
+            Self::ImageClustering => "image_clustering",
         }
     }
 }
@@ -103,6 +125,7 @@ impl ServiceType {
 enum ActiveService {
     Ocr(Provider),
     ImageTagging(RamProvider),
+    ImageClustering(ImageClusteringProvider),
 }
 
 impl ActiveService {
@@ -110,6 +133,7 @@ impl ActiveService {
         match self {
             Self::Ocr(_) => ServiceType::Ocr,
             Self::ImageTagging(_) => ServiceType::ImageTagging,
+            Self::ImageClustering(_) => ServiceType::ImageClustering,
         }
     }
 
@@ -117,6 +141,7 @@ impl ActiveService {
         match self {
             Self::Ocr(provider) => provider.name(),
             Self::ImageTagging(_) => "ram++",
+            Self::ImageClustering(_) => "dinov2",
         }
     }
 
@@ -124,6 +149,15 @@ impl ActiveService {
         match self {
             Self::Ocr(provider) => provider.shutdown().await,
             Self::ImageTagging(provider) => provider.shutdown().await,
+            Self::ImageClustering(provider) => provider.shutdown().await,
+        }
+    }
+
+    async fn is_alive(&self) -> Result<bool, ServiceError> {
+        match self {
+            Self::Ocr(provider) => provider.is_alive().await,
+            Self::ImageTagging(provider) => provider.runtime.is_alive().await,
+            Self::ImageClustering(provider) => provider.runtime.is_alive().await,
         }
     }
 }
@@ -159,6 +193,7 @@ impl ServiceManager {
         match self.active.as_ref() {
             Some(ActiveService::Ocr(provider)) => provider.infer(image, filename).await,
             Some(ActiveService::ImageTagging(provider)) => provider.infer(image).await,
+            Some(ActiveService::ImageClustering(provider)) => provider.infer(image).await,
             None => Err(ServiceError::Internal(
                 "LLM service was not activated".to_string(),
             )),
@@ -166,12 +201,10 @@ impl ServiceManager {
     }
 
     async fn activate(&mut self, service_type: ServiceType) -> Result<(), ServiceError> {
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.service_type() == service_type)
-        {
-            return Ok(());
+        if let Some(active) = self.active.as_ref() {
+            if active.service_type() == service_type && active.is_alive().await? {
+                return Ok(());
+            }
         }
 
         if let Some(active) = self.active.take() {
@@ -193,9 +226,19 @@ impl ServiceManager {
             ServiceType::ImageTagging => {
                 ActiveService::ImageTagging(RamProvider::new(&service).await?)
             }
+            ServiceType::ImageClustering => {
+                ActiveService::ImageClustering(ImageClusteringProvider::new(&service).await?)
+            }
         };
         self.active = Some(active);
         Ok(())
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), ServiceError> {
+        let Some(active) = self.active.take() else {
+            return Ok(());
+        };
+        active.shutdown().await
     }
 }
 
@@ -359,6 +402,11 @@ impl OcrProvider for BaiduProvider {
             model_type: "ocr".to_string(),
             model_version: self.config.model_version.clone(),
             tags: Vec::new(),
+            embedding: None,
+            embedding_encoding: None,
+            embedding_dimensions: None,
+            perceptual_hash: None,
+            quality_score: None,
         })
     }
 
@@ -410,7 +458,14 @@ impl LocalProvider {
             config: config.clone(),
             child: Arc::new(Mutex::new(child)),
         };
-        provider.wait_until_ready().await?;
+        if let Err(error) = provider.wait_until_ready().await {
+            if let Err(shutdown_error) = provider.shutdown().await {
+                tracing::error!(
+                    "Failed to stop OCR runtime after startup failure: {shutdown_error}"
+                );
+            }
+            return Err(error);
+        }
         Ok(provider)
     }
 
@@ -442,23 +497,19 @@ impl LocalProvider {
     }
 
     async fn shutdown(self) -> Result<(), ServiceError> {
-        let mut child = self.child.lock().await;
-        if child
+        stop_service_child(&self.child, &self.config, "OCR").await
+    }
+
+    async fn is_alive(&self) -> Result<bool, ServiceError> {
+        Ok(self
+            .child
+            .lock()
+            .await
             .try_wait()
             .map_err(|error| {
                 ServiceError::Internal(format!("failed to inspect OCR runtime: {error}"))
             })?
-            .is_some()
-        {
-            return Ok(());
-        }
-        child.start_kill().map_err(|error| {
-            ServiceError::Internal(format!("failed to stop OCR runtime: {error}"))
-        })?;
-        child.wait().await.map_err(|error| {
-            ServiceError::Internal(format!("failed to wait for OCR runtime: {error}"))
-        })?;
-        Ok(())
+            .is_none())
     }
 }
 
@@ -544,6 +595,11 @@ impl OcrProvider for LocalProvider {
             model_type: "ocr".to_string(),
             model_version: self.config.model_version.clone(),
             tags: Vec::new(),
+            embedding: None,
+            embedding_encoding: None,
+            embedding_dimensions: None,
+            perceptual_hash: None,
+            quality_score: None,
         })
     }
 
@@ -552,13 +608,14 @@ impl OcrProvider for LocalProvider {
     }
 }
 
-pub struct RamProvider {
+struct ManagedRuntime {
     client: Client,
     config: ServiceConfig,
     child: Arc<Mutex<Child>>,
+    runtime_name: &'static str,
 }
 
-impl Drop for RamProvider {
+impl Drop for ManagedRuntime {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.try_lock() {
             let _ = child.start_kill();
@@ -571,22 +628,32 @@ struct TaggingResponse {
     tags: Vec<String>,
 }
 
-impl RamProvider {
-    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+impl ManagedRuntime {
+    async fn new(config: &ServiceConfig, runtime_name: &'static str) -> Result<Self, ServiceError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|error| {
-                ServiceError::Internal(format!("failed to build RAM++ HTTP client: {error}"))
+                ServiceError::Internal(format!(
+                    "failed to build {runtime_name} HTTP client: {error}"
+                ))
             })?;
         let child = spawn_service_command(config)?;
-        let provider = Self {
+        let runtime = Self {
             client,
             config: config.clone(),
             child: Arc::new(Mutex::new(child)),
+            runtime_name,
         };
-        provider.wait_until_ready().await?;
-        Ok(provider)
+        if let Err(error) = runtime.wait_until_ready().await {
+            if let Err(shutdown_error) = runtime.shutdown().await {
+                tracing::error!(
+                    "Failed to stop {runtime_name} runtime after startup failure: {shutdown_error}"
+                );
+            }
+            return Err(error);
+        }
+        Ok(runtime)
     }
 
     async fn wait_until_ready(&self) -> Result<(), ServiceError> {
@@ -595,19 +662,23 @@ impl RamProvider {
         loop {
             if let Ok(response) = self.client.get(&url).send().await {
                 if response.status().is_success() {
-                    info!("RAM++ runtime is ready at {}", self.config.base_url);
+                    info!(
+                        "{} runtime is ready at {}",
+                        self.runtime_name, self.config.base_url
+                    );
                     return Ok(());
                 }
             }
             if let Ok(Some(status)) = self.child.lock().await.try_wait() {
                 return Err(ServiceError::Internal(format!(
-                    "RAM++ runtime exited during startup with {status}"
+                    "{} runtime exited during startup with {status}",
+                    self.runtime_name
                 )));
             }
             if started.elapsed() >= Duration::from_secs(self.config.startup_timeout_seconds) {
                 return Err(ServiceError::Internal(format!(
-                    "RAM++ runtime did not become ready within {} seconds",
-                    self.config.startup_timeout_seconds
+                    "{} runtime did not become ready within {} seconds",
+                    self.runtime_name, self.config.startup_timeout_seconds
                 )));
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -615,29 +686,44 @@ impl RamProvider {
     }
 
     async fn shutdown(self) -> Result<(), ServiceError> {
-        let mut child = self.child.lock().await;
-        if child
+        stop_service_child(&self.child, &self.config, self.runtime_name).await
+    }
+
+    async fn is_alive(&self) -> Result<bool, ServiceError> {
+        Ok(self
+            .child
+            .lock()
+            .await
             .try_wait()
             .map_err(|error| {
-                ServiceError::Internal(format!("failed to inspect image tagging runtime: {error}"))
+                ServiceError::Internal(format!(
+                    "failed to inspect {} runtime: {error}",
+                    self.runtime_name
+                ))
             })?
-            .is_some()
-        {
-            return Ok(());
-        }
-        child.start_kill().map_err(|error| {
-            ServiceError::Internal(format!("failed to stop image tagging runtime: {error}"))
-        })?;
-        child.wait().await.map_err(|error| {
-            ServiceError::Internal(format!("failed to wait for image tagging runtime: {error}"))
-        })?;
-        Ok(())
+            .is_none())
+    }
+}
+
+pub struct RamProvider {
+    runtime: ManagedRuntime,
+}
+
+impl RamProvider {
+    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+        Ok(Self {
+            runtime: ManagedRuntime::new(config, "RAM++").await?,
+        })
     }
 
     pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
         let encoded = STANDARD.encode(image);
-        let url = format!("{}/infer", self.config.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/infer",
+            self.runtime.config.base_url.trim_end_matches('/')
+        );
         let response = self
+            .runtime
             .client
             .post(url)
             .json(&json!({ "image": encoded }))
@@ -662,10 +748,214 @@ impl RamProvider {
             markdown: text,
             provider: "ram++".to_string(),
             model_type: "image_tagging".to_string(),
-            model_version: self.config.model_version.clone(),
+            model_version: self.runtime.config.model_version.clone(),
             tags: result.tags,
+            embedding: None,
+            embedding_encoding: None,
+            embedding_dimensions: None,
+            perceptual_hash: None,
+            quality_score: None,
         })
     }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        self.runtime.shutdown().await
+    }
+}
+
+pub struct ImageClusteringProvider {
+    runtime: ManagedRuntime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageClusteringRuntimeResponse {
+    embedding: String,
+    embedding_encoding: String,
+    embedding_dimensions: usize,
+    perceptual_hash: String,
+    quality_score: f32,
+}
+
+impl ImageClusteringProvider {
+    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+        Ok(Self {
+            runtime: ManagedRuntime::new(config, "DINOv2").await?,
+        })
+    }
+
+    pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
+        let encoded = STANDARD.encode(image);
+        let url = format!(
+            "{}/infer",
+            self.runtime.config.base_url.trim_end_matches('/')
+        );
+        let response = self
+            .runtime
+            .client
+            .post(url)
+            .json(&json!({ "image": encoded }))
+            .send()
+            .await
+            .map_err(|error| ServiceError::Upstream(format!("DINOv2 request failed: {error}")))?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            ServiceError::Upstream(format!("failed to read DINOv2 response: {error}"))
+        })?;
+        if !status.is_success() {
+            let message = format!("DINOv2 runtime returned {status}: {body}");
+            return if status.is_client_error() {
+                Err(ServiceError::BadRequest(message))
+            } else {
+                Err(ServiceError::Upstream(message))
+            };
+        }
+
+        let clustering_response: ImageClusteringRuntimeResponse = serde_json::from_str(&body)
+            .map_err(|error| ServiceError::Upstream(format!("invalid DINOv2 response: {error}")))?;
+        self.validate_response(&clustering_response)?;
+
+        Ok(InferenceResponse {
+            task: "image_clustering".to_string(),
+            text: String::new(),
+            markdown: String::new(),
+            provider: "dinov2".to_string(),
+            model_type: "image_clustering".to_string(),
+            model_version: self.runtime.config.model_version.clone(),
+            tags: Vec::new(),
+            embedding: Some(clustering_response.embedding),
+            embedding_encoding: Some(clustering_response.embedding_encoding),
+            embedding_dimensions: Some(clustering_response.embedding_dimensions),
+            perceptual_hash: Some(clustering_response.perceptual_hash),
+            quality_score: Some(clustering_response.quality_score),
+        })
+    }
+
+    fn validate_response(
+        &self,
+        response: &ImageClusteringRuntimeResponse,
+    ) -> Result<(), ServiceError> {
+        if response.embedding_encoding != "float32_le" {
+            return Err(ServiceError::Upstream(format!(
+                "DINOv2 returned unsupported embedding encoding `{}`",
+                response.embedding_encoding
+            )));
+        }
+        if response.embedding_dimensions != self.runtime.config.embedding_dimensions {
+            return Err(ServiceError::Upstream(format!(
+                "DINOv2 returned {} dimensions; expected {}",
+                response.embedding_dimensions, self.runtime.config.embedding_dimensions
+            )));
+        }
+        let embedding_bytes = STANDARD.decode(&response.embedding).map_err(|error| {
+            ServiceError::Upstream(format!("DINOv2 returned invalid base64 embedding: {error}"))
+        })?;
+        let expected_bytes = response.embedding_dimensions * std::mem::size_of::<f32>();
+        if embedding_bytes.len() != expected_bytes {
+            return Err(ServiceError::Upstream(format!(
+                "DINOv2 returned {} embedding bytes; expected {expected_bytes}",
+                embedding_bytes.len()
+            )));
+        }
+
+        let mut squared_norm = 0.0_f64;
+        for encoded_value in embedding_bytes.chunks_exact(4) {
+            let value = f32::from_le_bytes(encoded_value.try_into().map_err(|_| {
+                ServiceError::Internal("failed to decode embedding value".to_string())
+            })?);
+            if !value.is_finite() {
+                return Err(ServiceError::Upstream(
+                    "DINOv2 returned a non-finite embedding".to_string(),
+                ));
+            }
+            squared_norm += f64::from(value) * f64::from(value);
+        }
+        let norm = squared_norm.sqrt();
+        if (norm - 1.0).abs() > 0.01 {
+            return Err(ServiceError::Upstream(format!(
+                "DINOv2 embedding norm {norm:.6} is not normalized"
+            )));
+        }
+        if response.perceptual_hash.len() != 16
+            || !response
+                .perceptual_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(ServiceError::Upstream(
+                "DINOv2 returned an invalid perceptual hash".to_string(),
+            ));
+        }
+        if !response.quality_score.is_finite() || !(0.0..=1.0).contains(&response.quality_score) {
+            return Err(ServiceError::Upstream(
+                "DINOv2 returned an invalid quality score".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        self.runtime.shutdown().await
+    }
+}
+
+fn configured_container_name(config: &ServiceConfig) -> Option<&str> {
+    config
+        .docker_command
+        .windows(2)
+        .find(|arguments| arguments[0] == "--name")
+        .map(|arguments| arguments[1].as_str())
+}
+
+async fn stop_service_child(
+    child: &Arc<Mutex<Child>>,
+    config: &ServiceConfig,
+    runtime_name: &str,
+) -> Result<(), ServiceError> {
+    let mut child = child.lock().await;
+    if child
+        .try_wait()
+        .map_err(|error| {
+            ServiceError::Internal(format!("failed to inspect {runtime_name} runtime: {error}"))
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    if let Some(container_name) = configured_container_name(config) {
+        let stop_output = Command::new("docker")
+            .args(["stop", "--time", "10", container_name])
+            .output()
+            .await
+            .map_err(|error| {
+                ServiceError::Internal(format!(
+                    "failed to run docker stop for {runtime_name}: {error}"
+                ))
+            })?;
+        if !stop_output.status.success() {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", container_name])
+                .output()
+                .await;
+        }
+        child.wait().await.map_err(|error| {
+            ServiceError::Internal(format!(
+                "failed to wait for {runtime_name} docker client: {error}"
+            ))
+        })?;
+        return Ok(());
+    }
+
+    child.start_kill().map_err(|error| {
+        ServiceError::Internal(format!("failed to stop {runtime_name} runtime: {error}"))
+    })?;
+    child.wait().await.map_err(|error| {
+        ServiceError::Internal(format!(
+            "failed to wait for {runtime_name} runtime: {error}"
+        ))
+    })?;
+    Ok(())
 }
 
 fn spawn_service_command(config: &ServiceConfig) -> Result<Child, ServiceError> {
@@ -695,6 +985,8 @@ fn spawn_service_command(config: &ServiceConfig) -> Result<Child, ServiceError> 
         .map(|arg| {
             arg.replace("{script_path}", &script_path)
                 .replace("{device}", &config.device)
+                .replace("{model}", &config.model)
+                .replace("{uv_bootstrap}", UV_BOOTSTRAP_COMMAND)
         })
         .collect::<Vec<_>>();
     let mut command = Command::new(executable);
@@ -838,6 +1130,7 @@ mod tests {
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 100,
+            embedding_dimensions: 0,
         })
         .expect("Failed to create Baidu provider");
         let response = provider

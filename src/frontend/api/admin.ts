@@ -29,8 +29,8 @@ interface RegenerationStatus {
   metadataCompleted: number
   thumbnailJobs: number
   thumbnailsCompleted: number
-  imageTextJobs: number
-  imageTextCompleted: number
+  mediaTextJobs: number
+  mediaTextCompleted: number
   startedAt: string | null
   completedAt: string | null
   errors: string[]

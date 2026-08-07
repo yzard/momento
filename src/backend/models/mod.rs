@@ -1,5 +1,6 @@
 mod album;
 mod auth;
+mod deduplicate;
 mod imports;
 mod map;
 mod media;
@@ -9,6 +10,7 @@ mod user;
 
 pub use album::*;
 pub use auth::*;
+pub use deduplicate::*;
 pub use imports::*;
 pub use map::*;
 pub use media::*;

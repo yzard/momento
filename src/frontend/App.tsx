@@ -9,6 +9,7 @@ import Map from './pages/Map'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
 import Trash from './pages/Trash'
+import Deduplicate from './pages/Deduplicate'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
@@ -56,6 +57,8 @@ function AppRoutes() {
         <Route path="timeline/videos" element={<Timeline mediaType="video" />} />
         <Route path="albums" element={<Albums />} />
         <Route path="map" element={<Map />} />
+        <Route path="utility" element={<Navigate to="/utility/deduplicate" replace />} />
+        <Route path="utility/deduplicate" element={<Deduplicate />} />
         <Route path="settings" element={<Settings />} />
         <Route path="trash" element={<Trash />} />
         <Route

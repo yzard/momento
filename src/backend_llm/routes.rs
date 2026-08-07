@@ -137,9 +137,14 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     state: AppState,
 ) -> Result<(), std::io::Error> {
-    axum::serve(listener, router(state))
+    let manager = Arc::clone(&state.manager);
+    let server_result = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await
+        .await;
+    if let Err(error) = manager.lock().await.shutdown().await {
+        tracing::error!("Failed to stop active LLM runtime: {error}");
+    }
+    server_result
 }
 
 async fn shutdown_signal() {

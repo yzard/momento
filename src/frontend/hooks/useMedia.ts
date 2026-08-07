@@ -23,11 +23,13 @@ export function useDeleteMedia() {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: (mediaId: number) => mediaApi.delete(mediaId),
+    mutationFn: (mediaIds: number[]) => mediaApi.delete(mediaIds),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['timeline'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
       queryClient.invalidateQueries({ queryKey: ['mapMedia'] })
+      queryClient.invalidateQueries({ queryKey: ['trash'] })
+      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
     },
   })
 }

@@ -110,6 +110,8 @@ pub struct ServiceConfig {
     pub request_timeout_seconds: u64,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default)]
+    pub embedding_dimensions: usize,
 }
 
 fn default_baidu_token_url() -> String {
@@ -213,6 +215,7 @@ impl Config {
         match service.model_type.as_str() {
             "ocr" => self.validate_ocr_service(service),
             "image_tagging" => self.validate_image_tagging_service(service),
+            "image_clustering" => self.validate_image_clustering_service(service),
             model_type => Err(ServiceError::Configuration(format!(
                 "unsupported service model_type: {model_type}"
             ))),
@@ -267,8 +270,60 @@ impl Config {
                 "image tagging timeouts must be positive".to_string(),
             ));
         }
+        validate_uv_package_installation(service, "image tagging")?;
         Ok(())
     }
+
+    fn validate_image_clustering_service(
+        &self,
+        service: &ServiceConfig,
+    ) -> Result<(), ServiceError> {
+        if service.provider != ProviderKind::Local {
+            return Err(ServiceError::Configuration(
+                "image clustering requires the local provider".to_string(),
+            ));
+        }
+        if service.docker_command.is_empty()
+            || service.base_url.trim().is_empty()
+            || service.model.trim().is_empty()
+            || service.script_path.trim().is_empty()
+        {
+            return Err(ServiceError::Configuration(
+                "image clustering docker_command, base_url, model, and script_path are required"
+                    .to_string(),
+            ));
+        }
+        if service.startup_timeout_seconds == 0 || service.request_timeout_seconds == 0 {
+            return Err(ServiceError::Configuration(
+                "image clustering timeouts must be positive".to_string(),
+            ));
+        }
+        if service.embedding_dimensions != 384 {
+            return Err(ServiceError::Configuration(
+                "image clustering embedding_dimensions must be 384 for DINOv2-small".to_string(),
+            ));
+        }
+        if service.model != "facebook/dinov2-small" {
+            return Err(ServiceError::Configuration(
+                "image clustering model must be facebook/dinov2-small".to_string(),
+            ));
+        }
+        validate_uv_package_installation(service, "image clustering")?;
+        Ok(())
+    }
+}
+
+fn validate_uv_package_installation(
+    service: &ServiceConfig,
+    service_name: &str,
+) -> Result<(), ServiceError> {
+    let command = service.docker_command.join(" ");
+    if !command.contains("{uv_bootstrap}") || !command.contains("uv pip install --system") {
+        return Err(ServiceError::Configuration(format!(
+            "{service_name} docker_command must install Python packages with {{uv_bootstrap}} and uv pip install --system"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -295,6 +350,7 @@ mod tests {
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 100,
+            embedding_dimensions: 0,
         }
     }
 
@@ -326,7 +382,10 @@ mod tests {
             model_type: "image_tagging".to_string(),
             model_version: "ram++".to_string(),
             provider: ProviderKind::Local,
-            docker_command: vec!["docker".to_string()],
+            docker_command: vec![
+                "docker".to_string(),
+                "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
+            ],
             device: default_device(),
             base_url: "http://127.0.0.1:8200".to_string(),
             model: String::new(),
@@ -340,7 +399,76 @@ mod tests {
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,
+            embedding_dimensions: 0,
         });
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn image_clustering_service_requires_dinov2_small_model_and_dimensions() {
+        let mut config = local_config();
+        config.service.push(ServiceConfig {
+            enabled: true,
+            model_type: "image_clustering".to_string(),
+            model_version: "dinov2-small".to_string(),
+            provider: ProviderKind::Local,
+            docker_command: vec![
+                "python3".to_string(),
+                "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
+            ],
+            device: default_device(),
+            base_url: "http://127.0.0.1:8300".to_string(),
+            model: "facebook/dinov2-small".to_string(),
+            script_path: "image_clustering_server.py".to_string(),
+            api_key: String::new(),
+            secret_key: String::new(),
+            token_url: default_baidu_token_url(),
+            ocr_url: default_baidu_ocr_url(),
+            max_image_width: 0,
+            max_image_height: 0,
+            startup_timeout_seconds: 10,
+            request_timeout_seconds: 10,
+            max_tokens: 0,
+            embedding_dimensions: 384,
+        });
+        assert!(config.validate().is_ok());
+
+        config.service[1].model = "facebook/dinov2-base".to_string();
+        assert!(config.validate().is_err());
+        config.service[1].model = "facebook/dinov2-small".to_string();
+        config.service[1].embedding_dimensions = 768;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn python_service_rejects_pip_package_installation() {
+        let mut config = local_config();
+        config.service.push(ServiceConfig {
+            enabled: true,
+            model_type: "image_tagging".to_string(),
+            model_version: "ram++".to_string(),
+            provider: ProviderKind::Local,
+            docker_command: vec!["python -m pip install Pillow".to_string()],
+            device: default_device(),
+            base_url: "http://127.0.0.1:8200".to_string(),
+            model: String::new(),
+            script_path: "ram_server.py".to_string(),
+            api_key: String::new(),
+            secret_key: String::new(),
+            token_url: default_baidu_token_url(),
+            ocr_url: default_baidu_ocr_url(),
+            max_image_width: 0,
+            max_image_height: 0,
+            startup_timeout_seconds: 10,
+            request_timeout_seconds: 10,
+            max_tokens: 0,
+            embedding_dimensions: 0,
+        });
+
+        let error = config
+            .validate()
+            .expect_err("pip package installation must be rejected");
+
+        assert!(error.to_string().contains("uv pip install --system"));
     }
 }

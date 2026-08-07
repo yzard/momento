@@ -11,8 +11,8 @@ interface RegenerationStatus {
   metadataCompleted: number
   thumbnailJobs: number
   thumbnailsCompleted: number
-  imageTextJobs: number
-  imageTextCompleted: number
+  mediaTextJobs: number
+  mediaTextCompleted: number
   startedAt: string | null
   completedAt: string | null
   errors: string[]
@@ -153,7 +153,7 @@ export default function MetadataPanel() {
             </div>
             <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
               <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Image Text</span>
-              <span className="font-bold text-lg text-foreground">{status.imageTextCompleted} / {status.imageTextJobs}</span>
+              <span className="font-bold text-lg text-foreground">{status.mediaTextCompleted} / {status.mediaTextJobs}</span>
             </div>
           </div>
 

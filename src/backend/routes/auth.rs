@@ -7,8 +7,8 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 use crate::auth::{
-    create_access_token, create_refresh_token, hash_password, hash_refresh_token,
-    verify_and_migrate, AppState, CurrentUser,
+    create_access_token, create_refresh_token, hash_password, hash_refresh_token, verify_password,
+    AppState, CurrentUser,
 };
 use crate::database::{execute_query, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
@@ -65,18 +65,8 @@ async fn login(
     )?
     .ok_or_else(|| AppError::Authentication("Invalid credentials".to_string()))?;
 
-    let (valid, new_hash) = verify_and_migrate(password, &user.hashed_password);
-    if !valid {
+    if !verify_password(password, &user.hashed_password) {
         return Err(AppError::Authentication("Invalid credentials".to_string()));
-    }
-
-    // Migrate hash if needed
-    if let Some(new_hash) = new_hash {
-        let _ = execute_query(
-            &conn,
-            queries::auth::UPDATE_PASSWORD,
-            &[&new_hash, &user.id],
-        );
     }
 
     if user.is_active == 0 {
@@ -206,8 +196,7 @@ async fn change_password(
     )?
     .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let (valid, _) = verify_and_migrate(&request.current_password, &user);
-    if !valid {
+    if !verify_password(&request.current_password, &user) {
         return Err(AppError::BadRequest(
             "Current password is incorrect".to_string(),
         ));

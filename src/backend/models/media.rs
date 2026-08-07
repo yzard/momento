@@ -143,7 +143,7 @@ pub struct MediaUpdateRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaDeleteRequest {
-    pub media_id: i64,
+    pub media_ids: Vec<i64>,
 }
 
 #[derive(Debug, Serialize)]

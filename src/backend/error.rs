@@ -33,7 +33,10 @@ pub enum AppError {
     Internal(String),
 
     #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(rusqlite::Error),
+
+    #[error("Database is busy")]
+    DatabaseBusy,
 
     #[error("Pool error: {0}")]
     Pool(#[from] r2d2::Error),
@@ -53,6 +56,19 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if matches!(&self, AppError::DatabaseBusy) {
+            tracing::warn!("Database is busy; request should be retried");
+            let mut response = (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "detail": "Database is busy; retry shortly" })),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+            return response;
+        }
         let (status, message) = match &self {
             AppError::Authentication(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Authorization(msg) => (StatusCode::FORBIDDEN, msg.clone()),
@@ -80,6 +96,7 @@ impl IntoResponse for AppError {
                     "Database error".to_string(),
                 )
             }
+            AppError::DatabaseBusy => unreachable!(),
             AppError::Pool(e) => {
                 tracing::error!(
                     "Pool error: {}\nBacktrace: {:?}",
@@ -122,6 +139,17 @@ impl IntoResponse for AppError {
 
         let body = Json(json!({ "detail": message }));
         (status, body).into_response()
+    }
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        match error.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                Self::DatabaseBusy
+            }
+            _ => Self::Database(error),
+        }
     }
 }
 
