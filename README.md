@@ -20,35 +20,13 @@ Momento is a self-hosted photo management application designed to give you full 
 
 The fastest way to get Momento running is using Docker Compose.
 
-**1. Create a `docker-compose.yml` file:**
-
-```yaml
-version: "3.8"
-services:
-  momento:
-    image: momento:latest
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - UMASK=022
-      - TZ=UTC
-    volumes:
-      - momento_data:/data
-    restart: unless-stopped
-volumes:
-  momento_data:
-```
-
-**2. Start the application:**
+Start the application from the repository root:
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml up --build -d
 ```
 
-**3. Access the web interface at `http://localhost:8000`.**
+Access the web interface at `http://localhost:8000`.
 
 ## Installation from Source
 
@@ -86,38 +64,22 @@ git clone https://github.com/yourusername/momento.git
 cd momento
 ```
 
-**2. Install dependencies and build the frontend:**
+**2. Build and run the full local playground:**
 ```bash
-pnpm install
-pnpm build --filter @momento/web
+./run_playground.sh
 ```
 
-**3. Build the backend:**
-```bash
-cargo build --release --manifest-path src/backend/Cargo.toml
-```
-
-**4. Run the application:**
-```bash
-./src/backend/target/release/momento-api
-```
-
-The application will be available at `http://localhost:8000`.
+The script builds artifacts under `build/`, runs them from `dist/`, and starts both
+services with `playground/config.toml` and `playground/config_llm.toml`.
 
 ### Image OCR Service
 
-Momento can send imported images to the standalone Rust LLM service in
-`src/backend_llm`. Build and run it separately:
+Momento sends inference work to the standalone Rust LLM service in `src/backend_llm`.
+`run_playground.sh` builds and starts both services together.
 
-```bash
-cargo build --release --manifest-path src/backend_llm/Cargo.toml
-./src/backend_llm/target/release/llm-service -c /data/config_llm.toml
-```
-
-The stable inference endpoint is `POST /v1/infer` with multipart `task` and
-`file` fields. Responses contain `task`, `provider`, `modelType`,
-`modelVersion`, `text`, `markdown`, and task-specific fields such as `tags`;
-provider adapters own model-specific output normalization.
+Momento submits manifest-first multipart jobs to `POST /api/v1/jobs/submit`. The LLM
+service stores raw input bytes in its durable queue and returns task results through
+Momento's configured internal callback endpoint.
 
 The service supports `baidu` and `local` providers in `config_llm.toml`. The
 playground uses the local provider and starts
@@ -131,8 +93,7 @@ docker run --rm --gpus all nvidia/cuda:12.9.1-base-ubuntu24.04 nvidia-smi
 
 Momento's `llm.enabled` setting controls whether imported images are submitted
 for OCR and image tagging. Image tagging uses a RAM++ adapter configured in
-`playground/config_llm.toml`; it returns a broad list of image tags through the
-same `/v1/infer` endpoint with `modelVersion` set to `ram++`.
+`playground/config_llm.toml`.
 
 ### Playground
 

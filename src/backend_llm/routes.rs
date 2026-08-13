@@ -22,7 +22,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/jobs/submit", post(submit))
+        .route("/api/v1/jobs/submit", post(submit))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .with_state(state)

@@ -73,6 +73,7 @@ pnpm-debug.log*
 /playground/logs/
 /playground/upload/
 /playground/database.sqlite
+/playground/database.sqlite-*
 /playground/imports/
 /playground/originals/
 /playground/previews/

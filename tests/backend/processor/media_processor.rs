@@ -1,4 +1,4 @@
-use crate::test_utils::{create_test_db, init_test_paths};
+use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
 use filetime::{set_file_times, FileTime};
 use momento_api::constants::paths;
 use momento_api::database::{queries, DbConn};
@@ -312,8 +312,7 @@ fn interrupted_import_recovery_restores_completed_media_and_queues_metadata() {
     connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (9001, '.importing', 'camera.jpg', '42/camera.jpg', 'image', 'importing', 'local')", []).expect("media");
     let media_id = connection.last_insert_rowid();
     drop(connection);
-    let original_path = paths().originals.join("42/camera.jpg");
-    fs::create_dir_all(original_path.parent().expect("parent")).expect("original parent");
+    let original_path = paths().originals.join("camera.jpg");
     fs::write(&original_path, b"image").expect("original");
     recover_interrupted_imports(&pool).expect("recovery");
     let connection = pool.get().expect("connection");
@@ -333,4 +332,42 @@ fn interrupted_import_recovery_restores_completed_media_and_queues_metadata() {
         .expect("metadata job");
     assert_eq!(state, "imported");
     assert_eq!(metadata_status, "queued");
+}
+
+#[tokio::test]
+async fn import_flattens_originals_and_moves_supplemental_metadata() {
+    init_test_paths();
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "flat-import", "flat-import@example.com");
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let source_path = source_directory.path().join("camera.jpg");
+    let source_sidecar_path = source_directory
+        .path()
+        .join("camera.jpg.supplemental-metadata.json");
+    fs::write(&source_path, b"image").expect("media source");
+    fs::write(&source_sidecar_path, "{}\n").expect("metadata source");
+    let media_id = momento_api::processor::import::finalize_staged_original(
+        &source_path,
+        momento_api::processor::import::ImportSource::Local,
+        user_id,
+        &pool,
+    )
+    .await
+    .expect("import");
+    let final_filename = build_original_filename(media_id, &source_path);
+    assert!(paths().originals.join(&final_filename).is_file());
+    assert!(paths()
+        .originals
+        .join(format!("{final_filename}.supplemental-metadata.json"))
+        .is_file());
+    assert!(!source_sidecar_path.exists());
+    let connection = pool.get().expect("connection");
+    let file_path: String = connection
+        .query_row(
+            "SELECT file_path FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("file path");
+    assert_eq!(file_path, final_filename);
 }

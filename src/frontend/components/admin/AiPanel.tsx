@@ -38,7 +38,7 @@ export default function AiPanel() {
       </div>
       <div className="border-t border-border px-8 py-6">
         <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-muted-foreground">Deduplication controls</h3>
-        <DeduplicatePanel />
+        <DeduplicatePanel statusQuery={deduplicationQuery} />
       </div>
     </section>
   )

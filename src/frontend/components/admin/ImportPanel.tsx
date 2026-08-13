@@ -15,13 +15,15 @@ interface ImportStatus {
 export default function ImportPanel() {
   const [status, setStatus] = useState<ImportStatus | null>(null)
   const [isTriggering, setIsTriggering] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const loadStatus = async () => {
     try {
       const data = await importApi.getStatus()
       setStatus(data)
+      setErrorMessage(null)
     } catch {
-      console.error('Failed to load import status')
+      setErrorMessage('Could not load import status.')
     }
   }
 
@@ -37,7 +39,7 @@ export default function ImportPanel() {
       await importApi.triggerLocal()
       loadStatus()
     } catch {
-      alert('Failed to start import. An import may already be running.')
+      setErrorMessage('Could not start import. An import may already be running.')
     } finally {
       setIsTriggering(false)
     }
@@ -59,8 +61,9 @@ export default function ImportPanel() {
       <div className="flex flex-wrap gap-3">
         <button
           onClick={handleTriggerImport}
+          type="button"
           disabled={isTriggering || isRunning}
-          className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg shadow-primary/20 transition-all"
+          className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg shadow-primary/20 transition-all"
         >
           {isRunning ? 'Importing...' : isTriggering ? 'Starting...' : 'Start Local Import'}
         </button>
@@ -78,6 +81,11 @@ export default function ImportPanel() {
           {isRunning && status.totalFiles > 0 && (
             <div className="w-full bg-muted/50 rounded-full h-2 mb-6 overflow-hidden">
               <div
+                role="progressbar"
+                aria-label="Import progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress}
                 className="bg-primary h-2 rounded-full transition-all duration-300 shadow-[0_0_10px_hsl(var(--primary))]"
                 style={{ width: `${progress}%` }}
               />
@@ -101,8 +109,8 @@ export default function ImportPanel() {
                 Errors
               </h4>
               <ul className="text-xs text-destructive/80 max-h-32 overflow-y-auto bg-destructive/5 p-4 rounded-lg border border-destructive/10 font-mono">
-                {status.errors.slice(0, 10).map((err, i) => (
-                  <li key={i} className="truncate mb-1 last:mb-0 border-b border-destructive/10 pb-1 last:border-0 last:pb-0">{err}</li>
+                {status.errors.slice(0, 10).map((error, errorIndex) => (
+                  <li key={errorIndex} className="truncate mb-1 last:mb-0 border-b border-destructive/10 pb-1 last:border-0 last:pb-0">{error}</li>
                 ))}
                 {status.errors.length > 10 && (
                   <li className="mt-2 italic opacity-70">... and {status.errors.length - 10} more</li>
@@ -112,6 +120,7 @@ export default function ImportPanel() {
           )}
         </div>
       )}
+      {errorMessage && <p role="alert" className="mt-4 text-sm text-destructive">{errorMessage}</p>}
     </div>
   )
 }

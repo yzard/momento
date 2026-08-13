@@ -1,8 +1,8 @@
 use crate::test_utils::{create_test_db, create_test_media};
 use chrono::{TimeZone, Utc};
 use momento_api::processor::metadata::{
-    apply_supplemental_metadata, load_supplemental_metadata, supplemental_metadata_path,
-    MediaMetadata,
+    apply_supplemental_metadata, delete_supplemental_metadata, load_supplemental_metadata,
+    supplemental_metadata_path, MediaMetadata,
 };
 use std::fs;
 
@@ -143,6 +143,19 @@ fn supplemental_metadata_ignores_zero_coordinate_components() {
 
     assert_eq!(metadata.gps_latitude, None);
     assert_eq!(metadata.gps_longitude, None);
+}
+
+#[test]
+fn deletes_consumed_supplemental_metadata() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let media_path = directory.path().join("camera.jpg");
+    let sidecar_path = directory
+        .path()
+        .join("camera.jpg.supplemental-metadata.json");
+    fs::write(&media_path, "image").expect("media");
+    fs::write(&sidecar_path, "{}\n").expect("sidecar");
+    delete_supplemental_metadata(&media_path).expect("delete sidecar");
+    assert!(!sidecar_path.exists());
 }
 
 #[test]

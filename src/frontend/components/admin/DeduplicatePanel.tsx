@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { AlertCircle, Eraser, Loader2, RefreshCw, ScanSearch, X } from 'lucide-react'
 
 import { deduplicateApi } from '../../api/deduplicate'
@@ -9,14 +9,16 @@ function isJobRunning(status: string | undefined): boolean {
   return status === 'running' || status === 'cancelling'
 }
 
-export default function DeduplicatePanel() {
+export default function DeduplicatePanel({ statusQuery: sharedStatusQuery }: { statusQuery?: UseQueryResult<Awaited<ReturnType<typeof deduplicateApi.status>>> }) {
   const queryClient = useQueryClient()
   const previousStatus = useRef<string | null>(null)
-  const statusQuery = useQuery({
+  const localStatusQuery = useQuery({
     queryKey: ['deduplicate', 'status'],
     queryFn: deduplicateApi.status,
+    enabled: sharedStatusQuery === undefined,
     refetchInterval: (query) => isJobRunning(query.state.data?.status) ? 2000 : false,
   })
+  const statusQuery = sharedStatusQuery ?? localStatusQuery
 
   useEffect(() => {
     const currentStatus = statusQuery.data?.status

@@ -12,10 +12,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 
-if [[ ! -d "$DATA_DIR" ]]; then
-    printf 'Missing playground directory: %s\n' "$DATA_DIR" >&2
-    exit 1
-fi
+mkdir -p "$DATA_DIR"
 
 LLM_CONFIG_FILE="$PLAYGROUND_DIR/config_llm.toml"
 if [[ ! -f "$LLM_CONFIG_FILE" ]]; then
@@ -40,7 +37,7 @@ export RUST_BACKTRACE=full
 cd "$ROOT_DIR"
 
 rm -rf "$BACKEND_BUILD_DIR" "$FRONTEND_BUILD_DIR" "$LLM_BUILD_DIR" "$BACKEND_DIST_DIR" "$FRONTEND_DIST_DIR" "$LLM_DIST_DIR" "$PLAYGROUND_DIR/output"
-mkdir -p "$LOG_DIR" "$FRONTEND_WORKSPACE_DIR" "$BACKEND_DIST_DIR" "$FRONTEND_DIST_DIR" "$LLM_DIST_DIR"
+mkdir -p "$LOG_DIR" "$PLAYGROUND_DIR/imports" "$PLAYGROUND_DIR/webdav" "$FRONTEND_WORKSPACE_DIR" "$BACKEND_DIST_DIR" "$FRONTEND_DIST_DIR" "$LLM_DIST_DIR"
 
 cp "$ROOT_DIR/package.json" "$ROOT_DIR/pnpm-lock.yaml" "$ROOT_DIR/pnpm-workspace.yaml" "$FRONTEND_WORKSPACE_DIR/"
 mkdir -p "$FRONTEND_WORKSPACE_DIR/src"

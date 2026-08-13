@@ -10,17 +10,18 @@ RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --manifest-path /ap
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates wget
+RUN apk add --no-cache ca-certificates su-exec tzdata wget
 
 WORKDIR /app
 
 COPY --from=builder /app/build/target/release/llm-service /app/llm-service
+COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
-RUN mkdir -p /data
+RUN chmod +x /entrypoint_llm.sh && mkdir -p /data
 
 ENV RUST_BACKTRACE=full
 
 EXPOSE 8100
 
-ENTRYPOINT ["/app/llm-service"]
-CMD ["-c", "/data/config_llm.toml"]
+ENTRYPOINT ["/entrypoint_llm.sh"]
+CMD ["/app/llm-service", "-c", "/data/config_llm.toml"]

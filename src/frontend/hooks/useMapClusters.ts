@@ -25,8 +25,8 @@ export function useMapClusters({ bounds, zoom, dataZoom }: UseMapClustersProps) 
   const [clusters, setClusters] = useState<MapCluster[]>([])
   const superclusterRef = useRef<Supercluster<ClusterProperties, ClusterProperties>>(
     new Supercluster({
-      radius: 60,
-      maxZoom: 16,
+      radius: 32,
+      maxZoom: 20,
       minPoints: 2,
       map: (props) => ({
         count: props.count,

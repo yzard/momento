@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { AxiosError } from 'axios'
 import { adminApi } from '../../api/admin'
 import { AlertCircle } from 'lucide-react'
@@ -21,6 +21,8 @@ export default function UserManagement() {
   
   const [touched, setTouched] = useState<Record<string, boolean>>({})
   const [serverError, setServerError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const usernameInputRef = useRef<HTMLInputElement>(null)
 
   const validate = (data: typeof newUser) => {
     const errors: Record<string, string> = {}
@@ -39,17 +41,18 @@ export default function UserManagement() {
 
   const loadUsers = async () => {
     try {
-      const data = await adminApi.listUsers()
-      setUsers(data)
+      const users = await adminApi.listUsers()
+      setUsers(users)
+      setActionError(null)
     } catch {
-      console.error('Failed to load users')
+      setActionError('Could not load users.')
     } finally {
       setIsLoading(false)
     }
   }
 
   useEffect(() => {
-    loadUsers()
+    void loadUsers()
   }, [])
 
   useEffect(() => {
@@ -58,6 +61,16 @@ export default function UserManagement() {
       setTouched({})
       setServerError(null)
     }
+  }, [showCreateModal])
+
+  useEffect(() => {
+    if (!showCreateModal) return
+    usernameInputRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowCreateModal(false)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
   }, [showCreateModal])
 
   const handleCreate = async () => {
@@ -75,11 +88,11 @@ export default function UserManagement() {
       await adminApi.createUser(newUser)
       setShowCreateModal(false)
       loadUsers()
-    } catch (err) {
-      if (err instanceof AxiosError && err.response?.data?.detail) {
-        setServerError(err.response.data.detail)
+    } catch (error) {
+      if (error instanceof AxiosError && error.response?.data?.detail) {
+        setServerError(error.response.data.detail)
       } else {
-        const message = err instanceof Error ? err.message : 'Failed to create user'
+        const message = error instanceof Error ? error.message : 'Failed to create user'
         setServerError(message)
       }
     }
@@ -90,7 +103,7 @@ export default function UserManagement() {
       await adminApi.updateUser(user.id, { isActive: !user.isActive })
       loadUsers()
     } catch {
-      alert('Failed to update user')
+      setActionError('Could not update the user.')
     }
   }
 
@@ -100,7 +113,7 @@ export default function UserManagement() {
       await adminApi.deleteUser(userId)
       loadUsers()
     } catch {
-      alert('Failed to delete user')
+      setActionError('Could not delete the user.')
     }
   }
 
@@ -113,12 +126,14 @@ export default function UserManagement() {
       <div className="flex justify-between items-center mb-6">
         <h3 className="text-lg font-medium text-foreground">Users</h3>
         <button
+          type="button"
           onClick={() => setShowCreateModal(true)}
-          className="bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 shadow-sm font-medium text-sm transition-all hover:shadow-primary/20"
+          className="bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary shadow-sm font-medium text-sm transition-all hover:shadow-primary/20"
         >
           Add User
         </button>
       </div>
+      {actionError && <p role="alert" className="mb-4 text-sm text-destructive">{actionError}</p>}
 
       <div className="bg-card/30 rounded-xl border border-border/50 overflow-hidden backdrop-blur-sm">
         <table className="w-full text-sm">
@@ -148,14 +163,16 @@ export default function UserManagement() {
                 </td>
                 <td className="px-4 py-3">
                   <button
+                    type="button"
                     onClick={() => handleToggleActive(user)}
-                    className="text-primary hover:text-primary/80 mr-3 font-medium hover:underline"
+                    className="mr-3 text-primary hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary font-medium hover:underline"
                   >
                     {user.isActive ? 'Deactivate' : 'Activate'}
                   </button>
                   <button
+                    type="button"
                     onClick={() => handleDelete(user.id)}
-                    className="text-destructive hover:text-destructive/80 font-medium hover:underline"
+                    className="text-destructive hover:text-destructive/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive font-medium hover:underline"
                   >
                     Delete
                   </button>
@@ -168,8 +185,8 @@ export default function UserManagement() {
 
       {showCreateModal && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-card border border-border/50 rounded-xl shadow-2xl p-6 w-full max-w-md animate-scale-in">
-            <h3 className="text-xl font-display font-medium mb-6">Add User</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="add-user-title" className="bg-card border border-border/50 rounded-xl shadow-2xl p-6 w-full max-w-md animate-scale-in">
+            <h3 id="add-user-title" className="text-xl font-display font-medium mb-6">Add User</h3>
             
             {serverError && (
               <div className="mb-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-2 text-destructive text-sm">
@@ -180,12 +197,16 @@ export default function UserManagement() {
 
             <div className="space-y-4">
               <div className="space-y-1">
+                <label htmlFor="new-user-username" className="text-sm font-medium text-foreground">Username</label>
                 <input
+                  ref={usernameInputRef}
+                  id="new-user-username"
                   type="text"
-                  placeholder="Username"
                   value={newUser.username}
                   onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
                   onBlur={() => setTouched({ ...touched, username: true })}
+                  aria-invalid={touched.username && Boolean(errors.username)}
+                  aria-describedby={touched.username && errors.username ? 'new-user-username-error' : undefined}
                   className={`w-full px-4 py-2 bg-muted/20 border rounded-lg outline-none transition-all ${
                     touched.username && errors.username 
                       ? 'border-destructive focus:border-destructive' 
@@ -193,17 +214,21 @@ export default function UserManagement() {
                   }`}
                 />
                 {touched.username && errors.username && (
-                  <p className="text-xs text-destructive font-medium ml-1">{errors.username}</p>
+                  <p id="new-user-username-error" className="text-xs text-destructive font-medium ml-1">{errors.username}</p>
                 )}
               </div>
 
               <div className="space-y-1">
+                <label htmlFor="new-user-email" className="text-sm font-medium text-foreground">Email</label>
                 <input
+                  id="new-user-email"
                   type="email"
                   placeholder="Email"
                   value={newUser.email}
                   onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
                   onBlur={() => setTouched({ ...touched, email: true })}
+                  aria-invalid={touched.email && Boolean(errors.email)}
+                  aria-describedby={touched.email && errors.email ? 'new-user-email-error' : undefined}
                   className={`w-full px-4 py-2 bg-muted/20 border rounded-lg outline-none transition-all ${
                     touched.email && errors.email 
                       ? 'border-destructive focus:border-destructive' 
@@ -211,17 +236,21 @@ export default function UserManagement() {
                   }`}
                 />
                 {touched.email && errors.email && (
-                  <p className="text-xs text-destructive font-medium ml-1">{errors.email}</p>
+                  <p id="new-user-email-error" className="text-xs text-destructive font-medium ml-1">{errors.email}</p>
                 )}
               </div>
 
               <div className="space-y-1">
+                <label htmlFor="new-user-password" className="text-sm font-medium text-foreground">Password</label>
                 <input
+                  id="new-user-password"
                   type="password"
                   placeholder="Password"
                   value={newUser.password}
                   onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
                   onBlur={() => setTouched({ ...touched, password: true })}
+                  aria-invalid={touched.password && Boolean(errors.password)}
+                  aria-describedby={touched.password && errors.password ? 'new-user-password-error' : undefined}
                   className={`w-full px-4 py-2 bg-muted/20 border rounded-lg outline-none transition-all ${
                     touched.password && errors.password 
                       ? 'border-destructive focus:border-destructive' 
@@ -229,11 +258,14 @@ export default function UserManagement() {
                   }`}
                 />
                 {touched.password && errors.password && (
-                  <p className="text-xs text-destructive font-medium ml-1">{errors.password}</p>
+                  <p id="new-user-password-error" className="text-xs text-destructive font-medium ml-1">{errors.password}</p>
                 )}
               </div>
 
+              <div className="space-y-1">
+              <label htmlFor="new-user-role" className="text-sm font-medium text-foreground">Role</label>
               <select
+                id="new-user-role"
                 value={newUser.role}
                 onChange={(e) => setNewUser({ ...newUser, role: e.target.value as 'admin' | 'user' })}
                 className="w-full px-4 py-2 bg-muted/20 border border-input rounded-lg focus:border-primary focus:bg-background outline-none transition-all"
@@ -241,17 +273,19 @@ export default function UserManagement() {
                 <option value="user">User</option>
                 <option value="admin">Admin</option>
               </select>
+              </div>
             </div>
             <div className="flex justify-end gap-3 mt-8">
-              <button onClick={() => setShowCreateModal(false)} className="px-4 py-2 text-muted-foreground hover:text-foreground transition-colors font-medium">
+              <button type="button" onClick={() => setShowCreateModal(false)} className="px-4 py-2 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary transition-colors font-medium">
                 Cancel
               </button>
               <button 
+                type="button"
                 onClick={handleCreate} 
                 disabled={!isValid}
                 className={`px-6 py-2 rounded-lg font-medium shadow-lg transition-all ${
                   isValid 
-                    ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-primary/20' 
+                    ? 'bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary shadow-primary/20'
                     : 'bg-muted text-muted-foreground cursor-not-allowed shadow-none'
                 }`}
               >

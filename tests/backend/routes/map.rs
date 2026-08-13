@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 
 fn zoom_to_geohash_precision(zoom: u8) -> usize {
     match zoom {
-        0..=3 => 1,
-        4..=6 => 2,
-        7..=9 => 3,
-        10..=12 => 4,
-        13..=15 => 5,
-        16..=18 => 7,
-        _ => 7,
+        0..=3 => 2,
+        4..=6 => 3,
+        7..=9 => 4,
+        10..=12 => 5,
+        13..=15 => 6,
+        16..=18 => 8,
+        _ => 8,
     }
 }
 
@@ -112,6 +112,22 @@ fn test_map_clusters_excludes_zero_coordinates() {
     let req = make_request((1.0, -1.0, 1.0, -1.0), 10);
     let response = get_clusters_sync(&pool, user_id, &req).unwrap();
 
+    assert!(response.clusters.is_empty());
+    assert_eq!(response.total_count, 0);
+}
+
+#[test]
+fn test_map_clusters_excludes_each_zero_coordinate() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "testuser", "test@example.com");
+
+    let zero_latitude_media = create_test_media_with_gps(&pool, "zero-latitude.jpg", 0.0, 10.0);
+    let zero_longitude_media = create_test_media_with_gps(&pool, "zero-longitude.jpg", 10.0, 0.0);
+    grant_media_access(&pool, zero_latitude_media, user_id);
+    grant_media_access(&pool, zero_longitude_media, user_id);
+
+    let req = make_request((20.0, -1.0, 20.0, -1.0), 10);
+    let response = get_clusters_sync(&pool, user_id, &req).unwrap();
     assert!(response.clusters.is_empty());
     assert_eq!(response.total_count, 0);
 }
@@ -359,18 +375,18 @@ fn test_rtree_query_performance() {
 
 #[test]
 fn test_zoom_to_geohash_precision() {
-    assert_eq!(zoom_to_geohash_precision(0), 1);
-    assert_eq!(zoom_to_geohash_precision(3), 1);
-    assert_eq!(zoom_to_geohash_precision(4), 2);
-    assert_eq!(zoom_to_geohash_precision(6), 2);
-    assert_eq!(zoom_to_geohash_precision(7), 3);
-    assert_eq!(zoom_to_geohash_precision(9), 3);
-    assert_eq!(zoom_to_geohash_precision(10), 4);
-    assert_eq!(zoom_to_geohash_precision(12), 4);
-    assert_eq!(zoom_to_geohash_precision(13), 5);
-    assert_eq!(zoom_to_geohash_precision(15), 5);
-    assert_eq!(zoom_to_geohash_precision(16), 7);
-    assert_eq!(zoom_to_geohash_precision(18), 7);
-    assert_eq!(zoom_to_geohash_precision(19), 7);
-    assert_eq!(zoom_to_geohash_precision(25), 7);
+    assert_eq!(zoom_to_geohash_precision(0), 2);
+    assert_eq!(zoom_to_geohash_precision(3), 2);
+    assert_eq!(zoom_to_geohash_precision(4), 3);
+    assert_eq!(zoom_to_geohash_precision(6), 3);
+    assert_eq!(zoom_to_geohash_precision(7), 4);
+    assert_eq!(zoom_to_geohash_precision(9), 4);
+    assert_eq!(zoom_to_geohash_precision(10), 5);
+    assert_eq!(zoom_to_geohash_precision(12), 5);
+    assert_eq!(zoom_to_geohash_precision(13), 6);
+    assert_eq!(zoom_to_geohash_precision(15), 6);
+    assert_eq!(zoom_to_geohash_precision(16), 8);
+    assert_eq!(zoom_to_geohash_precision(18), 8);
+    assert_eq!(zoom_to_geohash_precision(19), 8);
+    assert_eq!(zoom_to_geohash_precision(25), 8);
 }

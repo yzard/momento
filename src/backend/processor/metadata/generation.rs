@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::constants::paths;
 use crate::database::{queries, DbPool};
 use crate::processor::media_processor::{calculate_geohash, generate_complete_metadata};
+use crate::processor::metadata::delete_supplemental_metadata;
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 use crate::utils::hash::calculate_file_hash;
 
@@ -137,6 +138,7 @@ pub async fn generate_media_metadata(
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
+    delete_supplemental_metadata(&original_path).map_err(|error| error.to_string())?;
     prepare_ai_inputs(
         pool,
         media_id,

@@ -152,14 +152,8 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
     setRenderZoom(nextZoom)
   }
 
-  const handleClusterClick = (cluster: MapCluster, latitude: number, longitude: number) => {
+  const handleClusterClick = (cluster: MapCluster) => {
     const { count, representativeId, cluster_id: clusterId, cellId } = cluster.properties
-
-    if (count > 1 && renderZoom < 16) {
-      const targetZoom = clusterId ? supercluster.getClusterExpansionZoom(clusterId) : Math.min(16, renderZoom + 2)
-      mapRef.current?.setView([latitude, longitude], targetZoom, { animate: true })
-      return
-    }
 
     if (count > 1 && clusterId !== undefined && bounds) {
       const leafLimit = Math.min(count, 500)
@@ -237,7 +231,7 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
               longitude={lng}
               count={count}
               representativeId={representativeId}
-              onClick={() => handleClusterClick(cluster, lat, lng)}
+              onClick={() => handleClusterClick(cluster)}
             />
           )
         })}

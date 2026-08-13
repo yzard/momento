@@ -5,13 +5,18 @@ services:
       dockerfile: docker/Dockerfile.llm
     ports:
       - "8100:8100"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=022
+      - TZ=UTC
     volumes:
       - ../playground/config_llm.toml:/data/config_llm.toml:ro
       # This volume contains queue states and retry metadata. It must survive restarts.
       - llm_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8100/health"]
+      test: ["CMD", "wget", "-q", "--post-data={}", "--spider", "http://localhost:8100/health"]
       interval: 30s
       timeout: 10s
       retries: 3

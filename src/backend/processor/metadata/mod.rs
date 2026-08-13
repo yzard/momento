@@ -96,6 +96,13 @@ pub fn load_supplemental_metadata(file_path: &Path) -> Option<serde_json::Value>
     }
 }
 
+pub fn delete_supplemental_metadata(file_path: &Path) -> std::io::Result<()> {
+    let Some(metadata_path) = supplemental_metadata_path(file_path) else {
+        return Ok(());
+    };
+    fs::remove_file(metadata_path)
+}
+
 pub fn apply_supplemental_metadata(metadata: &mut MediaMetadata, data: &serde_json::Value) {
     if metadata.gps_latitude == Some(0.0) && metadata.gps_longitude == Some(0.0) {
         metadata.gps_latitude = None;

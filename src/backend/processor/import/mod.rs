@@ -225,21 +225,19 @@ pub async fn finalize_staged_original(
     };
 
     let final_filename = build_original_filename(media_id, source_path);
-    let final_relative_path = PathBuf::from(media_id.to_string()).join(&final_filename);
+    let final_relative_path = PathBuf::from(&final_filename);
     let temporary_path = paths().originals.join(&temporary_relative_path);
     let final_path = paths().originals.join(&final_relative_path);
+    let final_supplemental_metadata_path = supplemental_metadata_path(&final_path);
 
     let result = async {
         let temporary_parent = temporary_path.parent().ok_or_else(|| {
             AppError::Internal("temporary original path has no parent".to_string())
         })?;
-        let final_parent = final_path
-            .parent()
-            .ok_or_else(|| AppError::Internal("final original path has no parent".to_string()))?;
         tokio::fs::create_dir_all(temporary_parent).await?;
-        tokio::fs::create_dir_all(final_parent).await?;
         tokio::fs::copy(source_path, &temporary_path).await?;
         tokio::fs::rename(&temporary_path, &final_path).await?;
+        move_supplemental_metadata(source_path, &final_supplemental_metadata_path).await?;
 
         let connection = pool.get()?;
         let transaction = connection.unchecked_transaction()?;
@@ -268,6 +266,17 @@ pub async fn finalize_staged_original(
 
     if let Err(error) = result {
         let _ = tokio::fs::remove_file(&temporary_path).await;
+        if final_path.is_file() {
+            let _ = tokio::fs::rename(&final_path, source_path).await;
+        }
+        let source_supplemental_metadata_path = supplemental_metadata_path(source_path);
+        if final_supplemental_metadata_path.is_file() {
+            let _ = tokio::fs::rename(
+                &final_supplemental_metadata_path,
+                source_supplemental_metadata_path,
+            )
+            .await;
+        }
         let connection = pool.get()?;
         let _ = execute_query(
             &connection,
@@ -277,6 +286,23 @@ pub async fn finalize_staged_original(
         return Err(error);
     }
     Ok(media_id)
+}
+
+async fn move_supplemental_metadata(source_path: &Path, destination_path: &Path) -> AppResult<()> {
+    let source_supplemental_metadata_path = supplemental_metadata_path(source_path);
+    if !source_supplemental_metadata_path.is_file() {
+        return Ok(());
+    }
+    tokio::fs::rename(&source_supplemental_metadata_path, destination_path).await?;
+    Ok(())
+}
+
+fn supplemental_metadata_path(media_path: &Path) -> PathBuf {
+    let media_filename = media_path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .unwrap_or_default();
+    media_path.with_file_name(format!("{media_filename}.supplemental-metadata.json"))
 }
 
 pub fn recover_interrupted_imports(pool: &DbPool) -> AppResult<()> {
@@ -406,11 +432,34 @@ async fn claim_source(source_path: &Path) -> Result<PathBuf, std::io::Error> {
     tokio::fs::create_dir_all(&claim_directory).await?;
     let claimed_path = claim_directory.join(filename);
     tokio::fs::rename(source_path, &claimed_path).await?;
+    let source_supplemental_metadata_path = supplemental_metadata_path(source_path);
+    if !source_supplemental_metadata_path.is_file() {
+        return Ok(claimed_path);
+    }
+    let claimed_supplemental_metadata_path = supplemental_metadata_path(&claimed_path);
+    if let Err(error) = tokio::fs::rename(
+        &source_supplemental_metadata_path,
+        &claimed_supplemental_metadata_path,
+    )
+    .await
+    {
+        let _ = tokio::fs::rename(&claimed_path, source_path).await;
+        let _ = tokio::fs::remove_dir(&claim_directory).await;
+        return Err(error);
+    }
     Ok(claimed_path)
 }
 
 async fn restore_claim(claimed_path: &Path, source_path: &Path) -> Result<(), std::io::Error> {
     tokio::fs::rename(claimed_path, source_path).await?;
+    let claimed_supplemental_metadata_path = supplemental_metadata_path(claimed_path);
+    if claimed_supplemental_metadata_path.is_file() {
+        tokio::fs::rename(
+            claimed_supplemental_metadata_path,
+            supplemental_metadata_path(source_path),
+        )
+        .await?;
+    }
     remove_claim_directory(claimed_path).await
 }
 

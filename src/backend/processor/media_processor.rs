@@ -61,31 +61,14 @@ pub fn get_media_type(file_path: &Path) -> Option<&'static str> {
     }
 }
 
-fn get_media_date(metadata: &MediaMetadata, source_path: &Path) -> DateTime<Utc> {
-    if let Some(dt) = metadata.date_taken {
-        return dt;
-    }
-
-    source_path
-        .metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(Utc::now)
-}
-
-fn save_original_file(
-    source_path: &Path,
-    date_taken: DateTime<Utc>,
-) -> std::io::Result<(PathBuf, PathBuf, String)> {
-    let year_month = date_taken.format("%Y-%m").to_string();
+fn save_original_file(source_path: &Path) -> std::io::Result<(PathBuf, PathBuf, String)> {
     let ext = source_path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
     let temporary_filename = format!("pending_{}.{}", Uuid::new_v4(), ext);
 
-    let relative_path = PathBuf::from(&year_month).join(&temporary_filename);
+    let relative_path = PathBuf::from(&temporary_filename);
     let dest_path = paths().originals.join(&relative_path);
 
     if let Some(parent) = dest_path.parent() {
@@ -99,13 +82,12 @@ fn save_original_file(
 
 fn finalize_original_file(
     temporary_path: &Path,
-    date_taken: DateTime<Utc>,
     media_id: i64,
     source_path: &Path,
     file_times: SourceFileTimes,
 ) -> std::io::Result<(PathBuf, PathBuf, String)> {
     let new_filename = build_original_filename(media_id, source_path);
-    let relative_path = PathBuf::from(date_taken.format("%Y-%m").to_string()).join(&new_filename);
+    let relative_path = PathBuf::from(&new_filename);
     let destination = paths().originals.join(&relative_path);
     fs::rename(temporary_path, &destination)?;
     apply_file_times(&destination, file_times)?;
@@ -427,10 +409,8 @@ pub async fn process_media_file(
     let metadata =
         generate_complete_metadata(source_path, media_type, context.reverse_geocoding.as_ref())
             .await;
-    let date_taken = get_media_date(&metadata, source_path);
-
     let (temporary_path, temporary_relative_path, temporary_filename) =
-        match save_original_file(source_path, date_taken) {
+        match save_original_file(source_path) {
             Ok(res) => res,
             Err(e) => {
                 tracing::error!(
@@ -534,26 +514,21 @@ pub async fn process_media_file(
         }
     };
 
-    let (dest_path, relative_path, new_filename) = match finalize_original_file(
-        &temporary_path,
-        date_taken,
-        media_id,
-        source_path,
-        source_file_times,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&media_id]);
-            let _ = fs::remove_file(&temporary_path);
-            tracing::error!(
+    let (dest_path, relative_path, new_filename) =
+        match finalize_original_file(&temporary_path, media_id, source_path, source_file_times) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = execute_query(&conn, queries::trash::DELETE_PERMANENTLY, &[&media_id]);
+                let _ = fs::remove_file(&temporary_path);
+                tracing::error!(
                 "Media processing failed for {} after {:?}: failed to finalize original file: {}",
                 source_path.display(),
                 start_time.elapsed(),
                 error
             );
-            return None;
-        }
-    };
+                return None;
+            }
+        };
 
     if execute_query(
         &conn,

@@ -3,15 +3,13 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  getRegenerationStatus: vi.fn(),
-  regenerateMedia: vi.fn(),
-  resetLibrary: vi.fn(),
-  cancelRegeneration: vi.fn(),
-  triggerQueuedLlmJobs: vi.fn(),
+  getStatus: vi.fn(),
+  generate: vi.fn(),
+  reset: vi.fn(),
 }))
 
-vi.mock('../../../../src/frontend/api/admin', () => ({
-  adminApi: mocks,
+vi.mock('../../../../src/frontend/api/metadata', () => ({
+  metadataApi: mocks,
 }))
 
 import MetadataPanel from '../../../../src/frontend/components/admin/MetadataPanel'
@@ -19,30 +17,28 @@ import MetadataPanel from '../../../../src/frontend/components/admin/MetadataPan
 describe('MetadataPanel', () => {
   beforeEach(() => {
     for (const mock of Object.values(mocks)) mock.mockReset()
-    mocks.getRegenerationStatus.mockResolvedValue({
-      status: 'idle', totalJobs: 0, completedJobs: 0, metadataJobs: 0, metadataCompleted: 0,
-      thumbnailJobs: 0, thumbnailsCompleted: 0, mediaTextJobs: 0, mediaTextCompleted: 0,
-      startedAt: null, completedAt: null, errors: [],
-    })
-    mocks.triggerQueuedLlmJobs.mockResolvedValue({ message: 'started', status: 'running' })
+    mocks.getStatus.mockResolvedValue({ status: 'idle', queuedJobs: 2, processingJobs: 1, completedJobs: 8, failedJobs: 0, errors: [] })
+    mocks.generate.mockResolvedValue({ message: 'queued', queuedJobs: 2 })
+    mocks.reset.mockResolvedValue({ message: 'reset', queuedJobs: 10 })
   })
 
   afterEach(cleanup)
 
-  it('processes queued LLM jobs', async () => {
+  it('generates metadata and shows status metrics', async () => {
     render(<MetadataPanel />)
 
-    await userEvent.click(await screen.findByText('Process queued LLM jobs'))
+    await userEvent.click(await screen.findByText('Generate'))
 
-    expect(mocks.triggerQueuedLlmJobs).toHaveBeenCalledOnce()
+    expect(mocks.generate).toHaveBeenCalledOnce()
+    expect(screen.getByText('8')).toBeTruthy()
   })
 
-  it('shows an error when processing queued LLM jobs fails', async () => {
-    mocks.triggerQueuedLlmJobs.mockRejectedValue(new Error('unavailable'))
+  it('shows an action error', async () => {
+    mocks.reset.mockRejectedValue(new Error('unavailable'))
     render(<MetadataPanel />)
 
-    await userEvent.click(await screen.findByText('Process queued LLM jobs'))
+    await userEvent.click(await screen.findByText('Reset & Generate All'))
 
-    expect((await screen.findByRole('alert')).textContent).toBe('Failed to process queued LLM jobs.')
+    expect((await screen.findByRole('alert')).textContent).toBe('Could not complete the metadata action.')
   })
 })

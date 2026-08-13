@@ -158,7 +158,7 @@ async fn submit_cycle(config: &Config, pool: &DbPool) -> Result<(), String> {
             form = form.part(name, part);
         }
         let response = client
-            .post(format!("{}/v1/jobs/submit", config.llm.service_url))
+            .post(format!("{}/api/v1/jobs/submit", config.llm.service_url))
             .header("x-api-key", &config.llm.api_key)
             .multipart(form)
             .send()
