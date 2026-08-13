@@ -96,6 +96,20 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.storage.data_dir, defaults.storage.data_dir);
     assert_eq!(config.storage.static_dir, defaults.storage.static_dir);
     assert_eq!(config.server.port, defaults.server.port);
+
+    let generated = std::fs::read_to_string(path).expect("Failed to read generated config");
+    let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
+    assert!(generated["metadata_worker"].get("batch_size").is_none());
+}
+
+#[test]
+fn test_load_config_rejects_removed_metadata_batch_size() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[metadata_worker]\nbatch_size = 64\n");
+
+    let error = load_config(&path).expect_err("Metadata batch size has been removed");
+
+    assert!(error.to_string().contains("batch_size"));
 }
 
 #[test]

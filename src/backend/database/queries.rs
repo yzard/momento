@@ -99,7 +99,7 @@ pub mod metadata_jobs {
     pub const MARK_IMPORTED_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) SELECT id, datetime('now') FROM media WHERE import_state = 'imported'";
     pub const SELECT_INPUT_PATHS: &str =
         "SELECT file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
-    pub const CLAIM_QUEUED: &str = "UPDATE media_metadata_jobs SET status = 'processing', claimed_at = datetime('now'), attempts = attempts + 1, updated_at = datetime('now') WHERE media_id IN (SELECT media_id FROM media_metadata_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY media_id LIMIT ?) AND status = 'queued' RETURNING media_id";
+    pub const CLAIM_NEXT_QUEUED: &str = "UPDATE media_metadata_jobs SET status = 'processing', claimed_at = datetime('now'), attempts = attempts + 1, updated_at = datetime('now') WHERE media_id = (SELECT media_id FROM media_metadata_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY media_id LIMIT 1) AND status = 'queued' RETURNING media_id";
     pub const RECLAIM_EXPIRED: &str = "UPDATE media_metadata_jobs SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), last_error = 'metadata worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', ?)";
     pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = 'completed', completed_at = datetime('now'), last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
     pub const MARK_FAILED_OR_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END, available_at = CASE WHEN attempts >= ? THEN available_at ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = ?, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
@@ -129,7 +129,7 @@ pub mod llm_callback {
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
     pub const UPSERT_TEXT: &str = "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, ?, ?) ON CONFLICT(media_id, model_type) DO UPDATE SET model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_INPUT_TEXT: &str = "INSERT INTO media_text_inputs (media_id, model_type, sequence, frame_timestamp_ms, model_version, string) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, model_type, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
-    pub const SELECT_CLUSTER_MEDIA: &str = "SELECT media.content_hash, strftime('%s', media_metadata.date_taken) FROM media LEFT JOIN media_metadata ON media_metadata.media_id = media.id WHERE media.id = ?";
+    pub const SELECT_CLUSTER_MEDIA: &str = "SELECT media.content_hash, CAST(strftime('%s', media_metadata.date_taken) AS INTEGER) FROM media LEFT JOIN media_metadata ON media_metadata.media_id = media.id WHERE media.id = ?";
     pub const UPSERT_SIMILARITY_INDEX: &str = "INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, capture_time_seconds, processing_status, processing_error) VALUES (?, ?, ?, 'prepared-input-v1', ?, ?, ?, 1, NULL) ON CONFLICT(media_id) DO UPDATE SET content_hash = excluded.content_hash, model_version = excluded.model_version, preprocessing_version = excluded.preprocessing_version, embedding = excluded.embedding, perceptual_hash = excluded.perceptual_hash, capture_time_seconds = excluded.capture_time_seconds, indexed_at = datetime('now'), processing_status = 1, processing_error = NULL";
     pub const DELETE_HASH_BANDS: &str =
         "DELETE FROM media_similarity_hash_bands WHERE media_id = ?";
@@ -1805,6 +1805,36 @@ pub mod deduplicate {
       , cosine_similarity
       , perceptual_hash_distance
     ) VALUES (?, ?, ?, ?)
+    "#;
+
+    pub const INSERT_CLUSTERS_FROM_JSON: &str = r#"
+    INSERT INTO media_similarity_clusters (
+        id
+      , kind
+      , representative_media_id
+    )
+    SELECT json_extract(cluster.value, '$.id')
+         , json_extract(cluster.value, '$.kind')
+         , json_extract(cluster.value, '$.representativeMediaId')
+      FROM json_each(?) AS cluster
+     ORDER BY json_extract(cluster.value, '$.id')
+    "#;
+
+    pub const INSERT_CLUSTER_MEMBERS_FROM_JSON: &str = r#"
+    INSERT INTO media_similarity_cluster_members (
+        cluster_id
+      , media_id
+      , cosine_similarity
+      , perceptual_hash_distance
+    )
+    SELECT json_extract(cluster.value, '$.id')
+         , json_extract(member.value, '$.mediaId')
+         , json_extract(member.value, '$.cosineSimilarity')
+         , json_extract(member.value, '$.perceptualHashDistance')
+      FROM json_each(?) AS cluster
+      JOIN json_each(json_extract(cluster.value, '$.members')) AS member
+     ORDER BY json_extract(cluster.value, '$.id')
+            , json_extract(member.value, '$.mediaId')
     "#;
 
     pub const SELECT_VISIBLE_CLUSTER_PAGE: &str = r#"

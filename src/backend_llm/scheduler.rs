@@ -323,32 +323,33 @@ impl Scheduler {
             self.fail(job_path, error.to_string());
             return;
         }
-        if self
+        let Err(callback_error) = self
             .deliver_callback(&manifest.callback_url, &callback)
             .await
-        {
+        else {
             if let Err(error) = tokio::fs::remove_dir_all(&job_path).await {
                 self.fail(
                     job_path,
                     format!("callback acknowledged but queue cleanup failed: {error}"),
                 );
             }
-        } else {
-            let destination = self
-                .queue_dir
-                .join("callback_pending")
-                .join(&manifest.job_id);
-            match tokio::fs::rename(&job_path, &destination).await {
-                Ok(()) => {
-                    if let Err(error) = self.record_callback_failure(&destination) {
-                        self.fail(destination, error.to_string());
-                    }
+            return;
+        };
+        self.log_callback_failure(&manifest, &callback_error);
+        let destination = self
+            .queue_dir
+            .join("callback_pending")
+            .join(&manifest.job_id);
+        match tokio::fs::rename(&job_path, &destination).await {
+            Ok(()) => {
+                if let Err(error) = self.record_callback_failure(&destination, &callback_error) {
+                    self.fail(destination, error.to_string());
                 }
-                Err(error) => self.fail(
-                    job_path,
-                    format!("failed to transition callback pending: {error}"),
-                ),
             }
+            Err(error) => self.fail(
+                job_path,
+                format!("failed to transition callback pending: {error}"),
+            ),
         }
     }
 
@@ -373,18 +374,24 @@ impl Scheduler {
                 self.fail(path, "invalid inference result".to_string());
                 continue;
             };
-            if self
+            match self
                 .deliver_callback(&manifest.callback_url, &callback)
                 .await
             {
-                if let Err(error) = tokio::fs::remove_dir_all(&path).await {
-                    self.fail(
-                        path,
-                        format!("callback acknowledged but queue cleanup failed: {error}"),
-                    );
+                Ok(()) => {
+                    if let Err(error) = tokio::fs::remove_dir_all(&path).await {
+                        self.fail(
+                            path,
+                            format!("callback acknowledged but queue cleanup failed: {error}"),
+                        );
+                    }
                 }
-            } else if let Err(error) = self.record_callback_failure(&path) {
-                self.fail(path, error.to_string());
+                Err(callback_error) => {
+                    self.log_callback_failure(&manifest, &callback_error);
+                    if let Err(error) = self.record_callback_failure(&path, &callback_error) {
+                        self.fail(path, error.to_string());
+                    }
+                }
             }
         }
     }
@@ -400,17 +407,19 @@ impl Scheduler {
         metadata.next_attempt_at <= chrono::Utc::now().timestamp()
     }
 
-    fn record_callback_failure(&self, job_path: &Path) -> Result<(), ServiceError> {
+    fn record_callback_failure(&self, job_path: &Path, error: &str) -> Result<(), ServiceError> {
         let metadata_path = job_path.join("callback.json");
         let mut state = std::fs::read(&metadata_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CallbackState>(&bytes).ok())
             .unwrap_or_default();
         state.attempts += 1;
+        state.last_error = Some(error.to_string());
         if state.attempts >= self.callback.max_attempts {
-            return Err(ServiceError::Upstream(
-                "callback retry attempts exhausted".to_string(),
-            ));
+            return Err(ServiceError::Upstream(format!(
+                "callback retry attempts exhausted after {} attempts: {error}",
+                state.attempts
+            )));
         }
         state.next_attempt_at =
             chrono::Utc::now().timestamp() + self.callback.retry_delay_seconds as i64;
@@ -421,21 +430,38 @@ impl Scheduler {
         file.sync_all().map_err(io_error)
     }
 
-    async fn deliver_callback(&self, callback_url: &str, callback: &serde_json::Value) -> bool {
-        let request = self
+    async fn deliver_callback(
+        &self,
+        callback_url: &str,
+        callback: &serde_json::Value,
+    ) -> Result<(), String> {
+        let response = self
             .client
             .post(callback_url)
             .header("x-momento-callback-key", &self.callback.key)
             .json(callback)
             .send()
-            .await;
-        match request {
-            Ok(response) => response.status().is_success(),
-            Err(error) => {
-                tracing::warn!("LLM callback delivery failed: {error}");
-                false
-            }
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
         }
+        let response_body = response
+            .text()
+            .await
+            .map_err(|error| format!("HTTP {status}; failed to read response body: {error}"))?;
+        let response_body = response_body.chars().take(4096).collect::<String>();
+        Err(format!("HTTP {status}: {response_body}"))
+    }
+
+    fn log_callback_failure(&self, manifest: &QueueManifest, error: &str) {
+        tracing::warn!(
+            job_id = %manifest.job_id,
+            callback_url = %manifest.callback_url,
+            error = %error,
+            "LLM callback delivery failed"
+        );
     }
 
     fn read_manifest(&self, path: &Path) -> Result<QueueManifest, ServiceError> {
@@ -458,6 +484,8 @@ impl Scheduler {
 struct CallbackState {
     attempts: usize,
     next_attempt_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
 }
 
 fn io_error(error: std::io::Error) -> ServiceError {

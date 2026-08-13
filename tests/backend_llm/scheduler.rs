@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn queue_acceptance_persists_raw_bytes_under_queuing() {
@@ -252,4 +254,76 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
         .path()
         .join(format!("callback_pending/{callback_job_id}/result.json"))
         .is_file());
+}
+
+#[tokio::test]
+async fn callback_failure_retains_http_status_and_response_body() {
+    let callback_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/callback"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_json(serde_json::json!({"detail": "Database error"})),
+        )
+        .mount(&callback_server)
+        .await;
+    let directory = tempdir().expect("queue directory");
+    let config = Arc::new(Config {
+        service: Vec::new(),
+        ..Config::default()
+    });
+    let scheduler = Arc::new(
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig {
+                poll_interval_seconds: 60,
+                active_batch_size: 1,
+            },
+            CallbackConfig {
+                request_timeout_seconds: 5,
+                retry_delay_seconds: 60,
+                max_attempts: 10,
+                key: "callback-key".to_string(),
+            },
+            Arc::new(Mutex::new(ServiceManager::new(config))),
+        )
+        .expect("scheduler"),
+    );
+    let job_id = "018f36e77c917cc89f7054252a33eaf4";
+    let job_path = directory.path().join(format!("callback_pending/{job_id}"));
+    std::fs::create_dir(&job_path).expect("callback job directory");
+    std::fs::write(
+        job_path.join("manifest.json"),
+        serde_json::to_vec(&QueueManifest {
+            job_id: job_id.to_string(),
+            media_id: 3,
+            task: "image_clustering".to_string(),
+            attempt: 1,
+            inputs: Vec::new(),
+            callback_url: format!("{}/callback", callback_server.uri()),
+        })
+        .expect("manifest JSON"),
+    )
+    .expect("manifest");
+    std::fs::write(job_path.join("result.json"), "{}").expect("result");
+
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    let callback_state_path = job_path.join("callback.json");
+    for _ in 0..50 {
+        if callback_state_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    scheduler_task.abort();
+
+    let callback_state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(callback_state_path).expect("callback failure state"),
+    )
+    .expect("callback state JSON");
+    let last_error = callback_state["last_error"]
+        .as_str()
+        .expect("last callback error");
+    assert!(last_error.contains("500 Internal Server Error"));
+    assert!(last_error.contains("Database error"));
 }

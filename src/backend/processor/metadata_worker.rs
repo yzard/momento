@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use tracing::warn;
 
 use crate::config::Config;
@@ -81,21 +81,27 @@ pub fn reset_all(pool: &DbPool) -> Result<i64, rusqlite::Error> {
 async fn process_cycle(config: &Config, pool: &DbPool) -> Result<(), rusqlite::Error> {
     queue_incomplete(pool)?;
     reclaim_expired_leases(pool, config.metadata_worker.lease_seconds)?;
-    let media_ids = claim_jobs(pool, config.metadata_worker.batch_size)?;
     let concurrency = config.metadata_worker.concurrency.max(1);
-    stream::iter(media_ids)
-        .for_each_concurrent(concurrency, |media_id| async move {
-            let outcome =
-                crate::processor::metadata::generate_media_metadata(pool, media_id, config)
-                    .await
-                    .and_then(|()| verify_ai_inputs(pool, media_id, config));
-            if let Err(error) =
-                finish_job(pool, media_id, outcome, config.metadata_worker.max_attempts)
-            {
-                warn!("failed to persist metadata job {media_id} outcome: {error}");
+    stream::unfold(pool, |pool| async move {
+        match claim_next_job(pool) {
+            Ok(Some(media_id)) => Some((media_id, pool)),
+            Ok(None) => None,
+            Err(error) => {
+                warn!("failed to claim next metadata job: {error}");
+                None
             }
-        })
-        .await;
+        }
+    })
+    .for_each_concurrent(concurrency, |media_id| async move {
+        let outcome = crate::processor::metadata::generate_media_metadata(pool, media_id, config)
+            .await
+            .and_then(|()| verify_ai_inputs(pool, media_id, config));
+        if let Err(error) = finish_job(pool, media_id, outcome, config.metadata_worker.max_attempts)
+        {
+            warn!("failed to persist metadata job {media_id} outcome: {error}");
+        }
+    })
+    .await;
     Ok(())
 }
 
@@ -134,17 +140,18 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
     Ok(())
 }
 
-pub fn claim_jobs(pool: &DbPool, batch_size: usize) -> Result<Vec<i64>, rusqlite::Error> {
+pub fn claim_next_job(pool: &DbPool) -> Result<Option<i64>, rusqlite::Error> {
     let mut connection = pool
         .get()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let transaction = connection.transaction()?;
-    let media_ids = transaction
-        .prepare(queries::metadata_jobs::CLAIM_QUEUED)?
-        .query_map([batch_size as i64], |row| row.get(0))?
-        .collect::<Result<Vec<i64>, _>>()?;
+    let media_id = transaction
+        .query_row(queries::metadata_jobs::CLAIM_NEXT_QUEUED, [], |row| {
+            row.get(0)
+        })
+        .optional()?;
     transaction.commit()?;
-    Ok(media_ids)
+    Ok(media_id)
 }
 
 pub fn reclaim_expired_leases(pool: &DbPool, lease_seconds: u64) -> Result<(), rusqlite::Error> {

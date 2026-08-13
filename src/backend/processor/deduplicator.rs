@@ -541,6 +541,25 @@ fn representative_match(
 }
 
 fn replace_clusters(pool: &DbPool, run_id: i64, clusters: Vec<PendingCluster>) -> AppResult<()> {
+    let cluster_count = clusters.len() as i64;
+    let cluster_payload = serde_json::to_string(
+        &clusters
+            .into_iter()
+            .enumerate()
+            .map(|(index, cluster)| {
+                serde_json::json!({
+                    "id": index + 1,
+                    "kind": cluster.kind.as_str(),
+                    "representativeMediaId": cluster.representative_media_id,
+                    "members": cluster.members.into_iter().map(|member| serde_json::json!({
+                        "mediaId": member.media_id,
+                        "cosineSimilarity": member.cosine_similarity,
+                        "perceptualHashDistance": member.perceptual_hash_distance,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )?;
     let connection = pool.get().map_err(AppError::Pool)?;
     let transaction = connection.unchecked_transaction()?;
     let locked_run =
@@ -550,25 +569,14 @@ fn replace_clusters(pool: &DbPool, run_id: i64, clusters: Vec<PendingCluster>) -
         return Ok(());
     }
     transaction.execute(queries::deduplicate::CLEAN_CLUSTERS, [])?;
-    let cluster_count = clusters.len() as i64;
-    for cluster in clusters {
-        transaction.execute(
-            queries::deduplicate::INSERT_CLUSTER,
-            rusqlite::params![cluster.kind.as_str(), cluster.representative_media_id],
-        )?;
-        let cluster_id = transaction.last_insert_rowid();
-        for member in cluster.members {
-            transaction.execute(
-                queries::deduplicate::INSERT_CLUSTER_MEMBER,
-                rusqlite::params![
-                    cluster_id,
-                    member.media_id,
-                    member.cosine_similarity,
-                    member.perceptual_hash_distance,
-                ],
-            )?;
-        }
-    }
+    transaction.execute(
+        queries::deduplicate::INSERT_CLUSTERS_FROM_JSON,
+        [&cluster_payload],
+    )?;
+    transaction.execute(
+        queries::deduplicate::INSERT_CLUSTER_MEMBERS_FROM_JSON,
+        [&cluster_payload],
+    )?;
     transaction.execute(
         queries::deduplicate::UPDATE_RUN_PROGRESS,
         rusqlite::params![0_i64, 0_i64, 0_i64, cluster_count, run_id],

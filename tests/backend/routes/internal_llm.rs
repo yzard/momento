@@ -1,9 +1,13 @@
 use crate::test_utils::{create_test_db, create_test_media, init_test_paths};
 use axum::http::StatusCode;
 use axum_test::TestServer;
+use base64::Engine;
 use momento_api::app::create_app;
 use momento_api::config::Config;
+use momento_api::database::{create_pool_at, init_database};
 use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
 
 fn callback_body(job_id: &str, media_id: i64, attempt: i64) -> serde_json::Value {
     serde_json::json!({ "jobId": job_id, "mediaId": media_id, "task": "ocr", "attempt": attempt, "status": "completed", "modelType": "ocr", "modelVersion": "test", "result": { "text": "recognized" } })
@@ -102,6 +106,122 @@ async fn callback_persists_every_video_frame_result() {
         )
         .expect("aggregate text");
     assert_eq!(aggregate_text, "first\nsecond");
+}
+
+#[tokio::test]
+async fn clustering_callback_persists_integer_capture_timestamp() {
+    let (application, pool) = create_callback_test_app();
+    let media_id = create_test_media(&pool, "clustering.jpg");
+    let connection = pool.get().expect("connection");
+    let run_id = connection
+        .query_row(
+            "INSERT INTO media_similarity_runs (trigger, status) VALUES ('manual', 'running') RETURNING id",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("similarity run");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status, attempts) VALUES ('callback-clustering', ?, ?, 'image_clustering', 'submitted', 1)", [media_id, run_id]).expect("job");
+    drop(connection);
+    let embedding = base64::engine::general_purpose::STANDARD.encode(vec![0_u8; 384 * 4]);
+    let request = serde_json::json!({
+        "jobId": "callback-clustering",
+        "mediaId": media_id,
+        "task": "image_clustering",
+        "attempt": 1,
+        "status": "completed",
+        "modelType": "image_clustering",
+        "modelVersion": "dinov2-small",
+        "result": {
+            "embedding": embedding,
+            "embeddingEncoding": "float32_le",
+            "embeddingDimensions": 384,
+            "perceptualHash": "0123456789abcdef"
+        }
+    });
+    let server = TestServer::new(application).expect("server");
+
+    server
+        .post("/api/v1/internal/llm/callback")
+        .add_header("x-momento-callback-key", "test-callback-key")
+        .json(&request)
+        .await
+        .assert_status_ok();
+
+    let connection = pool.get().expect("connection");
+    let capture_time_seconds: i64 = connection
+        .query_row(
+            "SELECT capture_time_seconds FROM media_similarity_index WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("capture timestamp");
+    assert_eq!(capture_time_seconds, 1_705_314_600);
+}
+
+#[tokio::test]
+async fn callback_returns_internal_database_detail_to_llm_service() {
+    let (application, pool) = create_callback_test_app();
+    let media_id = create_test_media(&pool, "callback-database-error.jpg");
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('callback-database-error', ?, 'ocr', 'submitted', 1)", [media_id]).expect("job");
+    connection
+        .execute("DROP TABLE media_text", [])
+        .expect("drop text table");
+    drop(connection);
+    let server = TestServer::new(application).expect("server");
+
+    let response = server
+        .post("/api/v1/internal/llm/callback")
+        .add_header("x-momento-callback-key", "test-callback-key")
+        .json(&callback_body("callback-database-error", media_id, 1))
+        .await;
+
+    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value = response.json();
+    assert!(body["detail"]
+        .as_str()
+        .expect("error detail")
+        .contains("no such table: media_text"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn callback_waits_for_concurrent_writer_instead_of_returning_busy() {
+    init_test_paths();
+    let directory = TempDir::new().expect("database directory");
+    let database_path = directory.path().join("database.sqlite");
+    let pool = create_pool_at(&database_path).expect("database pool");
+    let connection = pool.get().expect("connection");
+    init_database(&connection).expect("database schema");
+    drop(connection);
+    let media_id = create_test_media(&pool, "callback-contention.jpg");
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('callback-contention', ?, 'ocr', 'submitted', 1)", [media_id]).expect("job");
+    drop(connection);
+    let mut config = Config::default();
+    config.llm.callback_key = "test-callback-key".to_string();
+    let server = TestServer::new(create_app(Arc::new(config), pool)).expect("server");
+    let (writer_ready, callback_ready) = std::sync::mpsc::sync_channel(1);
+    let writer = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(database_path).expect("writer connection");
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("writer transaction");
+        writer_ready.send(()).expect("writer ready");
+        std::thread::sleep(Duration::from_millis(150));
+        connection
+            .execute_batch("ROLLBACK")
+            .expect("writer rollback");
+    });
+    callback_ready.recv().expect("writer lock");
+
+    server
+        .post("/api/v1/internal/llm/callback")
+        .add_header("x-momento-callback-key", "test-callback-key")
+        .json(&callback_body("callback-contention", media_id, 1))
+        .await
+        .assert_status_ok();
+
+    writer.join().expect("writer thread");
 }
 
 #[tokio::test]

@@ -1,4 +1,11 @@
-use axum::{extract::State, http::header::HeaderMap, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::header::HeaderMap,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
+use rusqlite::{Transaction, TransactionBehavior};
 
 use crate::auth::AppState;
 use crate::database::queries;
@@ -13,6 +20,17 @@ async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<LlmCallbackRequest>,
+) -> Response {
+    match process_callback(&state, &headers, request) {
+        Ok(response) => response.into_response(),
+        Err(error) => callback_error_response(error),
+    }
+}
+
+fn process_callback(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: LlmCallbackRequest,
 ) -> AppResult<Json<serde_json::Value>> {
     let callback_key = headers
         .get("x-momento-callback-key")
@@ -24,7 +42,7 @@ async fn callback(
         ));
     }
     let connection = state.pool.get()?;
-    let transaction = connection.unchecked_transaction()?;
+    let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
     let job: (i64, String, i64, String) = transaction
         .query_row(
             queries::llm_callback::SELECT_JOB,
@@ -102,6 +120,16 @@ async fn callback(
     }
     transaction.commit()?;
     Ok(Json(serde_json::json!({"status":"acknowledged"})))
+}
+
+fn callback_error_response(error: AppError) -> Response {
+    let detail = error.to_string();
+    let response = error.into_response();
+    let status = response.status();
+    if !status.is_server_error() {
+        return response;
+    }
+    (status, Json(serde_json::json!({"detail": detail}))).into_response()
 }
 
 fn persist_text_results(

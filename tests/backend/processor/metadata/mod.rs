@@ -171,22 +171,48 @@ fn metadata_claims_are_exclusive_and_expired_leases_are_recovered() {
         .expect("job");
     drop(connection);
     assert_eq!(
-        momento_api::processor::metadata_worker::claim_jobs(&pool, 1).expect("first claim"),
-        vec![media_id]
+        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("first claim"),
+        Some(media_id)
     );
-    assert!(
-        momento_api::processor::metadata_worker::claim_jobs(&pool, 1)
-            .expect("second claim")
-            .is_empty()
+    assert_eq!(
+        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("second claim"),
+        None
     );
     let connection = pool.get().expect("connection");
     connection.execute("UPDATE media_metadata_jobs SET claimed_at = datetime('now', '-10 minutes') WHERE media_id = ?", [media_id]).expect("expire lease");
     drop(connection);
     momento_api::processor::metadata_worker::reclaim_expired_leases(&pool, 30).expect("reclaim");
     assert_eq!(
-        momento_api::processor::metadata_worker::claim_jobs(&pool, 1).expect("reclaimed claim"),
-        vec![media_id]
+        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("reclaimed claim"),
+        Some(media_id)
     );
+}
+
+#[test]
+fn metadata_claims_drain_the_entire_eligible_queue() {
+    let pool = create_test_db();
+    let media_ids = (0..65)
+        .map(|index| create_test_media(&pool, &format!("queued-{index}.jpg")))
+        .collect::<Vec<_>>();
+    let connection = pool.get().expect("connection");
+    for media_id in &media_ids {
+        connection
+            .execute(
+                "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+                [media_id],
+            )
+            .expect("job");
+    }
+    drop(connection);
+
+    let mut claimed_ids = Vec::new();
+    while let Some(media_id) =
+        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("claim")
+    {
+        claimed_ids.push(media_id);
+    }
+
+    assert_eq!(claimed_ids, media_ids);
 }
 
 #[test]

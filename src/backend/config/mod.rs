@@ -322,11 +322,10 @@ pub struct RegenerateConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataWorkerConfig {
     #[serde(default = "default_metadata_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_metadata_batch_size")]
-    pub batch_size: usize,
     #[serde(default = "default_metadata_concurrency")]
     pub concurrency: usize,
     #[serde(default = "default_metadata_lease_seconds")]
@@ -337,10 +336,6 @@ pub struct MetadataWorkerConfig {
 
 fn default_metadata_poll_interval_seconds() -> u64 {
     10
-}
-
-fn default_metadata_batch_size() -> usize {
-    64
 }
 
 fn default_metadata_concurrency() -> usize {
@@ -357,7 +352,6 @@ impl Default for MetadataWorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: default_metadata_poll_interval_seconds(),
-            batch_size: default_metadata_batch_size(),
             concurrency: default_metadata_concurrency(),
             lease_seconds: default_metadata_lease_seconds(),
             max_attempts: default_metadata_max_attempts(),

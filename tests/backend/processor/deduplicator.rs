@@ -240,14 +240,15 @@ fn distinct_media_sets_remain_separate_after_canonicalization() {
     generate_clusters(&pool, run_id).expect("Failed to generate clusters");
 
     let connection = pool.get().expect("Failed to get connection");
-    let cluster_count: i64 = connection
+    let (cluster_count, member_count): (i64, i64) = connection
         .query_row(
-            "SELECT COUNT(*) FROM media_similarity_clusters",
+            "SELECT COUNT(DISTINCT clusters.id), COUNT(members.media_id) FROM media_similarity_clusters AS clusters JOIN media_similarity_cluster_members AS members ON members.cluster_id = clusters.id",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("Failed to count generated clusters");
     assert_eq!(cluster_count, 2);
+    assert_eq!(member_count, 4);
     assert_eq!(latest_run(&pool).unwrap().unwrap().clusters_created, 2);
 }
 

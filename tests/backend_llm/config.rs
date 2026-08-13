@@ -47,6 +47,14 @@ fn loads_playground_toml_configuration() {
     let clustering = config.service_for("image_clustering").unwrap();
     assert_eq!(clustering.model, "facebook/dinov2-small");
     assert_eq!(clustering.embedding_dimensions, 384);
+    assert!(clustering
+        .docker_command
+        .iter()
+        .any(|argument| argument.contains("transformers==4.46.3")));
+    assert!(clustering
+        .docker_command
+        .iter()
+        .any(|argument| argument.contains("--reinstall-package transformers")));
     assert_eq!(
         config.logging.file_path,
         std::path::PathBuf::from("playground/logs/llm-service.log")
