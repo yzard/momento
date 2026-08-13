@@ -5,6 +5,9 @@ use std::path::Path;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+use crate::config::Config;
+use crate::database::DbPool;
+
 #[derive(Debug, Default, Clone)]
 pub struct MediaMetadata {
     pub width: Option<i32>,
@@ -30,6 +33,16 @@ pub struct MediaMetadata {
     pub video_codec: Option<String>,
     pub focal_length_35mm: Option<f64>,
 }
+
+pub async fn generate_media_metadata(
+    pool: &DbPool,
+    media_id: i64,
+    config: &Config,
+) -> Result<(), String> {
+    generation::generate_media_metadata(pool, media_id, config).await
+}
+
+mod generation;
 
 pub fn supplemental_metadata_path(file_path: &Path) -> Option<std::path::PathBuf> {
     let file_name = file_path.file_name()?.to_str()?;

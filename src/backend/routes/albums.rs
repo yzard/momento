@@ -139,29 +139,57 @@ async fn update_album(
         return Err(AppError::NotFound("Album not found".to_string()));
     }
 
-    let mut updates = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-    if let Some(ref name) = request.name {
-        updates.push("name = ?");
-        params.push(Box::new(name.clone()));
-    }
-
-    if let Some(ref desc) = request.description {
-        updates.push("description = ?");
-        params.push(Box::new(desc.clone()));
-    }
-
-    if let Some(cover_id) = request.cover_media_id {
-        updates.push("cover_media_id = ?");
-        params.push(Box::new(cover_id));
-    }
-
-    if !updates.is_empty() {
-        params.push(Box::new(request.album_id));
-        let sql = format!("UPDATE albums SET {} WHERE id = ?", updates.join(", "));
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        execute_query(&conn, &sql, &param_refs)?;
+    match (&request.name, &request.description, request.cover_media_id) {
+        (Some(name), Some(description), Some(cover_media_id)) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_NAME_DESCRIPTION_COVER_MEDIA_ID,
+                &[name, description, &cover_media_id, &request.album_id],
+            )?;
+        }
+        (Some(name), Some(description), None) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_NAME_DESCRIPTION,
+                &[name, description, &request.album_id],
+            )?;
+        }
+        (Some(name), None, Some(cover_media_id)) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_NAME_COVER_MEDIA_ID,
+                &[name, &cover_media_id, &request.album_id],
+            )?;
+        }
+        (None, Some(description), Some(cover_media_id)) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_DESCRIPTION_COVER_MEDIA_ID,
+                &[description, &cover_media_id, &request.album_id],
+            )?;
+        }
+        (Some(name), None, None) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_NAME,
+                &[name, &request.album_id],
+            )?;
+        }
+        (None, Some(description), None) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_DESCRIPTION,
+                &[description, &request.album_id],
+            )?;
+        }
+        (None, None, Some(cover_media_id)) => {
+            execute_query(
+                &conn,
+                queries::albums::UPDATE_COVER_MEDIA_ID,
+                &[&cover_media_id, &request.album_id],
+            )?;
+        }
+        (None, None, None) => {}
     }
 
     let album = fetch_one(

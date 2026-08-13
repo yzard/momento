@@ -1,8 +1,8 @@
 import ImportPanel from '../components/admin/ImportPanel'
 import MetadataPanel from '../components/admin/MetadataPanel'
 import UserManagement from '../components/admin/UserManagement'
-import DeduplicatePanel from '../components/admin/DeduplicatePanel'
-import { Database, Users, ShieldCheck, FileText, ScanSearch } from 'lucide-react'
+import AiPanel from '../components/admin/AiPanel'
+import { Database, Users, ShieldCheck, FileText } from 'lucide-react'
 
 export default function Admin() {
   return (
@@ -19,34 +19,19 @@ export default function Admin() {
         </div>
       </div>
 
-      <div className="space-y-12">
-        <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
+        <div className="space-y-12">
+         <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
             <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">
                 <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
                     <Database className="w-5 h-5" />
                 </div>
                 <div>
-                    <h2 className="text-xl font-display font-semibold text-foreground">Data Import</h2>
+                    <h2 className="text-xl font-display font-semibold text-foreground">Import Media</h2>
                     <p className="text-sm text-muted-foreground">Import photos and videos from external sources.</p>
                 </div>
             </div>
             <div className="p-8">
                  <ImportPanel />
-            </div>
-        </section>
-
-        <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
-            <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">
-                <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
-                    <ScanSearch className="w-5 h-5" />
-                </div>
-                <div>
-                    <h2 className="text-xl font-display font-semibold text-foreground">Deduplication</h2>
-                    <p className="text-sm text-muted-foreground">Control global similarity indexing and clustering.</p>
-                </div>
-            </div>
-            <div className="p-8">
-                 <DeduplicatePanel />
             </div>
         </section>
 
@@ -60,10 +45,12 @@ export default function Admin() {
                     <p className="text-sm text-muted-foreground">Manage photo and video metadata and thumbnails.</p>
                 </div>
             </div>
-            <div className="p-8">
-                 <MetadataPanel />
-            </div>
+             <div className="p-8">
+                  <MetadataPanel />
+             </div>
         </section>
+
+        <AiPanel />
 
         <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
             <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">

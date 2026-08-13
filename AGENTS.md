@@ -6,6 +6,7 @@
 
 Momento is a self-hosted photo management application with:
 - **Backend**: Axum + SQLite (Rust) in `src/backend/`
+- **LLM service**: Separate Axum durable-inference queue in `src/backend_llm/`
 - **Frontend**: React + TypeScript + Vite + Tailwind in `src/frontend/`
 
 Monorepo managed with pnpm workspaces and Turborepo.
@@ -38,15 +39,31 @@ Three rules are worth repeating because they are the ones most often violated:
 
 ## LLM Task Scheduling
 
-The standalone `llm-service` keeps only one model runtime active because OCR and image-tagging
-models may reserve the same accelerator or CPU memory. The API must therefore group queued work
-by LLM service type and finish one type's batch before starting the next type's batch. Do not
-interleave OCR, image-tagging, or any future service type in the same queue. When adding a new
-service type, add it as an explicit batch in the API scheduler and add the corresponding on-demand
-runtime transition in `src/backend_llm/provider.rs`.
+Momento processing is strictly staged: import stores original files and creates a metadata job;
+metadata produces metadata, UI thumbnails, and task-ready AI inputs; AI workers submit durable
+jobs; llm-service performs inference; callbacks persist results in Momento SQLite. No stage runs
+its downstream stage inline.
 
-The LLM service starts a model only when its first request arrives, reuses that model for
-consecutive requests of the same type, and shuts it down before activating another type.
+`llm-service` is a separate service and must not assume a shared filesystem. Momento sends a
+manifest-first, self-contained multipart request containing prepared raw image/frame bytes. The LLM disk queue
+stores those bytes unchanged under `queue/queuing/`, then moves jobs through `processing/`,
+`callback_pending/`, and `failed/`. A successful callback deletes its job directory; there is no
+`completed/` queue state and no configurable queue-size limit.
+
+Only one model runtime may be active. The scheduler drains one task type (`ocr`,
+`image_tagging`, or `image_clustering`) before switching runtimes. Queue data is loaded into
+memory only for the bounded active inference batch. llm-service never generates thumbnails,
+crops/resizes images, or extracts video frames; Momento prepares all inference inputs first.
+
+API and source directories mirror each other: `/import/*`, `/metadata/*`, `/ai/*`, and
+`/internal/llm/*` have matching backend routes, processors, models, queries, frontend API
+callers, and mirrored tests. AI triggers require an administrator; internal LLM callbacks use
+the configured callback key rather than a user JWT.
+
+Multi-input inference preserves each descriptor sequence and optional video frame timestamp through
+the queue and callback. Momento stores input-level OCR/tagging results in `media_text_inputs` and
+derives the ordered media-level text in `media_text`. Metadata generation lives in
+`processor/metadata/`; `processor/regenerator.rs` does not exist.
 
 ---
 
@@ -57,7 +74,7 @@ environment variables. A missing or malformed config is a hard startup failure �
 falls back to defaults, because that would silently start the server against the wrong
 data directory.
 
-Every filesystem location derives from one config value:
+Momento filesystem locations derive from `storage.data_dir`:
 
 ```yaml
 storage:
@@ -68,6 +85,14 @@ storage:
 `main` calls `constants::init_paths(&config.storage.data_dir)` once after parsing the
 config; everything else reads `constants::paths()`. Never hardcode a path under the data
 directory and never add a new `std::env::var` call — add a config field instead.
+
+llm-service has separate `storage.data_dir` and `storage.queue_dir` settings. Its queue directory
+must be durable and must not be a Momento originals, previews, or thumbnail directory. Queue jobs
+are accepted only with a non-empty hexadecimal Momento job ID and a manifest that appears before
+all `input-N` multipart fields.
+
+`schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
+breaking schema changes require a fresh database for development and playground data.
 
 `docker/Dockerfile` and `docker/entrypoint.sh` are the one place environment variables
 belong (`PUID`/`PGID`/`UMASK`/`TZ`); they translate into the config file the entrypoint
@@ -254,8 +279,11 @@ src/
 │   ├── config/             # YAML config loading
 │   ├── database/           # SQLite pool, schema, queries
 │   ├── models/             # Request/response DTOs (serde)
-│   ├── processor/          # Media processing, thumbnails, import
-│   ├── routes/             # Axum route handlers
+│   ├── processor/          # Import, metadata, AI, deduplication, thumbnails
+│   ├── routes/             # Public and internal Axum route handlers
+│   │   ├── ai/             # AI control/status endpoints
+│   │   ├── import/         # Local/WebDAV import endpoints
+│   │   └── internal/llm/   # Callback-key authenticated LLM callback
 │   ├── utils/              # Helpers (datetime, geocoding)
 │   ├── webdav/             # WebDAV server and upload processing
 │   ├── app.rs              # App factory
@@ -266,7 +294,7 @@ src/
 │   ├── main.rs             # Entry point
 │   └── Cargo.toml          # Rust dependencies
 │
-├── backend_llm/            # llm-service binary (separate crate)
+├── backend_llm/            # llm-service binary: providers, manifest queue, scheduler
 │
 └── frontend/
     ├── api/                # API client modules
@@ -341,13 +369,14 @@ one means moving or deleting the other. A directory present in `src/` but missin
 ## API Conventions
 
 **Endpoint Pattern**: `/api/v1/<resource>/<operation>`
-- Resources: `user`, `media`, `album`, `tag`, `share`, `import`, `map`, `timeline`, `trash`
+- Resources: `user`, `media`, `album`, `tag`, `share`, `import`, `metadata`, `ai`, `map`, `timeline`, `trash`
 - Operations: `list`, `get`, `create`, `update`, `delete`
 
 **Authentication**:
 - Bearer token in `Authorization` header
 - Token refresh via `/api/v1/user/refresh`
 - Basic auth only for initial login (`/api/v1/user/authenticate`)
+- `/api/v1/internal/llm/callback` is the exception: it uses `x-momento-callback-key`, never a JWT.
 
 **Request/Response**:
 - All bodies are JSON
@@ -360,6 +389,7 @@ one means moving or deleting the other. A directory present in `src/` but missin
 
 - SQLite with r2d2 connection pooling
 - Schema in `src/backend/database/schema.sql`
+- Current-schema initialization only; no migration framework or compatibility DDL.
 - Helper functions in `src/backend/database/mod.rs`:
   - `fetch_one()`, `fetch_all()` for queries
   - `execute_query()` for mutations

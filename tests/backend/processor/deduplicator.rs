@@ -1,7 +1,7 @@
 use momento_api::database::queries;
 use momento_api::processor::deduplicator::{
-    blob_to_embedding, cosine_similarity, create_run, embedding_to_blob, generate_clusters,
-    latest_run, recover_interrupted_runs, request_cancel,
+    blob_to_embedding, cosine_similarity, create_run, embedding_to_blob, finalize_ready_runs,
+    generate_clusters, latest_run, recover_interrupted_runs, request_cancel,
 };
 
 use crate::test_utils::{create_test_db, create_test_media};
@@ -59,7 +59,51 @@ fn scan_claim_is_persistent_and_exclusive() {
     assert_eq!(latest_run(&pool).unwrap().unwrap().id, run_id);
 
     recover_interrupted_runs(&pool).expect("Recovery should succeed");
-    assert_eq!(latest_run(&pool).unwrap().unwrap().status, "interrupted");
+    assert_eq!(latest_run(&pool).unwrap().unwrap().status, "running");
+}
+
+#[test]
+fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "cancel.jpg");
+    let run_id = create_run(&pool, "manual", None).expect("run");
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('cancel-job', ?, ?, 'image_clustering', 'queued')", rusqlite::params![media_id, run_id]).expect("job");
+    drop(connection);
+    assert!(request_cancel(&pool).expect("cancel"));
+    finalize_ready_runs(&pool).expect("finalize cancellation");
+    let connection = pool.get().expect("connection");
+    let run_status: String = connection
+        .query_row(
+            "SELECT status FROM media_similarity_runs WHERE id = ?",
+            [run_id],
+            |row| row.get(0),
+        )
+        .expect("run status");
+    let job_status: String = connection
+        .query_row(
+            "SELECT status FROM llm_jobs WHERE id = 'cancel-job'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("job status");
+    assert_eq!(run_status, "cancelled");
+    assert_eq!(job_status, "cancelled");
+}
+
+#[test]
+fn failed_clustering_job_fails_deduplicate_run() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "failed.jpg");
+    let run_id = create_run(&pool, "scheduled", Some("2026-08-12T03:00:00Z")).expect("run");
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('failed-job', ?, ?, 'image_clustering', 'failed')", rusqlite::params![media_id, run_id]).expect("job");
+    drop(connection);
+    finalize_ready_runs(&pool).expect("finalize failure");
+    assert_eq!(
+        latest_run(&pool).expect("latest").expect("run").status,
+        "failed"
+    );
 }
 
 #[test]

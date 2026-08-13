@@ -22,14 +22,14 @@ describe('deduplicateApi', () => {
     post.mockResolvedValue({ data: response })
 
     await expect(deduplicateApi.groups({ cursor: '12', limit: 20 })).resolves.toEqual(response)
-    expect(post).toHaveBeenCalledWith('/deduplicate/groups', { cursor: '12', limit: 20 })
+    expect(post).toHaveBeenCalledWith('/ai/deduplicate/groups', { cursor: '12', limit: 20 })
   })
 
   it.each([
-    ['start', '/deduplicate/start'],
-    ['status', '/deduplicate/status'],
-    ['cancel', '/deduplicate/cancel'],
-    ['clean', '/deduplicate/clean'],
+    ['start', '/ai/deduplicate/start'],
+    ['status', '/ai/deduplicate/status'],
+    ['cancel', '/ai/deduplicate/cancel'],
+    ['clean', '/ai/deduplicate/clean'],
   ] as const)('calls the %s operation', async (operation, path) => {
     post.mockResolvedValue({ data: { message: 'ok', status: 'idle' } })
 

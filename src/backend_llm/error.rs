@@ -10,6 +10,8 @@ use thiserror::Error;
 pub enum ServiceError {
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("authentication failed")]
     Authentication,
     #[error("this inference task is not configured")]
@@ -26,6 +28,7 @@ impl IntoResponse for ServiceError {
     fn into_response(self) -> Response {
         let (status, detail) = match self {
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Authentication => (StatusCode::UNAUTHORIZED, "invalid API key".to_string()),
             Self::NotImplemented(message) => (StatusCode::NOT_IMPLEMENTED, message),
             Self::Configuration(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),

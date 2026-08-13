@@ -1,4 +1,148 @@
+pub mod import {
+    pub const INSERT_IMPORTING_MEDIA: &str = r#"
+    INSERT INTO media (
+        user_id
+      , filename
+      , original_filename
+      , file_path
+      , media_type
+      , mime_type
+      , file_size
+      , import_state
+      , import_source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'importing', ?)
+    "#;
+
+    pub const MARK_IMPORTED: &str = r#"
+    UPDATE media
+       SET filename = ?
+         , file_path = ?
+         , import_state = 'imported'
+         , import_error = NULL
+         , imported_at = datetime('now')
+     WHERE id = ?
+       AND import_state = 'importing'
+    "#;
+
+    pub const MARK_FAILED: &str = r#"
+    UPDATE media
+       SET import_state = 'failed'
+         , import_error = ?
+     WHERE id = ?
+       AND import_state = 'importing'
+    "#;
+
+    pub const SELECT_INTERRUPTED: &str = r#"
+    SELECT id
+     , file_path
+     , original_filename
+      FROM media
+     WHERE import_state = 'importing'
+     ORDER BY id
+    "#;
+    pub const INSERT_JOB: &str = "INSERT INTO import_jobs (source, status) VALUES (?, 'running')";
+    pub const SELECT_LATEST_JOB: &str = "SELECT status, total_files, processed_files, successful_imports, failed_imports, started_at, completed_at, last_error FROM import_jobs ORDER BY id DESC LIMIT 1";
+    pub const SET_JOB_TOTAL: &str =
+        "UPDATE import_jobs SET total_files = ? WHERE id = ? AND status = 'running'";
+    pub const SET_WEBDAV_JOB_TOTAL: &str = "UPDATE import_jobs SET total_files = ? WHERE id = ?";
+    pub const COMPLETE_JOB: &str = "UPDATE import_jobs SET status = CASE WHEN failed_imports = 0 THEN 'completed' ELSE 'failed' END, completed_at = datetime('now') WHERE id = ? AND status = 'running'";
+    pub const UPDATE_JOB_PROGRESS: &str = "UPDATE import_jobs SET processed_files = processed_files + 1, successful_imports = successful_imports + CASE WHEN ? THEN 1 ELSE 0 END, failed_imports = failed_imports + CASE WHEN ? THEN 0 ELSE 1 END, last_error = CASE WHEN ? = '' THEN last_error ELSE ? END WHERE id = ? AND status = 'running'";
+}
+
+pub mod metadata_jobs {
+    pub const INSERT_QUEUED: &str = r#"
+    INSERT INTO media_metadata_jobs (media_id, status, available_at)
+    VALUES (?, 'queued', datetime('now'))
+    ON CONFLICT(media_id) DO NOTHING
+    "#;
+
+    pub const QUEUE_INCOMPLETE: &str = r#"
+    INSERT INTO media_metadata_jobs (media_id, status, available_at)
+    SELECT media.id
+         , 'queued'
+         , datetime('now')
+      FROM media
+      LEFT JOIN media_metadata ON media_metadata.media_id = media.id
+     WHERE media.import_state = 'imported'
+       AND media_metadata.media_id IS NULL
+    ON CONFLICT(media_id) DO UPDATE SET
+        status = CASE
+            WHEN media_metadata_jobs.status = 'failed' THEN 'queued'
+            ELSE media_metadata_jobs.status
+        END
+      , available_at = CASE
+            WHEN media_metadata_jobs.status = 'failed' THEN datetime('now')
+            ELSE media_metadata_jobs.available_at
+        END
+      , updated_at = datetime('now')
+    "#;
+
+    pub const SELECT_STATUS_COUNTS: &str = r#"
+    SELECT status
+         , COUNT(*)
+      FROM media_metadata_jobs
+     GROUP BY status
+    "#;
+
+    pub const SELECT_ALL_MEDIA_IDS: &str = "SELECT id FROM media";
+    pub const DELETE_TEXT: &str = "DELETE FROM media_text";
+    pub const DELETE_TEXT_INPUTS: &str = "DELETE FROM media_text_inputs";
+    pub const DELETE_AI_INPUTS: &str = "DELETE FROM media_ai_inputs";
+    pub const DELETE_LLM_JOBS: &str = "DELETE FROM llm_jobs";
+    pub const DELETE_SIMILARITY_CLUSTERS: &str = "DELETE FROM media_similarity_clusters";
+    pub const DELETE_SIMILARITY_BANDS: &str = "DELETE FROM media_similarity_hash_bands";
+    pub const DELETE_SIMILARITY_INDEX: &str = "DELETE FROM media_similarity_index";
+    pub const DELETE_SIMILARITY_DIRTY: &str = "DELETE FROM media_similarity_dirty";
+    pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
+    pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
+    pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
+    pub const MARK_IMPORTED_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) SELECT id, datetime('now') FROM media WHERE import_state = 'imported'";
+    pub const SELECT_INPUT_PATHS: &str =
+        "SELECT file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
+    pub const CLAIM_QUEUED: &str = "UPDATE media_metadata_jobs SET status = 'processing', claimed_at = datetime('now'), attempts = attempts + 1, updated_at = datetime('now') WHERE media_id IN (SELECT media_id FROM media_metadata_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY media_id LIMIT ?) AND status = 'queued' RETURNING media_id";
+    pub const RECLAIM_EXPIRED: &str = "UPDATE media_metadata_jobs SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), last_error = 'metadata worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', ?)";
+    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = 'completed', completed_at = datetime('now'), last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
+    pub const MARK_FAILED_OR_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END, available_at = CASE WHEN attempts >= ? THEN available_at ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = ?, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
+    pub const SELECT_FAILURES: &str = "SELECT last_error FROM media_metadata_jobs WHERE status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
+}
+
+pub mod ai_jobs {
+    pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY created_at LIMIT ?";
+    pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued'";
+    pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const SELECT_INPUTS: &str = "SELECT sequence, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
+    pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND claimed_at < datetime('now', '-5 minutes')";
+    pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const SELECT_STATUS_COUNTS: &str =
+        "SELECT status, COUNT(*) FROM llm_jobs WHERE task = ? GROUP BY status";
+    pub const SELECT_FAILURES: &str = "SELECT last_error FROM llm_jobs WHERE task = ? AND status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
+    pub const DELETE_TEXT_FOR_TASK: &str = "DELETE FROM media_text WHERE model_type = ?";
+    pub const CANCEL_ACTIVE_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
+}
+
+pub mod llm_callback {
+    pub const SELECT_JOB: &str =
+        "SELECT media_id, task, attempts, status FROM llm_jobs WHERE id = ?";
+    pub const MARK_COMPLETED: &str = "UPDATE llm_jobs SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
+    pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
+    pub const UPSERT_TEXT: &str = "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, ?, ?) ON CONFLICT(media_id, model_type) DO UPDATE SET model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
+    pub const UPSERT_INPUT_TEXT: &str = "INSERT INTO media_text_inputs (media_id, model_type, sequence, frame_timestamp_ms, model_version, string) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, model_type, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
+    pub const SELECT_CLUSTER_MEDIA: &str = "SELECT media.content_hash, strftime('%s', media_metadata.date_taken) FROM media LEFT JOIN media_metadata ON media_metadata.media_id = media.id WHERE media.id = ?";
+    pub const UPSERT_SIMILARITY_INDEX: &str = "INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, capture_time_seconds, processing_status, processing_error) VALUES (?, ?, ?, 'prepared-input-v1', ?, ?, ?, 1, NULL) ON CONFLICT(media_id) DO UPDATE SET content_hash = excluded.content_hash, model_version = excluded.model_version, preprocessing_version = excluded.preprocessing_version, embedding = excluded.embedding, perceptual_hash = excluded.perceptual_hash, capture_time_seconds = excluded.capture_time_seconds, indexed_at = datetime('now'), processing_status = 1, processing_error = NULL";
+    pub const DELETE_HASH_BANDS: &str =
+        "DELETE FROM media_similarity_hash_bands WHERE media_id = ?";
+    pub const INSERT_HASH_BAND: &str = "INSERT INTO media_similarity_hash_bands (media_id, band_index, band_value) VALUES (?, ?, ?)";
+    pub const UPSERT_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) VALUES (?, datetime('now')) ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at";
+}
+
 pub mod media {
+    pub const INSERT_RTREE: &str =
+        "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)";
+    pub const DELETE_RTREE: &str = "DELETE FROM media_rtree WHERE media_id = ?";
+    pub const UPSERT_EDITABLE_METADATA: &str = "INSERT INTO media_metadata (media_id, date_taken, gps_latitude, gps_longitude) VALUES (?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET date_taken = COALESCE(excluded.date_taken, media_metadata.date_taken), gps_latitude = COALESCE(excluded.gps_latitude, media_metadata.gps_latitude), gps_longitude = COALESCE(excluded.gps_longitude, media_metadata.gps_longitude)";
+    pub const UPSERT_GEOHASH: &str = "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash";
     pub const INSERT: &str = r#"
     INSERT INTO media (
         user_id
@@ -10,7 +154,6 @@ pub mod media {
       , file_size
       , content_hash
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(content_hash) DO NOTHING
     "#;
 
     pub const UPDATE_FILE_LOCATION: &str = r#"
@@ -593,7 +736,15 @@ pub mod media_text {
     "#;
 }
 
-pub mod regenerator {
+pub mod metadata {
+    pub const SELECT_IMPORTED_MEDIA: &str =
+        "SELECT file_path, media_type FROM media WHERE id = ? AND import_state = 'imported'";
+    pub const DELETE_RTREE_FOR_MEDIA: &str = "DELETE FROM media_rtree WHERE media_id = ?";
+    pub const INSERT_RTREE: &str = "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)";
+    pub const UPSERT_GEOHASH: &str = "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash";
+    pub const DELETE_AI_INPUTS_FOR_TASK: &str =
+        "DELETE FROM media_ai_inputs WHERE media_id = ? AND task = ?";
+    pub const INSERT_AI_INPUT: &str = "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, ?, ?, ?, ?, 'image/jpeg', ?, ?, ?)";
     pub const SELECT_THUMBNAILS: &str = r#"
     SELECT m.id
          , mm.thumbnail_path
@@ -701,6 +852,17 @@ pub mod regenerator {
 }
 
 pub mod albums {
+    pub const UPDATE_NAME: &str = "UPDATE albums SET name = ? WHERE id = ?";
+    pub const UPDATE_DESCRIPTION: &str = "UPDATE albums SET description = ? WHERE id = ?";
+    pub const UPDATE_COVER_MEDIA_ID: &str = "UPDATE albums SET cover_media_id = ? WHERE id = ?";
+    pub const UPDATE_NAME_DESCRIPTION: &str =
+        "UPDATE albums SET name = ?, description = ? WHERE id = ?";
+    pub const UPDATE_NAME_COVER_MEDIA_ID: &str =
+        "UPDATE albums SET name = ?, cover_media_id = ? WHERE id = ?";
+    pub const UPDATE_DESCRIPTION_COVER_MEDIA_ID: &str =
+        "UPDATE albums SET description = ?, cover_media_id = ? WHERE id = ?";
+    pub const UPDATE_NAME_DESCRIPTION_COVER_MEDIA_ID: &str =
+        "UPDATE albums SET name = ?, description = ?, cover_media_id = ? WHERE id = ?";
     pub const INSERT: &str = r#"
     INSERT INTO albums (
         user_id
@@ -937,6 +1099,9 @@ pub mod map {
 }
 
 pub mod users {
+    pub const UPDATE_ROLE: &str = "UPDATE users SET role = ? WHERE id = ?";
+    pub const UPDATE_ACTIVE: &str = "UPDATE users SET is_active = ? WHERE id = ?";
+    pub const UPDATE_ROLE_ACTIVE: &str = "UPDATE users SET role = ?, is_active = ? WHERE id = ?";
     pub const SELECT_ID_BY_CREDENTIALS: &str = r#"
     SELECT id
       FROM users
@@ -1371,6 +1536,19 @@ pub mod access {
 }
 
 pub mod deduplicate {
+    pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
+    pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
+    pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";
+    pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
+    pub const SELECT_ACTIVE_RUNS: &str =
+        "SELECT id, status FROM media_similarity_runs WHERE status IN ('running', 'cancelling')";
+    pub const CANCEL_UNSUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting')";
+    pub const MARK_RUN_CANCELLED: &str = "UPDATE media_similarity_runs SET status = 'cancelled', completed_at = datetime('now') WHERE id = ?";
+    pub const COUNT_PENDING_JOBS: &str = "SELECT COUNT(*) FROM llm_jobs WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const COUNT_FAILED_JOBS: &str =
+        "SELECT COUNT(*) FROM llm_jobs WHERE deduplicate_run_id = ? AND status = 'failed'";
+    pub const MARK_RUN_FAILED: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'one or more clustering jobs failed' WHERE id = ?";
+    pub const MARK_RUN_COMPLETED: &str = "UPDATE media_similarity_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ? AND status = 'running'";
     pub const INTERRUPT_RUNNING: &str = r#"
     UPDATE media_similarity_runs
        SET status = 'interrupted'

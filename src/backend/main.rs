@@ -5,8 +5,10 @@ use momento_api::constants::{init_paths, paths};
 use momento_api::cronjob::run_cronjobs;
 use momento_api::database::{create_pool, init_database, queries};
 use momento_api::logging::{init_logging, install_panic_hook};
-use momento_api::processor::importer::start_webdav_import_job;
-use momento_api::processor::regenerator::generate_missing_metadata;
+use momento_api::processor::ai;
+use momento_api::processor::import::recover_interrupted_imports;
+use momento_api::processor::import::start_webdav_import_job;
+use momento_api::processor::metadata_worker;
 use momento_api::routes::cleanup_expired_trash;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -99,13 +101,36 @@ fn start_background_tasks(
     let pool_clone = pool.clone();
 
     tokio::spawn(async move {
-        generate_missing_metadata(&config_clone, &pool_clone).await;
-
         if let Ok(conn) = pool_clone.get() {
             let _ = cleanup_expired_trash(&conn);
         }
 
         run_cronjobs(config_clone, pool_clone).await;
+    });
+
+    let metadata_config = Arc::clone(&config);
+    let metadata_pool = pool.clone();
+    tokio::spawn(async move {
+        metadata_worker::run(metadata_config, metadata_pool).await;
+    });
+
+    let ai_config = Arc::clone(&config);
+    let ai_pool = pool.clone();
+    tokio::spawn(async move {
+        ai::run(ai_config, ai_pool).await;
+    });
+
+    let deduplicate_pool = pool.clone();
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(5);
+        loop {
+            if let Err(error) =
+                momento_api::processor::deduplicator::finalize_ready_runs(&deduplicate_pool)
+            {
+                tracing::warn!("deduplicate finalization failed: {error}");
+            }
+            tokio::time::sleep(interval).await;
+        }
     });
 
     if config.webdav.enabled {
@@ -172,6 +197,7 @@ async fn main() {
 
     momento_api::processor::deduplicator::recover_interrupted_runs(&pool)
         .expect("Failed to recover interrupted deduplicate scans");
+    recover_interrupted_imports(&pool).expect("Failed to recover interrupted imports");
 
     // Create default admin if needed
     create_default_admin(&pool, &config);

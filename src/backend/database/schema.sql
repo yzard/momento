@@ -18,7 +18,11 @@ CREATE TABLE IF NOT EXISTS media (
     media_type TEXT CHECK(media_type IN ('image', 'video')) NOT NULL,
     mime_type TEXT,
     file_size INTEGER,
-    content_hash TEXT UNIQUE,
+    content_hash TEXT,
+    import_state TEXT NOT NULL DEFAULT 'imported' CHECK(import_state IN ('importing', 'imported', 'failed')),
+    import_source TEXT NOT NULL DEFAULT 'local' CHECK(import_source IN ('local', 'webdav')),
+    import_error TEXT,
+    imported_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -137,6 +141,83 @@ CREATE TABLE IF NOT EXISTS media_text (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (media_id, model_type),
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_text_inputs (
+    media_id INTEGER NOT NULL,
+    model_type TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    frame_timestamp_ms INTEGER,
+    model_version TEXT NOT NULL,
+    string TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (media_id, model_type, sequence),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_metadata_jobs (
+    media_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL DEFAULT (datetime('now')),
+    claimed_at TEXT,
+    completed_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL CHECK(source IN ('local', 'webdav')),
+    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+    total_files INTEGER NOT NULL DEFAULT 0,
+    processed_files INTEGER NOT NULL DEFAULT 0,
+    successful_imports INTEGER NOT NULL DEFAULT 0,
+    failed_imports INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS media_ai_inputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL,
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering')),
+    sequence INTEGER NOT NULL,
+    input_kind TEXT NOT NULL CHECK(input_kind IN ('image', 'video_frame')),
+    file_path TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    frame_timestamp_ms INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (media_id, task, sequence),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS llm_jobs (
+    id TEXT PRIMARY KEY,
+    media_id INTEGER NOT NULL,
+    deduplicate_run_id INTEGER,
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering')),
+    status TEXT NOT NULL CHECK(status IN ('queued', 'submitting', 'submitted', 'completed', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL DEFAULT (datetime('now')),
+    claimed_at TEXT,
+    submitted_at TEXT,
+    completed_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+    FOREIGN KEY (deduplicate_run_id) REFERENCES media_similarity_runs(id) ON DELETE CASCADE,
+    CHECK(
+        (task IN ('ocr', 'image_tagging') AND deduplicate_run_id IS NULL)
+        OR (task = 'image_clustering' AND deduplicate_run_id IS NOT NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS media_similarity_runs (
@@ -282,6 +363,32 @@ CREATE INDEX IF NOT EXISTS idx_media_content_hash
     ON media (content_hash)
     WHERE content_hash IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS idx_media_import_state
+    ON media (import_state, id);
+
+CREATE INDEX IF NOT EXISTS idx_media_metadata_jobs_claim
+    ON media_metadata_jobs (status, available_at, media_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_import_jobs_single_running
+    ON import_jobs ((1))
+    WHERE status = 'running';
+
+CREATE INDEX IF NOT EXISTS idx_media_ai_inputs_media_task
+    ON media_ai_inputs (media_id, task, sequence);
+
+CREATE INDEX IF NOT EXISTS idx_llm_jobs_claim
+    ON llm_jobs (status, available_at, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_media_task
+    ON llm_jobs (media_id, task)
+    WHERE task IN ('ocr', 'image_tagging')
+      AND status IN ('queued', 'submitting', 'submitted');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_clustering
+    ON llm_jobs (deduplicate_run_id, media_id)
+    WHERE task = 'image_clustering'
+      AND status IN ('queued', 'submitting', 'submitted');
+
 CREATE INDEX IF NOT EXISTS idx_albums_user
     ON albums (user_id, created_at DESC);
 
@@ -329,9 +436,3 @@ CREATE INDEX IF NOT EXISTS idx_media_similarity_members_media
 
 CREATE INDEX IF NOT EXISTS idx_media_similarity_members_cluster
     ON media_similarity_cluster_members (cluster_id, media_id);
-
-INSERT OR IGNORE INTO media_similarity_dirty (media_id)
-SELECT media.id
-  FROM media
-  LEFT JOIN media_similarity_index ON media_similarity_index.media_id = media.id
- WHERE media_similarity_index.media_id IS NULL;

@@ -39,7 +39,7 @@ async fn groups_only_return_clusters_with_two_visible_items() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/deduplicate/groups")
+        .post("/api/v1/ai/deduplicate/groups")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
         .json(&json!({"cursor": null, "limit": 10}))
         .await;
@@ -95,7 +95,7 @@ async fn groups_canonicalize_identical_sets_before_cursor_pagination() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let first_page = server
-        .post("/api/v1/deduplicate/groups")
+        .post("/api/v1/ai/deduplicate/groups")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
         .json(&json!({"cursor": null, "limit": 1}))
         .await;
@@ -108,7 +108,7 @@ async fn groups_canonicalize_identical_sets_before_cursor_pagination() {
     assert_eq!(first_body["totalMedia"], 4);
 
     let second_page = server
-        .post("/api/v1/deduplicate/groups")
+        .post("/api/v1/ai/deduplicate/groups")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
         .json(&json!({"cursor": first_body["nextCursor"], "limit": 1}))
         .await;
@@ -127,7 +127,7 @@ async fn normal_user_cannot_read_admin_status() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/deduplicate/status")
+        .post("/api/v1/ai/deduplicate/status")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
         .await;
 
@@ -146,7 +146,7 @@ async fn admin_can_read_idle_status() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/deduplicate/status")
+        .post("/api/v1/ai/deduplicate/status")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "admin")))
         .await;
 
@@ -167,7 +167,7 @@ async fn admin_cannot_start_disabled_deduplication() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/deduplicate/start")
+        .post("/api/v1/ai/deduplicate/start")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "admin")))
         .await;
 
@@ -188,7 +188,7 @@ async fn admin_can_cancel_persisted_running_scan() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/deduplicate/cancel")
+        .post("/api/v1/ai/deduplicate/cancel")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "admin")))
         .await;
 
@@ -222,7 +222,7 @@ async fn admin_clean_removes_similarity_results_and_marks_media_dirty() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/deduplicate/clean")
+        .post("/api/v1/ai/deduplicate/clean")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "admin")))
         .await;
 

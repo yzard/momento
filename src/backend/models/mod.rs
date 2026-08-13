@@ -1,19 +1,23 @@
+mod ai;
 mod album;
 mod auth;
 mod deduplicate;
 mod imports;
 mod map;
 mod media;
+mod metadata;
 mod share;
 mod trash;
 mod user;
 
+pub use ai::*;
 pub use album::*;
 pub use auth::*;
 pub use deduplicate::*;
 pub use imports::*;
 pub use map::*;
 pub use media::*;
+pub use metadata::*;
 pub use share::*;
 pub use trash::*;
 pub use user::*;

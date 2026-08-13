@@ -1,5 +1,5 @@
 use llm_service::config::{Config, GeneralConfig, LoggingConfig, ProviderKind, ServiceConfig};
-use llm_service::provider::ServiceManager;
+use llm_service::provider::{InferenceInput, InferenceJob, ServiceManager};
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
@@ -110,8 +110,6 @@ fn service(
         secret_key: String::new(),
         token_url: String::new(),
         ocr_url: String::new(),
-        max_image_width: 0,
-        max_image_height: 0,
         startup_timeout_seconds: 5,
         request_timeout_seconds: 5,
         max_tokens: 0,
@@ -127,6 +125,8 @@ fn manager(services: Vec<ServiceConfig>) -> ServiceManager {
     ServiceManager::new(Arc::new(Config {
         general: GeneralConfig::default(),
         logging: LoggingConfig::default(),
+        storage: Default::default(),
+        callback: Default::default(),
         service: services,
     }))
 }
@@ -137,6 +137,31 @@ fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let start_log = directory.path().join("starts.log");
     fs::write(&script_path, MOCK_RUNTIME).expect("Failed to write mock runtime");
     (directory, script_path, start_log)
+}
+
+async fn infer_one(
+    manager: &mut ServiceManager,
+    task: &str,
+    bytes: &[u8],
+    filename: &str,
+) -> Result<llm_service::provider::InferenceResponse, llm_service::error::ServiceError> {
+    let mut results = manager
+        .infer_batch(vec![InferenceJob {
+            task: task.to_string(),
+            inputs: vec![InferenceInput {
+                sequence: 0,
+                frame_timestamp_ms: None,
+                bytes: bytes.to_vec(),
+                filename: filename.to_string(),
+            }],
+        }])
+        .await;
+    let inputs = results.remove(0)?;
+    Ok(inputs
+        .into_iter()
+        .next()
+        .expect("single input response")
+        .response)
 }
 
 #[tokio::test]
@@ -159,14 +184,22 @@ async fn manager_reuses_clustering_and_stops_it_before_switching() {
     );
     let mut manager = manager(vec![clustering, tagging]);
 
-    let first = manager
-        .infer("image_clustering", b"first image", "first.jpg")
-        .await
-        .expect("First clustering request should succeed");
-    let second = manager
-        .infer("image_clustering", b"second image", "second.jpg")
-        .await
-        .expect("Second clustering request should reuse the runtime");
+    let first = infer_one(
+        &mut manager,
+        "image_clustering",
+        b"first image",
+        "first.jpg",
+    )
+    .await
+    .expect("First clustering request should succeed");
+    let second = infer_one(
+        &mut manager,
+        "image_clustering",
+        b"second image",
+        "second.jpg",
+    )
+    .await
+    .expect("Second clustering request should reuse the runtime");
 
     assert_eq!(first.embedding_dimensions, Some(384));
     assert_eq!(first.embedding_encoding.as_deref(), Some("float32_le"));
@@ -187,8 +220,7 @@ async fn manager_reuses_clustering_and_stops_it_before_switching() {
         "image_clustering\n"
     );
 
-    let tagging_response = manager
-        .infer("image_tagging", b"tag image", "tag.jpg")
+    let tagging_response = infer_one(&mut manager, "image_tagging", b"tag image", "tag.jpg")
         .await
         .expect("Tagging should start after clustering stops");
 
@@ -207,6 +239,66 @@ async fn manager_reuses_clustering_and_stops_it_before_switching() {
 }
 
 #[tokio::test]
+async fn manager_batch_preserves_job_and_frame_input_correlation() {
+    let (_directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let clustering = service(
+        "image_clustering",
+        "image_clustering",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![clustering]);
+    let results = manager
+        .infer_batch(vec![
+            InferenceJob {
+                task: "image_clustering".to_string(),
+                inputs: vec![
+                    InferenceInput {
+                        sequence: 0,
+                        frame_timestamp_ms: Some(0),
+                        bytes: b"first frame".to_vec(),
+                        filename: "first.jpg".to_string(),
+                    },
+                    InferenceInput {
+                        sequence: 1,
+                        frame_timestamp_ms: Some(1000),
+                        bytes: b"second frame".to_vec(),
+                        filename: "second.jpg".to_string(),
+                    },
+                ],
+            },
+            InferenceJob {
+                task: "image_clustering".to_string(),
+                inputs: vec![InferenceInput {
+                    sequence: 0,
+                    frame_timestamp_ms: None,
+                    bytes: b"image".to_vec(),
+                    filename: "image.jpg".to_string(),
+                }],
+            },
+        ])
+        .await;
+    assert_eq!(results.len(), 2);
+    let first_job = results
+        .into_iter()
+        .next()
+        .expect("first job")
+        .expect("first result");
+    assert_eq!(first_job.len(), 2);
+    assert_eq!(first_job[0].sequence, 0);
+    assert_eq!(first_job[0].frame_timestamp_ms, Some(0));
+    assert_eq!(first_job[1].sequence, 1);
+    assert_eq!(first_job[1].frame_timestamp_ms, Some(1000));
+    assert_eq!(
+        fs::read_to_string(&start_log).expect("runtime starts"),
+        "image_clustering\n"
+    );
+    manager.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
 async fn manager_rejects_invalid_clustering_embedding_length() {
     let (_directory, script_path, start_log) = fixture();
     let port = available_port();
@@ -219,8 +311,7 @@ async fn manager_rejects_invalid_clustering_embedding_length() {
     );
     let mut manager = manager(vec![clustering]);
 
-    let error = manager
-        .infer("image_clustering", b"image", "image.jpg")
+    let error = infer_one(&mut manager, "image_clustering", b"image", "image.jpg")
         .await
         .expect_err("Short embedding should be rejected");
 

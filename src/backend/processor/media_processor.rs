@@ -644,22 +644,6 @@ pub async fn process_media_file(
         }
     }
 
-    if media_type == "image" && context.llm.enabled {
-        match crate::llm_client::LlmClient::new(&context.llm) {
-            Ok(client) => {
-                if let Err(error) = client
-                    .ocr_and_store(&context.pool, media_id, &dest_path)
-                    .await
-                {
-                    tracing::warn!("OCR failed for media {}: {}", media_id, error);
-                }
-            }
-            Err(error) => {
-                tracing::warn!("failed to initialize OCR for media {}: {}", media_id, error)
-            }
-        }
-    }
-
     tracing::info!(
         "Media processing completed for {} in {:?}",
         source_path.display(),
@@ -724,16 +708,13 @@ pub fn insert_into_rtree(
     lon: f64,
 ) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)",
+        queries::media::INSERT_RTREE,
         rusqlite::params![media_id, lat, lat, lon, lon],
     )?;
     Ok(())
 }
 
 pub fn delete_from_rtree(conn: &DbConn, media_id: i64) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "DELETE FROM media_rtree WHERE media_id = ?",
-        rusqlite::params![media_id],
-    )?;
+    conn.execute(queries::media::DELETE_RTREE, rusqlite::params![media_id])?;
     Ok(())
 }

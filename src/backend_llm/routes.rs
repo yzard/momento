@@ -1,108 +1,155 @@
-use axum::extract::{DefaultBodyLimit, Multipart, State};
-use axum::http::header::HeaderMap;
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{
+    extract::{Multipart, State},
+    http::header::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::config::Config;
 use crate::error::ServiceError;
-use crate::provider::{InferenceResponse, ServiceManager};
+use crate::provider::ServiceManager;
+use crate::scheduler::{QueueAdmission, QueueManifest, Scheduler};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub manager: Arc<Mutex<ServiceManager>>,
+    pub scheduler: Arc<Scheduler>,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/infer", post(infer))
+        .route("/v1/jobs/submit", post(submit))
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .layer(DefaultBodyLimit::max(
-            state.config.general.max_request_bytes,
-        ))
         .with_state(state)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
     provider: &'static str,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let provider = state.manager.lock().await.active_name();
     Json(HealthResponse {
         status: "healthy",
-        provider,
+        provider: state.manager.lock().await.active_name(),
     })
 }
-
 async fn ready(State(state): State<AppState>) -> Json<HealthResponse> {
-    let provider = state.manager.lock().await.active_name();
     Json(HealthResponse {
         status: "ready",
-        provider,
+        provider: state.manager.lock().await.active_name(),
     })
 }
 
-async fn infer(
+async fn submit(
     State(state): State<AppState>,
     headers: HeaderMap,
     mut multipart: Multipart,
-) -> Result<Json<InferenceResponse>, ServiceError> {
+) -> Result<Json<serde_json::Value>, ServiceError> {
     validate_api_key(&headers, &state.config.general.api_key)?;
-
-    let mut task = None;
-    let mut filename = None;
-    let mut content_type = None;
-    let mut image = None;
-    while let Some(field) = multipart
+    let mut manifest = None;
+    let mut admission = None;
+    while let Some(mut field) = multipart
         .next_field()
         .await
-        .map_err(|error| ServiceError::BadRequest(format!("invalid multipart body: {error}")))?
+        .map_err(|error| ServiceError::BadRequest(error.to_string()))?
     {
         match field.name() {
-            Some("task") => {
-                task = Some(field.text().await.map_err(|error| {
-                    ServiceError::BadRequest(format!("failed to read task: {error}"))
-                })?);
+            Some("manifest") => {
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|error| ServiceError::BadRequest(error.to_string()))?;
+                if manifest.is_some() {
+                    return Err(ServiceError::BadRequest(
+                        "manifest may only be supplied once".to_string(),
+                    ));
+                }
+                let parsed_manifest = serde_json::from_slice::<QueueManifest>(&bytes)
+                    .map_err(|error| ServiceError::BadRequest(error.to_string()))?;
+                admission = Some(state.scheduler.begin_admission(parsed_manifest.clone())?);
+                manifest = Some(parsed_manifest);
             }
-            Some("file") => {
-                filename = field.file_name().map(ToString::to_string);
-                content_type = field.content_type().map(ToString::to_string);
-                image = Some(field.bytes().await.map_err(|error| {
-                    ServiceError::BadRequest(format!("failed to read image: {error}"))
-                })?);
+            Some(name) if name.starts_with("input-") => {
+                let sequence = name
+                    .strip_prefix("input-")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        ServiceError::BadRequest("input field names must use input-N".to_string())
+                    })?;
+                let manifest = manifest.as_ref().ok_or_else(|| {
+                    ServiceError::BadRequest("manifest must be supplied before inputs".to_string())
+                })?;
+                let descriptor =
+                    manifest
+                        .inputs
+                        .get(sequence as usize)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ServiceError::BadRequest(
+                                "multipart input has no manifest descriptor".to_string(),
+                            )
+                        })?;
+                if descriptor.sequence != sequence {
+                    return Err(ServiceError::BadRequest(
+                        "multipart input sequence does not match manifest".to_string(),
+                    ));
+                }
+                let Some(QueueAdmission::Staging(staging)) = admission.as_ref() else {
+                    while field
+                        .chunk()
+                        .await
+                        .map_err(|error| ServiceError::BadRequest(error.to_string()))?
+                        .is_some()
+                    {}
+                    continue;
+                };
+                let input_path = staging.input_path(&descriptor)?;
+                let mut input_file = tokio::fs::File::create(input_path)
+                    .await
+                    .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|error| ServiceError::BadRequest(error.to_string()))?
+                {
+                    tokio::io::AsyncWriteExt::write_all(&mut input_file, &chunk)
+                        .await
+                        .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                }
+                input_file
+                    .sync_all()
+                    .await
+                    .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                staging.verify_input(&descriptor)?;
             }
-            _ => {}
+            _ => {
+                return Err(ServiceError::BadRequest(
+                    "only manifest and input-N multipart fields are allowed".to_string(),
+                ))
+            }
         }
     }
-
-    let filename = filename.unwrap_or_else(|| "image.jpg".to_string());
-    let image = image.ok_or_else(|| ServiceError::BadRequest("missing file field".to_string()))?;
-    if image.is_empty() {
-        return Err(ServiceError::BadRequest(
-            "image must not be empty".to_string(),
+    let manifest = manifest.ok_or_else(|| {
+        ServiceError::BadRequest("manifest multipart field is required".to_string())
+    })?;
+    let admission =
+        admission.ok_or_else(|| ServiceError::Internal("missing queue admission".to_string()))?;
+    let QueueAdmission::Staging(staging) = admission else {
+        return Ok(Json(
+            serde_json::json!({ "jobId": manifest.job_id, "status": "queued" }),
         ));
-    }
-    if !is_supported_image(content_type.as_deref(), &filename) {
-        return Err(ServiceError::BadRequest(
-            "only image files are supported".to_string(),
-        ));
-    }
-
-    let task = task.ok_or_else(|| ServiceError::BadRequest("missing task field".to_string()))?;
-    let result = state
-        .manager
-        .lock()
-        .await
-        .infer(&task, &image, &filename)
-        .await?;
-    Ok(Json(result))
+    };
+    staging.commit()?;
+    Ok(Json(
+        serde_json::json!({ "jobId": manifest.job_id, "status": "queued" }),
+    ))
 }
 
 fn validate_api_key(headers: &HeaderMap, configured_key: &str) -> Result<(), ServiceError> {
@@ -113,24 +160,11 @@ fn validate_api_key(headers: &HeaderMap, configured_key: &str) -> Result<(), Ser
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if provided_key != configured_key {
-        return Err(ServiceError::Authentication);
+    if provided_key == configured_key {
+        Ok(())
+    } else {
+        Err(ServiceError::Authentication)
     }
-    Ok(())
-}
-
-fn is_supported_image(content_type: Option<&str>, filename: &str) -> bool {
-    if content_type
-        .map(|value| value.starts_with("image/"))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    mime_guess::from_path(filename)
-        .first_raw()
-        .map(|value| value.starts_with("image/"))
-        .unwrap_or(false)
 }
 
 pub async fn serve(
@@ -138,45 +172,9 @@ pub async fn serve(
     state: AppState,
 ) -> Result<(), std::io::Error> {
     let manager = Arc::clone(&state.manager);
-    let server_result = axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let server_result = axum::serve(listener, router(state)).await;
     if let Err(error) = manager.lock().await.shutdown().await {
         tracing::error!("Failed to stop active LLM runtime: {error}");
     }
     server_result
-}
-
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let ctrl_c = tokio::signal::ctrl_c();
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
-
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = terminate.recv() => {}
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_supported_image;
-
-    #[test]
-    fn recognizes_image_content_types_and_extensions() {
-        assert!(is_supported_image(Some("image/jpeg"), "unknown.bin"));
-        assert!(is_supported_image(None, "photo.png"));
-        assert!(!is_supported_image(Some("text/plain"), "notes.txt"));
-    }
 }

@@ -552,14 +552,7 @@ async fn update_media(
     {
         execute_query(
             &conn,
-            r#"
-            INSERT INTO media_metadata (media_id, date_taken, gps_latitude, gps_longitude)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(media_id) DO UPDATE SET
-                date_taken = COALESCE(excluded.date_taken, media_metadata.date_taken),
-                gps_latitude = COALESCE(excluded.gps_latitude, media_metadata.gps_latitude),
-                gps_longitude = COALESCE(excluded.gps_longitude, media_metadata.gps_longitude)
-            "#,
+            queries::media::UPSERT_EDITABLE_METADATA,
             &[
                 &request.media_id,
                 &request.date_taken,
@@ -585,12 +578,7 @@ async fn update_media(
 
         execute_query(
             &conn,
-            r#"
-            INSERT INTO media_metadata (media_id, geohash)
-            VALUES (?, ?)
-            ON CONFLICT(media_id) DO UPDATE SET
-                geohash = excluded.geohash
-            "#,
+            queries::media::UPSERT_GEOHASH,
             &[&media.id, &geohash],
         )?;
 

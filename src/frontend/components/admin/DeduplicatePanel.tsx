@@ -62,15 +62,6 @@ export default function DeduplicatePanel() {
         </div>
       </div>
 
-      {statusQuery.data && statusQuery.data.runId !== null && (
-        <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatusMetric label="Indexed" value={statusQuery.data.indexedMedia} />
-          <StatusMetric label="Processed" value={statusQuery.data.processedMedia} />
-          <StatusMetric label="Comparisons" value={statusQuery.data.candidateComparisons} />
-          <StatusMetric label="Groups found" value={statusQuery.data.clustersCreated} />
-        </div>
-      )}
-
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <button
           type="button"
@@ -121,15 +112,6 @@ export default function DeduplicatePanel() {
           {statusQuery.data.error}
         </p>
       )}
-    </div>
-  )
-}
-
-function StatusMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-lg border border-border/60 bg-muted/10 p-3">
-      <span className="block text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</span>
-      <span className="mt-1 block font-mono text-lg font-bold text-foreground">{value.toLocaleString()}</span>
     </div>
   )
 }

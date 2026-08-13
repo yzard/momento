@@ -10,32 +10,6 @@ interface User {
   createdAt: string
 }
 
-interface ImportStatus {
-  status: string
-  totalFiles: number
-  processedFiles: number
-  successfulImports: number
-  failedImports: number
-  startedAt: string | null
-  completedAt: string | null
-  errors: string[]
-}
-
-interface RegenerationStatus {
-  status: string
-  totalJobs: number
-  completedJobs: number
-  metadataJobs: number
-  metadataCompleted: number
-  thumbnailJobs: number
-  thumbnailsCompleted: number
-  mediaTextJobs: number
-  mediaTextCompleted: number
-  startedAt: string | null
-  completedAt: string | null
-  errors: string[]
-}
-
 export const adminApi = {
   listUsers: async (): Promise<User[]> => {
     const response = await apiClient.post<{ users: User[] }>('/user/list')
@@ -56,35 +30,4 @@ export const adminApi = {
     await apiClient.post('/user/delete', { userId })
   },
 
-  triggerImport: async (): Promise<{ message: string; status: string }> => {
-    const response = await apiClient.post<{ message: string; status: string }>('/import/local')
-    return response.data
-  },
-
-  getImportStatus: async (): Promise<ImportStatus> => {
-    const response = await apiClient.post<ImportStatus>('/import/status')
-    return response.data
-  },
-
-  regenerateMedia: async (missingOnly: boolean): Promise<{ message: string; status: string }> => {
-    const response = await apiClient.post<{ message: string; status: string }>('/import/regenerate', {
-      missingOnly,
-    })
-    return response.data
-  },
-
-  resetLibrary: async (): Promise<{ message: string; status: string }> => {
-    const response = await apiClient.post<{ message: string; status: string }>('/import/reset')
-    return response.data
-  },
-
-  getRegenerationStatus: async (): Promise<RegenerationStatus> => {
-    const response = await apiClient.post<RegenerationStatus>('/import/regenerate/status')
-    return response.data
-  },
-
-  cancelRegeneration: async (): Promise<{ message: string; status: string }> => {
-    const response = await apiClient.post<{ message: string; status: string }>('/import/regenerate/cancel')
-    return response.data
-  },
 }

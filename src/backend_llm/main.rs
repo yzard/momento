@@ -8,6 +8,7 @@ use tracing_subscriber::{fmt::writer::MakeWriterExt, EnvFilter};
 use llm_service::config::Config;
 use llm_service::provider::ServiceManager;
 use llm_service::routes::{serve, AppState};
+use llm_service::scheduler::Scheduler;
 
 fn config_path() -> Result<PathBuf, String> {
     let mut args = std::env::args().skip(1);
@@ -61,11 +62,23 @@ async fn main() {
     };
 
     info!("Starting LLM service on {}", listener.local_addr().unwrap());
+    let manager = Arc::new(tokio::sync::Mutex::new(ServiceManager::new(Arc::clone(
+        &config,
+    ))));
+    let scheduler = Arc::new(
+        Scheduler::new(
+            config.storage.queue_dir.clone(),
+            config.general.scheduler.clone(),
+            config.callback.clone(),
+            Arc::clone(&manager),
+        )
+        .expect("Failed to initialize LLM disk queue"),
+    );
+    tokio::spawn(Arc::clone(&scheduler).run());
     let state = AppState {
-        manager: Arc::new(tokio::sync::Mutex::new(ServiceManager::new(Arc::clone(
-            &config,
-        )))),
         config,
+        manager,
+        scheduler,
     };
     if let Err(error) = serve(listener, state).await {
         tracing::error!("LLM service failed: {error}");

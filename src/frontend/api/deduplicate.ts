@@ -41,27 +41,27 @@ export interface DeduplicateStatusResponse {
 
 export const deduplicateApi = {
   groups: async (request: DeduplicateGroupsRequest): Promise<DeduplicateGroupsResponse> => {
-    const response = await apiClient.post<DeduplicateGroupsResponse>('/deduplicate/groups', request)
+    const response = await apiClient.post<DeduplicateGroupsResponse>('/ai/deduplicate/groups', request)
     return response.data
   },
 
   start: async (): Promise<DeduplicateActionResponse> => {
-    const response = await apiClient.post<DeduplicateActionResponse>('/deduplicate/start')
+    const response = await apiClient.post<DeduplicateActionResponse>('/ai/deduplicate/start', {})
     return response.data
   },
 
   status: async (): Promise<DeduplicateStatusResponse> => {
-    const response = await apiClient.post<DeduplicateStatusResponse>('/deduplicate/status')
+    const response = await apiClient.post<DeduplicateStatusResponse>('/ai/deduplicate/status', {})
     return response.data
   },
 
   cancel: async (): Promise<DeduplicateActionResponse> => {
-    const response = await apiClient.post<DeduplicateActionResponse>('/deduplicate/cancel')
+    const response = await apiClient.post<DeduplicateActionResponse>('/ai/deduplicate/cancel', {})
     return response.data
   },
 
   clean: async (): Promise<DeduplicateActionResponse> => {
-    const response = await apiClient.post<DeduplicateActionResponse>('/deduplicate/clean')
+    const response = await apiClient.post<DeduplicateActionResponse>('/ai/deduplicate/clean', {})
     return response.data
   },
 }

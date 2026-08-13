@@ -1,14 +1,18 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::error::ServiceError;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub callback: CallbackConfig,
     #[serde(default)]
     pub service: Vec<ServiceConfig>,
 }
@@ -39,8 +43,89 @@ pub struct GeneralConfig {
     pub port: u16,
     #[serde(default)]
     pub api_key: String,
-    #[serde(default = "default_max_request_bytes")]
-    pub max_request_bytes: usize,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SchedulerConfig {
+    #[serde(default = "default_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "default_active_batch_size")]
+    pub active_batch_size: usize,
+}
+
+fn default_poll_interval_seconds() -> u64 {
+    5
+}
+fn default_active_batch_size() -> usize {
+    8
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_seconds: default_poll_interval_seconds(),
+            active_batch_size: default_active_batch_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    #[serde(default = "default_queue_dir")]
+    pub queue_dir: PathBuf,
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("/data")
+}
+fn default_queue_dir() -> PathBuf {
+    PathBuf::from("/data/queue")
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            queue_dir: default_queue_dir(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CallbackConfig {
+    #[serde(default = "default_callback_timeout_seconds")]
+    pub request_timeout_seconds: u64,
+    #[serde(default = "default_callback_retry_delay_seconds")]
+    pub retry_delay_seconds: u64,
+    #[serde(default = "default_callback_max_attempts")]
+    pub max_attempts: usize,
+    #[serde(default)]
+    pub key: String,
+}
+
+fn default_callback_timeout_seconds() -> u64 {
+    30
+}
+fn default_callback_retry_delay_seconds() -> u64 {
+    30
+}
+fn default_callback_max_attempts() -> usize {
+    10
+}
+
+impl Default for CallbackConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_seconds: default_callback_timeout_seconds(),
+            retry_delay_seconds: default_callback_retry_delay_seconds(),
+            max_attempts: default_callback_max_attempts(),
+            key: String::new(),
+        }
+    }
 }
 
 fn default_host() -> String {
@@ -51,17 +136,13 @@ fn default_port() -> u16 {
     8100
 }
 
-fn default_max_request_bytes() -> usize {
-    50 * 1024 * 1024
-}
-
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             host: default_host(),
             port: default_port(),
             api_key: String::new(),
-            max_request_bytes: default_max_request_bytes(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -100,10 +181,6 @@ pub struct ServiceConfig {
     pub token_url: String,
     #[serde(default = "default_baidu_ocr_url")]
     pub ocr_url: String,
-    #[serde(default = "default_max_image_width")]
-    pub max_image_width: u32,
-    #[serde(default = "default_max_image_height")]
-    pub max_image_height: u32,
     #[serde(default = "default_startup_timeout_seconds")]
     pub startup_timeout_seconds: u64,
     #[serde(default = "default_request_timeout_seconds")]
@@ -122,16 +199,8 @@ fn default_baidu_ocr_url() -> String {
     "https://aip.baidubce.com/rest/2.0/ocr/v1/general".to_string()
 }
 
-fn default_max_image_width() -> u32 {
-    4096
-}
-
 fn default_device() -> String {
     "auto".to_string()
-}
-
-fn default_max_image_height() -> u32 {
-    16384
 }
 
 fn default_startup_timeout_seconds() -> u64 {
@@ -175,9 +244,11 @@ impl Config {
                 "general.port must be greater than zero".to_string(),
             ));
         }
-        if self.general.max_request_bytes == 0 {
+        if self.general.scheduler.poll_interval_seconds == 0
+            || self.general.scheduler.active_batch_size == 0
+        {
             return Err(ServiceError::Configuration(
-                "general.max_request_bytes must be greater than zero".to_string(),
+                "scheduler poll interval and active batch size must be positive".to_string(),
             ));
         }
         if self.service.is_empty() {
@@ -240,15 +311,12 @@ impl Config {
                         "local OCR docker_command, base_url, and model are required".to_string(),
                     ));
                 }
-                if service.max_image_width == 0
-                    || service.max_image_height == 0
-                    || service.startup_timeout_seconds == 0
+                if service.startup_timeout_seconds == 0
                     || service.request_timeout_seconds == 0
                     || service.max_tokens == 0
                 {
                     return Err(ServiceError::Configuration(
-                        "local OCR image limits, timeouts, and max_tokens must be positive"
-                            .to_string(),
+                        "local OCR timeouts and max_tokens must be positive".to_string(),
                     ));
                 }
             }
@@ -345,8 +413,6 @@ mod tests {
             secret_key: String::new(),
             token_url: default_baidu_token_url(),
             ocr_url: default_baidu_ocr_url(),
-            max_image_width: 4096,
-            max_image_height: 16384,
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 100,
@@ -394,8 +460,6 @@ mod tests {
             secret_key: String::new(),
             token_url: default_baidu_token_url(),
             ocr_url: default_baidu_ocr_url(),
-            max_image_width: 0,
-            max_image_height: 0,
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,
@@ -424,8 +488,6 @@ mod tests {
             secret_key: String::new(),
             token_url: default_baidu_token_url(),
             ocr_url: default_baidu_ocr_url(),
-            max_image_width: 0,
-            max_image_height: 0,
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,
@@ -457,8 +519,6 @@ mod tests {
             secret_key: String::new(),
             token_url: default_baidu_token_url(),
             ocr_url: default_baidu_ocr_url(),
-            max_image_width: 0,
-            max_image_height: 0,
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,

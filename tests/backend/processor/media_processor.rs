@@ -1,6 +1,10 @@
-use crate::test_utils::create_test_db;
+use crate::test_utils::{create_test_db, init_test_paths};
 use filetime::{set_file_times, FileTime};
+use momento_api::constants::paths;
 use momento_api::database::{queries, DbConn};
+use momento_api::processor::import::{
+    create_import_job, get_import_status, recover_interrupted_imports, ImportSource,
+};
 use momento_api::processor::media_processor::{
     apply_file_times, build_original_filename, calculate_geohash, capture_file_times,
     delete_from_rtree, insert_into_rtree,
@@ -62,7 +66,7 @@ fn insert_test_media(conn: &DbConn, id: i64, filename: &str) {
 }
 
 #[test]
-fn duplicate_content_hash_insert_is_ignored_atomically() {
+fn duplicate_content_hashes_are_allowed_for_fresh_imports() {
     let pool = create_test_db();
     let conn = pool.get().expect("Failed to get connection");
     let first = conn
@@ -97,8 +101,18 @@ fn duplicate_content_hash_insert_is_ignored_atomically() {
         .expect("Duplicate media insert should be ignored");
 
     assert_eq!(first, 1);
-    assert_eq!(second, 0);
-    assert_eq!(conn.last_insert_rowid(), 1);
+    assert_eq!(second, 1);
+}
+
+#[test]
+fn import_status_is_durable_and_prevents_concurrent_jobs() {
+    let pool = create_test_db();
+    let job_id = create_import_job(&pool, ImportSource::Local).expect("import job");
+    assert!(job_id > 0);
+    assert!(create_import_job(&pool, ImportSource::Webdav).is_err());
+    let status = get_import_status(&pool).expect("import status");
+    assert_eq!(status.status, "running");
+    assert_eq!(status.total_files, 0);
 }
 
 #[test]
@@ -287,4 +301,36 @@ fn test_new_media_populates_geohash_and_rtree() {
         .expect("Failed to query rtree");
 
     assert_eq!(rtree_count, 1);
+}
+
+#[test]
+fn interrupted_import_recovery_restores_completed_media_and_queues_metadata() {
+    init_test_paths();
+    let pool = create_test_db();
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO users (id, username, email, hashed_password, role, is_active) VALUES (9001, 'recovery', 'recovery@example.com', 'hash', 'admin', 1)", []).expect("user");
+    connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (9001, '.importing', 'camera.jpg', '42/camera.jpg', 'image', 'importing', 'local')", []).expect("media");
+    let media_id = connection.last_insert_rowid();
+    drop(connection);
+    let original_path = paths().originals.join("42/camera.jpg");
+    fs::create_dir_all(original_path.parent().expect("parent")).expect("original parent");
+    fs::write(&original_path, b"image").expect("original");
+    recover_interrupted_imports(&pool).expect("recovery");
+    let connection = pool.get().expect("connection");
+    let state: String = connection
+        .query_row(
+            "SELECT import_state FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("state");
+    let metadata_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("metadata job");
+    assert_eq!(state, "imported");
+    assert_eq!(metadata_status, "queued");
 }

@@ -1,0 +1,178 @@
+use std::sync::Arc;
+
+use futures::stream::{self, StreamExt};
+use rusqlite::params;
+use tracing::warn;
+
+use crate::config::Config;
+use crate::database::{queries, DbPool};
+
+pub async fn run(config: Arc<Config>, pool: DbPool) {
+    let interval = std::time::Duration::from_secs(config.metadata_worker.poll_interval_seconds);
+    loop {
+        if let Err(error) = process_cycle(&config, &pool).await {
+            warn!("metadata worker cycle failed: {error}");
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+pub fn queue_incomplete(pool: &DbPool) -> Result<usize, rusqlite::Error> {
+    let connection = pool
+        .get()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute(queries::metadata_jobs::QUEUE_INCOMPLETE, [])
+}
+
+pub fn status_counts(pool: &DbPool) -> Result<Vec<(String, i64)>, rusqlite::Error> {
+    let connection = pool
+        .get()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let counts = connection
+        .prepare(queries::metadata_jobs::SELECT_STATUS_COUNTS)?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect();
+    counts
+}
+
+pub fn reset_all(pool: &DbPool) -> Result<i64, rusqlite::Error> {
+    let connection = pool
+        .get()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let media_ids = connection
+        .prepare(queries::metadata_jobs::SELECT_ALL_MEDIA_IDS)?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(queries::metadata_jobs::DELETE_TEXT, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_TEXT_INPUTS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_AI_INPUTS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_LLM_JOBS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_SIMILARITY_CLUSTERS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_SIMILARITY_BANDS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_SIMILARITY_INDEX, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_SIMILARITY_DIRTY, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_RTREE, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_METADATA, [])?;
+    transaction.execute(queries::metadata_jobs::RESET_IMPORTED, [])?;
+    transaction.commit()?;
+    for media_id in &media_ids {
+        let _ = std::fs::remove_dir_all(
+            crate::constants::paths()
+                .thumbnails
+                .join(media_id.to_string()),
+        );
+        let _ = std::fs::remove_dir_all(
+            crate::constants::paths()
+                .thumbnails_tiny
+                .join(media_id.to_string()),
+        );
+        let _ = std::fs::remove_dir_all(
+            crate::constants::paths()
+                .previews
+                .join("ai")
+                .join(media_id.to_string()),
+        );
+    }
+    connection.execute(queries::metadata_jobs::MARK_IMPORTED_DIRTY, [])?;
+    Ok(media_ids.len() as i64)
+}
+
+async fn process_cycle(config: &Config, pool: &DbPool) -> Result<(), rusqlite::Error> {
+    queue_incomplete(pool)?;
+    reclaim_expired_leases(pool, config.metadata_worker.lease_seconds)?;
+    let media_ids = claim_jobs(pool, config.metadata_worker.batch_size)?;
+    let concurrency = config.metadata_worker.concurrency.max(1);
+    stream::iter(media_ids)
+        .for_each_concurrent(concurrency, |media_id| async move {
+            let outcome =
+                crate::processor::metadata::generate_media_metadata(pool, media_id, config)
+                    .await
+                    .and_then(|()| verify_ai_inputs(pool, media_id, config));
+            if let Err(error) =
+                finish_job(pool, media_id, outcome, config.metadata_worker.max_attempts)
+            {
+                warn!("failed to persist metadata job {media_id} outcome: {error}");
+            }
+        })
+        .await;
+    Ok(())
+}
+
+fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(), String> {
+    if !config.llm.enabled {
+        return Ok(());
+    }
+    let mut tasks = vec!["ocr"];
+    if config.llm.image_tagging_enabled {
+        tasks.push("image_tagging");
+    }
+    if config.llm.deduplicate_enabled {
+        tasks.push("image_clustering");
+    }
+    let connection = pool.get().map_err(|error| error.to_string())?;
+    for task in tasks {
+        let inputs = connection
+            .prepare(queries::metadata_jobs::SELECT_INPUT_PATHS)
+            .map_err(|error| error.to_string())?
+            .query_map(rusqlite::params![media_id, task], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        if inputs.is_empty() {
+            return Err(format!("missing prepared {task} AI inputs"));
+        }
+        if inputs
+            .iter()
+            .any(|file_path| !crate::constants::paths().previews.join(file_path).is_file())
+        {
+            return Err(format!("prepared {task} AI input file is missing"));
+        }
+    }
+    Ok(())
+}
+
+pub fn claim_jobs(pool: &DbPool, batch_size: usize) -> Result<Vec<i64>, rusqlite::Error> {
+    let mut connection = pool
+        .get()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let transaction = connection.transaction()?;
+    let media_ids = transaction
+        .prepare(queries::metadata_jobs::CLAIM_QUEUED)?
+        .query_map([batch_size as i64], |row| row.get(0))?
+        .collect::<Result<Vec<i64>, _>>()?;
+    transaction.commit()?;
+    Ok(media_ids)
+}
+
+pub fn reclaim_expired_leases(pool: &DbPool, lease_seconds: u64) -> Result<(), rusqlite::Error> {
+    let connection = pool
+        .get()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute(
+        queries::metadata_jobs::RECLAIM_EXPIRED,
+        [format!("-{} seconds", lease_seconds)],
+    )?;
+    Ok(())
+}
+
+pub fn finish_job(
+    pool: &DbPool,
+    media_id: i64,
+    outcome: Result<(), String>,
+    max_attempts: u32,
+) -> Result<(), rusqlite::Error> {
+    let connection = pool
+        .get()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    match outcome {
+        Ok(()) => connection.execute(queries::metadata_jobs::MARK_COMPLETED, [media_id])?,
+        Err(error) => connection.execute(
+            queries::metadata_jobs::MARK_FAILED_OR_RETRY,
+            params![max_attempts, max_attempts, error, media_id],
+        )?,
+    };
+    Ok(())
+}

@@ -17,7 +17,8 @@ fn clearing_metadata_also_clears_llm_text_models() {
     }
     drop(conn);
 
-    let cleared = momento_api::processor::regenerator::clear_all_metadata_and_thumbnails(&pool);
+    let cleared = momento_api::processor::metadata_worker::reset_all(&pool)
+        .expect("metadata reset should succeed");
 
     assert_eq!(cleared, 1);
     let conn = pool.get().expect("Failed to get database connection");

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { adminApi } from '../../api/admin'
+import { importApi } from '../../api/import'
 
 interface ImportStatus {
   status: string
@@ -18,7 +18,7 @@ export default function ImportPanel() {
 
   const loadStatus = async () => {
     try {
-      const data = await adminApi.getImportStatus()
+      const data = await importApi.getStatus()
       setStatus(data)
     } catch {
       console.error('Failed to load import status')
@@ -34,7 +34,7 @@ export default function ImportPanel() {
   const handleTriggerImport = async () => {
     setIsTriggering(true)
     try {
-      await adminApi.triggerImport()
+      await importApi.triggerLocal()
       loadStatus()
     } catch {
       alert('Failed to start import. An import may already be running.')
@@ -53,7 +53,7 @@ export default function ImportPanel() {
       <h3 className="text-lg font-medium mb-4 text-foreground">Import Photos</h3>
 
       <p className="text-muted-foreground mb-6 font-light">
-        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import. WebDAV uploads are processed automatically when enabled in <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/config.toml</code>.
+        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import. Import stores originals quickly; metadata and AI processing run afterward.
       </p>
 
       <div className="flex flex-wrap gap-3">

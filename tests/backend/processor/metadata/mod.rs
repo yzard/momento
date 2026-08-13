@@ -1,9 +1,12 @@
+use crate::test_utils::{create_test_db, create_test_media};
 use chrono::{TimeZone, Utc};
 use momento_api::processor::metadata::{
     apply_supplemental_metadata, load_supplemental_metadata, supplemental_metadata_path,
     MediaMetadata,
 };
 use std::fs;
+
+mod reset;
 
 #[test]
 fn loads_google_photos_supplemental_metadata() {
@@ -140,4 +143,83 @@ fn supplemental_metadata_ignores_zero_coordinate_components() {
 
     assert_eq!(metadata.gps_latitude, None);
     assert_eq!(metadata.gps_longitude, None);
+}
+
+#[test]
+fn metadata_claims_are_exclusive_and_expired_leases_are_recovered() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "claim.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+            [media_id],
+        )
+        .expect("job");
+    drop(connection);
+    assert_eq!(
+        momento_api::processor::metadata_worker::claim_jobs(&pool, 1).expect("first claim"),
+        vec![media_id]
+    );
+    assert!(
+        momento_api::processor::metadata_worker::claim_jobs(&pool, 1)
+            .expect("second claim")
+            .is_empty()
+    );
+    let connection = pool.get().expect("connection");
+    connection.execute("UPDATE media_metadata_jobs SET claimed_at = datetime('now', '-10 minutes') WHERE media_id = ?", [media_id]).expect("expire lease");
+    drop(connection);
+    momento_api::processor::metadata_worker::reclaim_expired_leases(&pool, 30).expect("reclaim");
+    assert_eq!(
+        momento_api::processor::metadata_worker::claim_jobs(&pool, 1).expect("reclaimed claim"),
+        vec![media_id]
+    );
+}
+
+#[test]
+fn metadata_failures_back_off_then_become_terminal() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "retry.jpg");
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO media_metadata_jobs (media_id, status, attempts) VALUES (?, 'processing', 1)", [media_id]).expect("job");
+    drop(connection);
+    momento_api::processor::metadata_worker::finish_job(
+        &pool,
+        media_id,
+        Err("temporary failure".to_string()),
+        2,
+    )
+    .expect("retry");
+    let connection = pool.get().expect("connection");
+    let first_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("status");
+    assert_eq!(first_status, "queued");
+    connection
+        .execute(
+            "UPDATE media_metadata_jobs SET status = 'processing', attempts = 2 WHERE media_id = ?",
+            [media_id],
+        )
+        .expect("retry claim");
+    drop(connection);
+    momento_api::processor::metadata_worker::finish_job(
+        &pool,
+        media_id,
+        Err("terminal failure".to_string()),
+        2,
+    )
+    .expect("terminal");
+    let connection = pool.get().expect("connection");
+    let final_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("status");
+    assert_eq!(final_status, "failed");
 }

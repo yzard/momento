@@ -7,7 +7,7 @@ use serde_json::json;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::info;
@@ -41,6 +41,24 @@ pub struct InferenceResponse {
     pub quality_score: Option<f32>,
 }
 
+pub struct InferenceInput {
+    pub sequence: u32,
+    pub frame_timestamp_ms: Option<i64>,
+    pub bytes: Vec<u8>,
+    pub filename: String,
+}
+
+pub struct InferenceJob {
+    pub task: String,
+    pub inputs: Vec<InferenceInput>,
+}
+
+pub struct InputInferenceResponse {
+    pub sequence: u32,
+    pub frame_timestamp_ms: Option<i64>,
+    pub response: InferenceResponse,
+}
+
 #[async_trait]
 pub trait OcrProvider: Send + Sync {
     async fn infer(&self, image: &[u8], filename: &str) -> Result<InferenceResponse, ServiceError>;
@@ -69,6 +87,22 @@ impl Provider {
             Self::Baidu(provider) => provider.infer(image, filename).await,
             Self::Local(provider) => provider.infer(image, filename).await,
         }
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let response = self.infer(&input.bytes, &input.filename).await?;
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response,
+            });
+        }
+        Ok(responses)
     }
 
     pub fn name(&self) -> &'static str {
@@ -102,7 +136,7 @@ pub enum ServiceType {
 }
 
 impl ServiceType {
-    fn from_task(task: &str) -> Result<Self, ServiceError> {
+    pub fn from_task(task: &str) -> Result<Self, ServiceError> {
         match task {
             "ocr" => Ok(Self::Ocr),
             "image_tagging" => Ok(Self::ImageTagging),
@@ -110,6 +144,14 @@ impl ServiceType {
             _ => Err(ServiceError::NotImplemented(format!(
                 "inference task `{task}` has no configured model provider"
             ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ocr => "ocr",
+            Self::ImageTagging => "image_tagging",
+            Self::ImageClustering => "image_clustering",
         }
     }
 
@@ -182,22 +224,58 @@ impl ServiceManager {
             .unwrap_or("on-demand")
     }
 
-    pub async fn infer(
+    pub async fn infer_batch(
         &mut self,
-        task: &str,
-        image: &[u8],
-        filename: &str,
-    ) -> Result<InferenceResponse, ServiceError> {
-        let service_type = ServiceType::from_task(task)?;
-        self.activate(service_type).await?;
-        match self.active.as_ref() {
-            Some(ActiveService::Ocr(provider)) => provider.infer(image, filename).await,
-            Some(ActiveService::ImageTagging(provider)) => provider.infer(image).await,
-            Some(ActiveService::ImageClustering(provider)) => provider.infer(image).await,
-            None => Err(ServiceError::Internal(
-                "LLM service was not activated".to_string(),
-            )),
+        jobs: Vec<InferenceJob>,
+    ) -> Vec<Result<Vec<InputInferenceResponse>, ServiceError>> {
+        let Some(first_job) = jobs.first() else {
+            return Vec::new();
+        };
+        if jobs.iter().any(|job| job.task != first_job.task) {
+            return jobs
+                .into_iter()
+                .map(|_| {
+                    Err(ServiceError::BadRequest(
+                        "an inference batch must contain one task".to_string(),
+                    ))
+                })
+                .collect();
         }
+        let service_type = match ServiceType::from_task(&first_job.task) {
+            Ok(service_type) => service_type,
+            Err(error) => {
+                return jobs
+                    .into_iter()
+                    .map(|_| Err(ServiceError::BadRequest(error.to_string())))
+                    .collect()
+            }
+        };
+        if let Err(error) = self.activate(service_type).await {
+            return jobs
+                .into_iter()
+                .map(|_| Err(ServiceError::Internal(error.to_string())))
+                .collect();
+        }
+        let Some(active_service) = self.active.as_ref() else {
+            return jobs
+                .into_iter()
+                .map(|_| {
+                    Err(ServiceError::Internal(
+                        "LLM service was not activated".to_string(),
+                    ))
+                })
+                .collect();
+        };
+        let mut results = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let result = match active_service {
+                ActiveService::Ocr(provider) => provider.infer_inputs(job.inputs).await,
+                ActiveService::ImageTagging(provider) => provider.infer_inputs(job.inputs).await,
+                ActiveService::ImageClustering(provider) => provider.infer_inputs(job.inputs).await,
+            };
+            results.push(result);
+        }
+        results
     }
 
     async fn activate(&mut self, service_type: ServiceType) -> Result<(), ServiceError> {
@@ -516,14 +594,7 @@ impl LocalProvider {
 #[async_trait]
 impl OcrProvider for LocalProvider {
     async fn infer(&self, image: &[u8], filename: &str) -> Result<InferenceResponse, ServiceError> {
-        let (image, filename) = normalize_local_image(
-            image,
-            filename,
-            self.config.max_image_width,
-            self.config.max_image_height,
-        )
-        .await?;
-        let mime_type = mime_guess::from_path(&filename)
+        let mime_type = mime_guess::from_path(filename)
             .first_raw()
             .filter(|value| value.starts_with("image/"))
             .unwrap_or("image/jpeg");
@@ -758,6 +829,21 @@ impl RamProvider {
         })
     }
 
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input.bytes).await?,
+            });
+        }
+        Ok(responses)
+    }
+
     async fn shutdown(self) -> Result<(), ServiceError> {
         self.runtime.shutdown().await
     }
@@ -829,6 +915,21 @@ impl ImageClusteringProvider {
             perceptual_hash: Some(clustering_response.perceptual_hash),
             quality_score: Some(clustering_response.quality_score),
         })
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input.bytes).await?,
+            });
+        }
+        Ok(responses)
     }
 
     fn validate_response(
@@ -1031,51 +1132,6 @@ where
             );
         }
     });
-}
-
-async fn normalize_local_image(
-    image: &[u8],
-    filename: &str,
-    max_width: u32,
-    max_height: u32,
-) -> Result<(Vec<u8>, String), ServiceError> {
-    let resize = format!("{max_width}x{max_height}>");
-    let mut process = Command::new("magick")
-        .args(["-", "-auto-orient", "-resize", &resize, "jpg:-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            ServiceError::Internal(format!(
-                "failed to start ImageMagick for {filename}: {error}"
-            ))
-        })?;
-    let mut stdin = process
-        .stdin
-        .take()
-        .ok_or_else(|| ServiceError::Internal("ImageMagick stdin was not available".to_string()))?;
-    stdin.write_all(image).await.map_err(|error| {
-        ServiceError::Internal(format!("failed to send image to ImageMagick: {error}"))
-    })?;
-    drop(stdin);
-
-    let output = process.wait_with_output().await.map_err(|error| {
-        ServiceError::Internal(format!("ImageMagick failed to finish: {error}"))
-    })?;
-    if !output.status.success() {
-        return Err(ServiceError::BadRequest(format!(
-            "ImageMagick could not decode the image: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    if output.stdout.is_empty() {
-        return Err(ServiceError::BadRequest(
-            "ImageMagick returned an empty normalized image".to_string(),
-        ));
-    }
-
-    Ok((output.stdout, "normalized.jpg".to_string()))
 }
 
 #[cfg(test)]

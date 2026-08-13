@@ -5,7 +5,6 @@ pub mod constants;
 pub mod cronjob;
 pub mod database;
 pub mod error;
-pub mod llm_client;
 pub mod logging;
 pub mod models;
 pub mod processor;

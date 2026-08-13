@@ -1,7 +1,8 @@
+pub mod ai;
 pub mod deduplicator;
-pub mod importer;
+pub mod import;
 pub mod media_deletion;
 pub mod media_processor;
 pub mod metadata;
-pub mod regenerator;
+pub mod metadata_worker;
 pub mod thumbnails;

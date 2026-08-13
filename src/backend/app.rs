@@ -15,7 +15,7 @@ use crate::auth::AppState;
 use crate::config::Config;
 use crate::database::DbPool;
 use crate::logging::request_logger;
-use crate::routes::api_router;
+use crate::routes::{api_router, internal_router};
 use crate::webdav::webdav_router;
 use crate::VERSION;
 
@@ -45,7 +45,8 @@ pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
 
     let api_routes = Router::new()
         .route("/healthcheck", get(healthcheck))
-        .merge(api_router());
+        .merge(api_router())
+        .merge(internal_router());
 
     let mut app = Router::new()
         .nest("/api/v1", api_routes)

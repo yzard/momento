@@ -9,17 +9,20 @@ use crate::models::{
     DeduplicateActionResponse, DeduplicateGroup, DeduplicateGroupsRequest,
     DeduplicateGroupsResponse, DeduplicateStatusResponse,
 };
-use crate::processor::deduplicator::{clean, create_run, latest_run, request_cancel, run_scan};
+use crate::processor::deduplicator::{
+    clean, create_run, latest_run, queue_clustering_jobs, request_cancel,
+};
 
 use super::media::map_media_row;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/deduplicate/start", post(start))
-        .route("/deduplicate/status", post(status))
-        .route("/deduplicate/cancel", post(cancel))
-        .route("/deduplicate/clean", post(clean_indexes))
-        .route("/deduplicate/groups", post(groups))
+        .route("/ai/deduplicate/start", post(start))
+        .route("/ai/deduplicate/trigger", post(start))
+        .route("/ai/deduplicate/status", post(status))
+        .route("/ai/deduplicate/cancel", post(cancel))
+        .route("/ai/deduplicate/clean", post(clean_indexes))
+        .route("/ai/deduplicate/groups", post(groups))
 }
 
 async fn start(
@@ -32,11 +35,7 @@ async fn start(
         ));
     }
     let run_id = create_run(&state.pool, "manual", None)?;
-    let config = state.config.clone();
-    let pool = state.pool.clone();
-    tokio::spawn(async move {
-        run_scan(&config, &pool, run_id).await;
-    });
+    queue_clustering_jobs(&state.pool, run_id)?;
     Ok(Json(DeduplicateActionResponse {
         message: "Deduplicate scan started".to_string(),
         status: "running".to_string(),

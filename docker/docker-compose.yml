@@ -7,9 +7,11 @@ services:
       - "8100:8100"
     volumes:
       - ../playground/config_llm.toml:/data/config_llm.toml:ro
+      # This volume contains queue states and retry metadata. It must survive restarts.
+      - llm_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8100/ready"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8100/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -39,4 +41,6 @@ services:
 
 volumes:
   momento_data:
+    driver: local
+  llm_data:
     driver: local

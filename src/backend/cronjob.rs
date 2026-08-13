@@ -8,7 +8,9 @@ use tracing::{info, warn};
 use crate::config::{Config, CronjobConfig};
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
-use crate::processor::deduplicator::{create_run, latest_run, log_schedule_start, run_scan};
+use crate::processor::deduplicator::{
+    create_run, latest_run, log_schedule_start, queue_clustering_jobs,
+};
 
 pub fn next_scheduled_at(
     config: &CronjobConfig,
@@ -74,7 +76,11 @@ async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool) {
         let scheduled_for = next.to_rfc3339();
         log_schedule_start(&scheduled_for);
         match create_run(&pool, "scheduled", Some(&scheduled_for)) {
-            Ok(run_id) => run_scan(&config, &pool, run_id).await,
+            Ok(run_id) => {
+                if let Err(error) = queue_clustering_jobs(&pool, run_id) {
+                    warn!("Could not queue scheduled deduplicate jobs: {error}");
+                }
+            }
             Err(AppError::Conflict(_)) => {
                 info!("Deduplicate schedule skipped because a scan is already running")
             }
@@ -86,7 +92,7 @@ async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool) {
 async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<()> {
     if latest_run(pool)?.is_some_and(|run| run.status == "interrupted" || run.status == "failed") {
         let run_id = create_run(pool, "startup", None)?;
-        run_scan(config, pool, run_id).await;
+        queue_clustering_jobs(pool, run_id)?;
         return Ok(());
     }
     let last_scheduled = last_scheduled_for(pool)?;
@@ -117,7 +123,9 @@ async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<()
     };
 
     match create_run(pool, trigger.0, trigger.1.as_deref()) {
-        Ok(run_id) => run_scan(config, pool, run_id).await,
+        Ok(run_id) => {
+            queue_clustering_jobs(pool, run_id)?;
+        }
         Err(AppError::Conflict(_)) => {}
         Err(error) => return Err(error),
     }

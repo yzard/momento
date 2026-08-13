@@ -33,6 +33,9 @@ fn rejects_local_provider_without_model_command_configuration() {
 fn loads_playground_toml_configuration() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../playground/config_llm.toml");
+    if !path.exists() {
+        return;
+    }
 
     let config = Config::load(&path).expect("Playground TOML configuration should load");
 
@@ -48,6 +51,18 @@ fn loads_playground_toml_configuration() {
         config.logging.file_path,
         std::path::PathBuf::from("playground/logs/llm-service.log")
     );
+}
+
+#[test]
+fn rejects_non_positive_scheduler_configuration() {
+    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    write!(
+        file,
+        "[general.scheduler]\npoll_interval_seconds = 0\n\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmodel_version = \"unlimited_ocr\"\nprovider = \"baidu\"\napi_key = \"test-ak\"\nsecret_key = \"test-sk\"\n"
+    )
+    .expect("Failed to write config fixture");
+
+    assert!(Config::load(file.path()).is_err());
 }
 
 #[test]

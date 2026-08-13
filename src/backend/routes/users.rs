@@ -168,29 +168,32 @@ async fn update_user(
         return Err(AppError::BadRequest("Cannot demote yourself".to_string()));
     }
 
-    let mut updates = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-    if let Some(ref role) = request.role {
-        updates.push("role = ?");
-        params.push(Box::new(role.clone()));
-    }
-
     if let Some(is_active) = request.is_active {
         if user_id == admin.id && !is_active {
             return Err(AppError::BadRequest(
                 "Cannot deactivate yourself".to_string(),
             ));
         }
-        updates.push("is_active = ?");
-        params.push(Box::new(if is_active { 1i32 } else { 0i32 }));
     }
-
-    if !updates.is_empty() {
-        params.push(Box::new(user_id));
-        let sql = format!("UPDATE users SET {} WHERE id = ?", updates.join(", "));
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        execute_query(&conn, &sql, &param_refs)?;
+    match (&request.role, request.is_active) {
+        (Some(role), Some(is_active)) => {
+            execute_query(
+                &conn,
+                queries::users::UPDATE_ROLE_ACTIVE,
+                &[role, &(if is_active { 1i32 } else { 0i32 }), &user_id],
+            )?;
+        }
+        (Some(role), None) => {
+            execute_query(&conn, queries::users::UPDATE_ROLE, &[role, &user_id])?;
+        }
+        (None, Some(is_active)) => {
+            execute_query(
+                &conn,
+                queries::users::UPDATE_ACTIVE,
+                &[&(if is_active { 1i32 } else { 0i32 }), &user_id],
+            )?;
+        }
+        (None, None) => {}
     }
 
     let user = fetch_one(&conn, queries::users::SELECT_BY_ID, &[&user_id], |row| {

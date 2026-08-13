@@ -321,6 +321,50 @@ pub struct RegenerateConfig {
     pub num_cpus: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataWorkerConfig {
+    #[serde(default = "default_metadata_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "default_metadata_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_metadata_concurrency")]
+    pub concurrency: usize,
+    #[serde(default = "default_metadata_lease_seconds")]
+    pub lease_seconds: u64,
+    #[serde(default = "default_metadata_max_attempts")]
+    pub max_attempts: u32,
+}
+
+fn default_metadata_poll_interval_seconds() -> u64 {
+    10
+}
+
+fn default_metadata_batch_size() -> usize {
+    64
+}
+
+fn default_metadata_concurrency() -> usize {
+    num_cpus::get()
+}
+fn default_metadata_lease_seconds() -> u64 {
+    300
+}
+fn default_metadata_max_attempts() -> u32 {
+    5
+}
+
+impl Default for MetadataWorkerConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_seconds: default_metadata_poll_interval_seconds(),
+            batch_size: default_metadata_batch_size(),
+            concurrency: default_metadata_concurrency(),
+            lease_seconds: default_metadata_lease_seconds(),
+            max_attempts: default_metadata_max_attempts(),
+        }
+    }
+}
+
 fn default_regenerate_num_cpus() -> usize {
     num_cpus::get()
 }
@@ -341,17 +385,11 @@ pub struct LlmConfig {
     #[serde(default = "default_llm_service_url")]
     pub service_url: String,
     #[serde(default)]
+    pub callback_url: String,
+    #[serde(default)]
     pub api_key: String,
-    #[serde(default = "default_llm_timeout_seconds")]
-    pub timeout_seconds: u64,
-    #[serde(default = "default_llm_startup_timeout_seconds")]
-    pub startup_timeout_seconds: u64,
-    #[serde(default = "default_llm_ready_poll_interval_seconds")]
-    pub ready_poll_interval_seconds: u64,
-    #[serde(default = "default_llm_ready_connection_timeout_seconds")]
-    pub ready_connection_timeout_seconds: u64,
-    #[serde(default = "default_llm_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
+    #[serde(default)]
+    pub callback_key: String,
     #[serde(default)]
     pub image_tagging_enabled: bool,
     #[serde(default)]
@@ -391,39 +429,40 @@ fn default_llm_service_url() -> String {
     "http://127.0.0.1:8100".to_string()
 }
 
-fn default_llm_timeout_seconds() -> u64 {
-    180
-}
-
-fn default_llm_startup_timeout_seconds() -> u64 {
-    1800
-}
-
-fn default_llm_ready_poll_interval_seconds() -> u64 {
-    5
-}
-
-fn default_llm_ready_connection_timeout_seconds() -> u64 {
-    5
-}
-
-fn default_llm_max_concurrent_requests() -> usize {
-    1
-}
-
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             service_url: default_llm_service_url(),
+            callback_url: String::new(),
             api_key: String::new(),
-            timeout_seconds: default_llm_timeout_seconds(),
-            startup_timeout_seconds: default_llm_startup_timeout_seconds(),
-            ready_poll_interval_seconds: default_llm_ready_poll_interval_seconds(),
-            ready_connection_timeout_seconds: default_llm_ready_connection_timeout_seconds(),
-            max_concurrent_requests: default_llm_max_concurrent_requests(),
+            callback_key: String::new(),
             image_tagging_enabled: false,
             deduplicate_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmSubmissionWorkerConfig {
+    #[serde(default = "default_llm_submission_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "default_llm_submission_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_llm_submission_poll_interval_seconds() -> u64 {
+    5
+}
+fn default_llm_submission_batch_size() -> usize {
+    64
+}
+
+impl Default for LlmSubmissionWorkerConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_seconds: default_llm_submission_poll_interval_seconds(),
+            batch_size: default_llm_submission_batch_size(),
         }
     }
 }
@@ -436,6 +475,11 @@ impl LlmConfig {
         if self.service_url.trim().is_empty() {
             return Err(std::io::Error::other(
                 "llm service_url is required when LLM is enabled",
+            ));
+        }
+        if self.callback_url.trim().is_empty() {
+            return Err(std::io::Error::other(
+                "llm callback_url is required when LLM is enabled",
             ));
         }
         Ok(())
@@ -463,6 +507,10 @@ pub struct Config {
     pub reverse_geocoding: ReverseGeocodingConfig,
     #[serde(default)]
     pub regenerate: RegenerateConfig,
+    #[serde(default)]
+    pub metadata_worker: MetadataWorkerConfig,
+    #[serde(default)]
+    pub llm_submission_worker: LlmSubmissionWorkerConfig,
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]

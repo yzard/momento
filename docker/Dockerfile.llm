@@ -10,7 +10,7 @@ RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --manifest-path /ap
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates imagemagick libheif wget
+RUN apk add --no-cache ca-certificates wget
 
 WORKDIR /app
 

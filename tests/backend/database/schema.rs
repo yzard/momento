@@ -1,4 +1,5 @@
 use crate::test_utils::create_test_db;
+use momento_api::database::init_database;
 
 #[test]
 fn creates_active_media_access_index() {
@@ -29,5 +30,52 @@ fn creates_current_schema_without_removed_tables() {
             )
             .expect("Failed to inspect database schema");
         assert_eq!(exists, 0, "removed table {removed_table} should not exist");
+    }
+}
+
+#[test]
+fn creates_durable_metadata_and_ai_job_tables() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("Failed to get database connection");
+
+    let table_name: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["llm_jobs"],
+            |row| row.get(0),
+        )
+        .expect("Failed to find LLM jobs table");
+    let metadata_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["media_metadata_jobs"],
+            |row| row.get(0),
+        )
+        .expect("Failed to find metadata jobs table");
+
+    assert_eq!(table_name, "llm_jobs");
+    assert_eq!(metadata_table, "media_metadata_jobs");
+}
+
+#[test]
+fn rerunning_schema_recreates_missing_table_and_index() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("Failed to get database connection");
+    connection
+        .execute_batch("DROP INDEX idx_llm_jobs_claim; DROP TABLE llm_jobs;")
+        .expect("Failed to remove LLM job schema objects");
+
+    init_database(&connection).expect("Schema should be safe to rerun");
+    init_database(&connection).expect("Repeated schema initialization should succeed");
+
+    for (object_type, object_name) in [("table", "llm_jobs"), ("index", "idx_llm_jobs_claim")] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?)",
+                [object_type, object_name],
+                |row| row.get(0),
+            )
+            .expect("Failed to inspect recreated schema object");
+        assert_eq!(exists, 1, "{object_type} {object_name} should be recreated");
     }
 }
