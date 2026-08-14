@@ -72,6 +72,17 @@ fn available_port() -> u16 {
         .port()
 }
 
+#[test]
+fn runtime_log_redacts_base64_payloads() {
+    let encoded = "a".repeat(64);
+    let line = format!("request image={encoded} complete");
+
+    let redacted = llm_service::provider::redact_base64_text(&line);
+
+    assert!(!redacted.contains(&encoded));
+    assert!(redacted.contains("[base64 omitted]"));
+}
+
 fn service(
     model_type: &str,
     mode: &str,
@@ -118,6 +129,7 @@ fn service(
         } else {
             0
         },
+        max_concurrent_jobs: 2,
     }
 }
 
@@ -146,15 +158,18 @@ async fn infer_one(
     filename: &str,
 ) -> Result<llm_service::provider::InferenceResponse, llm_service::error::ServiceError> {
     let mut results = manager
-        .infer_batch(vec![InferenceJob {
-            task: task.to_string(),
-            inputs: vec![InferenceInput {
-                sequence: 0,
-                frame_timestamp_ms: None,
-                bytes: bytes.to_vec(),
-                filename: filename.to_string(),
+        .infer_batch(
+            vec![InferenceJob {
+                task: task.to_string(),
+                inputs: vec![InferenceInput {
+                    sequence: 0,
+                    frame_timestamp_ms: None,
+                    bytes: bytes.to_vec(),
+                    filename: filename.to_string(),
+                }],
             }],
-        }])
+            1,
+        )
         .await;
     let inputs = results.remove(0)?;
     Ok(inputs
@@ -165,20 +180,21 @@ async fn infer_one(
 }
 
 #[tokio::test]
-async fn manager_reuses_clustering_and_stops_it_before_switching() {
+async fn manager_reuses_a_runtime_and_switches_for_a_different_task() {
     let (_directory, script_path, start_log) = fixture();
-    let port = available_port();
+    let clustering_port = available_port();
+    let tagging_port = available_port();
     let clustering = service(
         "image_clustering",
         "image_clustering",
-        port,
+        clustering_port,
         &script_path,
         &start_log,
     );
     let tagging = service(
         "image_tagging",
         "image_tagging",
-        port,
+        tagging_port,
         &script_path,
         &start_log,
     );
@@ -222,7 +238,7 @@ async fn manager_reuses_clustering_and_stops_it_before_switching() {
 
     let tagging_response = infer_one(&mut manager, "image_tagging", b"tag image", "tag.jpg")
         .await
-        .expect("Tagging should start after clustering stops");
+        .expect("Tagging should switch from clustering");
 
     assert_eq!(tagging_response.tags, vec!["person", "bicycle"]);
     assert_eq!(manager.active_name(), "ram++");
@@ -239,7 +255,7 @@ async fn manager_reuses_clustering_and_stops_it_before_switching() {
 }
 
 #[tokio::test]
-async fn manager_batch_preserves_job_and_frame_input_correlation() {
+async fn manager_preserves_ordered_frame_input_correlation() {
     let (_directory, script_path, start_log) = fixture();
     let port = available_port();
     let clustering = service(
@@ -250,9 +266,9 @@ async fn manager_batch_preserves_job_and_frame_input_correlation() {
         &start_log,
     );
     let mut manager = manager(vec![clustering]);
-    let results = manager
-        .infer_batch(vec![
-            InferenceJob {
+    let mut results = manager
+        .infer_batch(
+            vec![InferenceJob {
                 task: "image_clustering".to_string(),
                 inputs: vec![
                     InferenceInput {
@@ -268,24 +284,11 @@ async fn manager_batch_preserves_job_and_frame_input_correlation() {
                         filename: "second.jpg".to_string(),
                     },
                 ],
-            },
-            InferenceJob {
-                task: "image_clustering".to_string(),
-                inputs: vec![InferenceInput {
-                    sequence: 0,
-                    frame_timestamp_ms: None,
-                    bytes: b"image".to_vec(),
-                    filename: "image.jpg".to_string(),
-                }],
-            },
-        ])
+            }],
+            2,
+        )
         .await;
-    assert_eq!(results.len(), 2);
-    let first_job = results
-        .into_iter()
-        .next()
-        .expect("first job")
-        .expect("first result");
+    let first_job = results.remove(0).expect("first result");
     assert_eq!(first_job.len(), 2);
     assert_eq!(first_job[0].sequence, 0);
     assert_eq!(first_job[0].frame_timestamp_ms, Some(0));

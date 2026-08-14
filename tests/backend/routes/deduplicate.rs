@@ -11,6 +11,35 @@ fn token(user_id: i64, role: &str) -> String {
 }
 
 #[tokio::test]
+async fn status_reports_durable_ensembled_media_count() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "deduplicate-admin", "deduplicate-admin@example.com");
+    let media_id = create_test_media(&pool, "ensembled.jpg");
+    let connection = pool.get().expect("Failed to get connection");
+    connection
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("Failed to grant administrator role");
+    connection
+        .execute(
+            "INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, processing_status) VALUES (?, 'hash', 'dinov2-small', 'prepared-input-v1', X'00000000', 'hash', 1)",
+            [media_id],
+        )
+        .expect("Failed to insert ensemble embedding");
+    drop(connection);
+    let server = TestServer::new(app).expect("Failed to create server");
+
+    let response = server
+        .post("/api/v1/ai/deduplicate/status")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "admin")))
+        .json(&json!({}))
+        .await;
+
+    response.assert_status_ok();
+    let body: Value = response.json();
+    assert_eq!(body["ensembledMedia"], 1);
+}
+
+#[tokio::test]
 async fn groups_only_return_clusters_with_two_visible_items() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "viewer", "viewer@example.com");

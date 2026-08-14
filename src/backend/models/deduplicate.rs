@@ -42,7 +42,7 @@ pub struct DeduplicateStatusResponse {
     pub scheduled_for: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
-    pub indexed_media: i64,
+    pub ensembled_media: i64,
     pub processed_media: i64,
     pub candidate_comparisons: i64,
     pub clusters_created: i64,

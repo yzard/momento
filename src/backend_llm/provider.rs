@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -186,7 +187,6 @@ impl ActiveService {
             Self::ImageClustering(_) => "dinov2",
         }
     }
-
     async fn shutdown(self) -> Result<(), ServiceError> {
         match self {
             Self::Ocr(provider) => provider.shutdown().await,
@@ -200,6 +200,17 @@ impl ActiveService {
             Self::Ocr(provider) => provider.is_alive().await,
             Self::ImageTagging(provider) => provider.runtime.is_alive().await,
             Self::ImageClustering(provider) => provider.runtime.is_alive().await,
+        }
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        match self {
+            Self::Ocr(provider) => provider.infer_inputs(inputs).await,
+            Self::ImageTagging(provider) => provider.infer_inputs(inputs).await,
+            Self::ImageClustering(provider) => provider.infer_inputs(inputs).await,
         }
     }
 }
@@ -224,14 +235,32 @@ impl ServiceManager {
             .unwrap_or("on-demand")
     }
 
+    pub fn active_task(&self) -> Option<&'static str> {
+        self.active
+            .as_ref()
+            .map(|active| active.service_type().as_str())
+    }
+
+    pub fn max_concurrent_jobs(&self, task: &str) -> Result<usize, ServiceError> {
+        self.config
+            .service_for(task)
+            .map(|service| service.max_concurrent_jobs)
+            .ok_or_else(|| {
+                ServiceError::NotImplemented(format!(
+                    "inference task `{task}` has no configured model provider"
+                ))
+            })
+    }
+
     pub async fn infer_batch(
         &mut self,
         jobs: Vec<InferenceJob>,
+        max_concurrent_jobs: usize,
     ) -> Vec<Result<Vec<InputInferenceResponse>, ServiceError>> {
-        let Some(first_job) = jobs.first() else {
+        let Some(first) = jobs.first() else {
             return Vec::new();
         };
-        if jobs.iter().any(|job| job.task != first_job.task) {
+        if jobs.iter().any(|job| job.task != first.task) {
             return jobs
                 .into_iter()
                 .map(|_| {
@@ -241,41 +270,32 @@ impl ServiceManager {
                 })
                 .collect();
         }
-        let service_type = match ServiceType::from_task(&first_job.task) {
+        let service_type = match ServiceType::from_task(&first.task) {
             Ok(service_type) => service_type,
             Err(error) => {
+                let message = error.to_string();
                 return jobs
                     .into_iter()
-                    .map(|_| Err(ServiceError::BadRequest(error.to_string())))
-                    .collect()
+                    .map(|_| Err(ServiceError::BadRequest(message.clone())))
+                    .collect();
             }
         };
         if let Err(error) = self.activate(service_type).await {
+            let message = error.to_string();
             return jobs
                 .into_iter()
-                .map(|_| Err(ServiceError::Internal(error.to_string())))
+                .map(|_| Err(ServiceError::Internal(message.clone())))
                 .collect();
         }
-        let Some(active_service) = self.active.as_ref() else {
-            return jobs
-                .into_iter()
-                .map(|_| {
-                    Err(ServiceError::Internal(
-                        "LLM service was not activated".to_string(),
-                    ))
-                })
-                .collect();
-        };
-        let mut results = Vec::with_capacity(jobs.len());
-        for job in jobs {
-            let result = match active_service {
-                ActiveService::Ocr(provider) => provider.infer_inputs(job.inputs).await,
-                ActiveService::ImageTagging(provider) => provider.infer_inputs(job.inputs).await,
-                ActiveService::ImageClustering(provider) => provider.infer_inputs(job.inputs).await,
-            };
-            results.push(result);
-        }
-        results
+        let active = self
+            .active
+            .as_ref()
+            .expect("active service set by activate");
+        stream::iter(jobs)
+            .map(|job| active.infer_inputs(job.inputs))
+            .buffered(max_concurrent_jobs)
+            .collect()
+            .await
     }
 
     async fn activate(&mut self, service_type: ServiceType) -> Result<(), ServiceError> {
@@ -284,7 +304,6 @@ impl ServiceManager {
                 return Ok(());
             }
         }
-
         if let Some(active) = self.active.take() {
             active.shutdown().await?;
         }
@@ -1128,10 +1147,37 @@ where
                 service = %service_type,
                 stream = stream_name,
                 "{}",
-                line
+                redact_base64_text(&line)
             );
         }
     });
+}
+
+pub fn redact_base64_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut token_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=') {
+            token_start.get_or_insert(index);
+            continue;
+        }
+        redact_base64_token(&mut output, &text, token_start.take(), index);
+        output.push(character);
+    }
+    redact_base64_token(&mut output, text, token_start, text.len());
+    output
+}
+
+fn redact_base64_token(output: &mut String, text: &str, start: Option<usize>, end: usize) {
+    let Some(start) = start else {
+        return;
+    };
+    let token = &text[start..end];
+    if token.len() >= 64 {
+        output.push_str("[base64 omitted]");
+        return;
+    }
+    output.push_str(token);
 }
 
 #[cfg(test)]
@@ -1187,6 +1233,7 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 100,
             embedding_dimensions: 0,
+            max_concurrent_jobs: 1,
         })
         .expect("Failed to create Baidu provider");
         let response = provider

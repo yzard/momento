@@ -3,18 +3,62 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ getOcrStatus: vi.fn(), getImageTaggingStatus: vi.fn(), status: vi.fn() }))
+const mocks = vi.hoisted(() => ({ trigger: vi.fn(), cancel: vi.fn(), clean: vi.fn(), triggerOcr: vi.fn(), cancelOcr: vi.fn(), cleanOcr: vi.fn(), triggerImageTagging: vi.fn(), cancelImageTagging: vi.fn(), cleanImageTagging: vi.fn(), triggerImageClustering: vi.fn(), cancelImageClustering: vi.fn(), cleanImageClustering: vi.fn(), getOcrStatus: vi.fn(), getImageTaggingStatus: vi.fn(), status: vi.fn() }))
 
-vi.mock('../../../../src/frontend/api/ai', () => ({ aiApi: { getOcrStatus: mocks.getOcrStatus, getImageTaggingStatus: mocks.getImageTaggingStatus } }))
+vi.mock('../../../../src/frontend/api/ai', () => ({ aiApi: { trigger: mocks.trigger, cancel: mocks.cancel, clean: mocks.clean, triggerOcr: mocks.triggerOcr, cancelOcr: mocks.cancelOcr, cleanOcr: mocks.cleanOcr, triggerImageTagging: mocks.triggerImageTagging, cancelImageTagging: mocks.cancelImageTagging, cleanImageTagging: mocks.cleanImageTagging, triggerImageClustering: mocks.triggerImageClustering, cancelImageClustering: mocks.cancelImageClustering, cleanImageClustering: mocks.cleanImageClustering, getOcrStatus: mocks.getOcrStatus, getImageTaggingStatus: mocks.getImageTaggingStatus } }))
 vi.mock('../../../../src/frontend/api/deduplicate', () => ({ deduplicateApi: { status: mocks.status } }))
 
 import AiPanel from '../../../../src/frontend/components/admin/AiPanel'
 
 describe('AiPanel', () => {
   beforeEach(() => {
-    mocks.getOcrStatus.mockResolvedValue({ completedJobs: 12 })
-    mocks.getImageTaggingStatus.mockResolvedValue({ completedJobs: 9 })
-    mocks.status.mockResolvedValue({ indexedMedia: 30, candidateComparisons: 44, clustersCreated: 5 })
+    mocks.getOcrStatus.mockResolvedValue({ status: 'idle', completedJobs: 12 })
+    mocks.getImageTaggingStatus.mockResolvedValue({ status: 'idle', completedJobs: 9 })
+    mocks.status.mockResolvedValue({ status: 'idle', ensembledMedia: 30, candidateComparisons: 44, clustersCreated: 5 })
+    mocks.trigger.mockResolvedValue({})
+    mocks.cancel.mockResolvedValue({})
+    mocks.clean.mockResolvedValue({})
+    mocks.triggerOcr.mockResolvedValue({})
+    mocks.triggerImageTagging.mockResolvedValue({})
+    mocks.triggerImageClustering.mockResolvedValue({})
+  })
+
+  it('starts all and individual AI job types', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><AiPanel /></QueryClientProvider>)
+    await screen.findByText('12')
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'All AI Jobs' }))
+    await waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+    await user.click(screen.getByRole('button', { name: 'OCR' }))
+    await waitFor(() => expect(mocks.triggerOcr).toHaveBeenCalledOnce())
+    await user.click(screen.getByRole('button', { name: 'Image Tagging' }))
+    await waitFor(() => expect(mocks.triggerImageTagging).toHaveBeenCalledOnce())
+    await user.click(screen.getByRole('button', { name: 'Image Clustering' }))
+    await waitFor(() => expect(mocks.triggerImageClustering).toHaveBeenCalledOnce())
+  })
+
+  it('cancels active all AI jobs', async () => {
+    mocks.getOcrStatus.mockResolvedValue({ status: 'queued', completedJobs: 12 })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><AiPanel /></QueryClientProvider>)
+    await screen.findByText('12')
+
+    await userEvent.click(screen.getByRole('button', { name: 'All AI Jobs' }))
+
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledOnce())
+  })
+
+  it('renders a cleanup action for every AI control row', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><AiPanel /></QueryClientProvider>)
+    await screen.findByText('12')
+
+    expect(screen.getByRole('button', { name: 'Clean All AI Data' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Clean OCR Data' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Clean Image Tagging Data' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Clean Image Clustering Data' })).toBeTruthy()
   })
 
   afterEach(cleanup)

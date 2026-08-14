@@ -57,13 +57,11 @@ def calculate_quality_score(image):
 
 
 def select_device(requested_device, torch_module):
-    if requested_device != "auto":
-        return torch_module.device(requested_device)
-    if torch_module.cuda.is_available():
-        return torch_module.device("cuda")
-    if hasattr(torch_module, "xpu") and torch_module.xpu.is_available():
-        return torch_module.device("xpu")
-    return torch_module.device("cpu")
+    if not requested_device.startswith("cuda"):
+        raise RuntimeError("image clustering requires a CUDA device")
+    if not torch_module.cuda.is_available():
+        raise RuntimeError("image clustering requires an available NVIDIA CUDA GPU")
+    return torch_module.device(requested_device)
 
 
 def decode_image(image_bytes):

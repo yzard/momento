@@ -160,6 +160,141 @@ fn queue_acceptance_preserves_ordered_frame_inputs() {
 }
 
 #[test]
+fn queue_acceptance_accepts_non_contiguous_input_sequences() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = Scheduler::new(
+        directory.path().to_path_buf(),
+        SchedulerConfig::default(),
+        CallbackConfig::default(),
+        Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+            service: Vec::new(),
+            ..Config::default()
+        })))),
+    )
+    .expect("scheduler");
+    let bytes = b"input".to_vec();
+    let descriptor = QueueInputDescriptor {
+        sequence: 3,
+        filename: "frame.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(&bytes)),
+        input_kind: "video_frame".to_string(),
+        frame_timestamp_ms: Some(3000),
+    };
+
+    scheduler
+        .accept(
+            QueueManifest {
+                job_id: "0123456789abcdef0123456789abcdef".to_string(),
+                media_id: 1,
+                task: "image_clustering".to_string(),
+                attempt: 1,
+                inputs: vec![descriptor.clone()],
+                callback_url: "http://example.test/callback".to_string(),
+            },
+            vec![(descriptor, bytes)],
+        )
+        .expect("sparse sequence should be accepted");
+
+    assert!(directory
+        .path()
+        .join("queuing/0123456789abcdef0123456789abcdef/input-3")
+        .is_file());
+}
+
+#[test]
+fn scheduler_prioritizes_a_single_task_before_switching_runtimes() {
+    let directory = tempdir().expect("queue directory");
+    let config = Arc::new(Config {
+        service: Vec::new(),
+        ..Config::default()
+    });
+    let scheduler = Scheduler::new(
+        directory.path().to_path_buf(),
+        SchedulerConfig::default(),
+        CallbackConfig::default(),
+        Arc::new(Mutex::new(ServiceManager::new(config))),
+    )
+    .expect("scheduler");
+    let bytes = b"input".to_vec();
+    let descriptor = QueueInputDescriptor {
+        sequence: 0,
+        filename: "input.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(&bytes)),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
+    };
+    for (job_id, task) in [
+        ("00000000000000000000000000000002", "image_tagging"),
+        ("00000000000000000000000000000001", "ocr"),
+    ] {
+        scheduler
+            .accept(
+                QueueManifest {
+                    job_id: job_id.to_string(),
+                    media_id: 1,
+                    task: task.to_string(),
+                    attempt: 1,
+                    inputs: vec![descriptor.clone()],
+                    callback_url: "http://example.test/callback".to_string(),
+                },
+                vec![(descriptor.clone(), bytes.clone())],
+            )
+            .expect("accepted");
+    }
+
+    let queued = std::fs::read_dir(directory.path().join("queuing"))
+        .expect("queue directory")
+        .flatten()
+        .map(|entry| {
+            let manifest: QueueManifest = serde_json::from_slice(
+                &std::fs::read(entry.path().join("manifest.json")).expect("manifest"),
+            )
+            .expect("valid manifest");
+            (entry.path(), manifest)
+        })
+        .collect::<Vec<_>>();
+    let mut queued = queued;
+    queued.sort_by(|left, right| left.1.job_id.cmp(&right.1.job_id));
+    assert_eq!(queued[0].1.task, "ocr");
+}
+
+#[test]
+fn scheduler_prefers_queued_jobs_for_the_warm_runtime() {
+    let queued = vec![
+        (
+            std::path::PathBuf::from("ocr"),
+            QueueManifest {
+                job_id: "00000000000000000000000000000001".to_string(),
+                media_id: 1,
+                task: "ocr".to_string(),
+                attempt: 1,
+                inputs: Vec::new(),
+                callback_url: "http://example.test/callback".to_string(),
+            },
+        ),
+        (
+            std::path::PathBuf::from("tagging"),
+            QueueManifest {
+                job_id: "00000000000000000000000000000002".to_string(),
+                media_id: 2,
+                task: "image_tagging".to_string(),
+                attempt: 1,
+                inputs: Vec::new(),
+                callback_url: "http://example.test/callback".to_string(),
+            },
+        ),
+    ];
+
+    let task = llm_service::scheduler::select_task(&queued, Some("image_tagging"));
+
+    assert_eq!(task, Some("image_tagging"));
+}
+
+#[test]
 fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
     let directory = tempdir().expect("queue directory");
     let config = Arc::new(Config {
@@ -277,7 +412,7 @@ async fn callback_failure_retains_http_status_and_response_body() {
             directory.path().to_path_buf(),
             SchedulerConfig {
                 poll_interval_seconds: 60,
-                active_batch_size: 1,
+                idle_shutdown_seconds: 60,
             },
             CallbackConfig {
                 request_timeout_seconds: 5,

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     http::header::HeaderMap,
     routing::{get, post},
     Json, Router,
@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/jobs/submit", post(submit))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state)
 }
 
@@ -86,21 +87,16 @@ async fn submit(
                 let manifest = manifest.as_ref().ok_or_else(|| {
                     ServiceError::BadRequest("manifest must be supplied before inputs".to_string())
                 })?;
-                let descriptor =
-                    manifest
-                        .inputs
-                        .get(sequence as usize)
-                        .cloned()
-                        .ok_or_else(|| {
-                            ServiceError::BadRequest(
-                                "multipart input has no manifest descriptor".to_string(),
-                            )
-                        })?;
-                if descriptor.sequence != sequence {
-                    return Err(ServiceError::BadRequest(
-                        "multipart input sequence does not match manifest".to_string(),
-                    ));
-                }
+                let descriptor = manifest
+                    .inputs
+                    .iter()
+                    .find(|descriptor| descriptor.sequence == sequence)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ServiceError::BadRequest(
+                            "multipart input has no manifest descriptor".to_string(),
+                        )
+                    })?;
                 let Some(QueueAdmission::Staging(staging)) = admission.as_ref() else {
                     while field
                         .chunk()

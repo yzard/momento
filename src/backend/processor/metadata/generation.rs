@@ -181,11 +181,11 @@ fn prepare_ai_inputs(
     original_path: &std::path::Path,
     thumbnail_path: &std::path::Path,
     media_type: &str,
-    duration_seconds: Option<f64>,
+    _duration_seconds: Option<f64>,
 ) -> Result<(), String> {
     let output_directory = paths().previews.join("ai").join(media_id.to_string());
     let frames = if media_type == "video" {
-        extract_video_frames(original_path, &output_directory, duration_seconds)?
+        extract_first_video_frame(original_path, &output_directory)?
     } else {
         vec![(0, None, thumbnail_path.to_path_buf())]
     };
@@ -236,49 +236,32 @@ fn prepare_ai_inputs(
     Ok(())
 }
 
-fn extract_video_frames(
+fn extract_first_video_frame(
     original_path: &std::path::Path,
     output_directory: &std::path::Path,
-    duration_seconds: Option<f64>,
 ) -> Result<Vec<(i64, Option<i64>, PathBuf)>, String> {
-    let duration_seconds = duration_seconds.unwrap_or(0.0).max(0.0);
-    let timestamps = if duration_seconds > 2.0 {
-        vec![0.0, duration_seconds / 2.0, duration_seconds * 0.9]
-    } else {
-        vec![0.0]
-    };
     let frames_directory = output_directory.join("frames");
     std::fs::create_dir_all(&frames_directory).map_err(|error| error.to_string())?;
-    timestamps
-        .into_iter()
-        .enumerate()
-        .map(|(sequence, timestamp_seconds)| {
-            let output_path = frames_directory.join(format!("{sequence:03}.jpg"));
-            let output = std::process::Command::new("ffmpeg")
-                .args(["-y", "-ss", &format!("{timestamp_seconds:.3}"), "-i"])
-                .arg(original_path)
-                .args([
-                    "-frames:v",
-                    "1",
-                    "-vf",
-                    "scale='min(1920,iw)':-2",
-                    "-q:v",
-                    "2",
-                ])
-                .arg(&output_path)
-                .output()
-                .map_err(|error| error.to_string())?;
-            if !output.status.success() || !output_path.is_file() {
-                return Err(format!(
-                    "FFmpeg frame extraction failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-            Ok((
-                sequence as i64,
-                Some((timestamp_seconds * 1000.0).round() as i64),
-                output_path,
-            ))
-        })
-        .collect()
+    let output_path = frames_directory.join("000.jpg");
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-y", "-ss", "0", "-i"])
+        .arg(original_path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(1920,iw)':-2",
+            "-q:v",
+            "2",
+        ])
+        .arg(&output_path)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() || !output_path.is_file() {
+        return Err(format!(
+            "FFmpeg frame extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(vec![(0, Some(0), output_path)])
 }

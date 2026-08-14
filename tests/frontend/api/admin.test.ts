@@ -18,4 +18,20 @@ describe('aiApi', () => {
     await expect(aiApi.trigger()).resolves.toEqual(response)
     expect(post).toHaveBeenCalledWith('/ai/trigger', {})
   })
+
+  it('cancels durable AI work', async () => {
+    const response = { message: 'AI jobs cancelled', queuedJobs: 2 }
+    post.mockResolvedValue({ data: response })
+
+    await expect(aiApi.cancel()).resolves.toEqual(response)
+    expect(post).toHaveBeenCalledWith('/ai/cancel', {})
+  })
+
+  it('triggers image clustering work', async () => {
+    const response = { message: 'Image clustering processing queued', queuedJobs: 2 }
+    post.mockResolvedValue({ data: response })
+
+    await expect(aiApi.triggerImageClustering()).resolves.toEqual(response)
+    expect(post).toHaveBeenCalledWith('/ai/image_clustering/trigger', {})
+  })
 })

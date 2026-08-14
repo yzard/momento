@@ -180,11 +180,15 @@ async fn submit_cycle(config: &Config, pool: &DbPool) -> Result<(), String> {
                     &format!("llm service error: {}", response.status()),
                 )?;
             }
-            Ok(response) => mark_failed(
-                pool,
-                &job_id,
-                &format!("llm service rejected submission: {}", response.status()),
-            )?,
+            Ok(response) => {
+                let status = response.status();
+                let detail = response.text().await.unwrap_or_default();
+                mark_failed(
+                    pool,
+                    &job_id,
+                    &format!("llm service rejected submission: {status}: {detail}"),
+                )?
+            }
             Err(error) => retry_job(&connection, &job_id, &error.to_string())?,
         }
     }

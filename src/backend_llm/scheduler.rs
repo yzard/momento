@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use tracing::warn;
 
 use crate::config::{CallbackConfig, SchedulerConfig};
 use crate::error::ServiceError;
@@ -204,7 +206,8 @@ impl QueueStaging {
         let expected = self
             .manifest
             .inputs
-            .get(descriptor.sequence as usize)
+            .iter()
+            .find(|expected| expected.sequence == descriptor.sequence)
             .ok_or_else(|| {
                 ServiceError::BadRequest("multipart input has no manifest descriptor".to_string())
             })?;
@@ -222,17 +225,28 @@ impl QueueStaging {
 
 impl Scheduler {
     pub async fn run(self: Arc<Self>) {
-        let interval = std::time::Duration::from_secs(self.configuration.poll_interval_seconds);
+        let interval = Duration::from_secs(self.configuration.poll_interval_seconds);
+        let idle_shutdown = Duration::from_secs(self.configuration.idle_shutdown_seconds);
+        let mut idle_since = None;
         loop {
-            self.process_cycle().await;
+            if self.process_cycle().await {
+                idle_since = None;
+                continue;
+            }
+            let idle_since = *idle_since.get_or_insert_with(Instant::now);
+            if idle_since.elapsed() >= idle_shutdown {
+                if let Err(error) = self.manager.lock().await.shutdown().await {
+                    warn!("failed to stop idle LLM runtime: {error}");
+                }
+            }
             tokio::time::sleep(interval).await;
         }
     }
 
-    async fn process_cycle(&self) {
+    async fn process_cycle(&self) -> bool {
         self.retry_callbacks().await;
         let Ok(entries) = std::fs::read_dir(self.queue_dir.join("queuing")) else {
-            return;
+            return false;
         };
         let mut queued = entries
             .flatten()
@@ -244,14 +258,21 @@ impl Scheduler {
             .collect::<Vec<_>>();
         queued.sort_by(|left, right| left.1.job_id.cmp(&right.1.job_id));
         let Some((_, first)) = queued.first() else {
-            return;
+            return false;
         };
-        let task = first.task.clone();
+        let active_task = self.manager.lock().await.active_task();
+        let task = select_task(&queued, active_task)
+            .unwrap_or(&first.task)
+            .to_string();
+        let max_concurrent_jobs = match self.manager.lock().await.max_concurrent_jobs(&task) {
+            Ok(max_concurrent_jobs) => max_concurrent_jobs,
+            Err(_) => return false,
+        };
         let mut claimed = Vec::new();
         for (queue_path, manifest) in queued
             .into_iter()
             .filter(|(_, manifest)| manifest.task == task)
-            .take(self.configuration.active_batch_size)
+            .take(max_concurrent_jobs)
         {
             let processing_path = self.queue_dir.join("processing").join(&manifest.job_id);
             if std::fs::rename(&queue_path, &processing_path).is_err() {
@@ -259,12 +280,13 @@ impl Scheduler {
             }
             claimed.push((processing_path, manifest));
         }
-        let mut inference_jobs = Vec::with_capacity(claimed.len());
+        let mut jobs = Vec::new();
         let mut ready = Vec::new();
+        let processed = !claimed.is_empty();
         for (job_path, manifest) in claimed {
             match self.load_inputs(&job_path, &manifest).await {
                 Ok(inputs) => {
-                    inference_jobs.push(InferenceJob {
+                    jobs.push(InferenceJob {
                         task: manifest.task.clone(),
                         inputs,
                     });
@@ -273,10 +295,16 @@ impl Scheduler {
                 Err(error) => self.fail(job_path, error),
             }
         }
-        let responses = self.manager.lock().await.infer_batch(inference_jobs).await;
+        let responses = self
+            .manager
+            .lock()
+            .await
+            .infer_batch(jobs, max_concurrent_jobs)
+            .await;
         for ((job_path, manifest), inference) in ready.into_iter().zip(responses) {
             self.finish_job(job_path, manifest, inference).await;
         }
+        processed
     }
 
     async fn load_inputs(
@@ -478,6 +506,17 @@ impl Scheduler {
         let name = path.file_name().unwrap_or_default().to_owned();
         let _ = std::fs::rename(path, self.queue_dir.join("failed").join(name));
     }
+}
+
+pub fn select_task<'a>(
+    queued: &'a [(PathBuf, QueueManifest)],
+    active_task: Option<&str>,
+) -> Option<&'a str> {
+    let active_task = active_task?;
+    queued
+        .iter()
+        .find(|(_, manifest)| manifest.task == active_task)
+        .map(|(_, manifest)| manifest.task.as_str())
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]

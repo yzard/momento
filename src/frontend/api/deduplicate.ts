@@ -31,7 +31,7 @@ export interface DeduplicateStatusResponse {
   scheduledFor: string | null
   startedAt: string | null
   completedAt: string | null
-  indexedMedia: number
+  ensembledMedia: number
   processedMedia: number
   candidateComparisons: number
   clustersCreated: number

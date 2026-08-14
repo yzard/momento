@@ -20,6 +20,22 @@ SPECIFICATION.loader.exec_module(IMAGE_CLUSTERING_SERVER)
 
 
 class ImageClusteringServerTests(unittest.TestCase):
+    def test_select_device_requires_available_cuda_gpu(self):
+        class FakeCuda:
+            @staticmethod
+            def is_available():
+                return False
+
+        class FakeTorch:
+            cuda = FakeCuda()
+
+            @staticmethod
+            def device(value):
+                return value
+
+        with self.assertRaisesRegex(RuntimeError, "NVIDIA CUDA GPU"):
+            IMAGE_CLUSTERING_SERVER.select_device("cuda", FakeTorch())
+
     def test_encodes_float32_values_in_little_endian_order(self):
         encoded = IMAGE_CLUSTERING_SERVER.encode_float32_le([1.0, -0.5])
 

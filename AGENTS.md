@@ -51,9 +51,10 @@ stores those bytes unchanged under `queue/queuing/`, then moves jobs through `pr
 `completed/` queue state and no configurable queue-size limit.
 
 Only one model runtime may be active. The scheduler drains one task type (`ocr`,
-`image_tagging`, or `image_clustering`) before switching runtimes. Queue data is loaded into
-memory only for the bounded active inference batch. llm-service never generates thumbnails,
-crops/resizes images, or extracts video frames; Momento prepares all inference inputs first.
+`image_tagging`, or `image_clustering`) before switching runtimes, and submits those jobs
+concurrently up to that subservice's configured maximum concurrent job count. llm-service never generates thumbnails,
+crops/resizes images, or extracts video frames; Momento prepares all inference inputs first. The active runtime remains
+warm until the scheduler switches task types or the queue stays empty for its configured idle shutdown period.
 
 API and source directories mirror each other: `/import/*`, `/metadata/*`, `/ai/*`, and
 `/internal/llm/*` have matching backend routes, processors, models, queries, frontend API

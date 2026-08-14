@@ -1,5 +1,6 @@
 use axum::{
     body::Body,
+    extract::DefaultBodyLimit,
     http::{Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -51,6 +52,7 @@ pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
     let mut app = Router::new()
         .nest("/api/v1", api_routes)
         .merge(webdav_router(state.clone()))
+        .layer(DefaultBodyLimit::disable())
         .layer(middleware::from_fn(request_logger))
         .layer(cors)
         .with_state(state);

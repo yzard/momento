@@ -73,9 +73,17 @@ pub async fn request_logger(mut request: Request<Body>, next: Next) -> Response 
     response
 }
 
-async fn extract_compact_payload(request: &mut Request<Body>) -> Option<String> {
+pub async fn extract_compact_payload(request: &mut Request<Body>) -> Option<String> {
     if request.method() != axum::http::Method::POST {
         return None;
+    }
+    if request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| content_type.starts_with("multipart/"))
+    {
+        return Some("[multipart body omitted]".to_string());
     }
 
     let body = std::mem::replace(request.body_mut(), Body::empty());
@@ -90,7 +98,11 @@ async fn extract_compact_payload(request: &mut Request<Body>) -> Option<String> 
     };
 
     let compact = match serde_json::from_str::<serde_json::Value>(&body_str) {
-        Ok(value) => value.to_string(),
+        Ok(mut value) => {
+            redact_binary_values(&mut value);
+            value.to_string()
+        }
+        Err(_) if body_str.contains("base64") => "[binary payload omitted]".to_string(),
         Err(_) => body_str.trim().to_string(),
     };
 
@@ -98,6 +110,39 @@ async fn extract_compact_payload(request: &mut Request<Body>) -> Option<String> 
     *request.body_mut() = restored;
 
     Some(compact)
+}
+
+pub fn redact_binary_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if is_binary_field(key) {
+                    if value.is_string() {
+                        *value = serde_json::Value::String("[base64 omitted]".to_string());
+                        continue;
+                    }
+                }
+                redact_binary_values(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_binary_values(value);
+            }
+        }
+        serde_json::Value::String(text) if text.contains(";base64,") => {
+            *text = "[base64 omitted]".to_string();
+        }
+        _ => {}
+    }
+}
+
+fn is_binary_field(key: &str) -> bool {
+    matches!(
+        key,
+        "image" | "imageBase64" | "image_base64" | "data" | "bytes"
+    ) || key.ends_with("Base64")
+        || key.ends_with("_base64")
 }
 
 pub fn log_error(context: &str, error: &dyn std::error::Error) {

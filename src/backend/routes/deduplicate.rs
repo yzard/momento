@@ -47,6 +47,11 @@ async fn status(
     RequireAdmin(_): RequireAdmin,
 ) -> AppResult<Json<DeduplicateStatusResponse>> {
     let run = latest_run(&state.pool)?;
+    let connection = state.pool.get()?;
+    let ensembled_media =
+        connection.query_row(queries::deduplicate::COUNT_ENSEMBLED_MEDIA, [], |row| {
+            row.get(0)
+        })?;
     let next_scheduled_at = if state.config.llm.deduplicate_enabled {
         Some(
             next_scheduled_at(
@@ -68,7 +73,7 @@ async fn status(
             scheduled_for: None,
             started_at: None,
             completed_at: None,
-            indexed_media: 0,
+            ensembled_media,
             processed_media: 0,
             candidate_comparisons: 0,
             clusters_created: 0,
@@ -83,7 +88,7 @@ async fn status(
         scheduled_for: run.scheduled_for,
         started_at: Some(run.started_at),
         completed_at: run.completed_at,
-        indexed_media: run.indexed_media,
+        ensembled_media,
         processed_media: run.processed_media,
         candidate_comparisons: run.candidate_comparisons,
         clusters_created: run.clusters_created,

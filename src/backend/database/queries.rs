@@ -119,7 +119,11 @@ pub mod ai_jobs {
         "SELECT status, COUNT(*) FROM llm_jobs WHERE task = ? GROUP BY status";
     pub const SELECT_FAILURES: &str = "SELECT last_error FROM llm_jobs WHERE task = ? AND status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
     pub const DELETE_TEXT_FOR_TASK: &str = "DELETE FROM media_text WHERE model_type = ?";
+    pub const DELETE_TEXT_INPUTS_FOR_TASK: &str =
+        "DELETE FROM media_text_inputs WHERE model_type = ?";
+    pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
     pub const CANCEL_ACTIVE_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const CANCEL_ALL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted')";
 }
 
 pub mod llm_callback {
@@ -1536,6 +1540,8 @@ pub mod access {
 }
 
 pub mod deduplicate {
+    pub const COUNT_ENSEMBLED_MEDIA: &str =
+        "SELECT COUNT(*) FROM media_similarity_index WHERE processing_status = 1";
     pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
     pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
     pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";

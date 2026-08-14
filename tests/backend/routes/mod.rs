@@ -1,3 +1,4 @@
+mod ai;
 mod deduplicate;
 mod internal_llm;
 mod map;

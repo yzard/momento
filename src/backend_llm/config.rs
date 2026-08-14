@@ -51,22 +51,23 @@ pub struct GeneralConfig {
 pub struct SchedulerConfig {
     #[serde(default = "default_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_active_batch_size")]
-    pub active_batch_size: usize,
+    #[serde(default = "default_idle_shutdown_seconds")]
+    pub idle_shutdown_seconds: u64,
 }
 
 fn default_poll_interval_seconds() -> u64 {
     5
 }
-fn default_active_batch_size() -> usize {
-    8
+
+fn default_idle_shutdown_seconds() -> u64 {
+    60
 }
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: default_poll_interval_seconds(),
-            active_batch_size: default_active_batch_size(),
+            idle_shutdown_seconds: default_idle_shutdown_seconds(),
         }
     }
 }
@@ -189,6 +190,7 @@ pub struct ServiceConfig {
     pub max_tokens: u32,
     #[serde(default)]
     pub embedding_dimensions: usize,
+    pub max_concurrent_jobs: usize,
 }
 
 fn default_baidu_token_url() -> String {
@@ -245,10 +247,10 @@ impl Config {
             ));
         }
         if self.general.scheduler.poll_interval_seconds == 0
-            || self.general.scheduler.active_batch_size == 0
+            || self.general.scheduler.idle_shutdown_seconds == 0
         {
             return Err(ServiceError::Configuration(
-                "scheduler poll interval and active batch size must be positive".to_string(),
+                "scheduler poll interval and idle shutdown timeout must be positive".to_string(),
             ));
         }
         if self.service.is_empty() {
@@ -281,6 +283,11 @@ impl Config {
         }
         if !service.enabled {
             return Ok(());
+        }
+        if service.max_concurrent_jobs == 0 {
+            return Err(ServiceError::Configuration(
+                "enabled service max_concurrent_jobs must be positive".to_string(),
+            ));
         }
 
         match service.model_type.as_str() {
@@ -319,6 +326,7 @@ impl Config {
                         "local OCR timeouts and max_tokens must be positive".to_string(),
                     ));
                 }
+                validate_cuda_service(service, "local OCR")?;
             }
         }
         Ok(())
@@ -339,6 +347,7 @@ impl Config {
             ));
         }
         validate_uv_package_installation(service, "image tagging")?;
+        validate_cuda_service(service, "image tagging")?;
         Ok(())
     }
 
@@ -377,6 +386,7 @@ impl Config {
             ));
         }
         validate_uv_package_installation(service, "image clustering")?;
+        validate_cuda_service(service, "image clustering")?;
         Ok(())
     }
 }
@@ -394,6 +404,24 @@ fn validate_uv_package_installation(
     Ok(())
 }
 
+fn validate_cuda_service(service: &ServiceConfig, service_name: &str) -> Result<(), ServiceError> {
+    if !service.device.starts_with("cuda") {
+        return Err(ServiceError::Configuration(format!(
+            "{service_name} device must select a CUDA GPU"
+        )));
+    }
+    if !service
+        .docker_command
+        .iter()
+        .any(|argument| argument == "--gpus")
+    {
+        return Err(ServiceError::Configuration(format!(
+            "{service_name} docker_command must expose an NVIDIA GPU with --gpus"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,8 +432,12 @@ mod tests {
             model_type: "ocr".to_string(),
             model_version: "unlimited_ocr".to_string(),
             provider: ProviderKind::Local,
-            docker_command: vec!["vllm".to_string()],
-            device: default_device(),
+            docker_command: vec![
+                "docker".to_string(),
+                "--gpus".to_string(),
+                "all".to_string(),
+            ],
+            device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8000/v1".to_string(),
             model: "baidu/Unlimited-OCR".to_string(),
             script_path: String::new(),
@@ -417,6 +449,7 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 100,
             embedding_dimensions: 0,
+            max_concurrent_jobs: 8,
         }
     }
 
@@ -450,9 +483,11 @@ mod tests {
             provider: ProviderKind::Local,
             docker_command: vec![
                 "docker".to_string(),
+                "--gpus".to_string(),
+                "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
             ],
-            device: default_device(),
+            device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8200".to_string(),
             model: String::new(),
             script_path: "ram_server.py".to_string(),
@@ -464,6 +499,7 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 0,
+            max_concurrent_jobs: 8,
         });
         assert!(config.validate().is_ok());
     }
@@ -478,9 +514,11 @@ mod tests {
             provider: ProviderKind::Local,
             docker_command: vec![
                 "python3".to_string(),
+                "--gpus".to_string(),
+                "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
             ],
-            device: default_device(),
+            device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8300".to_string(),
             model: "facebook/dinov2-small".to_string(),
             script_path: "image_clustering_server.py".to_string(),
@@ -492,6 +530,7 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 384,
+            max_concurrent_jobs: 8,
         });
         assert!(config.validate().is_ok());
 
@@ -523,6 +562,7 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 0,
+            max_concurrent_jobs: 8,
         });
 
         let error = config

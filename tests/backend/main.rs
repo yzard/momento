@@ -4,6 +4,7 @@ mod constants;
 mod cronjob;
 mod database;
 mod error;
+mod logging;
 mod models;
 mod processor;
 mod routes;

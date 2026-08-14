@@ -66,13 +66,11 @@ class TaggingRuntime:
 
 
 def select_device(requested):
-    if requested != "auto":
-        return torch.device(requested)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        return torch.device("xpu")
-    return torch.device("cpu")
+    if not requested.startswith("cuda"):
+        raise RuntimeError("image tagging requires a CUDA device")
+    if not torch.cuda.is_available():
+        raise RuntimeError("image tagging requires an available NVIDIA CUDA GPU")
+    return torch.device(requested)
 
 
 class Handler(BaseHTTPRequestHandler):
