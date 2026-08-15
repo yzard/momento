@@ -413,11 +413,13 @@ async fn callback_failure_retains_http_status_and_response_body() {
             SchedulerConfig {
                 poll_interval_seconds: 60,
                 idle_shutdown_seconds: 60,
+                dispatch_batch_size: 64,
             },
             CallbackConfig {
                 request_timeout_seconds: 5,
                 retry_delay_seconds: 60,
                 max_attempts: 10,
+                max_concurrent_deliveries: 4,
                 key: "callback-key".to_string(),
             },
             Arc::new(Mutex::new(ServiceManager::new(config))),

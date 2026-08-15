@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::{future::join_all, stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -225,6 +226,13 @@ impl QueueStaging {
 
 impl Scheduler {
     pub async fn run(self: Arc<Self>) {
+        tokio::join!(
+            Arc::clone(&self).run_inference_loop(),
+            self.run_callback_loop()
+        );
+    }
+
+    async fn run_inference_loop(self: Arc<Self>) {
         let interval = Duration::from_secs(self.configuration.poll_interval_seconds);
         let idle_shutdown = Duration::from_secs(self.configuration.idle_shutdown_seconds);
         let mut idle_since = None;
@@ -243,8 +251,15 @@ impl Scheduler {
         }
     }
 
+    async fn run_callback_loop(self: Arc<Self>) {
+        let interval = Duration::from_secs(self.configuration.poll_interval_seconds);
+        loop {
+            self.retry_callbacks().await;
+            tokio::time::sleep(interval).await;
+        }
+    }
+
     async fn process_cycle(&self) -> bool {
-        self.retry_callbacks().await;
         let Ok(entries) = std::fs::read_dir(self.queue_dir.join("queuing")) else {
             return false;
         };
@@ -264,15 +279,11 @@ impl Scheduler {
         let task = select_task(&queued, active_task)
             .unwrap_or(&first.task)
             .to_string();
-        let max_concurrent_jobs = match self.manager.lock().await.max_concurrent_jobs(&task) {
-            Ok(max_concurrent_jobs) => max_concurrent_jobs,
-            Err(_) => return false,
-        };
         let mut claimed = Vec::new();
         for (queue_path, manifest) in queued
             .into_iter()
             .filter(|(_, manifest)| manifest.task == task)
-            .take(max_concurrent_jobs)
+            .take(self.configuration.dispatch_batch_size)
         {
             let processing_path = self.queue_dir.join("processing").join(&manifest.job_id);
             if std::fs::rename(&queue_path, &processing_path).is_err() {
@@ -295,15 +306,16 @@ impl Scheduler {
                 Err(error) => self.fail(job_path, error),
             }
         }
-        let responses = self
-            .manager
-            .lock()
-            .await
-            .infer_batch(jobs, max_concurrent_jobs)
-            .await;
-        for ((job_path, manifest), inference) in ready.into_iter().zip(responses) {
-            self.finish_job(job_path, manifest, inference).await;
-        }
+        let responses = self.manager.lock().await.infer_batch(jobs).await;
+        join_all(
+            ready
+                .into_iter()
+                .zip(responses)
+                .map(|((job_path, manifest), inference)| {
+                    self.persist_job_result(job_path, manifest, inference)
+                }),
+        )
+        .await;
         processed
     }
 
@@ -327,7 +339,7 @@ impl Scheduler {
         Ok(inputs)
     }
 
-    async fn finish_job(
+    async fn persist_job_result(
         &self,
         job_path: PathBuf,
         manifest: QueueManifest,
@@ -351,29 +363,12 @@ impl Scheduler {
             self.fail(job_path, error.to_string());
             return;
         }
-        let Err(callback_error) = self
-            .deliver_callback(&manifest.callback_url, &callback)
-            .await
-        else {
-            if let Err(error) = tokio::fs::remove_dir_all(&job_path).await {
-                self.fail(
-                    job_path,
-                    format!("callback acknowledged but queue cleanup failed: {error}"),
-                );
-            }
-            return;
-        };
-        self.log_callback_failure(&manifest, &callback_error);
         let destination = self
             .queue_dir
             .join("callback_pending")
             .join(&manifest.job_id);
         match tokio::fs::rename(&job_path, &destination).await {
-            Ok(()) => {
-                if let Err(error) = self.record_callback_failure(&destination, &callback_error) {
-                    self.fail(destination, error.to_string());
-                }
-            }
+            Ok(()) => {}
             Err(error) => self.fail(
                 job_path,
                 format!("failed to transition callback pending: {error}"),
@@ -385,40 +380,47 @@ impl Scheduler {
         let Ok(entries) = std::fs::read_dir(self.queue_dir.join("callback_pending")) else {
             return;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !self.callback_is_due(&path) {
-                continue;
-            }
-            let Ok(manifest) = self.read_manifest(&path) else {
-                self.fail(path, "invalid manifest".to_string());
-                continue;
-            };
-            let Ok(result) = tokio::fs::read(path.join("result.json")).await else {
-                self.fail(path, "missing inference result".to_string());
-                continue;
-            };
-            let Ok(callback) = serde_json::from_slice(&result) else {
-                self.fail(path, "invalid inference result".to_string());
-                continue;
-            };
-            match self
-                .deliver_callback(&manifest.callback_url, &callback)
-                .await
-            {
-                Ok(()) => {
-                    if let Err(error) = tokio::fs::remove_dir_all(&path).await {
-                        self.fail(
-                            path,
-                            format!("callback acknowledged but queue cleanup failed: {error}"),
-                        );
-                    }
+        let due_paths = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| self.callback_is_due(path))
+            .collect::<Vec<_>>();
+        stream::iter(due_paths)
+            .for_each_concurrent(self.callback.max_concurrent_deliveries, |path| {
+                self.retry_callback(path)
+            })
+            .await;
+    }
+
+    async fn retry_callback(&self, path: PathBuf) {
+        let Ok(manifest) = self.read_manifest(&path) else {
+            self.fail(path, "invalid manifest".to_string());
+            return;
+        };
+        let Ok(result) = tokio::fs::read(path.join("result.json")).await else {
+            self.fail(path, "missing inference result".to_string());
+            return;
+        };
+        let Ok(callback) = serde_json::from_slice(&result) else {
+            self.fail(path, "invalid inference result".to_string());
+            return;
+        };
+        match self
+            .deliver_callback(&manifest.callback_url, &callback)
+            .await
+        {
+            Ok(()) => {
+                if let Err(error) = tokio::fs::remove_dir_all(&path).await {
+                    self.fail(
+                        path,
+                        format!("callback acknowledged but queue cleanup failed: {error}"),
+                    );
                 }
-                Err(callback_error) => {
-                    self.log_callback_failure(&manifest, &callback_error);
-                    if let Err(error) = self.record_callback_failure(&path, &callback_error) {
-                        self.fail(path, error.to_string());
-                    }
+            }
+            Err(callback_error) => {
+                self.log_callback_failure(&manifest, &callback_error);
+                if let Err(error) = self.record_callback_failure(&path, &callback_error) {
+                    self.fail(path, error.to_string());
                 }
             }
         }

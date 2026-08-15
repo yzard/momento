@@ -7,6 +7,7 @@ import binascii
 import json
 import math
 import sys
+import threading
 from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -19,6 +20,12 @@ MAX_REQUEST_BYTES = 50 * 1024 * 1024
 
 class InvalidImageError(ValueError):
     """The request body is not a readable image."""
+
+
+def create_inference_slots(max_concurrent_jobs):
+    if max_concurrent_jobs <= 0:
+        raise ValueError("max_concurrent_jobs must be positive")
+    return threading.BoundedSemaphore(max_concurrent_jobs)
 
 
 def encode_float32_le(values):
@@ -124,6 +131,7 @@ class ImageClusteringRuntime:
 
 class Handler(BaseHTTPRequestHandler):
     runtime = None
+    inference_slots = None
 
     def do_GET(self):
         if self.path != "/ready":
@@ -152,7 +160,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            response = self.runtime.infer(image_bytes)
+            with self.inference_slots:
+                response = self.runtime.infer(image_bytes)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
             return
@@ -180,11 +189,15 @@ def main():
     parser.add_argument("--device", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--max-concurrent-jobs", type=int, required=True)
     arguments = parser.parse_args()
+    if arguments.max_concurrent_jobs <= 0:
+        parser.error("--max-concurrent-jobs must be positive")
 
     Handler.runtime = ImageClusteringRuntime(
         arguments.model, arguments.cache_dir, arguments.device
     )
+    Handler.inference_slots = create_inference_slots(arguments.max_concurrent_jobs)
     server = ThreadingHTTPServer((arguments.host, arguments.port), Handler)
     serve_until_stopped(server)
 

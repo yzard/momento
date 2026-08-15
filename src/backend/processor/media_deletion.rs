@@ -27,6 +27,7 @@ pub fn permanently_delete_for_user(
         return Ok(false);
     }
     transaction.execute(queries::trash::DELETE_PERMANENTLY, [media_id])?;
+    transaction.execute(queries::trash::DELETE_EMPTY_FACE_GROUPS, [])?;
     transaction.commit()?;
     delete_media_files(media_id, file_path, thumbnail_path);
     Ok(true)

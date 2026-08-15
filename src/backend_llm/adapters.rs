@@ -1,6 +1,6 @@
-pub const BAIDU_UNLIMITED_OCR_MODEL: &str = "baidu/Unlimited-OCR";
+pub const UNLIMITED_OCR_MODEL: &str = "baidu/Unlimited-OCR";
 
-pub fn normalize_baidu_unlimited_ocr_text(text: &str) -> String {
+pub fn normalize_unlimited_ocr_text(text: &str) -> String {
     let cleaned = text
         .replace("<|ref|>", "")
         .replace("<|/ref|>", "")
@@ -16,20 +16,20 @@ pub fn normalize_baidu_unlimited_ocr_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_baidu_unlimited_ocr_text;
+    use super::normalize_unlimited_ocr_text;
 
     #[test]
-    fn removes_baidu_unlimited_ocr_grounding_only_output() {
+    fn removes_unlimited_ocr_grounding_only_output() {
         assert_eq!(
-            normalize_baidu_unlimited_ocr_text("<|det|>image [0, 0, 999, 999]<|/det|>"),
+            normalize_unlimited_ocr_text("<|det|>image [0, 0, 999, 999]<|/det|>"),
             ""
         );
     }
 
     #[test]
-    fn preserves_non_empty_baidu_unlimited_ocr_text() {
+    fn preserves_non_empty_unlimited_ocr_text() {
         assert_eq!(
-            normalize_baidu_unlimited_ocr_text("<|ref|>Title<|/ref|>"),
+            normalize_unlimited_ocr_text("<|ref|>Title<|/ref|>"),
             "Title"
         );
     }

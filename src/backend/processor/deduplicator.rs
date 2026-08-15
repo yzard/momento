@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries, DbPool};
 use crate::error::{AppError, AppResult};
+use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
 
 const CANDIDATE_PAGE_SIZE: usize = 256;
 const INDEX_PAGE_SIZE: usize = 64;
@@ -256,10 +257,14 @@ pub fn queue_clustering_jobs(pool: &DbPool, run_id: i64) -> AppResult<usize> {
     if run_status != "running" {
         return Ok(0);
     }
-    Ok(connection.execute(
+    let transaction = connection.unchecked_transaction()?;
+    let queued_jobs = transaction.execute(
         queries::deduplicate::CREATE_CLUSTERING_JOBS,
         rusqlite::params![run_id, run_id],
-    )?)
+    )?;
+    transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+    transaction.commit()?;
+    Ok(queued_jobs)
 }
 
 pub fn finalize_ready_runs(pool: &DbPool) -> AppResult<()> {
@@ -283,6 +288,10 @@ pub fn finalize_ready_runs(pool: &DbPool) -> AppResult<()> {
         if current_status != "running" {
             continue;
         }
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(queries::deduplicate::REQUEUE_MISSING_INPUT_JOBS, [run_id])?;
+        transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+        transaction.commit()?;
         let pending: i64 =
             connection.query_row(queries::deduplicate::COUNT_PENDING_JOBS, [run_id], |row| {
                 row.get(0)
@@ -621,37 +630,6 @@ fn update_run_progress(
         ],
     )?;
     Ok(())
-}
-
-pub fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.is_empty() || left.len() != right.len() {
-        return None;
-    }
-    let mut dot_product = 0.0_f32;
-    let mut left_norm = 0.0_f32;
-    let mut right_norm = 0.0_f32;
-    for (left_component, right_component) in left.iter().zip(right) {
-        dot_product += left_component * right_component;
-        left_norm += left_component * left_component;
-        right_norm += right_component * right_component;
-    }
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return None;
-    }
-    Some(dot_product / (left_norm.sqrt() * right_norm.sqrt()))
-}
-
-pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|component| component.to_le_bytes())
-        .collect()
-}
-
-pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
 }
 
 pub fn log_schedule_start(scheduled_for: &str) {

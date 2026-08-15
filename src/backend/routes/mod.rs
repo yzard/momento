@@ -2,6 +2,7 @@ mod ai;
 mod albums;
 mod auth;
 mod deduplicate;
+mod faces;
 #[path = "import/mod.rs"]
 mod imports;
 mod internal;
@@ -23,6 +24,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(auth::router())
         .merge(ai::router())
         .merge(deduplicate::router())
+        .merge(faces::router())
         .merge(users::router())
         .merge(media::router())
         .merge(media::thumbnail_router())

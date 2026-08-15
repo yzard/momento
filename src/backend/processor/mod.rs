@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod deduplicator;
+pub mod face_detection;
 pub mod import;
 pub mod media_deletion;
 pub mod media_processor;

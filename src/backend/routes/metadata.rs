@@ -62,6 +62,7 @@ async fn status(
         completed_jobs: count_for("completed"),
         failed_jobs,
         errors,
+        face_groups: None,
     }))
 }
 

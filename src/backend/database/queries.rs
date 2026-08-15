@@ -93,6 +93,10 @@ pub mod metadata_jobs {
     pub const DELETE_SIMILARITY_BANDS: &str = "DELETE FROM media_similarity_hash_bands";
     pub const DELETE_SIMILARITY_INDEX: &str = "DELETE FROM media_similarity_index";
     pub const DELETE_SIMILARITY_DIRTY: &str = "DELETE FROM media_similarity_dirty";
+    pub const DELETE_FACE_GROUPING_RUNS: &str = "DELETE FROM face_grouping_runs";
+    pub const DELETE_FACE_GROUPS: &str = "DELETE FROM face_groups";
+    pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces";
+    pub const DELETE_FACE_DETECTION_RESULTS: &str = "DELETE FROM media_face_detection_results";
     pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
     pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
     pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
@@ -108,10 +112,12 @@ pub mod metadata_jobs {
 
 pub mod ai_jobs {
     pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY created_at LIMIT ?";
     pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued'";
     pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
-    pub const SELECT_INPUTS: &str = "SELECT sequence, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
+    pub const SNAPSHOT_QUEUED_INPUTS: &str = "INSERT OR IGNORE INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) SELECT llm_jobs.id, media_ai_inputs.sequence, media_ai_inputs.input_kind, media_ai_inputs.file_path, media_ai_inputs.filename, media_ai_inputs.mime_type, media_ai_inputs.byte_size, media_ai_inputs.content_hash, media_ai_inputs.frame_timestamp_ms FROM llm_jobs JOIN media_ai_inputs ON media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = llm_jobs.task WHERE llm_jobs.status = 'queued'";
+    pub const SELECT_INPUTS: &str = "SELECT sequence, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
     pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND claimed_at < datetime('now', '-5 minutes')";
     pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
@@ -124,6 +130,64 @@ pub mod ai_jobs {
     pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
     pub const CANCEL_ACTIVE_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
     pub const CANCEL_ALL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted')";
+}
+
+pub mod faces {
+    pub const COUNT_GROUPS: &str = "SELECT COUNT(*) FROM face_groups";
+    pub const INSERT_GROUPING_RUN: &str =
+        "INSERT INTO face_grouping_runs (status) VALUES ('running')";
+    pub const SELECT_ACTIVE_RUN: &str = "SELECT id, status FROM face_grouping_runs WHERE status IN ('running', 'cancelling') ORDER BY id DESC LIMIT 1";
+    pub const COUNT_PENDING_JOBS: &str = "SELECT COUNT(*) FROM llm_jobs WHERE face_grouping_run_id = ? AND task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted')";
+    pub const COUNT_FAILED_JOBS: &str =
+        "SELECT COUNT(*) FROM llm_jobs WHERE face_grouping_run_id = ? AND task = 'face_detection' AND status = 'failed'";
+    pub const MARK_RUN: &str = "UPDATE face_grouping_runs SET status = ?, completed_at = datetime('now'), error = ? WHERE id = ? AND status IN ('running', 'cancelling')";
+    pub const CANCEL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted')";
+    pub const SELECT_FACES: &str = "SELECT media_faces.id, media_faces.embedding, media_faces.quality FROM media_faces WHERE NOT EXISTS (SELECT 1 FROM face_group_members JOIN face_groups ON face_groups.id = face_group_members.face_group_id WHERE face_group_members.face_id = media_faces.id AND face_groups.manual_curated = 1) ORDER BY media_faces.id";
+    pub const DELETE_AUTOMATIC_GROUPS: &str = "DELETE FROM face_groups WHERE manual_curated = 0";
+    pub const INSERT_GROUP: &str =
+        "INSERT INTO face_groups (representative_face_id, manual_curated) VALUES (?, 0)";
+    pub const INSERT_MEMBER: &str =
+        "INSERT OR IGNORE INTO face_group_members (face_group_id, face_id) VALUES (?, ?)";
+    pub const INSERT_FACE: &str = "INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, embedding, crop_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces WHERE media_id = ?";
+    pub const CANCEL_RECOVERED_CANCELLING_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
+    pub const FINALIZE_RECOVERED_CANCELLING_RUNS: &str = "UPDATE face_grouping_runs SET status = 'cancelled', completed_at = datetime('now'), error = NULL WHERE status = 'cancelling'";
+    pub const REQUEST_CANCEL_RUNS: &str =
+        "UPDATE face_grouping_runs SET status = 'cancelling' WHERE status = 'running'";
+    pub const CLEAN_RUNS: &str = "DELETE FROM face_grouping_runs";
+    pub const CLEAN_GROUPS: &str = "DELETE FROM face_groups";
+    pub const CLEAN_FACES: &str = "DELETE FROM media_faces";
+    pub const CLEAN_RESULTS: &str = "DELETE FROM media_face_detection_results";
+    pub const CLEAN_JOBS: &str = "DELETE FROM llm_jobs WHERE task = 'face_detection'";
+    pub const SELECT_INPUT_CORRELATION: &str = "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
+    pub const SELECT_INPUT_PATH: &str = "SELECT file_path, byte_size, content_hash FROM llm_job_inputs WHERE job_id = ? AND sequence = ?";
+    pub const SELECT_MEDIA_CROPS: &str = "SELECT crop_path FROM media_faces WHERE media_id = ?";
+    pub const UPSERT_RESULT: &str = "INSERT INTO media_face_detection_results (media_id, model_type, model_version) VALUES (?, 'face_detection', ?) ON CONFLICT(media_id) DO UPDATE SET model_type = excluded.model_type, model_version = excluded.model_version, completed_at = datetime('now')";
+    pub const LIST_GROUPS: &str = "SELECT fg.id, COUNT(fgm.face_id), COUNT(DISTINCT mf.media_id) FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id ORDER BY fg.id LIMIT ? OFFSET ?";
+    pub const COUNT_VISIBLE_GROUPS: &str = "SELECT COUNT(*) FROM (SELECT fg.id FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id)";
+    pub const SELECT_GROUP: &str = "SELECT fg.id, COUNT(fgm.face_id), COUNT(DISTINCT mf.media_id) FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE fg.id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id";
+    pub const SELECT_GROUP_MEDIA: &str = "SELECT DISTINCT m.id, m.filename, m.original_filename, m.media_type, m.mime_type, mm.width, mm.height, m.file_size, mm.duration_seconds, mm.date_taken, mm.gps_latitude, mm.gps_longitude, mm.camera_make, mm.camera_model, mm.lens_make, mm.lens_model, mm.iso, mm.exposure_time, mm.f_number, mm.focal_length, mm.focal_length_35mm, mm.gps_altitude, mm.location_city, mm.location_state, mm.location_country, mm.video_codec, mm.keywords, m.created_at FROM media AS m JOIN media_faces AS mf ON mf.media_id = m.id JOIN face_group_members AS fgm ON fgm.face_id = mf.id JOIN media_access AS ma ON ma.media_id = m.id LEFT JOIN media_metadata AS mm ON mm.media_id = m.id WHERE fgm.face_group_id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL ORDER BY m.id";
+    pub const SELECT_CROP: &str = "SELECT mf.crop_path FROM face_group_members AS fgm JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id LEFT JOIN face_groups AS fg ON fg.id = fgm.face_group_id WHERE fgm.face_group_id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL ORDER BY CASE WHEN mf.id = fg.representative_face_id THEN 0 ELSE 1 END, mf.quality DESC, mf.id LIMIT 1";
+    pub const SELECT_EXISTING_GROUPS: &str = "SELECT id FROM face_groups WHERE id IN (%s)";
+    pub const SELECT_MERGE_MEMBERS: &str =
+        "SELECT face_id FROM face_group_members WHERE face_group_id IN (%s)";
+    pub const UPDATE_MANUAL_GROUP: &str = "UPDATE face_groups SET manual_curated = 1, representative_face_id = (SELECT MIN(face_id) FROM face_group_members WHERE face_group_id = ?) WHERE id = ?";
+    pub const DELETE_GROUP: &str = "DELETE FROM face_groups WHERE id = ?";
+    pub const COUNT_GROUP_MEMBERS: &str =
+        "SELECT COUNT(*) FROM face_group_members WHERE face_group_id = ?";
+    pub const COUNT_GROUP_MEDIA: &str = "SELECT COUNT(DISTINCT media_faces.media_id) FROM face_group_members JOIN media_faces ON media_faces.id = face_group_members.face_id WHERE face_group_members.face_group_id = ?";
+
+    pub fn build_existing_groups_query(count: usize) -> String {
+        SELECT_EXISTING_GROUPS.replace("%s", &placeholders(count))
+    }
+    pub fn build_merge_members_query(count: usize) -> String {
+        SELECT_MERGE_MEMBERS.replace("%s", &placeholders(count))
+    }
+    fn placeholders(count: usize) -> String {
+        std::iter::repeat_n("?", count)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 pub mod llm_callback {
@@ -1423,6 +1487,7 @@ pub mod public {
 }
 
 pub mod trash {
+    pub const DELETE_EMPTY_FACE_GROUPS: &str = "DELETE FROM face_groups WHERE NOT EXISTS (SELECT 1 FROM face_group_members WHERE face_group_members.face_group_id = face_groups.id)";
     pub const SELECT_DELETED: &str = r#"
     SELECT m.id
          , m.filename
@@ -1546,6 +1611,7 @@ pub mod deduplicate {
     pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
     pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";
     pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
+    pub const REQUEUE_MISSING_INPUT_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', last_error = NULL, claimed_at = NULL, completed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND task = 'image_clustering' AND status = 'failed' AND last_error = 'missing prepared AI inputs' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = 'image_clustering')";
     pub const SELECT_ACTIVE_RUNS: &str =
         "SELECT id, status FROM media_similarity_runs WHERE status IN ('running', 'cancelling')";
     pub const CANCEL_UNSUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting')";

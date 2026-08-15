@@ -19,4 +19,6 @@ pub struct MetadataStatusResponse {
     pub completed_jobs: i64,
     pub failed_jobs: i64,
     pub errors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face_groups: Option<i64>,
 }

@@ -4,7 +4,13 @@ use momento_api::logging::redact_binary_values;
 fn redacts_base64_request_values() {
     let mut payload = serde_json::json!({
         "image": "aGVsbG8=",
-        "nested": { "url": "data:image/jpeg;base64,aGVsbG8=" },
+        "nested": {
+            "url": "data:image/jpeg;base64,aGVsbG8=",
+            "faces": [{
+                "embedding": "aGVsbG8=",
+                "embeddingDimensions": 512
+            }]
+        },
         "label": "keep"
     });
 
@@ -12,6 +18,11 @@ fn redacts_base64_request_values() {
 
     assert_eq!(payload["image"], "[base64 omitted]");
     assert_eq!(payload["nested"]["url"], "[base64 omitted]");
+    assert_eq!(
+        payload["nested"]["faces"][0]["embedding"],
+        "[base64 omitted]"
+    );
+    assert_eq!(payload["nested"]["faces"][0]["embeddingDimensions"], 512);
     assert_eq!(payload["label"], "keep");
 }
 

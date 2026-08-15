@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Folder,
+  UsersRound,
   Image as ImageIcon,
   Map as MapIcon,
   ScanSearch,
@@ -38,6 +39,7 @@ const navItems: NavItem[] = [
   },
   { to: '/albums', label: 'Albums', icon: Folder },
   { to: '/map', label: 'Map', icon: MapIcon },
+  { to: '/faces', label: 'Faces', icon: UsersRound },
   {
     to: '/utility',
     label: 'Utility',

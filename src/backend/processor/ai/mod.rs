@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::future::join_all;
 use reqwest::multipart::{Form, Part};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -55,10 +56,14 @@ pub fn queue_task(
     let connection = pool
         .get()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    connection.execute(
+    let transaction = connection.unchecked_transaction()?;
+    let queued = transaction.execute(
         queries::ai_jobs::INSERT_ELIGIBLE,
         rusqlite::params![task, task, task, task],
-    )
+    )?;
+    transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+    transaction.commit()?;
+    Ok(queued)
 }
 
 pub fn queue_all(pool: &DbPool, image_tagging_enabled: bool) -> Result<usize, rusqlite::Error> {
@@ -68,6 +73,10 @@ pub fn queue_all(pool: &DbPool, image_tagging_enabled: bool) -> Result<usize, ru
 
 async fn submit_cycle(config: &Config, pool: &DbPool) -> Result<(), String> {
     reclaim_stale_claims(pool)?;
+    pool.get()
+        .map_err(|error| error.to_string())?
+        .execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])
+        .map_err(|error| error.to_string())?;
     let jobs = {
         let connection = pool.get().map_err(|error| error.to_string())?;
         let jobs = connection
@@ -87,110 +96,116 @@ async fn submit_cycle(config: &Config, pool: &DbPool) -> Result<(), String> {
         jobs
     };
     let client = reqwest::Client::new();
-    for (job_id, media_id, task, attempts) in jobs {
-        let connection = pool.get().map_err(|error| error.to_string())?;
-        let claimed = connection
-            .execute(queries::ai_jobs::CLAIM, [&job_id])
-            .map_err(|error| error.to_string())?;
-        if claimed != 1 {
-            continue;
-        }
-        drop(connection);
+    let results = join_all(
+        jobs.into_iter()
+            .map(|job| submit_job(config, pool, &client, job)),
+    )
+    .await;
+    if let Some(error) = results.into_iter().find_map(Result::err) {
+        return Err(error);
+    }
+    Ok(())
+}
 
-        let inputs = load_inputs(pool, media_id, &task)?;
-        if inputs.is_empty() {
-            mark_failed(pool, &job_id, "missing prepared AI inputs")?;
-            continue;
-        }
-        let mut descriptors = Vec::new();
-        let mut parts = Vec::new();
-        let mut input_error = None;
-        for input in inputs {
-            let bytes = match tokio::fs::read(paths().previews.join(&input.file_path)).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    input_error = Some(error.to_string());
-                    break;
-                }
-            };
-            if bytes.len() as i64 != input.byte_size
-                || format!("{:x}", Sha256::digest(&bytes)) != input.content_hash
-            {
-                input_error =
-                    Some("prepared AI input no longer matches its durable descriptor".to_string());
-                break;
-            }
-            parts.push((
-                format!("input-{}", input.sequence),
-                Part::bytes(bytes)
-                    .mime_str("application/octet-stream")
-                    .map_err(|error| error.to_string())?,
-            ));
-            descriptors.push(SubmissionInputDescriptor {
-                sequence: input.sequence,
-                filename: input.filename,
-                mime_type: input.mime_type,
-                byte_size: input.byte_size as u64,
-                content_hash: input.content_hash,
-                input_kind: input.input_kind,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-            });
-        }
-        if let Some(error) = input_error {
-            mark_failed(pool, &job_id, &error)?;
-            continue;
-        }
-        let manifest = SubmissionManifest {
-            job_id: job_id.clone(),
-            media_id,
-            task: task.clone(),
-            attempt: (attempts + 1) as u32,
-            callback_url: config.llm.callback_url.clone(),
-            inputs: descriptors,
+async fn submit_job(
+    config: &Config,
+    pool: &DbPool,
+    client: &reqwest::Client,
+    (job_id, media_id, task, attempts): (String, i64, String, i64),
+) -> Result<(), String> {
+    let connection = pool.get().map_err(|error| error.to_string())?;
+    let claimed = connection
+        .execute(queries::ai_jobs::CLAIM, [&job_id])
+        .map_err(|error| error.to_string())?;
+    if claimed != 1 {
+        return Ok(());
+    }
+    drop(connection);
+
+    let inputs = load_inputs(pool, &job_id)?;
+    if inputs.is_empty() {
+        return mark_failed(pool, &job_id, "missing prepared AI inputs");
+    }
+    let mut descriptors = Vec::new();
+    let mut parts = Vec::new();
+    for input in inputs {
+        let bytes = match tokio::fs::read(paths().previews.join(&input.file_path)).await {
+            Ok(bytes) => bytes,
+            Err(error) => return mark_failed(pool, &job_id, &error.to_string()),
         };
-        let mut form = Form::new().part(
-            "manifest",
-            Part::text(serde_json::to_string(&manifest).map_err(|error| error.to_string())?)
-                .mime_str("application/json")
+        if bytes.len() as i64 != input.byte_size
+            || format!("{:x}", Sha256::digest(&bytes)) != input.content_hash
+        {
+            return mark_failed(
+                pool,
+                &job_id,
+                "prepared AI input no longer matches its durable descriptor",
+            );
+        }
+        parts.push((
+            format!("input-{}", input.sequence),
+            Part::bytes(bytes)
+                .mime_str("application/octet-stream")
                 .map_err(|error| error.to_string())?,
-        );
-        for (name, part) in parts {
-            form = form.part(name, part);
+        ));
+        descriptors.push(SubmissionInputDescriptor {
+            sequence: input.sequence,
+            filename: input.filename,
+            mime_type: input.mime_type,
+            byte_size: input.byte_size as u64,
+            content_hash: input.content_hash,
+            input_kind: input.input_kind,
+            frame_timestamp_ms: input.frame_timestamp_ms,
+        });
+    }
+    let manifest = SubmissionManifest {
+        job_id: job_id.clone(),
+        media_id,
+        task,
+        attempt: (attempts + 1) as u32,
+        callback_url: config.llm.callback_url.clone(),
+        inputs: descriptors,
+    };
+    let mut form = Form::new().part(
+        "manifest",
+        Part::text(serde_json::to_string(&manifest).map_err(|error| error.to_string())?)
+            .mime_str("application/json")
+            .map_err(|error| error.to_string())?,
+    );
+    for (name, part) in parts {
+        form = form.part(name, part);
+    }
+    let response = client
+        .post(format!("{}/api/v1/jobs/submit", config.llm.service_url))
+        .header("x-api-key", &config.llm.api_key)
+        .multipart(form)
+        .send()
+        .await;
+    let connection = pool.get().map_err(|error| error.to_string())?;
+    match response {
+        Ok(response)
+            if response.status() == reqwest::StatusCode::ACCEPTED
+                || response.status().is_success() =>
+        {
+            connection
+                .execute(queries::ai_jobs::MARK_SUBMITTED, [&job_id])
+                .map_err(|error| error.to_string())?;
         }
-        let response = client
-            .post(format!("{}/api/v1/jobs/submit", config.llm.service_url))
-            .header("x-api-key", &config.llm.api_key)
-            .multipart(form)
-            .send()
-            .await;
-        let connection = pool.get().map_err(|error| error.to_string())?;
-        match response {
-            Ok(response)
-                if response.status() == reqwest::StatusCode::ACCEPTED
-                    || response.status().is_success() =>
-            {
-                connection
-                    .execute(queries::ai_jobs::MARK_SUBMITTED, [&job_id])
-                    .map_err(|error| error.to_string())?;
-            }
-            Ok(response) if response.status().is_server_error() => {
-                retry_job(
-                    &connection,
-                    &job_id,
-                    &format!("llm service error: {}", response.status()),
-                )?;
-            }
-            Ok(response) => {
-                let status = response.status();
-                let detail = response.text().await.unwrap_or_default();
-                mark_failed(
-                    pool,
-                    &job_id,
-                    &format!("llm service rejected submission: {status}: {detail}"),
-                )?
-            }
-            Err(error) => retry_job(&connection, &job_id, &error.to_string())?,
+        Ok(response) if response.status().is_server_error() => retry_job(
+            &connection,
+            &job_id,
+            &format!("llm service error: {}", response.status()),
+        )?,
+        Ok(response) => {
+            let status = response.status();
+            let detail = response.text().await.unwrap_or_default();
+            mark_failed(
+                pool,
+                &job_id,
+                &format!("llm service rejected submission: {status}: {detail}"),
+            )?
         }
+        Err(error) => retry_job(&connection, &job_id, &error.to_string())?,
     }
     Ok(())
 }
@@ -206,12 +221,12 @@ struct PreparedInput {
     frame_timestamp_ms: Option<i64>,
 }
 
-fn load_inputs(pool: &DbPool, media_id: i64, task: &str) -> Result<Vec<PreparedInput>, String> {
+fn load_inputs(pool: &DbPool, job_id: &str) -> Result<Vec<PreparedInput>, String> {
     let connection = pool.get().map_err(|error| error.to_string())?;
     let inputs = connection
         .prepare(queries::ai_jobs::SELECT_INPUTS)
         .map_err(|error| error.to_string())?
-        .query_map(rusqlite::params![media_id, task], |row| {
+        .query_map([job_id], |row| {
             Ok(PreparedInput {
                 sequence: row.get(0)?,
                 file_path: row.get(1)?,

@@ -8,6 +8,7 @@ use crate::processor::ai;
 use crate::processor::deduplicator::{
     clean, create_run, latest_run, queue_clustering_jobs, request_cancel,
 };
+use crate::processor::face_detection;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -30,6 +31,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/ai/image_clustering/cancel", post(cancel_image_clustering))
         .route("/ai/image_clustering/clean", post(clean_image_clustering))
+        .route("/ai/faces/start", post(start_faces))
+        .route("/ai/faces/cancel", post(cancel_faces))
+        .route("/ai/faces/clean", post(clean_faces))
+        .route("/ai/faces/status", post(faces_status))
 }
 
 async fn cancel_ocr(
@@ -83,6 +88,57 @@ async fn clean_image_clustering(
     }))
 }
 
+async fn start_faces(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    let queued_jobs =
+        face_detection::start(&state.pool, state.config.llm.face_detection_enabled)? as i64;
+    Ok(Json(MetadataActionResponse {
+        message: "Face detection processing queued".to_string(),
+        queued_jobs,
+    }))
+}
+
+async fn cancel_faces(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    face_detection::cancel(&state.pool)?;
+    Ok(Json(MetadataActionResponse {
+        message: "Face detection cancelled".to_string(),
+        queued_jobs: 0,
+    }))
+}
+
+async fn clean_faces(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    face_detection::clean(&state.pool)?;
+    Ok(Json(MetadataActionResponse {
+        message: "Face detection data cleaned".to_string(),
+        queued_jobs: 0,
+    }))
+}
+
+async fn faces_status(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataStatusResponse>> {
+    let Json(mut status) = task_status(&state.pool, "face_detection")?;
+    status.face_groups = Some(state.pool.get()?.query_row(
+        queries::faces::COUNT_GROUPS,
+        [],
+        |row| row.get(0),
+    )?);
+    Ok(Json(status))
+}
+
 fn cancel_task(
     pool: &crate::database::DbPool,
     task: &str,
@@ -119,6 +175,7 @@ async fn clean_all(
 ) -> AppResult<Json<MetadataActionResponse>> {
     let _ = clean_task(&state.pool, "ocr")?;
     let _ = clean_task(&state.pool, "image_tagging")?;
+    face_detection::clean(&state.pool)?;
     clean(&state.pool)?;
     Ok(Json(MetadataActionResponse {
         message: "All AI data cleaned".to_string(),
@@ -199,6 +256,7 @@ fn task_status(
         completed_jobs: count_for("completed"),
         failed_jobs,
         errors,
+        face_groups: None,
     }))
 }
 
@@ -224,11 +282,16 @@ async fn trigger(
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
     let queued_jobs = ai::queue_all(&state.pool, state.config.llm.image_tagging_enabled)? as i64;
+    let face_jobs = if state.config.llm.face_detection_enabled {
+        face_detection::start(&state.pool, true)? as i64
+    } else {
+        0
+    };
     let clustering_jobs =
         trigger_clustering_jobs(&state.pool, state.config.llm.deduplicate_enabled)? as i64;
     Ok(Json(MetadataActionResponse {
         message: "AI processing queued".to_string(),
-        queued_jobs: queued_jobs + clustering_jobs,
+        queued_jobs: queued_jobs + clustering_jobs + face_jobs,
     }))
 }
 
@@ -240,6 +303,7 @@ async fn cancel(
     let connection = state.pool.get()?;
     let cancelled_jobs = connection.execute(queries::ai_jobs::CANCEL_ALL_ACTIVE, [])? as i64;
     let clustering_cancelled = request_cancel(&state.pool)?;
+    face_detection::cancel(&state.pool)?;
     Ok(Json(MetadataActionResponse {
         message: if clustering_cancelled {
             "AI jobs cancelled and image clustering cancellation requested".to_string()

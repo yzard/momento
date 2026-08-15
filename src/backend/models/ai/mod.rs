@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
@@ -26,3 +26,40 @@ pub struct LlmInputResult {
 
 #[derive(Debug, Deserialize)]
 pub struct AiRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceGroupsListRequest {
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceGroupRequest {
+    pub face_group_id: i64,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceGroupsMergeRequest {
+    pub face_group_ids: Vec<i64>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceGroupResponse {
+    pub face_group_id: i64,
+    pub face_count: i64,
+    pub media_count: i64,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceGroupsListResponse {
+    pub groups: Vec<FaceGroupResponse>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceGroupMediaResponse {
+    pub group: FaceGroupResponse,
+    pub media: Vec<crate::models::MediaResponse>,
+}

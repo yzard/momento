@@ -34,4 +34,20 @@ describe('aiApi', () => {
     await expect(aiApi.triggerImageClustering()).resolves.toEqual(response)
     expect(post).toHaveBeenCalledWith('/ai/image_clustering/trigger', {})
   })
+
+  it('starts face detection work', async () => {
+    const response = { message: 'Face detection queued', queuedJobs: 2 }
+    post.mockResolvedValue({ data: response })
+
+    await expect(aiApi.startFaces()).resolves.toEqual(response)
+    expect(post).toHaveBeenCalledWith('/ai/faces/start', {})
+  })
+
+  it('loads face detection and group status', async () => {
+    const response = { status: 'idle', queuedJobs: 0, processingJobs: 0, completedJobs: 20, failedJobs: 0, errors: [], faceGroups: 8 }
+    post.mockResolvedValue({ data: response })
+
+    await expect(aiApi.getFacesStatus()).resolves.toEqual(response)
+    expect(post).toHaveBeenCalledWith('/ai/faces/status', {})
+  })
 })

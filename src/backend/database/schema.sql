@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 CREATE TABLE IF NOT EXISTS media_ai_inputs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL,
-    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering')),
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'face_detection')),
     sequence INTEGER NOT NULL,
     input_kind TEXT NOT NULL CHECK(input_kind IN ('image', 'video_frame')),
     file_path TEXT NOT NULL,
@@ -198,11 +198,62 @@ CREATE TABLE IF NOT EXISTS media_ai_inputs (
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS face_grouping_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL CHECK(status IN ('running', 'cancelling', 'completed', 'failed', 'cancelled')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS media_faces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL,
+    input_sequence INTEGER NOT NULL,
+    face_index INTEGER NOT NULL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    width REAL NOT NULL,
+    height REAL NOT NULL,
+    confidence REAL NOT NULL,
+    quality REAL NOT NULL,
+    embedding BLOB NOT NULL,
+    crop_path TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(media_id, input_sequence, face_index),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_face_detection_results (
+    media_id INTEGER PRIMARY KEY,
+    model_type TEXT NOT NULL CHECK(model_type = 'face_detection'),
+    model_version TEXT NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS face_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    representative_face_id INTEGER,
+    manual_curated INTEGER NOT NULL DEFAULT 0 CHECK(manual_curated IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (representative_face_id) REFERENCES media_faces(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS face_group_members (
+    face_group_id INTEGER NOT NULL,
+    face_id INTEGER NOT NULL,
+    PRIMARY KEY (face_group_id, face_id),
+    FOREIGN KEY (face_group_id) REFERENCES face_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (face_id) REFERENCES media_faces(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS llm_jobs (
     id TEXT PRIMARY KEY,
     media_id INTEGER NOT NULL,
     deduplicate_run_id INTEGER,
-    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering')),
+    face_grouping_run_id INTEGER,
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'face_detection')),
     status TEXT NOT NULL CHECK(status IN ('queued', 'submitting', 'submitted', 'completed', 'failed', 'cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
     available_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -214,10 +265,26 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (deduplicate_run_id) REFERENCES media_similarity_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (face_grouping_run_id) REFERENCES face_grouping_runs(id) ON DELETE CASCADE,
     CHECK(
-        (task IN ('ocr', 'image_tagging') AND deduplicate_run_id IS NULL)
-        OR (task = 'image_clustering' AND deduplicate_run_id IS NOT NULL)
+        (task IN ('ocr', 'image_tagging') AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NULL)
+        OR (task = 'image_clustering' AND deduplicate_run_id IS NOT NULL AND face_grouping_run_id IS NULL)
+        OR (task = 'face_detection' AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NOT NULL)
     )
+);
+
+CREATE TABLE IF NOT EXISTS llm_job_inputs (
+    job_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    input_kind TEXT NOT NULL CHECK(input_kind IN ('image', 'video_frame')),
+    file_path TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    frame_timestamp_ms INTEGER,
+    PRIMARY KEY (job_id, sequence),
+    FOREIGN KEY (job_id) REFERENCES llm_jobs(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS media_similarity_runs (
@@ -379,9 +446,12 @@ CREATE INDEX IF NOT EXISTS idx_media_ai_inputs_media_task
 CREATE INDEX IF NOT EXISTS idx_llm_jobs_claim
     ON llm_jobs (status, available_at, created_at);
 
+CREATE INDEX IF NOT EXISTS idx_llm_job_inputs_job
+    ON llm_job_inputs (job_id, sequence);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_media_task
     ON llm_jobs (media_id, task)
-    WHERE task IN ('ocr', 'image_tagging')
+    WHERE task IN ('ocr', 'image_tagging', 'face_detection')
       AND status IN ('queued', 'submitting', 'submitted');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_clustering
@@ -436,3 +506,13 @@ CREATE INDEX IF NOT EXISTS idx_media_similarity_members_media
 
 CREATE INDEX IF NOT EXISTS idx_media_similarity_members_cluster
     ON media_similarity_cluster_members (cluster_id, media_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_faces_media
+    ON media_faces (media_id, input_sequence, face_index);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_face_grouping_single_active
+    ON face_grouping_runs ((1))
+    WHERE status IN ('running', 'cancelling');
+
+CREATE INDEX IF NOT EXISTS idx_face_group_members_face
+    ON face_group_members (face_id, face_group_id);

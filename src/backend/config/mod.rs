@@ -388,6 +388,8 @@ pub struct LlmConfig {
     pub image_tagging_enabled: bool,
     #[serde(default)]
     pub deduplicate_enabled: bool,
+    #[serde(default)]
+    pub face_detection_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,6 +435,7 @@ impl Default for LlmConfig {
             callback_key: String::new(),
             image_tagging_enabled: false,
             deduplicate_enabled: false,
+            face_detection_enabled: false,
         }
     }
 }
@@ -451,13 +454,23 @@ fn default_llm_submission_poll_interval_seconds() -> u64 {
 fn default_llm_submission_batch_size() -> usize {
     64
 }
-
 impl Default for LlmSubmissionWorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: default_llm_submission_poll_interval_seconds(),
             batch_size: default_llm_submission_batch_size(),
         }
+    }
+}
+
+impl LlmSubmissionWorkerConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.poll_interval_seconds == 0 || self.batch_size == 0 {
+            return Err(std::io::Error::other(
+                "llm submission poll interval and batch size must be positive",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -527,6 +540,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
         std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
     })?;
     config.llm.validate()?;
+    config.llm_submission_worker.validate()?;
     config.cronjob.validate()?;
     Ok(config)
 }

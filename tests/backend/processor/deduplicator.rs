@@ -1,8 +1,9 @@
 use momento_api::database::queries;
 use momento_api::processor::deduplicator::{
-    blob_to_embedding, cosine_similarity, create_run, embedding_to_blob, finalize_ready_runs,
-    generate_clusters, latest_run, recover_interrupted_runs, request_cancel,
+    create_run, finalize_ready_runs, generate_clusters, latest_run, queue_clustering_jobs,
+    recover_interrupted_runs, request_cancel,
 };
+use momento_api::utils::embedding::embedding_to_blob;
 
 use crate::test_utils::{create_test_db, create_test_media};
 
@@ -37,20 +38,6 @@ fn insert_similarity_index(
 }
 
 #[test]
-fn float32_embedding_blob_round_trips() {
-    let embedding = vec![0.25, -1.5, 3.0];
-
-    assert_eq!(blob_to_embedding(&embedding_to_blob(&embedding)), embedding);
-}
-
-#[test]
-fn cosine_similarity_rejects_invalid_vectors() {
-    assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
-    assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), None);
-    assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), None);
-}
-
-#[test]
 fn scan_claim_is_persistent_and_exclusive() {
     let pool = create_test_db();
     let run_id = create_run(&pool, "manual", None).expect("First claim should succeed");
@@ -60,6 +47,66 @@ fn scan_claim_is_persistent_and_exclusive() {
 
     recover_interrupted_runs(&pool).expect("Recovery should succeed");
     assert_eq!(latest_run(&pool).unwrap().unwrap().status, "running");
+}
+
+#[test]
+fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "clustering-input.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'ai/clustering.jpg', 'clustering.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("prepared input");
+    drop(connection);
+    let run_id = create_run(&pool, "manual", None).expect("run");
+
+    assert_eq!(queue_clustering_jobs(&pool, run_id).expect("queue"), 1);
+
+    let connection = pool.get().expect("connection");
+    let job_id: String = connection
+        .query_row(
+            "SELECT id FROM llm_jobs WHERE deduplicate_run_id = ?",
+            [run_id],
+            |row| row.get(0),
+        )
+        .expect("job id");
+    let snapshot_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_job_inputs WHERE job_id = ?",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .expect("snapshot count");
+    assert_eq!(snapshot_count, 1);
+    connection
+        .execute("DELETE FROM llm_job_inputs WHERE job_id = ?", [&job_id])
+        .expect("remove snapshot");
+    connection.execute("UPDATE llm_jobs SET status = 'failed', last_error = 'missing prepared AI inputs' WHERE id = ?", [&job_id]).expect("failed job");
+    drop(connection);
+
+    finalize_ready_runs(&pool).expect("repair run");
+
+    let connection = pool.get().expect("connection");
+    let repaired_status: String = connection
+        .query_row(
+            "SELECT status FROM llm_jobs WHERE id = ?",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .expect("repaired status");
+    let repaired_snapshot_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_job_inputs WHERE job_id = ?",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .expect("repaired snapshot count");
+    assert_eq!(repaired_status, "queued");
+    assert_eq!(repaired_snapshot_count, 1);
 }
 
 #[test]

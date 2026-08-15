@@ -4,7 +4,9 @@ use axum_test::TestServer;
 use base64::Engine;
 use momento_api::app::create_app;
 use momento_api::config::Config;
+use momento_api::constants::paths;
 use momento_api::database::{create_pool_at, init_database};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -106,6 +108,90 @@ async fn callback_persists_every_video_frame_result() {
         )
         .expect("aggregate text");
     assert_eq!(aggregate_text, "first\nsecond");
+}
+
+#[tokio::test]
+async fn face_callback_accepts_llm_wire_shape_and_persists_crop_and_success_marker() {
+    let (application, pool) = create_callback_test_app();
+    let media_id = create_test_media(&pool, "face-callback.jpg");
+    let input_relative = format!("ai/{media_id}/face_detection/input.jpg");
+    let input_path = paths().previews.join(&input_relative);
+    std::fs::create_dir_all(input_path.parent().expect("input parent")).expect("input parent");
+    image::RgbImage::from_pixel(20, 20, image::Rgb([120, 80, 40]))
+        .save(&input_path)
+        .expect("prepared input");
+    let input_bytes = std::fs::read(&input_path).expect("input bytes");
+    let input_hash = format!("{:x}", Sha256::digest(&input_bytes));
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO face_grouping_runs (id, status) VALUES (1, 'running')",
+            [],
+        )
+        .expect("run");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status, attempts) VALUES ('callback-face', ?, 1, 'face_detection', 'submitted', 1)", [media_id]).expect("job");
+    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES ('callback-face', 0, 'image', ?, 'input.jpg', 'image/jpeg', ?, ?)", rusqlite::params![input_relative, input_bytes.len() as i64, input_hash]).expect("job input");
+    drop(connection);
+    let embedding = base64::engine::general_purpose::STANDARD.encode(
+        (0..512)
+            .flat_map(|index| (if index == 0 { 1.0_f32 } else { 0.0_f32 }).to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    let input_result = serde_json::json!({
+        "task": "face_detection",
+        "text": "",
+        "markdown": "",
+        "provider": "insightface",
+        "modelType": "face_detection",
+        "modelVersion": "buffalo_l",
+        "faces": [{
+            "index": 0,
+            "boundingBox": {"x": 0.9, "y": 0.8, "width": 0.10000003, "height": 0.20000003},
+            "confidence": 0.95,
+            "qualityScore": 0.8,
+            "embedding": embedding,
+            "embeddingEncoding": "float32_le",
+            "embeddingDimensions": 512
+        }]
+    });
+    let request = serde_json::json!({
+        "jobId": "callback-face",
+        "mediaId": media_id,
+        "task": "face_detection",
+        "attempt": 1,
+        "status": "completed",
+        "modelType": "face_detection",
+        "modelVersion": "buffalo_l",
+        "result": input_result,
+        "inputResults": [{"sequence": 0, "frameTimestampMs": null, "result": input_result}]
+    });
+    let server = TestServer::new(application).expect("server");
+
+    server
+        .post("/api/v1/internal/llm/callback")
+        .add_header("x-momento-callback-key", "test-callback-key")
+        .json(&request)
+        .await
+        .assert_status_ok();
+
+    let connection = pool.get().expect("connection");
+    let (crop_path, box_x, box_width): (String, f64, f64) = connection
+        .query_row(
+            "SELECT crop_path, x, width FROM media_faces WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("face row");
+    let result_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_face_detection_results WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("result marker");
+    assert_eq!(result_count, 1);
+    assert!(box_x + box_width <= 1.0);
+    assert!(paths().previews.join(crop_path).is_file());
 }
 
 #[tokio::test]

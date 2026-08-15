@@ -116,11 +116,9 @@ pub fn redact_binary_values(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(fields) => {
             for (key, value) in fields {
-                if is_binary_field(key) {
-                    if value.is_string() {
-                        *value = serde_json::Value::String("[base64 omitted]".to_string());
-                        continue;
-                    }
+                if is_binary_field(key) && value.is_string() {
+                    *value = serde_json::Value::String("[base64 omitted]".to_string());
+                    continue;
                 }
                 redact_binary_values(value);
             }
@@ -140,7 +138,7 @@ pub fn redact_binary_values(value: &mut serde_json::Value) {
 fn is_binary_field(key: &str) -> bool {
     matches!(
         key,
-        "image" | "imageBase64" | "image_base64" | "data" | "bytes"
+        "image" | "imageBase64" | "image_base64" | "data" | "bytes" | "embedding"
     ) || key.ends_with("Base64")
         || key.ends_with("_base64")
 }

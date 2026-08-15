@@ -20,6 +20,15 @@ SPECIFICATION.loader.exec_module(IMAGE_CLUSTERING_SERVER)
 
 
 class ImageClusteringServerTests(unittest.TestCase):
+    def test_model_concurrency_is_bounded_inside_runtime(self):
+        slots = IMAGE_CLUSTERING_SERVER.create_inference_slots(2)
+
+        self.assertTrue(slots.acquire(blocking=False))
+        self.assertTrue(slots.acquire(blocking=False))
+        self.assertFalse(slots.acquire(blocking=False))
+        slots.release()
+        slots.release()
+
     def test_select_device_requires_available_cuda_gpu(self):
         class FakeCuda:
             @staticmethod

@@ -10,11 +10,12 @@ RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --manifest-path /ap
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates su-exec tzdata wget
+RUN apk add --no-cache ca-certificates docker-cli su-exec tzdata wget
 
 WORKDIR /app
 
 COPY --from=builder /app/build/target/release/llm-service /app/llm-service
+COPY src/backend_llm/*.py /app/src/backend_llm/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
 RUN chmod +x /entrypoint_llm.sh && mkdir -p /data

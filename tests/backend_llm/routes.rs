@@ -30,10 +30,11 @@ async fn submission_has_no_framework_multipart_body_limit() {
     });
     let boundary = "momento-boundary";
     let image = "a".repeat(3 * 1024 * 1024);
+    let content_hash = format!("{:x}", sha2::Sha256::digest(image.as_bytes()));
     let manifest = format!(
         r#"{{"jobId":"0123456789abcdef0123456789abcdef","mediaId":1,"task":"image_clustering","attempt":1,"inputs":[{{"sequence":0,"filename":"input.jpg","mimeType":"image/jpeg","byteSize":{},"contentHash":"{}","inputKind":"image","frameTimestampMs":null}}],"callbackUrl":"http://example.test/callback"}}"#,
         image.len(),
-        format!("{:x}", sha2::Sha256::digest(image.as_bytes()))
+        content_hash
     );
     let body = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"manifest\"\r\nContent-Type: application/json\r\n\r\n{manifest}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"input-0\"; filename=\"input.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n{image}\r\n--{boundary}--\r\n"

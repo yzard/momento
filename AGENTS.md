@@ -39,32 +39,215 @@ Three rules are worth repeating because they are the ones most often violated:
 
 ## LLM Task Scheduling
 
-Momento processing is strictly staged: import stores original files and creates a metadata job;
-metadata produces metadata, UI thumbnails, and task-ready AI inputs; AI workers submit durable
-jobs; llm-service performs inference; callbacks persist results in Momento SQLite. No stage runs
-its downstream stage inline.
+Every AI inference type follows one staged, durable propagation pattern. Current task identifiers
+are `ocr`, `image_tagging`, and `image_clustering`; adding another identifier means extending this
+same pattern end to end, not creating a direct or type-specific transport path.
 
-`llm-service` is a separate service and must not assume a shared filesystem. Momento sends a
-manifest-first, self-contained multipart request containing prepared raw image/frame bytes. The LLM disk queue
-stores those bytes unchanged under `queue/queuing/`, then moves jobs through `processing/`,
-`callback_pending/`, and `failed/`. A successful callback deletes its job directory; there is no
-`completed/` queue state and no configurable queue-size limit.
+### End-to-end ownership
 
-Only one model runtime may be active. The scheduler drains one task type (`ocr`,
-`image_tagging`, or `image_clustering`) before switching runtimes, and submits those jobs
-concurrently up to that subservice's configured maximum concurrent job count. llm-service never generates thumbnails,
-crops/resizes images, or extracts video frames; Momento prepares all inference inputs first. The active runtime remains
-warm until the scheduler switches task types or the queue stays empty for its configured idle shutdown period.
+```text
+import
+  -> metadata job
+  -> task-ready inputs in Momento previews + media_ai_inputs descriptors
+  -> durable Momento llm_jobs row
+  -> manifest-first multipart submission
+  -> durable llm-service disk queue
+  -> one task runtime performs inference
+  -> authenticated callback
+  -> transactional Momento result persistence + terminal job state
+  -> optional separately scheduled downstream work
+```
+
+No stage runs its downstream stage inline. Import only creates metadata work; metadata prepares
+inputs; an AI trigger creates inference jobs; the Momento submission worker sends them;
+llm-service performs inference; the callback persists results. Type-specific work after inference,
+such as deduplication cluster generation, is another scheduled stage.
+
+Momento owns all media preparation. It applies orientation, generates thumbnails or previews,
+chooses video frame timestamps, extracts frames, crops/resizes, and records descriptors before an
+inference job is eligible. llm-service may decode bytes and perform model-required tensor
+transforms, but it never reads Momento paths, generates task inputs, or assumes a shared
+filesystem.
+
+The primary implementation points are:
+
+- `src/backend/processor/metadata/generation.rs`: prepare task inputs.
+- `src/backend/processor/metadata_worker.rs`: verify required inputs before metadata completes.
+- `src/backend/processor/ai/mod.rs`: create/claim jobs, verify bytes, and submit requests.
+- `src/backend/routes/internal/llm.rs`: authenticate, validate, and persist callbacks.
+- `src/backend_llm/routes.rs`: authenticate and stream multipart admission.
+- `src/backend_llm/scheduler.rs`: durable queue, batching, callbacks, retries, and recovery.
+- `src/backend_llm/provider.rs`: task registry, local runtime lifecycle, and inference dispatch.
 
 API and source directories mirror each other: `/import/*`, `/metadata/*`, `/ai/*`, and
 `/internal/llm/*` have matching backend routes, processors, models, queries, frontend API
-callers, and mirrored tests. AI triggers require an administrator; internal LLM callbacks use
+callers, and mirrored tests. AI triggers require an administrator. Internal LLM callbacks use
 the configured callback key rather than a user JWT.
 
-Multi-input inference preserves each descriptor sequence and optional video frame timestamp through
-the queue and callback. Momento stores input-level OCR/tagging results in `media_text_inputs` and
-derives the ordered media-level text in `media_text`. Metadata generation lives in
-`processor/metadata/`; `processor/regenerator.rs` does not exist.
+### Prepared input contract
+
+Momento stores each prepared input below `previews/ai/<media-id>/<task>/` and inserts a
+`media_ai_inputs` descriptor containing the task, sequence, input kind, relative file path,
+filename, MIME type, byte size, SHA-256 content hash, and optional frame timestamp. Job
+eligibility requires imported media, completed metadata, and at least one matching descriptor.
+
+Before each submission, Momento loads descriptors in sequence order, reads the prepared files,
+and rechecks their exact byte sizes and SHA-256 hashes. Missing or changed bytes fail the Momento
+job; they are never submitted. The request is self-contained because llm-service receives the
+raw prepared bytes rather than Momento file paths.
+
+Multi-input jobs preserve every descriptor's `sequence` and optional `frameTimestampMs` through
+the queue, provider response, callback, and input-level persistence. Concurrency is across jobs;
+inputs within one job are currently inferred sequentially in descriptor order. A new type must
+define explicit aggregation and persistence semantics for all inputs rather than silently using
+only the first result.
+
+### Submission wire contract
+
+Momento sends:
+
+```text
+POST <llm-service>/api/v1/jobs/submit
+x-api-key: <configured API key>
+Content-Type: multipart/form-data
+
+part 1: manifest                 application/json
+part 2+: input-<sequence>        raw prepared bytes
+```
+
+The manifest is camel-case JSON with:
+
+```text
+jobId, mediaId, task, attempt, callbackUrl, inputs[]
+```
+
+Each input descriptor contains:
+
+```text
+sequence, filename, mimeType, byteSize, contentHash, inputKind, frameTimestampMs
+```
+
+The `manifest` part must appear before every `input-N` part. A non-empty hexadecimal `jobId`, a
+known task, a non-empty callback URL, and at least one input are required. Every declared input
+must be present, non-empty, and exactly match its descriptor's byte size and SHA-256 hash. The
+current admission contract accepts image MIME types; supporting audio, text, or another payload
+requires deliberately extending the shared descriptor and admission abstractions.
+
+Momento job states follow:
+
+```text
+queued -> submitting -> submitted -> completed | failed
+                  \-> queued       transient network/5xx retry
+queued | submitting | submitted -> cancelled
+```
+
+Momento retries network errors and llm-service `5xx` responses, but treats other non-`2xx`
+responses as permanent submission failures. A successful `2xx` means only that llm-service has
+durably admitted the job, not that inference has completed. The callback must return the same
+`jobId`, `mediaId`, `task`, and exact submitted `attempt`.
+
+### Durable llm-service queue
+
+Admission streams files into `.tmp/<job-id>/`, validates all descriptors and bytes, syncs the
+staged data, and atomically renames the directory into `queuing/<job-id>/`. llm-service stores
+the submitted bytes unchanged. Duplicate job IDs in any durable state are acknowledged
+idempotently and are not enqueued twice.
+
+```text
+.tmp -> queuing -> processing -> deleted after a successful callback
+                            \-> callback_pending -> deleted after a successful retry
+                                                 \-> failed after retry exhaustion
+                  processing -> failed for terminal local queue/processing failure
+```
+
+Each job directory contains `manifest.json` and `input-N` files. Inference adds `result.json`;
+callback retry state adds `callback.json`; terminal queue failures add `failure.json`. There is
+no `completed/` directory and no configurable queue-size limit. A successful callback is the
+acknowledgement that permits deletion of all llm-service job data.
+
+Startup recovery removes incomplete `.tmp` admissions, moves interrupted `processing` jobs back
+to `queuing`, keeps `callback_pending` jobs that already have `result.json`, and requeues callback
+jobs that do not have a durable result. Therefore interrupted inference may run again, while a
+completed inference awaiting callback is delivered again without rerunning the model.
+
+### Multiple-request scheduling
+
+Only one model runtime may be active in llm-service. Every model provider is a local managed
+subservice; model `base_url` values must use a loopback HTTP address. llm-service itself may run on
+a different machine from Momento, but it never delegates inference to a remote model provider.
+For each scheduler cycle:
+
+1. A separate callback loop retries due durable `callback_pending` results; it never gates model
+   inference and never reruns completed inference.
+2. Read valid queued manifests and sort them by job ID.
+3. If the currently active task still has queued work, select that task to keep its runtime warm.
+4. Otherwise select the task belonging to the first sorted queued job.
+5. Claim at most the scheduler's global `dispatch_batch_size`, moving only same-task jobs from
+   `queuing` to `processing`.
+6. Activate or reuse the selected local runtime and dispatch the homogeneous batch. The scheduler
+   and provider do not apply a model concurrency limit.
+7. The model subservice alone enforces its configured `max_concurrent_jobs`; vLLM uses
+   `--max-num-seqs`, and Python runtimes use their inference semaphore.
+8. Finish every claimed job independently, then immediately run another cycle while work remains.
+
+This warm-task preference drains successive batches of one task before switching when that task
+continues to have work. Switching task type shuts down the old runtime before starting and
+readiness-checking the new one. A runtime is also shut down when no inference job is claimed for
+`idle_shutdown_seconds`; callback delivery does not require or keep a model runtime active.
+
+One failed job does not prevent other batch jobs from finishing. Provider or runtime inference
+errors become durable failed callback payloads; inference is not retried by llm-service. Callback
+delivery uses its own timeout, fixed retry delay, and maximum-attempt policy. Any callback `2xx`
+deletes the queue directory; failure moves or keeps it in `callback_pending`, and retry exhaustion
+moves it to `failed`.
+
+### Callback contract
+
+llm-service posts `result.json` to the manifest's callback URL with
+`x-momento-callback-key`. A completed payload contains matching correlation fields,
+`status = completed`, model type/version, a top-level result derived from the first input, and
+ordered `inputResults` carrying each original sequence and frame timestamp. A failed payload
+contains `status = failed` and an error.
+
+Momento validates the callback key and correlation fields inside an immediate SQLite transaction.
+Only a matching `submitted` job may transition to `completed` or `failed`. Result persistence and
+the terminal state transition commit atomically. Matching callbacks for an already terminal job
+are acknowledged idempotently; late callbacks for cancelled jobs are acknowledged without
+persisting results.
+
+Persistence is deliberately type-specific. OCR and tagging validate text-like results, store
+input-level rows in `media_text_inputs`, and derive ordered media-level text in `media_text`.
+Clustering validates its embedding/hash result and updates similarity tables. A generic transport
+response does not remove the requirement for explicit validation, storage, clean/reset behavior,
+and optional downstream scheduling for each inference type.
+
+### Adding an inference type
+
+Every new inference type must use one exact snake-case task identifier and propagate through all
+layers below in the same change. Do not add a second submission endpoint, bypass prepared inputs,
+call llm-service inline from metadata/import, let llm-service access Momento storage, or add a
+type-specific queue/scheduler.
+
+1. Add metadata preparation and completion verification for task-ready inputs, including stable
+   sequence/timestamp rules and durable `media_ai_inputs` descriptors.
+2. Extend schema constraints and centralized queries for eligibility, idempotent job creation,
+   active-job uniqueness, status, cancellation, reset, clean, retry, and any run relationship.
+3. Add administrator trigger/status API behavior and matching frontend API/UI behavior where the
+   task is user-controllable.
+4. Reuse the shared Momento `llm_jobs` submission worker and manifest-first multipart protocol.
+5. Register the task in llm-service `ServiceType`, configuration validation, `ActiveService`,
+   provider dispatch, and local runtime activation/readiness/liveness/shutdown.
+6. Keep scheduler dispatch batches homogeneous, enforce `max_concurrent_jobs` only inside the
+   local model subservice, and preserve ordered per-input correlation in provider responses.
+7. Extend the callback DTO only for required result fields, then add strict type-specific result
+   validation and transactional persistence in Momento.
+8. Define failure, cancellation, restart recovery, duplicate callback, multi-input aggregation,
+   clean/reset, and optional downstream-stage semantics explicitly.
+9. Add mirrored tests for preparation and eligibility, multipart admission and raw-byte
+   preservation, runtime reuse/switching, configured concurrency, result validation, callback
+   retries/idempotency, persistence, cancellation, and recovery.
+
+Metadata generation lives in `processor/metadata/`; `processor/regenerator.rs` does not exist.
 
 ---
 

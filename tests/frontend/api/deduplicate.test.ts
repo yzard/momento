@@ -35,6 +35,6 @@ describe('deduplicateApi', () => {
 
     await deduplicateApi[operation]()
 
-    expect(post).toHaveBeenCalledWith(path)
+    expect(post).toHaveBeenCalledWith(path, {})
   })
 })

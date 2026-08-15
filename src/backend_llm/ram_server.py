@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import shutil
+import threading
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -29,6 +30,12 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 class InvalidImageError(ValueError):
     """The request body is not a readable image."""
+
+
+def create_inference_slots(max_concurrent_jobs):
+    if max_concurrent_jobs <= 0:
+        raise ValueError("max_concurrent_jobs must be positive")
+    return threading.BoundedSemaphore(max_concurrent_jobs)
 
 
 def parse_tags(raw_tags):
@@ -75,6 +82,7 @@ def select_device(requested):
 
 class Handler(BaseHTTPRequestHandler):
     runtime = None
+    inference_slots = None
 
     def do_GET(self):
         if self.path != "/ready":
@@ -90,7 +98,8 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length))
         image = base64.b64decode(payload["image"])
         try:
-            tags = self.runtime.infer(image)
+            with self.inference_slots:
+                tags = self.runtime.infer(image)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
             return
@@ -115,10 +124,14 @@ def main():
     parser.add_argument("--device", default="auto")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8200)
+    parser.add_argument("--max-concurrent-jobs", type=int, required=True)
     args = parser.parse_args()
+    if args.max_concurrent_jobs <= 0:
+        parser.error("--max-concurrent-jobs must be positive")
 
     ensure_checkpoint(args.checkpoint)
     Handler.runtime = TaggingRuntime(args.checkpoint, args.image_size, args.device)
+    Handler.inference_slots = create_inference_slots(args.max_concurrent_jobs)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.serve_forever()
 

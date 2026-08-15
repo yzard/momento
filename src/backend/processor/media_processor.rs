@@ -669,6 +669,8 @@ pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option
     if clustering_frame.exists() {
         let _ = fs::remove_file(clustering_frame);
     }
+
+    let _ = fs::remove_dir_all(paths().previews.join("faces").join(media_id.to_string()));
 }
 
 pub fn calculate_geohash(lat: f64, lon: f64) -> Option<String> {

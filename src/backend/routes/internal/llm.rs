@@ -68,6 +68,7 @@ fn process_callback(
             "LLM callback status must be completed or failed".to_string(),
         ));
     }
+    let mut face_file_changes = None;
     if request.status == "completed" {
         let model_type = request
             .model_type
@@ -89,6 +90,15 @@ fn process_callback(
                 &result,
                 request.input_results.as_deref(),
             )?;
+        } else if request.task == "face_detection" {
+            face_file_changes = Some(crate::processor::face_detection::persist_callback(
+                &transaction,
+                &request.job_id,
+                request.media_id,
+                &model_type,
+                &model_version,
+                request.input_results.as_deref(),
+            )?);
         } else {
             return Err(AppError::BadRequest(
                 "completed callback task is not supported".to_string(),
@@ -119,6 +129,9 @@ fn process_callback(
         ));
     }
     transaction.commit()?;
+    if let Some(changes) = face_file_changes {
+        changes.commit();
+    }
     Ok(Json(serde_json::json!({"status":"acknowledged"})))
 }
 

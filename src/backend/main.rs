@@ -133,6 +133,19 @@ fn start_background_tasks(
         }
     });
 
+    let face_pool = pool.clone();
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(5);
+        loop {
+            if let Err(error) =
+                momento_api::processor::face_detection::finalize_ready_runs(&face_pool)
+            {
+                tracing::warn!("face grouping finalization failed: {error}");
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+
     if config.webdav.enabled {
         let webdav_config = Arc::clone(&config);
         let webdav_pool = pool.clone();
@@ -197,6 +210,8 @@ async fn main() {
 
     momento_api::processor::deduplicator::recover_interrupted_runs(&pool)
         .expect("Failed to recover interrupted deduplicate scans");
+    momento_api::processor::face_detection::recover_interrupted_runs(&pool)
+        .expect("Failed to recover interrupted face grouping scans");
     recover_interrupted_imports(&pool).expect("Failed to recover interrupted imports");
 
     // Create default admin if needed

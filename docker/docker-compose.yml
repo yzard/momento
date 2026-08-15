@@ -3,49 +3,31 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.llm
-    ports:
-      - "8100:8100"
+    network_mode: host
+    command: ["/app/llm-service", "-c", "/data/config_llm.toml"]
     environment:
-      - PUID=1000
-      - PGID=1000
-      - UMASK=022
-      - TZ=UTC
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+      TZ: "UTC"
     volumes:
-      - ../playground/config_llm.toml:/data/config_llm.toml:ro
-      # This volume contains queue states and retry metadata. It must survive restarts.
-      - llm_data:/data
+      - /srv/momento/llm:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--post-data={}", "--spider", "http://localhost:8100/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
   momento:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    ports:
-      - "8000:8000"
+    network_mode: host
+    command: ["/app/momento-api", "-c", "/data/config.toml"]
     environment:
-      - PUID=1000
-      - PGID=1000
-      - UMASK=022
-      - TZ=UTC
+      PUID: "1000"
+      PGID: "1000"
+      UMASK: "022"
+      TZ: "UTC"
     volumes:
-      - momento_data:/data
+      - /srv/momento/data:/data
     depends_on:
-      llm-service:
-        condition: service_healthy
+      - llm-service
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/api/v1/healthcheck"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-volumes:
-  momento_data:
-    driver: local
-  llm_data:
-    driver: local

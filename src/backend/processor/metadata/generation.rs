@@ -189,7 +189,7 @@ fn prepare_ai_inputs(
     } else {
         vec![(0, None, thumbnail_path.to_path_buf())]
     };
-    for task in ["ocr", "image_tagging", "image_clustering"] {
+    for task in ["ocr", "image_tagging", "image_clustering", "face_detection"] {
         let task_directory = output_directory.join(task);
         std::fs::create_dir_all(&task_directory).map_err(|error| error.to_string())?;
         pool.get()

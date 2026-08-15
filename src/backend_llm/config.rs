@@ -53,6 +53,8 @@ pub struct SchedulerConfig {
     pub poll_interval_seconds: u64,
     #[serde(default = "default_idle_shutdown_seconds")]
     pub idle_shutdown_seconds: u64,
+    #[serde(default = "default_dispatch_batch_size")]
+    pub dispatch_batch_size: usize,
 }
 
 fn default_poll_interval_seconds() -> u64 {
@@ -63,11 +65,16 @@ fn default_idle_shutdown_seconds() -> u64 {
     60
 }
 
+fn default_dispatch_batch_size() -> usize {
+    64
+}
+
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: default_poll_interval_seconds(),
             idle_shutdown_seconds: default_idle_shutdown_seconds(),
+            dispatch_batch_size: default_dispatch_batch_size(),
         }
     }
 }
@@ -104,6 +111,8 @@ pub struct CallbackConfig {
     pub retry_delay_seconds: u64,
     #[serde(default = "default_callback_max_attempts")]
     pub max_attempts: usize,
+    #[serde(default = "default_callback_max_concurrent_deliveries")]
+    pub max_concurrent_deliveries: usize,
     #[serde(default)]
     pub key: String,
 }
@@ -117,6 +126,9 @@ fn default_callback_retry_delay_seconds() -> u64 {
 fn default_callback_max_attempts() -> usize {
     10
 }
+fn default_callback_max_concurrent_deliveries() -> usize {
+    16
+}
 
 impl Default for CallbackConfig {
     fn default() -> Self {
@@ -124,6 +136,7 @@ impl Default for CallbackConfig {
             request_timeout_seconds: default_callback_timeout_seconds(),
             retry_delay_seconds: default_callback_retry_delay_seconds(),
             max_attempts: default_callback_max_attempts(),
+            max_concurrent_deliveries: default_callback_max_concurrent_deliveries(),
             key: String::new(),
         }
     }
@@ -148,22 +161,13 @@ impl Default for GeneralConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderKind {
-    Baidu,
-    #[default]
-    Local,
-}
-
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
     #[serde(default)]
     pub enabled: bool,
     pub model_type: String,
     pub model_version: String,
-    #[serde(default)]
-    pub provider: ProviderKind,
     #[serde(default)]
     pub docker_command: Vec<String>,
     #[serde(default = "default_device")]
@@ -174,14 +178,6 @@ pub struct ServiceConfig {
     pub model: String,
     #[serde(default)]
     pub script_path: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
-    pub secret_key: String,
-    #[serde(default = "default_baidu_token_url")]
-    pub token_url: String,
-    #[serde(default = "default_baidu_ocr_url")]
-    pub ocr_url: String,
     #[serde(default = "default_startup_timeout_seconds")]
     pub startup_timeout_seconds: u64,
     #[serde(default = "default_request_timeout_seconds")]
@@ -191,14 +187,6 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub embedding_dimensions: usize,
     pub max_concurrent_jobs: usize,
-}
-
-fn default_baidu_token_url() -> String {
-    "https://aip.baidubce.com/oauth/2.0/token".to_string()
-}
-
-fn default_baidu_ocr_url() -> String {
-    "https://aip.baidubce.com/rest/2.0/ocr/v1/general".to_string()
 }
 
 fn default_device() -> String {
@@ -248,9 +236,21 @@ impl Config {
         }
         if self.general.scheduler.poll_interval_seconds == 0
             || self.general.scheduler.idle_shutdown_seconds == 0
+            || self.general.scheduler.dispatch_batch_size == 0
         {
             return Err(ServiceError::Configuration(
-                "scheduler poll interval and idle shutdown timeout must be positive".to_string(),
+                "scheduler poll interval, idle shutdown timeout, and dispatch batch size must be positive"
+                    .to_string(),
+            ));
+        }
+        if self.callback.request_timeout_seconds == 0
+            || self.callback.retry_delay_seconds == 0
+            || self.callback.max_attempts == 0
+            || self.callback.max_concurrent_deliveries == 0
+        {
+            return Err(ServiceError::Configuration(
+                "callback timeout, retry delay, attempts, and concurrency must be positive"
+                    .to_string(),
             ));
         }
         if self.service.is_empty() {
@@ -289,11 +289,23 @@ impl Config {
                 "enabled service max_concurrent_jobs must be positive".to_string(),
             ));
         }
+        if !service
+            .docker_command
+            .iter()
+            .any(|argument| argument.contains("{max_concurrent_jobs}"))
+        {
+            return Err(ServiceError::Configuration(
+                "enabled service docker_command must pass {max_concurrent_jobs} to the local model subservice"
+                    .to_string(),
+            ));
+        }
+        validate_local_base_url(service)?;
 
         match service.model_type.as_str() {
             "ocr" => self.validate_ocr_service(service),
             "image_tagging" => self.validate_image_tagging_service(service),
             "image_clustering" => self.validate_image_clustering_service(service),
+            "face_detection" => self.validate_face_detection_service(service),
             model_type => Err(ServiceError::Configuration(format!(
                 "unsupported service model_type: {model_type}"
             ))),
@@ -301,34 +313,23 @@ impl Config {
     }
 
     fn validate_ocr_service(&self, service: &ServiceConfig) -> Result<(), ServiceError> {
-        match service.provider {
-            ProviderKind::Baidu => {
-                if service.api_key.trim().is_empty() || service.secret_key.trim().is_empty() {
-                    return Err(ServiceError::Configuration(
-                        "baidu service api_key and secret_key are required".to_string(),
-                    ));
-                }
-            }
-            ProviderKind::Local => {
-                if service.docker_command.is_empty()
-                    || service.base_url.trim().is_empty()
-                    || service.model.trim().is_empty()
-                {
-                    return Err(ServiceError::Configuration(
-                        "local OCR docker_command, base_url, and model are required".to_string(),
-                    ));
-                }
-                if service.startup_timeout_seconds == 0
-                    || service.request_timeout_seconds == 0
-                    || service.max_tokens == 0
-                {
-                    return Err(ServiceError::Configuration(
-                        "local OCR timeouts and max_tokens must be positive".to_string(),
-                    ));
-                }
-                validate_cuda_service(service, "local OCR")?;
-            }
+        if service.docker_command.is_empty()
+            || service.base_url.trim().is_empty()
+            || service.model.trim().is_empty()
+        {
+            return Err(ServiceError::Configuration(
+                "local OCR docker_command, base_url, and model are required".to_string(),
+            ));
         }
+        if service.startup_timeout_seconds == 0
+            || service.request_timeout_seconds == 0
+            || service.max_tokens == 0
+        {
+            return Err(ServiceError::Configuration(
+                "local OCR timeouts and max_tokens must be positive".to_string(),
+            ));
+        }
+        validate_cuda_service(service, "local OCR")?;
         Ok(())
     }
 
@@ -355,11 +356,6 @@ impl Config {
         &self,
         service: &ServiceConfig,
     ) -> Result<(), ServiceError> {
-        if service.provider != ProviderKind::Local {
-            return Err(ServiceError::Configuration(
-                "image clustering requires the local provider".to_string(),
-            ));
-        }
         if service.docker_command.is_empty()
             || service.base_url.trim().is_empty()
             || service.model.trim().is_empty()
@@ -389,6 +385,38 @@ impl Config {
         validate_cuda_service(service, "image clustering")?;
         Ok(())
     }
+
+    fn validate_face_detection_service(&self, service: &ServiceConfig) -> Result<(), ServiceError> {
+        if service.docker_command.is_empty()
+            || service.base_url.trim().is_empty()
+            || service.model.trim().is_empty()
+            || service.script_path.trim().is_empty()
+        {
+            return Err(ServiceError::Configuration(
+                "face detection docker_command, base_url, model, and script_path are required"
+                    .to_string(),
+            ));
+        }
+        if service.startup_timeout_seconds == 0 || service.request_timeout_seconds == 0 {
+            return Err(ServiceError::Configuration(
+                "face detection timeouts must be positive".to_string(),
+            ));
+        }
+        if service.embedding_dimensions != 512 {
+            return Err(ServiceError::Configuration(
+                "face detection embedding_dimensions must be 512 for InsightFace buffalo_l"
+                    .to_string(),
+            ));
+        }
+        if service.model != "buffalo_l" {
+            return Err(ServiceError::Configuration(
+                "face detection model must be buffalo_l".to_string(),
+            ));
+        }
+        validate_uv_package_installation(service, "face detection")?;
+        validate_cuda_service(service, "face detection")?;
+        Ok(())
+    }
 }
 
 fn validate_uv_package_installation(
@@ -399,6 +427,23 @@ fn validate_uv_package_installation(
     if !command.contains("{uv_bootstrap}") || !command.contains("uv pip install --system") {
         return Err(ServiceError::Configuration(format!(
             "{service_name} docker_command must install Python packages with {{uv_bootstrap}} and uv pip install --system"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_local_base_url(service: &ServiceConfig) -> Result<(), ServiceError> {
+    let base_url = reqwest::Url::parse(&service.base_url).map_err(|error| {
+        ServiceError::Configuration(format!(
+            "{} base_url must be a valid local HTTP URL: {error}",
+            service.model_type
+        ))
+    })?;
+    let local_host = matches!(base_url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
+    if base_url.scheme() != "http" || !local_host {
+        return Err(ServiceError::Configuration(format!(
+            "{} base_url must point to a loopback HTTP model subservice",
+            service.model_type
         )));
     }
     Ok(())
@@ -431,20 +476,16 @@ mod tests {
             enabled: true,
             model_type: "ocr".to_string(),
             model_version: "unlimited_ocr".to_string(),
-            provider: ProviderKind::Local,
             docker_command: vec![
                 "docker".to_string(),
                 "--gpus".to_string(),
                 "all".to_string(),
+                "{max_concurrent_jobs}".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8000/v1".to_string(),
             model: "baidu/Unlimited-OCR".to_string(),
             script_path: String::new(),
-            api_key: String::new(),
-            secret_key: String::new(),
-            token_url: default_baidu_token_url(),
-            ocr_url: default_baidu_ocr_url(),
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 100,
@@ -457,6 +498,8 @@ mod tests {
         Config {
             general: GeneralConfig::default(),
             logging: LoggingConfig::default(),
+            storage: StorageConfig::default(),
+            callback: CallbackConfig::default(),
             service: vec![local_service()],
         }
     }
@@ -467,10 +510,29 @@ mod tests {
     }
 
     #[test]
-    fn baidu_provider_requires_credentials() {
+    fn model_subservice_rejects_remote_base_url() {
+        let mut config = Config::default();
+        let mut service = local_service();
+        service.base_url = "https://models.example.com/v1".to_string();
+        config.service = vec![service];
+
+        let error = config.validate().expect_err("remote model URL must fail");
+
+        assert!(error.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn model_subservice_requires_local_concurrency_argument() {
         let mut config = local_config();
-        config.service[0].provider = ProviderKind::Baidu;
-        assert!(config.validate().is_err());
+        config.service[0]
+            .docker_command
+            .retain(|argument| !argument.contains("{max_concurrent_jobs}"));
+
+        let error = config
+            .validate()
+            .expect_err("model command without concurrency must fail");
+
+        assert!(error.to_string().contains("local model subservice"));
     }
 
     #[test]
@@ -480,21 +542,17 @@ mod tests {
             enabled: true,
             model_type: "image_tagging".to_string(),
             model_version: "ram++".to_string(),
-            provider: ProviderKind::Local,
             docker_command: vec![
                 "docker".to_string(),
                 "--gpus".to_string(),
                 "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
+                "{max_concurrent_jobs}".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8200".to_string(),
             model: String::new(),
             script_path: "ram_server.py".to_string(),
-            api_key: String::new(),
-            secret_key: String::new(),
-            token_url: default_baidu_token_url(),
-            ocr_url: default_baidu_ocr_url(),
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,
@@ -511,21 +569,17 @@ mod tests {
             enabled: true,
             model_type: "image_clustering".to_string(),
             model_version: "dinov2-small".to_string(),
-            provider: ProviderKind::Local,
             docker_command: vec![
                 "python3".to_string(),
                 "--gpus".to_string(),
                 "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
+                "{max_concurrent_jobs}".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8300".to_string(),
             model: "facebook/dinov2-small".to_string(),
             script_path: "image_clustering_server.py".to_string(),
-            api_key: String::new(),
-            secret_key: String::new(),
-            token_url: default_baidu_token_url(),
-            ocr_url: default_baidu_ocr_url(),
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,
@@ -542,22 +596,53 @@ mod tests {
     }
 
     #[test]
+    fn face_detection_service_requires_buffalo_l_and_arcface_dimensions() {
+        let mut config = local_config();
+        config.service.push(ServiceConfig {
+            enabled: true,
+            model_type: "face_detection".to_string(),
+            model_version: "buffalo_l".to_string(),
+            docker_command: vec![
+                "python3".to_string(),
+                "--gpus".to_string(),
+                "all".to_string(),
+                "{uv_bootstrap} && uv pip install --system insightface".to_string(),
+                "{max_concurrent_jobs}".to_string(),
+            ],
+            device: "cuda".to_string(),
+            base_url: "http://127.0.0.1:8500".to_string(),
+            model: "buffalo_l".to_string(),
+            script_path: "face_detection_server.py".to_string(),
+            startup_timeout_seconds: 10,
+            request_timeout_seconds: 10,
+            max_tokens: 0,
+            embedding_dimensions: 512,
+            max_concurrent_jobs: 8,
+        });
+        assert!(config.validate().is_ok());
+
+        config.service[1].model = "antelopev2".to_string();
+        assert!(config.validate().is_err());
+        config.service[1].model = "buffalo_l".to_string();
+        config.service[1].embedding_dimensions = 384;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn python_service_rejects_pip_package_installation() {
         let mut config = local_config();
         config.service.push(ServiceConfig {
             enabled: true,
             model_type: "image_tagging".to_string(),
             model_version: "ram++".to_string(),
-            provider: ProviderKind::Local,
-            docker_command: vec!["python -m pip install Pillow".to_string()],
+            docker_command: vec![
+                "python -m pip install Pillow".to_string(),
+                "{max_concurrent_jobs}".to_string(),
+            ],
             device: default_device(),
             base_url: "http://127.0.0.1:8200".to_string(),
             model: String::new(),
             script_path: "ram_server.py".to_string(),
-            api_key: String::new(),
-            secret_key: String::new(),
-            token_url: default_baidu_token_url(),
-            ocr_url: default_baidu_ocr_url(),
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 0,

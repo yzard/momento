@@ -1,10 +1,13 @@
-use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
-use momento_api::constants::OCR_MODEL_TYPE;
+use crate::test_utils::{
+    create_test_db, create_test_media, create_test_user, grant_media_access, init_test_paths,
+};
+use momento_api::constants::{paths, OCR_MODEL_TYPE};
 use momento_api::processor::media_deletion::permanently_delete_for_user;
 use momento_api::processor::media_processor::insert_into_rtree;
 
 #[test]
 fn permanent_delete_cleans_every_media_owned_row() {
+    init_test_paths();
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "owner", "owner@example.com");
     let media_id = create_test_media(&pool, "delete.jpg");
@@ -56,6 +59,30 @@ fn permanent_delete_cleans_every_media_owned_row() {
             rusqlite::params![cluster_id, media_id],
         )
         .expect("Failed to insert cluster member");
+    connection
+        .execute(
+            "INSERT INTO media_face_detection_results (media_id, model_type, model_version) VALUES (?, 'face_detection', 'buffalo_l')",
+            [media_id],
+        )
+        .expect("Failed to insert face result");
+    let crop_directory = paths().previews.join("faces").join(media_id.to_string());
+    std::fs::create_dir_all(&crop_directory).expect("face crop directory");
+    std::fs::write(crop_directory.join("face.jpg"), b"face").expect("face crop");
+    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, embedding, crop_path) VALUES (?, 0, 0, 0, 0, 1, 1, 1, 1, X'00000000', ?)", rusqlite::params![media_id, format!("faces/{media_id}/face.jpg")]).expect("Failed to insert face");
+    let face_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO face_groups (representative_face_id) VALUES (?)",
+            [face_id],
+        )
+        .expect("Failed to insert face group");
+    let face_group_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+            [face_group_id, face_id],
+        )
+        .expect("Failed to insert face group member");
 
     assert!(
         permanently_delete_for_user(&connection, media_id, user_id, "missing.jpg", None,)
@@ -71,6 +98,10 @@ fn permanent_delete_cleans_every_media_owned_row() {
         "media_similarity_hash_bands",
         "media_similarity_cluster_members",
         "media_similarity_clusters",
+        "media_face_detection_results",
+        "media_faces",
+        "face_group_members",
+        "face_groups",
     ] {
         let count: i64 = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -79,6 +110,7 @@ fn permanent_delete_cleans_every_media_owned_row() {
             .expect("Cleanup query should succeed");
         assert_eq!(count, 0, "{table} was not cleaned");
     }
+    assert!(!crop_directory.exists());
 }
 
 #[test]

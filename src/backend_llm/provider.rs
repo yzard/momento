@@ -1,6 +1,5 @@
-use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures::stream::{self, StreamExt};
+use futures::future::join_all;
 use reqwest::Client;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -13,8 +12,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::adapters::{normalize_baidu_unlimited_ocr_text, BAIDU_UNLIMITED_OCR_MODEL};
-use crate::config::{Config, ProviderKind, ServiceConfig};
+use crate::adapters::{normalize_unlimited_ocr_text, UNLIMITED_OCR_MODEL};
+use crate::config::{Config, ServiceConfig};
 use crate::error::ServiceError;
 
 const UV_BOOTSTRAP_COMMAND: &str = "UV_VERSION=0.8.22; UV_MACHINE=$(uname -m); if [ \"$UV_MACHINE\" = \"x86_64\" ]; then UV_TARGET=x86_64-unknown-linux-gnu; elif [ \"$UV_MACHINE\" = \"aarch64\" ] || [ \"$UV_MACHINE\" = \"arm64\" ]; then UV_TARGET=aarch64-unknown-linux-gnu; else echo \"Unsupported uv architecture: $UV_MACHINE\" >&2; exit 1; fi; python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \"https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz\" /tmp/uv.tar.gz && tar -xzf /tmp/uv.tar.gz -C /tmp && install \"/tmp/uv-$UV_TARGET/uv\" /usr/local/bin/uv";
@@ -40,6 +39,29 @@ pub struct InferenceResponse {
     pub perceptual_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality_score: Option<f32>,
+    #[serde(default)]
+    pub faces: Vec<FaceDetection>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetection {
+    pub index: usize,
+    pub bounding_box: NormalizedBoundingBox,
+    pub confidence: f32,
+    pub quality_score: f32,
+    pub embedding: String,
+    pub embedding_encoding: String,
+    pub embedding_dimensions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedBoundingBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 pub struct InferenceInput {
@@ -60,80 +82,12 @@ pub struct InputInferenceResponse {
     pub response: InferenceResponse,
 }
 
-#[async_trait]
-pub trait OcrProvider: Send + Sync {
-    async fn infer(&self, image: &[u8], filename: &str) -> Result<InferenceResponse, ServiceError>;
-    fn name(&self) -> &'static str;
-}
-
-pub enum Provider {
-    Baidu(BaiduProvider),
-    Local(LocalProvider),
-}
-
-impl Provider {
-    pub async fn build(service: &ServiceConfig) -> Result<Self, ServiceError> {
-        match service.provider {
-            ProviderKind::Baidu => Ok(Self::Baidu(BaiduProvider::new(service)?)),
-            ProviderKind::Local => Ok(Self::Local(LocalProvider::new(service).await?)),
-        }
-    }
-
-    pub async fn infer(
-        &self,
-        image: &[u8],
-        filename: &str,
-    ) -> Result<InferenceResponse, ServiceError> {
-        match self {
-            Self::Baidu(provider) => provider.infer(image, filename).await,
-            Self::Local(provider) => provider.infer(image, filename).await,
-        }
-    }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let response = self.infer(&input.bytes, &input.filename).await?;
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response,
-            });
-        }
-        Ok(responses)
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Baidu(provider) => provider.name(),
-            Self::Local(provider) => provider.name(),
-        }
-    }
-
-    async fn shutdown(self) -> Result<(), ServiceError> {
-        if let Self::Local(provider) = self {
-            provider.shutdown().await
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn is_alive(&self) -> Result<bool, ServiceError> {
-        match self {
-            Self::Baidu(_) => Ok(true),
-            Self::Local(provider) => provider.is_alive().await,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceType {
     Ocr,
     ImageTagging,
     ImageClustering,
+    FaceDetection,
 }
 
 impl ServiceType {
@@ -142,8 +96,9 @@ impl ServiceType {
             "ocr" => Ok(Self::Ocr),
             "image_tagging" => Ok(Self::ImageTagging),
             "image_clustering" => Ok(Self::ImageClustering),
+            "face_detection" => Ok(Self::FaceDetection),
             _ => Err(ServiceError::NotImplemented(format!(
-                "inference task `{task}` has no configured model provider"
+                "inference task `{task}` has no configured managed runtime"
             ))),
         }
     }
@@ -153,6 +108,7 @@ impl ServiceType {
             Self::Ocr => "ocr",
             Self::ImageTagging => "image_tagging",
             Self::ImageClustering => "image_clustering",
+            Self::FaceDetection => "face_detection",
         }
     }
 
@@ -161,14 +117,16 @@ impl ServiceType {
             Self::Ocr => "ocr",
             Self::ImageTagging => "image_tagging",
             Self::ImageClustering => "image_clustering",
+            Self::FaceDetection => "face_detection",
         }
     }
 }
 
 enum ActiveService {
-    Ocr(Provider),
+    Ocr(LocalProvider),
     ImageTagging(RamProvider),
     ImageClustering(ImageClusteringProvider),
+    FaceDetection(FaceDetectionProvider),
 }
 
 impl ActiveService {
@@ -177,6 +135,7 @@ impl ActiveService {
             Self::Ocr(_) => ServiceType::Ocr,
             Self::ImageTagging(_) => ServiceType::ImageTagging,
             Self::ImageClustering(_) => ServiceType::ImageClustering,
+            Self::FaceDetection(_) => ServiceType::FaceDetection,
         }
     }
 
@@ -185,6 +144,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.name(),
             Self::ImageTagging(_) => "ram++",
             Self::ImageClustering(_) => "dinov2",
+            Self::FaceDetection(_) => "insightface",
         }
     }
     async fn shutdown(self) -> Result<(), ServiceError> {
@@ -192,6 +152,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.shutdown().await,
             Self::ImageTagging(provider) => provider.shutdown().await,
             Self::ImageClustering(provider) => provider.shutdown().await,
+            Self::FaceDetection(provider) => provider.shutdown().await,
         }
     }
 
@@ -200,6 +161,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.is_alive().await,
             Self::ImageTagging(provider) => provider.runtime.is_alive().await,
             Self::ImageClustering(provider) => provider.runtime.is_alive().await,
+            Self::FaceDetection(provider) => provider.runtime.is_alive().await,
         }
     }
 
@@ -211,6 +173,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.infer_inputs(inputs).await,
             Self::ImageTagging(provider) => provider.infer_inputs(inputs).await,
             Self::ImageClustering(provider) => provider.infer_inputs(inputs).await,
+            Self::FaceDetection(provider) => provider.infer_inputs(inputs).await,
         }
     }
 }
@@ -241,21 +204,9 @@ impl ServiceManager {
             .map(|active| active.service_type().as_str())
     }
 
-    pub fn max_concurrent_jobs(&self, task: &str) -> Result<usize, ServiceError> {
-        self.config
-            .service_for(task)
-            .map(|service| service.max_concurrent_jobs)
-            .ok_or_else(|| {
-                ServiceError::NotImplemented(format!(
-                    "inference task `{task}` has no configured model provider"
-                ))
-            })
-    }
-
     pub async fn infer_batch(
         &mut self,
         jobs: Vec<InferenceJob>,
-        max_concurrent_jobs: usize,
     ) -> Vec<Result<Vec<InputInferenceResponse>, ServiceError>> {
         let Some(first) = jobs.first() else {
             return Vec::new();
@@ -291,11 +242,7 @@ impl ServiceManager {
             .active
             .as_ref()
             .expect("active service set by activate");
-        stream::iter(jobs)
-            .map(|job| active.infer_inputs(job.inputs))
-            .buffered(max_concurrent_jobs)
-            .collect()
-            .await
+        join_all(jobs.into_iter().map(|job| active.infer_inputs(job.inputs))).await
     }
 
     async fn activate(&mut self, service_type: ServiceType) -> Result<(), ServiceError> {
@@ -314,17 +261,20 @@ impl ServiceManager {
             .cloned()
             .ok_or_else(|| {
                 ServiceError::NotImplemented(format!(
-                    "inference task `{}` has no configured model provider",
+                    "inference task `{}` has no configured managed runtime",
                     service_type.config_key()
                 ))
             })?;
         let active = match service_type {
-            ServiceType::Ocr => ActiveService::Ocr(Provider::build(&service).await?),
+            ServiceType::Ocr => ActiveService::Ocr(LocalProvider::new(&service).await?),
             ServiceType::ImageTagging => {
                 ActiveService::ImageTagging(RamProvider::new(&service).await?)
             }
             ServiceType::ImageClustering => {
                 ActiveService::ImageClustering(ImageClusteringProvider::new(&service).await?)
+            }
+            ServiceType::FaceDetection => {
+                ActiveService::FaceDetection(FaceDetectionProvider::new(&service).await?)
             }
         };
         self.active = Some(active);
@@ -336,179 +286,6 @@ impl ServiceManager {
             return Ok(());
         };
         active.shutdown().await
-    }
-}
-
-pub struct BaiduProvider {
-    client: Client,
-    config: ServiceConfig,
-    token: Mutex<Option<CachedToken>>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedToken {
-    value: String,
-    expires_at: Instant,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: Option<String>,
-    expires_in: Option<u64>,
-    error_description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BaiduResponse {
-    words_result: Option<Vec<BaiduWord>>,
-    error_code: Option<i64>,
-    error_msg: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BaiduWord {
-    words: String,
-}
-
-impl BaiduProvider {
-    fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(config.request_timeout_seconds))
-            .build()
-            .map_err(|error| {
-                ServiceError::Internal(format!("failed to build HTTP client: {error}"))
-            })?;
-
-        Ok(Self {
-            client,
-            config: config.clone(),
-            token: Mutex::new(None),
-        })
-    }
-
-    async fn access_token(&self) -> Result<String, ServiceError> {
-        let cached_token = self.token.lock().await.clone();
-        if let Some(token) = cached_token {
-            if token.expires_at > Instant::now() {
-                return Ok(token.value);
-            }
-        }
-
-        let response = self
-            .client
-            .post(&self.config.token_url)
-            .query(&[
-                ("grant_type", "client_credentials"),
-                ("client_id", self.config.api_key.as_str()),
-                ("client_secret", self.config.secret_key.as_str()),
-            ])
-            .send()
-            .await
-            .map_err(|error| ServiceError::Upstream(format!("token request failed: {error}")))?;
-
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read token response: {error}"))
-        })?;
-        if !status.is_success() {
-            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                return Err(ServiceError::Configuration(format!(
-                    "Baidu credentials were rejected by the token endpoint: {body}"
-                )));
-            }
-            return Err(ServiceError::Upstream(format!(
-                "token endpoint returned {status}: {body}"
-            )));
-        }
-
-        let token_response: TokenResponse = serde_json::from_str(&body)
-            .map_err(|error| ServiceError::Upstream(format!("invalid token response: {error}")))?;
-        let token = token_response.access_token.ok_or_else(|| {
-            ServiceError::Upstream(
-                token_response
-                    .error_description
-                    .unwrap_or_else(|| "token response did not contain access_token".to_string()),
-            )
-        })?;
-        let expires_in = token_response.expires_in.unwrap_or(1800).saturating_sub(60);
-        *self.token.lock().await = Some(CachedToken {
-            value: token.clone(),
-            expires_at: Instant::now() + Duration::from_secs(expires_in),
-        });
-        Ok(token)
-    }
-}
-
-#[async_trait]
-impl OcrProvider for BaiduProvider {
-    async fn infer(
-        &self,
-        image: &[u8],
-        _filename: &str,
-    ) -> Result<InferenceResponse, ServiceError> {
-        let token = self.access_token().await?;
-        let encoded = STANDARD.encode(image);
-        let response = self
-            .client
-            .post(&self.config.ocr_url)
-            .query(&[("access_token", token)])
-            .form(&[("image", encoded.as_str())])
-            .send()
-            .await
-            .map_err(|error| ServiceError::Upstream(format!("OCR request failed: {error}")))?;
-
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read OCR response: {error}"))
-        })?;
-        if !status.is_success() {
-            if status == StatusCode::BAD_REQUEST {
-                return Err(ServiceError::BadRequest(format!(
-                    "Baidu OCR rejected the image: {body}"
-                )));
-            }
-            return Err(ServiceError::Upstream(format!(
-                "OCR endpoint returned {status}: {body}"
-            )));
-        }
-
-        let result: BaiduResponse = serde_json::from_str(&body)
-            .map_err(|error| ServiceError::Upstream(format!("invalid OCR response: {error}")))?;
-        if let Some(error_code) = result.error_code {
-            return Err(ServiceError::Upstream(format!(
-                "Baidu OCR error {error_code}: {}",
-                result
-                    .error_msg
-                    .unwrap_or_else(|| "unknown error".to_string())
-            )));
-        }
-
-        let text = result
-            .words_result
-            .unwrap_or_default()
-            .into_iter()
-            .map(|word| word.words)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let text = normalize_baidu_unlimited_ocr_text(&text);
-        Ok(InferenceResponse {
-            task: "ocr".to_string(),
-            text: text.clone(),
-            markdown: text,
-            provider: self.name().to_string(),
-            model_type: "ocr".to_string(),
-            model_version: self.config.model_version.clone(),
-            tags: Vec::new(),
-            embedding: None,
-            embedding_encoding: None,
-            embedding_dimensions: None,
-            perceptual_hash: None,
-            quality_score: None,
-        })
-    }
-
-    fn name(&self) -> &'static str {
-        "baidu"
     }
 }
 
@@ -550,20 +327,20 @@ impl LocalProvider {
                 ServiceError::Internal(format!("failed to build HTTP client: {error}"))
             })?;
         let child = spawn_service_command(config)?;
-        let provider = Self {
+        let runtime = Self {
             client,
             config: config.clone(),
             child: Arc::new(Mutex::new(child)),
         };
-        if let Err(error) = provider.wait_until_ready().await {
-            if let Err(shutdown_error) = provider.shutdown().await {
+        if let Err(error) = runtime.wait_until_ready().await {
+            if let Err(shutdown_error) = runtime.shutdown().await {
                 tracing::error!(
                     "Failed to stop OCR runtime after startup failure: {shutdown_error}"
                 );
             }
             return Err(error);
         }
-        Ok(provider)
+        Ok(runtime)
     }
 
     async fn wait_until_ready(&self) -> Result<(), ServiceError> {
@@ -610,8 +387,7 @@ impl LocalProvider {
     }
 }
 
-#[async_trait]
-impl OcrProvider for LocalProvider {
+impl LocalProvider {
     async fn infer(&self, image: &[u8], filename: &str) -> Result<InferenceResponse, ServiceError> {
         let mime_type = mime_guess::from_path(filename)
             .first_raw()
@@ -672,8 +448,8 @@ impl OcrProvider for LocalProvider {
             .ok_or_else(|| {
                 ServiceError::Upstream("local OCR response had no choices".to_string())
             })?;
-        let text = if self.config.model == BAIDU_UNLIMITED_OCR_MODEL {
-            normalize_baidu_unlimited_ocr_text(raw_text)
+        let text = if self.config.model == UNLIMITED_OCR_MODEL {
+            normalize_unlimited_ocr_text(raw_text)
         } else {
             raw_text.trim().to_string()
         };
@@ -690,11 +466,27 @@ impl OcrProvider for LocalProvider {
             embedding_dimensions: None,
             perceptual_hash: None,
             quality_score: None,
+            faces: Vec::new(),
         })
     }
 
     fn name(&self) -> &'static str {
         "local"
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input.bytes, &input.filename).await?,
+            });
+        }
+        Ok(responses)
     }
 }
 
@@ -845,6 +637,7 @@ impl RamProvider {
             embedding_dimensions: None,
             perceptual_hash: None,
             quality_score: None,
+            faces: Vec::new(),
         })
     }
 
@@ -933,6 +726,7 @@ impl ImageClusteringProvider {
             embedding_dimensions: Some(clustering_response.embedding_dimensions),
             perceptual_hash: Some(clustering_response.perceptual_hash),
             quality_score: Some(clustering_response.quality_score),
+            faces: Vec::new(),
         })
     }
 
@@ -967,35 +761,11 @@ impl ImageClusteringProvider {
                 response.embedding_dimensions, self.runtime.config.embedding_dimensions
             )));
         }
-        let embedding_bytes = STANDARD.decode(&response.embedding).map_err(|error| {
-            ServiceError::Upstream(format!("DINOv2 returned invalid base64 embedding: {error}"))
-        })?;
-        let expected_bytes = response.embedding_dimensions * std::mem::size_of::<f32>();
-        if embedding_bytes.len() != expected_bytes {
-            return Err(ServiceError::Upstream(format!(
-                "DINOv2 returned {} embedding bytes; expected {expected_bytes}",
-                embedding_bytes.len()
-            )));
-        }
-
-        let mut squared_norm = 0.0_f64;
-        for encoded_value in embedding_bytes.chunks_exact(4) {
-            let value = f32::from_le_bytes(encoded_value.try_into().map_err(|_| {
-                ServiceError::Internal("failed to decode embedding value".to_string())
-            })?);
-            if !value.is_finite() {
-                return Err(ServiceError::Upstream(
-                    "DINOv2 returned a non-finite embedding".to_string(),
-                ));
-            }
-            squared_norm += f64::from(value) * f64::from(value);
-        }
-        let norm = squared_norm.sqrt();
-        if (norm - 1.0).abs() > 0.01 {
-            return Err(ServiceError::Upstream(format!(
-                "DINOv2 embedding norm {norm:.6} is not normalized"
-            )));
-        }
+        validate_normalized_embedding(
+            &response.embedding,
+            response.embedding_dimensions,
+            "DINOv2",
+        )?;
         if response.perceptual_hash.len() != 16
             || !response
                 .perceptual_hash
@@ -1017,6 +787,240 @@ impl ImageClusteringProvider {
     async fn shutdown(self) -> Result<(), ServiceError> {
         self.runtime.shutdown().await
     }
+}
+
+pub struct FaceDetectionProvider {
+    runtime: ManagedRuntime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FaceDetectionRuntimeResponse {
+    faces: Vec<FaceDetectionRuntimeFace>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FaceDetectionRuntimeFace {
+    index: usize,
+    bounding_box: FaceDetectionRuntimeBoundingBox,
+    confidence: f32,
+    quality_score: f32,
+    embedding: String,
+    embedding_encoding: String,
+    embedding_dimensions: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FaceDetectionRuntimeBoundingBox {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl FaceDetectionProvider {
+    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+        Ok(Self {
+            runtime: ManagedRuntime::new(config, "InsightFace").await?,
+        })
+    }
+
+    pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
+        let url = format!(
+            "{}/infer",
+            self.runtime.config.base_url.trim_end_matches('/')
+        );
+        let response = self
+            .runtime
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(image.to_vec())
+            .send()
+            .await
+            .map_err(|error| {
+                ServiceError::Upstream(format!("InsightFace request failed: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            ServiceError::Upstream(format!("failed to read InsightFace response: {error}"))
+        })?;
+        if !status.is_success() {
+            let message = format!("InsightFace runtime returned {status}: {body}");
+            return if status.is_client_error() {
+                Err(ServiceError::BadRequest(message))
+            } else {
+                Err(ServiceError::Upstream(message))
+            };
+        }
+        let runtime_response: FaceDetectionRuntimeResponse =
+            serde_json::from_str(&body).map_err(|error| {
+                ServiceError::Upstream(format!("invalid InsightFace response: {error}"))
+            })?;
+        self.validate_response(&runtime_response)?;
+        let faces = runtime_response
+            .faces
+            .into_iter()
+            .map(|face| FaceDetection {
+                index: face.index,
+                bounding_box: NormalizedBoundingBox {
+                    x: face.bounding_box.x,
+                    y: face.bounding_box.y,
+                    width: face.bounding_box.width,
+                    height: face.bounding_box.height,
+                },
+                confidence: face.confidence,
+                quality_score: face.quality_score,
+                embedding: face.embedding,
+                embedding_encoding: face.embedding_encoding,
+                embedding_dimensions: face.embedding_dimensions,
+            })
+            .collect();
+
+        Ok(InferenceResponse {
+            task: "face_detection".to_string(),
+            text: String::new(),
+            markdown: String::new(),
+            provider: "insightface".to_string(),
+            model_type: "face_detection".to_string(),
+            model_version: self.runtime.config.model_version.clone(),
+            tags: Vec::new(),
+            embedding: None,
+            embedding_encoding: None,
+            embedding_dimensions: None,
+            perceptual_hash: None,
+            quality_score: None,
+            faces,
+        })
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input.bytes).await?,
+            });
+        }
+        Ok(responses)
+    }
+
+    fn validate_response(
+        &self,
+        response: &FaceDetectionRuntimeResponse,
+    ) -> Result<(), ServiceError> {
+        for (index, face) in response.faces.iter().enumerate() {
+            if face.index != index {
+                return Err(ServiceError::Upstream(format!(
+                    "InsightFace returned face index {}; expected {index}",
+                    face.index
+                )));
+            }
+            validate_normalized_face_box(&face.bounding_box)?;
+            validate_unit_score(face.confidence, "confidence")?;
+            validate_unit_score(face.quality_score, "quality score")?;
+            if face.embedding_encoding != "float32_le" {
+                return Err(ServiceError::Upstream(format!(
+                    "InsightFace returned unsupported embedding encoding `{}`",
+                    face.embedding_encoding
+                )));
+            }
+            if face.embedding_dimensions != self.runtime.config.embedding_dimensions {
+                return Err(ServiceError::Upstream(format!(
+                    "InsightFace returned {} dimensions; expected {}",
+                    face.embedding_dimensions, self.runtime.config.embedding_dimensions
+                )));
+            }
+            validate_normalized_embedding(
+                &face.embedding,
+                face.embedding_dimensions,
+                "InsightFace",
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(self) -> Result<(), ServiceError> {
+        self.runtime.shutdown().await
+    }
+}
+
+fn validate_normalized_face_box(
+    bounding_box: &FaceDetectionRuntimeBoundingBox,
+) -> Result<(), ServiceError> {
+    let values = [
+        bounding_box.x,
+        bounding_box.y,
+        bounding_box.width,
+        bounding_box.height,
+    ];
+    if values.iter().any(|value| !value.is_finite())
+        || !(0.0..=1.0).contains(&bounding_box.x)
+        || !(0.0..=1.0).contains(&bounding_box.y)
+        || bounding_box.width <= 0.0
+        || bounding_box.height <= 0.0
+        || bounding_box.x + bounding_box.width > 1.0
+        || bounding_box.y + bounding_box.height > 1.0
+    {
+        return Err(ServiceError::Upstream(
+            "InsightFace returned an invalid normalized bounding box".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_unit_score(score: f32, name: &str) -> Result<(), ServiceError> {
+    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+        return Err(ServiceError::Upstream(format!(
+            "InsightFace returned an invalid {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_normalized_embedding(
+    embedding: &str,
+    dimensions: usize,
+    provider_name: &str,
+) -> Result<(), ServiceError> {
+    let embedding_bytes = STANDARD.decode(embedding).map_err(|error| {
+        ServiceError::Upstream(format!(
+            "{provider_name} returned invalid base64 embedding: {error}"
+        ))
+    })?;
+    let expected_bytes = dimensions * std::mem::size_of::<f32>();
+    if embedding_bytes.len() != expected_bytes {
+        return Err(ServiceError::Upstream(format!(
+            "{provider_name} returned {} embedding bytes; expected {expected_bytes}",
+            embedding_bytes.len()
+        )));
+    }
+    let mut squared_norm = 0.0_f64;
+    for encoded_value in embedding_bytes.chunks_exact(4) {
+        let value =
+            f32::from_le_bytes(encoded_value.try_into().map_err(|_| {
+                ServiceError::Internal("failed to decode embedding value".to_string())
+            })?);
+        if !value.is_finite() {
+            return Err(ServiceError::Upstream(format!(
+                "{provider_name} returned a non-finite embedding"
+            )));
+        }
+        squared_norm += f64::from(value) * f64::from(value);
+    }
+    let norm = squared_norm.sqrt();
+    if (norm - 1.0).abs() > 0.01 {
+        return Err(ServiceError::Upstream(format!(
+            "{provider_name} embedding norm {norm:.6} is not normalized"
+        )));
+    }
+    Ok(())
 }
 
 fn configured_container_name(config: &ServiceConfig) -> Option<&str> {
@@ -1106,6 +1110,10 @@ fn spawn_service_command(config: &ServiceConfig) -> Result<Child, ServiceError> 
             arg.replace("{script_path}", &script_path)
                 .replace("{device}", &config.device)
                 .replace("{model}", &config.model)
+                .replace(
+                    "{max_concurrent_jobs}",
+                    &config.max_concurrent_jobs.to_string(),
+                )
                 .replace("{uv_bootstrap}", UV_BOOTSTRAP_COMMAND)
         })
         .collect::<Vec<_>>();
@@ -1161,7 +1169,7 @@ pub fn redact_base64_text(text: &str) -> String {
             token_start.get_or_insert(index);
             continue;
         }
-        redact_base64_token(&mut output, &text, token_start.take(), index);
+        redact_base64_token(&mut output, text, token_start.take(), index);
         output.push(character);
     }
     redact_base64_token(&mut output, text, token_start, text.len());
@@ -1182,73 +1190,16 @@ fn redact_base64_token(output: &mut String, text: &str, start: Option<usize>, en
 
 #[cfg(test)]
 mod tests {
-    use super::{BaiduProvider, OcrProvider, ServiceManager, ServiceType};
-    use crate::config::{ProviderKind, ServiceConfig};
+    use super::{ServiceManager, ServiceType};
     use std::sync::Arc;
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    #[tokio::test]
-    async fn baidu_provider_sends_oauth_credentials_as_query_parameters() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .and(query_param("grant_type", "client_credentials"))
-            .and(query_param("client_id", "test-key"))
-            .and(query_param("client_secret", "test-secret"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "test-token",
-                "expires_in": 3600
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/ocr"))
-            .and(query_param("access_token", "test-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "words_result": [{"words": "recognized text"}]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let provider = BaiduProvider::new(&ServiceConfig {
-            enabled: true,
-            model_type: "ocr".to_string(),
-            model_version: "unlimited_ocr".to_string(),
-            provider: ProviderKind::Baidu,
-            docker_command: vec!["docker".to_string()],
-            device: "auto".to_string(),
-            base_url: String::new(),
-            model: String::new(),
-            script_path: String::new(),
-            token_url: format!("{}/token", server.uri()),
-            ocr_url: format!("{}/ocr", server.uri()),
-            api_key: "test-key".to_string(),
-            secret_key: "test-secret".to_string(),
-            max_image_width: 4096,
-            max_image_height: 16384,
-            startup_timeout_seconds: 10,
-            request_timeout_seconds: 10,
-            max_tokens: 100,
-            embedding_dimensions: 0,
-            max_concurrent_jobs: 1,
-        })
-        .expect("Failed to create Baidu provider");
-        let response = provider
-            .infer(b"image", "image.jpg")
-            .await
-            .expect("Baidu OCR should succeed");
-
-        assert_eq!(response.text, "recognized text");
-    }
 
     #[test]
     fn service_manager_starts_without_an_active_runtime() {
         let manager = ServiceManager::new(Arc::new(crate::config::Config {
             general: Default::default(),
             logging: Default::default(),
+            storage: Default::default(),
+            callback: Default::default(),
             service: Vec::new(),
         }));
         assert_eq!(manager.active_name(), "on-demand");
