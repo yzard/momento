@@ -1,38 +1,19 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::ServiceError;
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
-    #[serde(default)]
-    pub logging: LoggingConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub callback: CallbackConfig,
     #[serde(default)]
     pub service: Vec<ServiceConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LoggingConfig {
-    #[serde(default = "default_log_file_path")]
-    pub file_path: PathBuf,
-}
-
-fn default_log_file_path() -> PathBuf {
-    PathBuf::from("/data/logs/llm-service.log")
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            file_path: default_log_file_path(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,13 +29,16 @@ pub struct GeneralConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
     #[serde(default = "default_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
     #[serde(default = "default_idle_shutdown_seconds")]
     pub idle_shutdown_seconds: u64,
-    #[serde(default = "default_dispatch_batch_size")]
-    pub dispatch_batch_size: usize,
+    #[serde(default = "default_max_in_flight_jobs")]
+    pub max_in_flight_jobs: usize,
+    #[serde(default = "default_runtime_max_attempts")]
+    pub runtime_max_attempts: usize,
 }
 
 fn default_poll_interval_seconds() -> u64 {
@@ -65,8 +49,12 @@ fn default_idle_shutdown_seconds() -> u64 {
     60
 }
 
-fn default_dispatch_batch_size() -> usize {
-    64
+fn default_max_in_flight_jobs() -> usize {
+    128
+}
+
+fn default_runtime_max_attempts() -> usize {
+    3
 }
 
 impl Default for SchedulerConfig {
@@ -74,7 +62,8 @@ impl Default for SchedulerConfig {
         Self {
             poll_interval_seconds: default_poll_interval_seconds(),
             idle_shutdown_seconds: default_idle_shutdown_seconds(),
-            dispatch_batch_size: default_dispatch_batch_size(),
+            max_in_flight_jobs: default_max_in_flight_jobs(),
+            runtime_max_attempts: default_runtime_max_attempts(),
         }
     }
 }
@@ -85,6 +74,10 @@ pub struct StorageConfig {
     pub data_dir: PathBuf,
     #[serde(default = "default_queue_dir")]
     pub queue_dir: PathBuf,
+    #[serde(default)]
+    pub runtime_mount_source: PathBuf,
+    #[serde(default = "default_runtime_mount_target")]
+    pub runtime_mount_target: PathBuf,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -93,12 +86,17 @@ fn default_data_dir() -> PathBuf {
 fn default_queue_dir() -> PathBuf {
     PathBuf::from("/data/queue")
 }
+fn default_runtime_mount_target() -> PathBuf {
+    PathBuf::from("/momento-inputs")
+}
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
             queue_dir: default_queue_dir(),
+            runtime_mount_source: PathBuf::new(),
+            runtime_mount_target: default_runtime_mount_target(),
         }
     }
 }
@@ -186,6 +184,8 @@ pub struct ServiceConfig {
     pub max_tokens: u32,
     #[serde(default)]
     pub embedding_dimensions: usize,
+    pub minimum_face_likelihood: Option<f64>,
+    pub minimum_face_resolution_pixels: Option<u32>,
     pub max_concurrent_jobs: usize,
 }
 
@@ -236,10 +236,11 @@ impl Config {
         }
         if self.general.scheduler.poll_interval_seconds == 0
             || self.general.scheduler.idle_shutdown_seconds == 0
-            || self.general.scheduler.dispatch_batch_size == 0
+            || self.general.scheduler.max_in_flight_jobs == 0
+            || self.general.scheduler.runtime_max_attempts == 0
         {
             return Err(ServiceError::Configuration(
-                "scheduler poll interval, idle shutdown timeout, and dispatch batch size must be positive"
+                "scheduler poll interval, idle shutdown timeout, max in-flight jobs, and runtime attempts must be positive"
                     .to_string(),
             ));
         }
@@ -250,6 +251,33 @@ impl Config {
         {
             return Err(ServiceError::Configuration(
                 "callback timeout, retry delay, attempts, and concurrency must be positive"
+                    .to_string(),
+            ));
+        }
+        if !self.storage.runtime_mount_target.is_absolute()
+            || self.storage.runtime_mount_target.parent().is_none()
+            || self.storage.runtime_mount_target == Path::new("/")
+            || self
+                .storage
+                .runtime_mount_target
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            return Err(ServiceError::Configuration(
+                "storage.runtime_mount_target must be an absolute non-root path".to_string(),
+            ));
+        }
+        if !self.storage.runtime_mount_source.as_os_str().is_empty()
+            && (!self.storage.runtime_mount_source.is_absolute()
+                || self.storage.runtime_mount_source == Path::new("/")
+                || self
+                    .storage
+                    .runtime_mount_source
+                    .components()
+                    .any(|component| component == Component::ParentDir))
+        {
+            return Err(ServiceError::Configuration(
+                "storage.runtime_mount_source must be empty or an absolute non-root host path"
                     .to_string(),
             ));
         }
@@ -297,6 +325,26 @@ impl Config {
             return Err(ServiceError::Configuration(
                 "enabled service docker_command must pass {max_concurrent_jobs} to the local model subservice"
                     .to_string(),
+            ));
+        }
+        for placeholder in ["{runtime_mount_source}", "{runtime_mount_target}"] {
+            if !service
+                .docker_command
+                .iter()
+                .any(|argument| argument.contains(placeholder))
+            {
+                return Err(ServiceError::Configuration(format!(
+                    "enabled service docker_command must contain {placeholder}"
+                )));
+            }
+        }
+        if !service
+            .docker_command
+            .iter()
+            .any(|argument| argument.contains("readonly"))
+        {
+            return Err(ServiceError::Configuration(
+                "enabled service docker_command must mount runtime inputs read-only".to_string(),
             ));
         }
         validate_local_base_url(service)?;
@@ -413,6 +461,37 @@ impl Config {
                 "face detection model must be buffalo_l".to_string(),
             ));
         }
+        let Some(minimum_face_likelihood) = service.minimum_face_likelihood else {
+            return Err(ServiceError::Configuration(
+                "face detection minimum_face_likelihood is required".to_string(),
+            ));
+        };
+        if !minimum_face_likelihood.is_finite()
+            || !(0.0 < minimum_face_likelihood && minimum_face_likelihood <= 1.0)
+        {
+            return Err(ServiceError::Configuration(
+                "face detection minimum_face_likelihood must be within (0, 1]".to_string(),
+            ));
+        }
+        if service
+            .minimum_face_resolution_pixels
+            .is_none_or(|resolution| resolution == 0)
+        {
+            return Err(ServiceError::Configuration(
+                "face detection minimum_face_resolution_pixels must be positive".to_string(),
+            ));
+        }
+        let command = service.docker_command.join(" ");
+        for placeholder in [
+            "{minimum_face_likelihood}",
+            "{minimum_face_resolution_pixels}",
+        ] {
+            if !command.contains(placeholder) {
+                return Err(ServiceError::Configuration(format!(
+                    "face detection docker_command must contain {placeholder}"
+                )));
+            }
+        }
         validate_uv_package_installation(service, "face detection")?;
         validate_cuda_service(service, "face detection")?;
         Ok(())
@@ -481,6 +560,9 @@ mod tests {
                 "--gpus".to_string(),
                 "all".to_string(),
                 "{max_concurrent_jobs}".to_string(),
+                "{runtime_mount_source}".to_string(),
+                "{runtime_mount_target}".to_string(),
+                "readonly".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8000/v1".to_string(),
@@ -490,6 +572,8 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 100,
             embedding_dimensions: 0,
+            minimum_face_likelihood: None,
+            minimum_face_resolution_pixels: None,
             max_concurrent_jobs: 8,
         }
     }
@@ -497,7 +581,6 @@ mod tests {
     fn local_config() -> Config {
         Config {
             general: GeneralConfig::default(),
-            logging: LoggingConfig::default(),
             storage: StorageConfig::default(),
             callback: CallbackConfig::default(),
             service: vec![local_service()],
@@ -548,6 +631,9 @@ mod tests {
                 "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
                 "{max_concurrent_jobs}".to_string(),
+                "{runtime_mount_source}".to_string(),
+                "{runtime_mount_target}".to_string(),
+                "readonly".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8200".to_string(),
@@ -557,6 +643,8 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 0,
+            minimum_face_likelihood: None,
+            minimum_face_resolution_pixels: None,
             max_concurrent_jobs: 8,
         });
         assert!(config.validate().is_ok());
@@ -575,6 +663,9 @@ mod tests {
                 "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system Pillow".to_string(),
                 "{max_concurrent_jobs}".to_string(),
+                "{runtime_mount_source}".to_string(),
+                "{runtime_mount_target}".to_string(),
+                "readonly".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8300".to_string(),
@@ -584,6 +675,8 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 384,
+            minimum_face_likelihood: None,
+            minimum_face_resolution_pixels: None,
             max_concurrent_jobs: 8,
         });
         assert!(config.validate().is_ok());
@@ -608,6 +701,11 @@ mod tests {
                 "all".to_string(),
                 "{uv_bootstrap} && uv pip install --system insightface".to_string(),
                 "{max_concurrent_jobs}".to_string(),
+                "{runtime_mount_source}".to_string(),
+                "{runtime_mount_target}".to_string(),
+                "{minimum_face_likelihood}".to_string(),
+                "{minimum_face_resolution_pixels}".to_string(),
+                "readonly".to_string(),
             ],
             device: "cuda".to_string(),
             base_url: "http://127.0.0.1:8500".to_string(),
@@ -617,6 +715,8 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 512,
+            minimum_face_likelihood: Some(0.8),
+            minimum_face_resolution_pixels: Some(112),
             max_concurrent_jobs: 8,
         });
         assert!(config.validate().is_ok());
@@ -625,6 +725,17 @@ mod tests {
         assert!(config.validate().is_err());
         config.service[1].model = "buffalo_l".to_string();
         config.service[1].embedding_dimensions = 384;
+        assert!(config.validate().is_err());
+        config.service[1].embedding_dimensions = 512;
+        config.service[1].minimum_face_likelihood = Some(0.0);
+        assert!(config.validate().is_err());
+        config.service[1].minimum_face_likelihood = Some(0.8);
+        config.service[1].minimum_face_resolution_pixels = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].minimum_face_resolution_pixels = Some(112);
+        config.service[1]
+            .docker_command
+            .retain(|argument| !argument.contains("{minimum_face_resolution_pixels}"));
         assert!(config.validate().is_err());
     }
 
@@ -638,6 +749,9 @@ mod tests {
             docker_command: vec![
                 "python -m pip install Pillow".to_string(),
                 "{max_concurrent_jobs}".to_string(),
+                "{runtime_mount_source}".to_string(),
+                "{runtime_mount_target}".to_string(),
+                "readonly".to_string(),
             ],
             device: default_device(),
             base_url: "http://127.0.0.1:8200".to_string(),
@@ -647,6 +761,8 @@ mod tests {
             request_timeout_seconds: 10,
             max_tokens: 0,
             embedding_dimensions: 0,
+            minimum_face_likelihood: None,
+            minimum_face_resolution_pixels: None,
             max_concurrent_jobs: 8,
         });
 

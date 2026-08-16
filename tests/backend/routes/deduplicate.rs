@@ -207,13 +207,21 @@ async fn admin_cannot_start_disabled_deduplication() {
 async fn admin_can_cancel_persisted_running_scan() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "admin-cancel", "admin-cancel@example.com");
+    let media_id = create_test_media(&pool, "cancel-clustering.jpg");
     let connection = pool.get().expect("Failed to get connection");
     connection
         .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
         .expect("Failed to promote admin");
     drop(connection);
-    momento_api::processor::deduplicator::create_run(&pool, "manual", None)
+    let run_id = momento_api::processor::deduplicator::create_run(&pool, "manual", None)
         .expect("Failed to create running scan");
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('3123456789abcdef0123456789abcdef', ?, ?, 'image_clustering', 'submitted')",
+            rusqlite::params![media_id, run_id],
+        )
+        .expect("submitted clustering job");
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
@@ -224,6 +232,16 @@ async fn admin_can_cancel_persisted_running_scan() {
     response.assert_status_ok();
     let body: Value = response.json();
     assert_eq!(body["status"], "cancelling");
+    let connection = pool.get().expect("database connection");
+    let (job_status, outbox_count): (String, i64) = connection
+        .query_row(
+            "SELECT llm_jobs.status, (SELECT COUNT(*) FROM llm_job_cancellations) FROM llm_jobs WHERE llm_jobs.id = '3123456789abcdef0123456789abcdef'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("durable clustering cancellation");
+    assert_eq!(job_status, "cancelled");
+    assert_eq!(outbox_count, 1);
 }
 
 #[tokio::test]

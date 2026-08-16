@@ -5,6 +5,7 @@ WORKDIR /app
 RUN apk add --no-cache musl-dev
 
 COPY src/backend_llm ./src/backend_llm
+COPY src/common ./src/common
 
 RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --manifest-path /app/src/backend_llm/Cargo.toml
 

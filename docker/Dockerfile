@@ -16,6 +16,7 @@ WORKDIR /app
 RUN apk add --no-cache musl-dev
 
 COPY src/backend ./src/backend
+COPY src/common ./src/common
 
 RUN CARGO_TARGET_DIR=/app/build/backend/target cargo build --release --manifest-path /app/src/backend/Cargo.toml && mkdir -p /app/dist/backend && cp /app/build/backend/target/release/momento-api /app/dist/backend/momento-api
 

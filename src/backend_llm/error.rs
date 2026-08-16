@@ -20,6 +20,8 @@ pub enum ServiceError {
     Configuration(String),
     #[error("upstream inference request failed: {0}")]
     Upstream(String),
+    #[error("local model runtime unavailable: {0}")]
+    RuntimeUnavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -33,6 +35,7 @@ impl IntoResponse for ServiceError {
             Self::NotImplemented(message) => (StatusCode::NOT_IMPLEMENTED, message),
             Self::Configuration(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
             Self::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
+            Self::RuntimeUnavailable(message) => (StatusCode::BAD_GATEWAY, message),
             Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
         };
 

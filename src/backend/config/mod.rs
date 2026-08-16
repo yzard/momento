@@ -36,24 +36,6 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    #[serde(default = "default_log_file_path")]
-    pub file_path: PathBuf,
-}
-
-fn default_log_file_path() -> PathBuf {
-    PathBuf::from("/data/logs/momento-api.log")
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            file_path: default_log_file_path(),
-        }
-    }
-}
-
 /// Filesystem locations. `data_dir` is the root every media directory and the database
 /// are derived from; `static_dir` holds the built frontend the server falls back to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,6 +372,8 @@ pub struct LlmConfig {
     pub deduplicate_enabled: bool,
     #[serde(default)]
     pub face_detection_enabled: bool,
+    #[serde(default = "default_face_group_similarity_threshold")]
+    pub face_group_similarity_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,6 +409,10 @@ fn default_llm_service_url() -> String {
     "http://127.0.0.1:8100".to_string()
 }
 
+fn default_face_group_similarity_threshold() -> f32 {
+    0.55
+}
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -436,38 +424,40 @@ impl Default for LlmConfig {
             image_tagging_enabled: false,
             deduplicate_enabled: false,
             face_detection_enabled: false,
+            face_group_similarity_threshold: default_face_group_similarity_threshold(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LlmSubmissionWorkerConfig {
     #[serde(default = "default_llm_submission_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_llm_submission_batch_size")]
-    pub batch_size: usize,
+    #[serde(default = "default_llm_submission_max_in_flight")]
+    pub max_in_flight: usize,
 }
 
 fn default_llm_submission_poll_interval_seconds() -> u64 {
     5
 }
-fn default_llm_submission_batch_size() -> usize {
-    64
+fn default_llm_submission_max_in_flight() -> usize {
+    128
 }
 impl Default for LlmSubmissionWorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: default_llm_submission_poll_interval_seconds(),
-            batch_size: default_llm_submission_batch_size(),
+            max_in_flight: default_llm_submission_max_in_flight(),
         }
     }
 }
 
 impl LlmSubmissionWorkerConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.poll_interval_seconds == 0 || self.batch_size == 0 {
+        if self.poll_interval_seconds == 0 || self.max_in_flight == 0 {
             return Err(std::io::Error::other(
-                "llm submission poll interval and batch size must be positive",
+                "llm submission poll interval and max in-flight submissions must be positive",
             ));
         }
         Ok(())
@@ -476,6 +466,13 @@ impl LlmSubmissionWorkerConfig {
 
 impl LlmConfig {
     fn validate(&self) -> std::io::Result<()> {
+        if !self.face_group_similarity_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.face_group_similarity_threshold)
+        {
+            return Err(std::io::Error::other(
+                "llm face_group_similarity_threshold must be within [0, 1]",
+            ));
+        }
         if !self.enabled {
             return Ok(());
         }
@@ -498,8 +495,6 @@ impl LlmConfig {
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
-    #[serde(default)]
-    pub logging: LoggingConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]

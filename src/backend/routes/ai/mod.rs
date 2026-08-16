@@ -42,7 +42,7 @@ async fn cancel_ocr(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state.pool, "ocr")
+    cancel_task(&state, "ocr").await
 }
 async fn clean_ocr(
     State(state): State<AppState>,
@@ -56,7 +56,7 @@ async fn cancel_image_tagging(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state.pool, "image_tagging")
+    cancel_task(&state, "image_tagging").await
 }
 async fn clean_image_tagging(
     State(state): State<AppState>,
@@ -70,10 +70,12 @@ async fn cancel_image_clustering(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
+    let cancelled_jobs = ai::cancel_active_jobs(&state.pool, Some("image_clustering"))? as i64;
     request_cancel(&state.pool)?;
+    deliver_cancellations(&state).await;
     Ok(Json(MetadataActionResponse {
         message: "Image clustering cancellation requested".to_string(),
-        queued_jobs: 0,
+        queued_jobs: cancelled_jobs,
     }))
 }
 async fn clean_image_clustering(
@@ -106,7 +108,9 @@ async fn cancel_faces(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
+    ai::cancel_active_jobs(&state.pool, Some("face_detection"))?;
     face_detection::cancel(&state.pool)?;
+    deliver_cancellations(&state).await;
     Ok(Json(MetadataActionResponse {
         message: "Face detection cancelled".to_string(),
         queued_jobs: 0,
@@ -139,13 +143,9 @@ async fn faces_status(
     Ok(Json(status))
 }
 
-fn cancel_task(
-    pool: &crate::database::DbPool,
-    task: &str,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let connection = pool.get()?;
-    let cancelled_jobs =
-        connection.execute(queries::ai_jobs::CANCEL_ACTIVE_FOR_TASK, [task])? as i64;
+async fn cancel_task(state: &AppState, task: &str) -> AppResult<Json<MetadataActionResponse>> {
+    let cancelled_jobs = ai::cancel_active_jobs(&state.pool, Some(task))? as i64;
+    deliver_cancellations(state).await;
     Ok(Json(MetadataActionResponse {
         message: format!("{task} jobs cancelled"),
         queued_jobs: cancelled_jobs,
@@ -204,7 +204,7 @@ async fn reset_ocr(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(&state.pool, "ocr")
+    reset_task(&state, "ocr").await
 }
 
 async fn reset_image_tagging(
@@ -212,7 +212,7 @@ async fn reset_image_tagging(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(&state.pool, "image_tagging")
+    reset_task(&state, "image_tagging").await
 }
 
 fn task_status(
@@ -260,16 +260,14 @@ fn task_status(
     }))
 }
 
-fn reset_task(
-    pool: &crate::database::DbPool,
-    task: &str,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let connection = pool.get()?;
+async fn reset_task(state: &AppState, task: &str) -> AppResult<Json<MetadataActionResponse>> {
+    ai::cancel_active_jobs(&state.pool, Some(task))?;
+    deliver_cancellations(state).await;
+    let connection = state.pool.get()?;
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
-    transaction.execute(queries::ai_jobs::CANCEL_ACTIVE_FOR_TASK, [task])?;
     transaction.commit()?;
-    let queued_jobs = ai::queue_task(pool, task, true)? as i64;
+    let queued_jobs = ai::queue_task(&state.pool, task, true)? as i64;
     Ok(Json(MetadataActionResponse {
         message: format!("{task} processing reset"),
         queued_jobs,
@@ -300,10 +298,10 @@ async fn cancel(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let connection = state.pool.get()?;
-    let cancelled_jobs = connection.execute(queries::ai_jobs::CANCEL_ALL_ACTIVE, [])? as i64;
+    let cancelled_jobs = ai::cancel_active_jobs(&state.pool, None)? as i64;
     let clustering_cancelled = request_cancel(&state.pool)?;
     face_detection::cancel(&state.pool)?;
+    deliver_cancellations(&state).await;
     Ok(Json(MetadataActionResponse {
         message: if clustering_cancelled {
             "AI jobs cancelled and image clustering cancellation requested".to_string()
@@ -312,6 +310,12 @@ async fn cancel(
         },
         queued_jobs: cancelled_jobs,
     }))
+}
+
+async fn deliver_cancellations(state: &AppState) {
+    if let Err(error) = ai::deliver_pending_cancellations(&state.config, &state.pool).await {
+        tracing::warn!("immediate LLM cancellation delivery failed: {error}");
+    }
 }
 
 async fn trigger_ocr(

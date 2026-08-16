@@ -3,7 +3,6 @@
 
 import argparse
 import base64
-import binascii
 import json
 import math
 import sys
@@ -11,13 +10,13 @@ import threading
 from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
+from pathlib import Path
+
+from runtime_input import read_runtime_input
 
 
 EMBEDDING_DIMENSIONS = 384
 EMBEDDING_ENCODING = "float32_le"
-MAX_REQUEST_BYTES = 50 * 1024 * 1024
-
-
 class InvalidImageError(ValueError):
     """The request body is not a readable image."""
 
@@ -132,6 +131,7 @@ class ImageClusteringRuntime:
 class Handler(BaseHTTPRequestHandler):
     runtime = None
     inference_slots = None
+    input_root = None
 
     def do_GET(self):
         if self.path != "/ready":
@@ -143,25 +143,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/infer":
             self.send_error(404)
             return
+        with self.inference_slots:
+            self.handle_inference()
 
+    def handle_inference(self):
         try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-            if content_length <= 0 or content_length > MAX_REQUEST_BYTES:
-                raise ValueError(
-                    f"Content-Length must be between 1 and {MAX_REQUEST_BYTES}"
-                )
-            request = json.loads(self.rfile.read(content_length))
-            image_bytes = base64.b64decode(request["image"], validate=True)
-        except (ValueError, json.JSONDecodeError, KeyError, binascii.Error) as error:
+            image_bytes = read_runtime_input(self, self.input_root)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
             self.send_json(400, {"detail": f"invalid request: {error}"})
             return
-        if not image_bytes:
-            self.send_json(400, {"detail": "image must not be empty"})
-            return
 
         try:
-            with self.inference_slots:
-                response = self.runtime.infer(image_bytes)
+            response = self.runtime.infer(image_bytes)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
             return
@@ -182,6 +175,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class ModelHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 1024
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -190,6 +188,7 @@ def main():
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--max-concurrent-jobs", type=int, required=True)
+    parser.add_argument("--input-root", required=True)
     arguments = parser.parse_args()
     if arguments.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
@@ -198,7 +197,8 @@ def main():
         arguments.model, arguments.cache_dir, arguments.device
     )
     Handler.inference_slots = create_inference_slots(arguments.max_concurrent_jobs)
-    server = ThreadingHTTPServer((arguments.host, arguments.port), Handler)
+    Handler.input_root = Path(arguments.input_root)
+    server = ModelHTTPServer((arguments.host, arguments.port), Handler)
     serve_until_stopped(server)
 
 

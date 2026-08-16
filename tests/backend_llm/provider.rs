@@ -1,15 +1,18 @@
-use llm_service::config::{Config, GeneralConfig, LoggingConfig, ServiceConfig};
-use llm_service::provider::{InferenceInput, InferenceJob, ServiceManager};
+use futures::stream::{FuturesUnordered, StreamExt};
+use llm_service::config::{Config, GeneralConfig, ServiceConfig, StorageConfig};
+use llm_service::provider::{InferenceInput, ServiceManager};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 
 const MOCK_RUNTIME: &str = r#"
 import argparse
 import base64
 import json
+import os
 import struct
 import threading
 import time
@@ -20,7 +23,16 @@ parser.add_argument('--mode', required=True)
 parser.add_argument('--port', required=True, type=int)
 parser.add_argument('--start-log', required=True)
 parser.add_argument('--max-concurrent-jobs', required=True, type=int)
+parser.add_argument('--input-root', required=True)
+parser.add_argument('--mount-source', required=True)
+parser.add_argument('--minimum-face-likelihood', type=float)
+parser.add_argument('--minimum-face-resolution-pixels', type=int)
 arguments = parser.parse_args()
+if 'face_detection' in arguments.mode:
+    if arguments.minimum_face_likelihood != 0.8:
+        raise RuntimeError('invalid minimum face likelihood')
+    if arguments.minimum_face_resolution_pixels != 112:
+        raise RuntimeError('invalid minimum face resolution')
 
 with open(arguments.start_log, 'a', encoding='utf-8') as output:
     output.write(arguments.mode + ':' + str(arguments.max_concurrent_jobs) + '\n')
@@ -34,35 +46,59 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/ready':
             self.send_json(200, {'status': 'ready'})
             return
+        if arguments.mode == 'ocr' and self.path == '/v1/models':
+            self.send_json(200, {'data': []})
+            return
         if self.path == '/metrics':
             self.send_json(200, {'maximumActiveRequests': maximum_active_requests})
             return
         self.send_error(404)
 
     def do_POST(self):
+        if arguments.mode == 'ocr' and self.path == '/v1/chat/completions':
+            content_length = int(self.headers.get('Content-Length', '0'))
+            request = json.loads(self.rfile.read(content_length))
+            image_url = request['messages'][0]['content'][1]['image_url']['url']
+            if not image_url.startswith('file://' + arguments.input_root + '/'):
+                self.send_json(400, {'detail': 'OCR input was not a local file URL'})
+                return
+            self.send_json(200, {'choices': [{'message': {'content': 'OCR text'}}]})
+            return
         if self.path != '/infer':
             self.send_error(404)
             return
         content_length = int(self.headers.get('Content-Length', '0'))
         request_body = self.rfile.read(content_length)
+        if arguments.mode == 'crash_face_detection':
+            os._exit(1)
+        try:
+            descriptor = json.loads(request_body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json(400, {'detail': 'input was not a JSON descriptor'})
+            return
+        if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType'}:
+            self.send_json(400, {'detail': 'invalid input descriptor'})
+            return
         if arguments.mode == 'image_tagging':
             self.send_json(200, {'tags': ['person', 'bicycle']})
             return
-        if arguments.mode in ('face_detection', 'slow_face_detection'):
-            if self.headers.get('Content-Type') != 'application/octet-stream' or request_body != b'image':
-                self.send_json(400, {'detail': 'face input was not sent as raw bytes'})
-                return
+        if arguments.mode in ('face_detection', 'slow_face_detection', 'rolling_face_detection'):
             global active_requests, maximum_active_requests
             with request_lock:
                 active_requests += 1
                 maximum_active_requests = max(maximum_active_requests, active_requests)
             if arguments.mode == 'slow_face_detection':
-                time.sleep(0.1)
+                time.sleep(0.25)
+            if arguments.mode == 'rolling_face_detection':
+                with open(arguments.start_log, 'a', encoding='utf-8') as output:
+                    output.write('start:' + descriptor['jobId'] + '\n')
+                time.sleep(0.25 if descriptor['jobId'].endswith('0') else 0.02)
             embedding = [1.0] + [0.0] * 511
             encoded = base64.b64encode(struct.pack('<512f', *embedding)).decode('ascii')
             self.send_json(200, {'faces': [{
                 'index': 0,
                 'boundingBox': {'x': 0.1, 'y': 0.2, 'width': 0.3, 'height': 0.4},
+                'eyeCenter': {'x': 0.25, 'y': 0.32},
                 'confidence': 0.95,
                 'qualityScore': 0.8,
                 'embedding': encoded,
@@ -71,11 +107,15 @@ class Handler(BaseHTTPRequestHandler):
             }]})
             with request_lock:
                 active_requests -= 1
+            if arguments.mode == 'rolling_face_detection':
+                with open(arguments.start_log, 'a', encoding='utf-8') as output:
+                    output.write('finish:' + descriptor['jobId'] + '\n')
             return
         if arguments.mode == 'malformed_face_detection':
             self.send_json(200, {'faces': [{
-                'index': 1,
+                'index': 0,
                 'boundingBox': {'x': 0.1, 'y': 0.2, 'width': 0.3, 'height': 0.4},
+                'eyeCenter': {'x': 1.5, 'y': 0.32},
                 'confidence': 0.95,
                 'qualityScore': 0.8,
                 'embedding': '',
@@ -129,38 +169,59 @@ fn runtime_log_redacts_base64_payloads() {
     assert!(redacted.contains("embeddingDimensions"));
 }
 
-fn service(
+pub(super) fn service(
     model_type: &str,
     mode: &str,
     port: u16,
     script_path: &Path,
     start_log: &Path,
 ) -> ServiceConfig {
+    let mut docker_command = vec![
+        "python3".to_string(),
+        "{script_path}".to_string(),
+        "--mode".to_string(),
+        mode.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--start-log".to_string(),
+        start_log.to_string_lossy().into_owned(),
+        "--max-concurrent-jobs".to_string(),
+        "{max_concurrent_jobs}".to_string(),
+        "--input-root".to_string(),
+        "{runtime_mount_target}".to_string(),
+        "--mount-source".to_string(),
+        "{runtime_mount_source}".to_string(),
+    ];
+    if model_type == "face_detection" {
+        docker_command.extend([
+            "--minimum-face-likelihood".to_string(),
+            "{minimum_face_likelihood}".to_string(),
+            "--minimum-face-resolution-pixels".to_string(),
+            "{minimum_face_resolution_pixels}".to_string(),
+        ]);
+    }
     ServiceConfig {
         enabled: true,
         model_type: model_type.to_string(),
-        model_version: if model_type == "image_clustering" {
+        model_version: if model_type == "ocr" {
+            "unlimited_ocr".to_string()
+        } else if model_type == "image_clustering" {
             "dinov2-small".to_string()
         } else if model_type == "face_detection" {
             "buffalo_l".to_string()
         } else {
             "ram++".to_string()
         },
-        docker_command: vec![
-            "python3".to_string(),
-            "{script_path}".to_string(),
-            "--mode".to_string(),
-            mode.to_string(),
-            "--port".to_string(),
-            port.to_string(),
-            "--start-log".to_string(),
-            start_log.to_string_lossy().into_owned(),
-            "--max-concurrent-jobs".to_string(),
-            "{max_concurrent_jobs}".to_string(),
-        ],
+        docker_command,
         device: "cpu".to_string(),
-        base_url: format!("http://127.0.0.1:{port}"),
-        model: if model_type == "image_clustering" {
+        base_url: if model_type == "ocr" {
+            format!("http://127.0.0.1:{port}/v1")
+        } else {
+            format!("http://127.0.0.1:{port}")
+        },
+        model: if model_type == "ocr" {
+            "baidu/Unlimited-OCR".to_string()
+        } else if model_type == "image_clustering" {
             "facebook/dinov2-small".to_string()
         } else if model_type == "face_detection" {
             "buffalo_l".to_string()
@@ -178,25 +239,41 @@ fn service(
         } else {
             0
         },
+        minimum_face_likelihood: (model_type == "face_detection").then_some(0.8),
+        minimum_face_resolution_pixels: (model_type == "face_detection").then_some(112),
         max_concurrent_jobs: 2,
     }
 }
 
-fn manager(services: Vec<ServiceConfig>) -> ServiceManager {
+pub(super) fn manager(services: Vec<ServiceConfig>) -> ServiceManager {
+    let fixture_root = Path::new(&services[0].script_path)
+        .parent()
+        .expect("fixture script parent");
+    let queue_dir = fixture_root.join("queue");
+    fs::create_dir_all(queue_dir.join("processing")).expect("test processing queue");
     ServiceManager::new(Arc::new(Config {
         general: GeneralConfig::default(),
-        logging: LoggingConfig::default(),
-        storage: Default::default(),
+        storage: StorageConfig {
+            data_dir: fixture_root.to_path_buf(),
+            queue_dir: queue_dir.clone(),
+            runtime_mount_source: Path::new("").to_path_buf(),
+            runtime_mount_target: queue_dir.join("processing"),
+        },
         callback: Default::default(),
         service: services,
     }))
 }
 
-fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+pub(super) fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let directory = TempDir::new().expect("Failed to create runtime fixture");
     let script_path = directory.path().join("mock_runtime.py");
     let start_log = directory.path().join("starts.log");
     fs::write(&script_path, MOCK_RUNTIME).expect("Failed to write mock runtime");
+    fs::write(
+        directory.path().join("runtime_input.py"),
+        include_str!("../../src/backend_llm/runtime_input.py"),
+    )
+    .expect("Failed to write runtime input helper");
     (directory, script_path, start_log)
 }
 
@@ -206,19 +283,22 @@ async fn infer_one(
     bytes: &[u8],
     filename: &str,
 ) -> Result<llm_service::provider::InferenceResponse, llm_service::error::ServiceError> {
-    let mut results = manager
-        .infer_batch(vec![InferenceJob {
-            task: task.to_string(),
-            inputs: vec![InferenceInput {
-                sequence: 0,
-                frame_timestamp_ms: None,
-                bytes: bytes.to_vec(),
-                filename: filename.to_string(),
-            }],
+    let input_file = NamedTempFile::new().expect("Failed to create queued input");
+    fs::write(input_file.path(), bytes).expect("Failed to write queued input");
+    let dispatcher = manager.dispatcher(task).await?;
+    let inputs = dispatcher
+        .infer_inputs(vec![InferenceInput {
+            job_id: "abcdef12".to_string(),
+            sequence: 0,
+            frame_timestamp_ms: None,
+            path: input_file.path().to_path_buf(),
+            byte_size: bytes.len() as u64,
+            content_hash: format!("{:x}", Sha256::digest(bytes)),
+            mime_type: "image/jpeg".to_string(),
+            filename: filename.to_string(),
         }])
         .await;
-    let inputs = results.remove(0)?;
-    Ok(inputs
+    Ok(inputs?
         .into_iter()
         .next()
         .expect("single input response")
@@ -301,8 +381,23 @@ async fn manager_reuses_a_runtime_and_switches_for_a_different_task() {
 }
 
 #[tokio::test]
-async fn manager_preserves_ordered_frame_input_correlation() {
+async fn manager_sends_ocr_a_local_queue_file_url() {
     let (_directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let ocr = service("ocr", "ocr", port, &script_path, &start_log);
+    let mut manager = manager(vec![ocr]);
+
+    let response = infer_one(&mut manager, "ocr", b"ocr image", "ocr.jpg")
+        .await
+        .expect("OCR request should succeed");
+
+    assert_eq!(response.text, "OCR text");
+    manager.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn manager_preserves_ordered_frame_input_correlation() {
+    let (directory, script_path, start_log) = fixture();
     let port = available_port();
     let clustering = service(
         "image_clustering",
@@ -312,26 +407,39 @@ async fn manager_preserves_ordered_frame_input_correlation() {
         &start_log,
     );
     let mut manager = manager(vec![clustering]);
-    let mut results = manager
-        .infer_batch(vec![InferenceJob {
-            task: "image_clustering".to_string(),
-            inputs: vec![
-                InferenceInput {
-                    sequence: 0,
-                    frame_timestamp_ms: Some(0),
-                    bytes: b"first frame".to_vec(),
-                    filename: "first.jpg".to_string(),
-                },
-                InferenceInput {
-                    sequence: 1,
-                    frame_timestamp_ms: Some(1000),
-                    bytes: b"second frame".to_vec(),
-                    filename: "second.jpg".to_string(),
-                },
-            ],
-        }])
-        .await;
-    let first_job = results.remove(0).expect("first result");
+    let first_path = directory.path().join("first-frame.jpg");
+    let second_path = directory.path().join("second-frame.jpg");
+    fs::write(&first_path, b"first frame").expect("first frame");
+    fs::write(&second_path, b"second frame").expect("second frame");
+    let dispatcher = manager
+        .dispatcher("image_clustering")
+        .await
+        .expect("clustering dispatcher");
+    let first_job = dispatcher
+        .infer_inputs(vec![
+            InferenceInput {
+                job_id: "abcdef12".to_string(),
+                sequence: 0,
+                frame_timestamp_ms: Some(0),
+                path: first_path,
+                byte_size: 11,
+                content_hash: format!("{:x}", Sha256::digest(b"first frame")),
+                mime_type: "image/jpeg".to_string(),
+                filename: "first.jpg".to_string(),
+            },
+            InferenceInput {
+                job_id: "abcdef12".to_string(),
+                sequence: 1,
+                frame_timestamp_ms: Some(1000),
+                path: second_path,
+                byte_size: 12,
+                content_hash: format!("{:x}", Sha256::digest(b"second frame")),
+                mime_type: "image/jpeg".to_string(),
+                filename: "second.jpg".to_string(),
+            },
+        ])
+        .await
+        .expect("first result");
     assert_eq!(first_job.len(), 2);
     assert_eq!(first_job[0].sequence, 0);
     assert_eq!(first_job[0].frame_timestamp_ms, Some(0));
@@ -399,6 +507,8 @@ async fn manager_reuses_face_runtime_and_serializes_ordered_faces() {
     assert_eq!(first.faces.len(), 1);
     assert_eq!(first.faces[0].index, 0);
     assert_eq!(first.faces[0].embedding_dimensions, 512);
+    assert_eq!(first.faces[0].eye_center.x, 0.25);
+    assert_eq!(first.faces[0].eye_center.y, 0.32);
     assert_eq!(first.faces[0].embedding_encoding, "float32_le");
     assert_eq!(second.faces[0].bounding_box.width, 0.3);
     assert_eq!(manager.active_name(), "insightface");
@@ -430,7 +540,7 @@ async fn manager_reuses_face_runtime_and_serializes_ordered_faces() {
 
 #[tokio::test]
 async fn manager_dispatches_all_face_jobs_without_a_provider_concurrency_limit() {
-    let (_directory, script_path, start_log) = fixture();
+    let (directory, script_path, start_log) = fixture();
     let port = available_port();
     let face_detection = service(
         "face_detection",
@@ -440,19 +550,35 @@ async fn manager_dispatches_all_face_jobs_without_a_provider_concurrency_limit()
         &start_log,
     );
     let mut manager = manager(vec![face_detection]);
-    let jobs = (0..8)
-        .map(|sequence| InferenceJob {
-            task: "face_detection".to_string(),
-            inputs: vec![InferenceInput {
+    let inputs = (0..8)
+        .map(|sequence| {
+            let path = directory.path().join(format!("image-{sequence}.jpg"));
+            fs::write(&path, b"image").expect("queued face input");
+            InferenceInput {
+                job_id: format!("abcdef{sequence:02x}"),
                 sequence,
                 frame_timestamp_ms: None,
-                bytes: b"image".to_vec(),
+                path,
+                byte_size: 5,
+                content_hash: format!("{:x}", Sha256::digest(b"image")),
+                mime_type: "image/jpeg".to_string(),
                 filename: format!("image-{sequence}.jpg"),
-            }],
+            }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    let results = manager.infer_batch(jobs).await;
+    let dispatcher = manager
+        .dispatcher("face_detection")
+        .await
+        .expect("face dispatcher");
+    let mut in_flight = inputs
+        .into_iter()
+        .map(|input| dispatcher.infer_inputs(vec![input]))
+        .collect::<FuturesUnordered<_>>();
+    let mut results = Vec::new();
+    while let Some(result) = in_flight.next().await {
+        results.push(result);
+    }
     let metrics: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
         .await
         .expect("metrics response")
@@ -467,7 +593,31 @@ async fn manager_dispatches_all_face_jobs_without_a_provider_concurrency_limit()
 }
 
 #[tokio::test]
-async fn manager_rejects_invalid_face_detection_response() {
+async fn face_runtime_connection_loss_is_retryable_by_the_scheduler() {
+    let (_directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let face_detection = service(
+        "face_detection",
+        "crash_face_detection",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![face_detection]);
+
+    let error = infer_one(&mut manager, "face_detection", b"image", "face.jpg")
+        .await
+        .expect_err("crashed runtime must fail the request");
+
+    assert!(matches!(
+        error,
+        llm_service::error::ServiceError::RuntimeUnavailable(_)
+    ));
+    manager.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn manager_rejects_invalid_face_eye_center() {
     let (_directory, script_path, start_log) = fixture();
     let port = available_port();
     let face_detection = service(
@@ -481,8 +631,8 @@ async fn manager_rejects_invalid_face_detection_response() {
 
     let error = infer_one(&mut manager, "face_detection", b"image", "image.jpg")
         .await
-        .expect_err("Non-contiguous face indices must be rejected");
+        .expect_err("Invalid eye center must be rejected");
 
-    assert!(error.to_string().contains("expected 0"));
+    assert!(error.to_string().contains("normalized eye center"));
     manager.shutdown().await.expect("runtime shutdown");
 }

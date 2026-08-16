@@ -31,16 +31,37 @@ fn test_load_config_reads_storage_paths() {
 }
 
 #[test]
-fn test_load_config_reads_log_file_path() {
+fn test_load_config_rejects_configurable_log_file_path() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(&dir, "[logging]\nfile_path = \"/var/log/momento.log\"\n");
 
+    let error = load_config(&path).expect_err("Logging path must not be configurable");
+
+    assert!(error.to_string().contains("logging"));
+}
+
+#[test]
+fn test_load_config_reads_llm_submission_window() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[llm_submission_worker]\nmax_in_flight = 17\npoll_interval_seconds = 2\n",
+    );
+
     let config = load_config(&path).expect("Failed to load config");
 
-    assert_eq!(
-        config.logging.file_path,
-        PathBuf::from("/var/log/momento.log")
-    );
+    assert_eq!(config.llm_submission_worker.max_in_flight, 17);
+    assert_eq!(config.llm_submission_worker.poll_interval_seconds, 2);
+}
+
+#[test]
+fn test_load_config_rejects_removed_llm_submission_batch_size() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[llm_submission_worker]\nbatch_size = 64\n");
+
+    let error = load_config(&path).expect_err("Submission batch size has been removed");
+
+    assert!(error.to_string().contains("batch_size"));
 }
 
 #[test]
@@ -121,6 +142,19 @@ fn test_load_config_uses_disabled_deduplicate_llm_default_when_section_is_missin
     let config = load_config(&path).expect("Missing deduplicate config should use safe defaults");
 
     assert!(!config.llm.deduplicate_enabled);
+    assert_eq!(config.llm.face_group_similarity_threshold, 0.55);
+}
+
+#[test]
+fn test_load_config_rejects_invalid_face_group_similarity_threshold() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[llm]\nface_group_similarity_threshold = 1.1\n");
+
+    let error = load_config(&path).expect_err("Invalid face similarity threshold must fail");
+
+    assert!(error
+        .to_string()
+        .contains("face_group_similarity_threshold"));
 }
 
 #[test]

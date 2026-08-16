@@ -1,32 +1,7 @@
-use axum::{body::Body, extract::Request, middleware::Next, response::Response};
-use std::fs::{self, OpenOptions};
-use std::io;
-use std::path::Path;
 use std::time::Instant;
+
+use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, fmt::writer::MakeWriterExt, EnvFilter};
-
-pub fn init_logging(file_path: &Path) -> io::Result<()> {
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file_path)?;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("momento_api=info,tower_http=warn"));
-
-    fmt()
-        .with_env_filter(filter)
-        .with_writer(file.and(std::io::stdout))
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(false)
-        .init();
-    Ok(())
-}
 
 pub async fn request_logger(mut request: Request<Body>, next: Next) -> Response {
     let method = request.method().clone();

@@ -12,19 +12,42 @@ fn embedding() -> String {
     base64::engine::general_purpose::STANDARD.encode(values)
 }
 
+fn insert_face(connection: &rusqlite::Connection, media_id: i64, embedding: &[u8]) {
+    connection
+        .execute(
+            queries::faces::INSERT_FACE,
+            rusqlite::params![
+                media_id,
+                0_i64,
+                0_i64,
+                0.0_f64,
+                0.0_f64,
+                1.0_f64,
+                1.0_f64,
+                1.0_f64,
+                1.0_f64,
+                embedding,
+                "faces/test.jpg"
+            ],
+        )
+        .expect("face");
+}
+
 #[test]
 fn portrait_crop_includes_head_and_shoulders_within_image_bounds() {
     let (crop_x, crop_y, crop_width, crop_height) =
-        face_detection::portrait_crop_box(1000, 1000, 0.4, 0.2, 0.2, 0.2);
+        face_detection::portrait_crop_box(1000, 1000, 0.5, 0.3, 0.2, 0.2);
 
     assert!(crop_x <= 400);
-    assert!(crop_y < 200);
+    assert!(crop_y < 300);
     assert!(crop_x + crop_width >= 600);
-    assert!(crop_y + crop_height > 500);
+    assert!(crop_y + crop_height > 300);
     assert_eq!(crop_width, crop_height);
+    assert!((i64::from(crop_x + (crop_width / 2)) - 500).abs() <= 1);
+    assert!((i64::from(crop_y + (crop_height / 2)) - 300).abs() <= 1);
 
     let (edge_x, edge_y, edge_width, edge_height) =
-        face_detection::portrait_crop_box(1000, 600, 0.85, 0.7, 0.15, 0.25);
+        face_detection::portrait_crop_box(1000, 600, 0.9, 0.75, 0.15, 0.25);
     assert!(edge_x + edge_width <= 1000);
     assert!(edge_y + edge_height <= 600);
 }
@@ -48,7 +71,7 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
     let results = vec![LlmInputResult {
         sequence: 0,
         frame_timestamp_ms: None,
-        result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "confidence": 1.0, "qualityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
+        result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "eyeCenter": { "x": 0.5, "y": 0.3 }, "confidence": 1.0, "qualityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
     }];
     assert!(face_detection::persist_callback(
         &transaction,
@@ -132,30 +155,13 @@ fn face_grouping_creates_deterministic_group_for_matching_embeddings() {
         .decode(embedding())
         .expect("embedding");
     for media_id in [first_media_id, second_media_id] {
-        connection
-            .execute(
-                queries::faces::INSERT_FACE,
-                rusqlite::params![
-                    media_id,
-                    0_i64,
-                    0_i64,
-                    0.0_f64,
-                    0.0_f64,
-                    1.0_f64,
-                    1.0_f64,
-                    1.0_f64,
-                    1.0_f64,
-                    embedding.clone(),
-                    "faces/test.jpg"
-                ],
-            )
-            .expect("face");
+        insert_face(&connection, media_id, &embedding);
     }
     connection
         .execute(queries::faces::INSERT_GROUPING_RUN, [])
         .expect("run");
     drop(connection);
-    face_detection::finalize_ready_runs(&pool).expect("finalize");
+    face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize");
     let connection = pool.get().expect("connection");
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM face_group_members", [], |row| {
@@ -163,6 +169,50 @@ fn face_grouping_creates_deterministic_group_for_matching_embeddings() {
         })
         .expect("members");
     assert_eq!(count, 2);
+}
+
+#[test]
+fn face_group_similarity_threshold_controls_matching_tolerance() {
+    init_test_paths();
+    let pool = create_test_db();
+    let first_media_id = create_test_media(&pool, "first-threshold.jpg");
+    let second_media_id = create_test_media(&pool, "second-threshold.jpg");
+    let connection = pool.get().expect("connection");
+    let first_embedding = [1.0_f32]
+        .into_iter()
+        .chain(std::iter::repeat_n(0.0_f32, 511))
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let second_embedding = [0.6_f32, 0.8_f32]
+        .into_iter()
+        .chain(std::iter::repeat_n(0.0_f32, 510))
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    insert_face(&connection, first_media_id, &first_embedding);
+    insert_face(&connection, second_media_id, &second_embedding);
+    connection
+        .execute(queries::faces::INSERT_GROUPING_RUN, [])
+        .expect("strict grouping run");
+    drop(connection);
+
+    face_detection::finalize_ready_runs(&pool, 0.7).expect("strict grouping");
+    let connection = pool.get().expect("connection");
+    let strict_groups: i64 = connection
+        .query_row("SELECT COUNT(*) FROM face_groups", [], |row| row.get(0))
+        .expect("strict group count");
+    assert_eq!(strict_groups, 2);
+    connection
+        .execute(queries::faces::INSERT_GROUPING_RUN, [])
+        .expect("tolerant grouping run");
+    drop(connection);
+
+    face_detection::finalize_ready_runs(&pool, 0.55).expect("tolerant grouping");
+    let tolerant_groups: i64 = pool
+        .get()
+        .expect("connection")
+        .query_row("SELECT COUNT(*) FROM face_groups", [], |row| row.get(0))
+        .expect("tolerant group count");
+    assert_eq!(tolerant_groups, 1);
 }
 
 #[test]
@@ -206,7 +256,8 @@ fn restart_recovery_resumes_running_face_jobs_and_finishes_cancellation() {
             [],
         )
         .expect("run");
-    connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES ('restart-face-job', ?, 1, 'face_detection', 'submitted')", [media_id]).expect("job");
+    let job_id = "0123456789abcdef0123456789abcdef";
+    connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES (?, ?, 1, 'face_detection', 'submitted')", rusqlite::params![job_id, media_id]).expect("job");
     drop(connection);
 
     face_detection::recover_interrupted_runs(&pool).expect("resume running run");
@@ -239,6 +290,14 @@ fn restart_recovery_resumes_running_face_jobs_and_finishes_cancellation() {
         .expect("cancelled state");
     assert_eq!(run_status, "cancelled");
     assert_eq!(job_status, "cancelled");
+    let queued_cancellation: String = connection
+        .query_row(
+            "SELECT job_id FROM llm_job_cancellations WHERE job_id = ?",
+            [job_id],
+            |row| row.get(0),
+        )
+        .expect("durable cancellation");
+    assert_eq!(queued_cancellation, job_id);
 }
 
 #[test]
@@ -290,7 +349,7 @@ fn automatic_regrouping_does_not_duplicate_manually_merged_faces() {
         .expect("run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool).expect("finalize");
+    face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize");
 
     let connection = pool.get().expect("connection");
     for face_id in &face_ids[..2] {

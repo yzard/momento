@@ -1,17 +1,20 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use momento_common::logging::init_logging;
+
 use momento_api::app::create_app;
 use momento_api::auth::hash_password;
 use momento_api::config::{load_config, save_default_config};
 use momento_api::constants::{init_paths, paths};
 use momento_api::cronjob::run_cronjobs;
 use momento_api::database::{create_pool, init_database, queries};
-use momento_api::logging::{init_logging, install_panic_hook};
+use momento_api::logging::install_panic_hook;
 use momento_api::processor::ai;
 use momento_api::processor::import::recover_interrupted_imports;
 use momento_api::processor::import::start_webdav_import_job;
 use momento_api::processor::metadata_worker;
 use momento_api::routes::cleanup_expired_trash;
-use std::net::SocketAddr;
-use std::sync::Arc;
 
 struct Cli {
     config_path: std::path::PathBuf,
@@ -134,12 +137,14 @@ fn start_background_tasks(
     });
 
     let face_pool = pool.clone();
+    let face_group_similarity_threshold = config.llm.face_group_similarity_threshold;
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(5);
         loop {
-            if let Err(error) =
-                momento_api::processor::face_detection::finalize_ready_runs(&face_pool)
-            {
+            if let Err(error) = momento_api::processor::face_detection::finalize_ready_runs(
+                &face_pool,
+                face_group_similarity_threshold,
+            ) {
                 tracing::warn!("face grouping finalization failed: {error}");
             }
             tokio::time::sleep(interval).await;
@@ -187,14 +192,21 @@ async fn main() {
         }
     };
 
-    if let Err(error) = init_logging(&config.logging.file_path) {
-        eprintln!("Failed to initialize logging: {error}");
-        std::process::exit(1);
-    }
-    install_panic_hook();
-
     // Derive every filesystem location from the configured data directory
     init_paths(&config.storage.data_dir);
+
+    let _logging_guard = match init_logging(
+        &config.storage.data_dir,
+        "momento-api",
+        "momento_api=info,tower_http=warn",
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("Failed to initialize logging: {error}");
+            std::process::exit(1);
+        }
+    };
+    install_panic_hook();
 
     // Initialize directories
     init_directories();

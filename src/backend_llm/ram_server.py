@@ -2,7 +2,6 @@
 """Small HTTP adapter for Recognize Anything Model++ image tagging."""
 
 import argparse
-import base64
 import json
 import shutil
 import threading
@@ -19,6 +18,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module=r"fairscale\..*
 
 from ram import get_transform, inference_ram
 from ram.models import ram_plus
+from runtime_input import read_runtime_input
 
 RAM_PLUS_CHECKPOINT_URL = (
     "https://huggingface.co/xinyu1205/recognize-anything-plus-model/"
@@ -83,6 +83,7 @@ def select_device(requested):
 class Handler(BaseHTTPRequestHandler):
     runtime = None
     inference_slots = None
+    input_root = None
 
     def do_GET(self):
         if self.path != "/ready":
@@ -94,12 +95,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/infer":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        payload = json.loads(self.rfile.read(length))
-        image = base64.b64decode(payload["image"])
+        with self.inference_slots:
+            self.handle_inference()
+
+    def handle_inference(self):
         try:
-            with self.inference_slots:
-                tags = self.runtime.infer(image)
+            image = read_runtime_input(self, self.input_root)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.send_json(400, {"detail": f"invalid runtime input: {error}"})
+            return
+        try:
+            tags = self.runtime.infer(image)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
             return
@@ -117,6 +123,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class ModelHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 1024
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -125,6 +136,7 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8200)
     parser.add_argument("--max-concurrent-jobs", type=int, required=True)
+    parser.add_argument("--input-root", required=True)
     args = parser.parse_args()
     if args.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
@@ -132,7 +144,8 @@ def main():
     ensure_checkpoint(args.checkpoint)
     Handler.runtime = TaggingRuntime(args.checkpoint, args.image_size, args.device)
     Handler.inference_slots = create_inference_slots(args.max_concurrent_jobs)
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    Handler.input_root = Path(args.input_root)
+    server = ModelHTTPServer((args.host, args.port), Handler)
     server.serve_forever()
 
 

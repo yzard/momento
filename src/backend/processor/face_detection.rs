@@ -13,7 +13,6 @@ use crate::models::LlmInputResult;
 use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
 
 const EMBEDDING_DIMENSIONS: usize = 512;
-const GROUP_SIMILARITY: f32 = 0.55;
 const BOUNDING_BOX_EPSILON: f64 = 1e-6;
 
 struct FaceResult {
@@ -23,6 +22,8 @@ struct FaceResult {
     y: f64,
     width: f64,
     height: f64,
+    eye_center_x: f64,
+    eye_center_y: f64,
     confidence: f64,
     quality: f64,
     embedding: Vec<u8>,
@@ -208,6 +209,16 @@ fn parse_face(sequence: i64, value: &serde_json::Value) -> AppResult<FaceResult>
     }
     let width = (x + reported_width).min(1.0) - x;
     let height = (y + reported_height).min(1.0) - y;
+    let eye_center = value
+        .get("eyeCenter")
+        .ok_or_else(|| AppError::BadRequest("face eyeCenter is required".to_string()))?;
+    let eye_coordinate = |name: &str| {
+        eye_center
+            .get(name)
+            .and_then(|coordinate| coordinate.as_f64())
+            .filter(|coordinate| coordinate.is_finite() && (0.0..=1.0).contains(coordinate))
+            .ok_or_else(|| AppError::BadRequest(format!("face eyeCenter {name} is invalid")))
+    };
     let scalar = |name: &str| {
         value
             .get(name)
@@ -264,6 +275,8 @@ fn parse_face(sequence: i64, value: &serde_json::Value) -> AppResult<FaceResult>
         y,
         width,
         height,
+        eye_center_x: eye_coordinate("x")?,
+        eye_center_y: eye_coordinate("y")?,
         confidence: scalar("confidence")?,
         quality: scalar("qualityScore")?,
         embedding: bytes,
@@ -294,8 +307,14 @@ fn write_crop(
     })?;
     let width = input.width();
     let height = input.height();
-    let (crop_x, crop_y, crop_width, crop_height) =
-        portrait_crop_box(width, height, face.x, face.y, face.width, face.height);
+    let (crop_x, crop_y, crop_width, crop_height) = portrait_crop_box(
+        width,
+        height,
+        face.eye_center_x,
+        face.eye_center_y,
+        face.width,
+        face.height,
+    );
     let crop = input
         .crop_imm(crop_x, crop_y, crop_width, crop_height)
         .resize_exact(256, 256, FilterType::Lanczos3);
@@ -315,8 +334,8 @@ fn write_crop(
 pub fn portrait_crop_box(
     image_width: u32,
     image_height: u32,
-    face_x: f64,
-    face_y: f64,
+    eye_center_x: f64,
+    eye_center_y: f64,
     face_width: f64,
     face_height: f64,
 ) -> (u32, u32, u32, u32) {
@@ -326,8 +345,8 @@ pub fn portrait_crop_box(
     let image_height = f64::from(image_height_pixels);
     let face_width = face_width * image_width;
     let face_height = face_height * image_height;
-    let center_x = (face_x * image_width) + (face_width / 2.0);
-    let face_top = face_y * image_height;
+    let center_x = eye_center_x * image_width;
+    let center_y = eye_center_y * image_height;
     let crop_width = (face_width * 2.2)
         .max(face_height * 2.0)
         .min(image_width)
@@ -336,7 +355,7 @@ pub fn portrait_crop_box(
     let crop_x = (center_x - (crop_width / 2.0))
         .max(0.0)
         .min(image_width - crop_width);
-    let crop_y = (face_top - (face_height * 0.3))
+    let crop_y = (center_y - (crop_height / 2.0))
         .max(0.0)
         .min(image_height - crop_height);
     let crop_x = crop_x.floor() as u32;
@@ -371,7 +390,7 @@ pub fn start(pool: &DbPool, enabled: bool) -> AppResult<usize> {
     Ok(queued_jobs)
 }
 
-pub fn finalize_ready_runs(pool: &DbPool) -> AppResult<()> {
+pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let run = connection
         .query_row(queries::faces::SELECT_ACTIVE_RUN, [], |row| {
@@ -421,7 +440,7 @@ pub fn finalize_ready_runs(pool: &DbPool) -> AppResult<()> {
     for (face_id, embedding, _quality) in faces {
         let matching = groups.iter().position(|(_, representative)| {
             cosine_similarity(&embedding, representative)
-                .is_some_and(|score| score >= GROUP_SIMILARITY)
+                .is_some_and(|score| score >= group_similarity_threshold)
         });
         let group_id = if let Some(index) = matching {
             groups[index].0
@@ -466,6 +485,8 @@ pub fn clean(pool: &DbPool) -> AppResult<()> {
 pub fn recover_interrupted_runs(pool: &DbPool) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let transaction = connection.unchecked_transaction()?;
+    transaction.execute(queries::faces::QUEUE_RECOVERED_CANCELLATION_SCOPE, [])?;
+    transaction.execute(queries::faces::QUEUE_RECOVERED_CANCELLATIONS, [])?;
     transaction.execute(queries::faces::CANCEL_RECOVERED_CANCELLING_JOBS, [])?;
     transaction.execute(queries::faces::FINALIZE_RECOVERED_CANCELLING_RUNS, [])?;
     transaction.commit()?;

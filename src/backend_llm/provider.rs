@@ -1,9 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures::future::join_all;
 use reqwest::Client;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,11 +13,10 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::adapters::{normalize_unlimited_ocr_text, UNLIMITED_OCR_MODEL};
-use crate::config::{Config, ServiceConfig};
+use crate::config::{Config, ServiceConfig, StorageConfig};
 use crate::error::ServiceError;
 
 const UV_BOOTSTRAP_COMMAND: &str = "UV_VERSION=0.8.22; UV_MACHINE=$(uname -m); if [ \"$UV_MACHINE\" = \"x86_64\" ]; then UV_TARGET=x86_64-unknown-linux-gnu; elif [ \"$UV_MACHINE\" = \"aarch64\" ] || [ \"$UV_MACHINE\" = \"arm64\" ]; then UV_TARGET=aarch64-unknown-linux-gnu; else echo \"Unsupported uv architecture: $UV_MACHINE\" >&2; exit 1; fi; python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \"https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz\" /tmp/uv.tar.gz && tar -xzf /tmp/uv.tar.gz -C /tmp && install \"/tmp/uv-$UV_TARGET/uv\" /usr/local/bin/uv";
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceResponse {
@@ -48,6 +47,7 @@ pub struct InferenceResponse {
 pub struct FaceDetection {
     pub index: usize,
     pub bounding_box: NormalizedBoundingBox,
+    pub eye_center: NormalizedPoint,
     pub confidence: f32,
     pub quality_score: f32,
     pub embedding: String,
@@ -64,16 +64,22 @@ pub struct NormalizedBoundingBox {
     pub height: f32,
 }
 
-pub struct InferenceInput {
-    pub sequence: u32,
-    pub frame_timestamp_ms: Option<i64>,
-    pub bytes: Vec<u8>,
-    pub filename: String,
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedPoint {
+    pub x: f32,
+    pub y: f32,
 }
 
-pub struct InferenceJob {
-    pub task: String,
-    pub inputs: Vec<InferenceInput>,
+pub struct InferenceInput {
+    pub job_id: String,
+    pub sequence: u32,
+    pub frame_timestamp_ms: Option<i64>,
+    pub path: PathBuf,
+    pub byte_size: u64,
+    pub content_hash: String,
+    pub mime_type: String,
+    pub filename: String,
 }
 
 pub struct InputInferenceResponse {
@@ -122,11 +128,12 @@ impl ServiceType {
     }
 }
 
+#[derive(Clone)]
 enum ActiveService {
-    Ocr(LocalProvider),
-    ImageTagging(RamProvider),
-    ImageClustering(ImageClusteringProvider),
-    FaceDetection(FaceDetectionProvider),
+    Ocr(Arc<LocalProvider>),
+    ImageTagging(Arc<RamProvider>),
+    ImageClustering(Arc<ImageClusteringProvider>),
+    FaceDetection(Arc<FaceDetectionProvider>),
 }
 
 impl ActiveService {
@@ -147,7 +154,7 @@ impl ActiveService {
             Self::FaceDetection(_) => "insightface",
         }
     }
-    async fn shutdown(self) -> Result<(), ServiceError> {
+    async fn shutdown(&self) -> Result<(), ServiceError> {
         match self {
             Self::Ocr(provider) => provider.shutdown().await,
             Self::ImageTagging(provider) => provider.shutdown().await,
@@ -178,6 +185,20 @@ impl ActiveService {
     }
 }
 
+#[derive(Clone)]
+pub struct InferenceDispatcher {
+    active: ActiveService,
+}
+
+impl InferenceDispatcher {
+    pub async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        self.active.infer_inputs(inputs).await
+    }
+}
+
 pub struct ServiceManager {
     config: Arc<Config>,
     active: Option<ActiveService>,
@@ -204,45 +225,15 @@ impl ServiceManager {
             .map(|active| active.service_type().as_str())
     }
 
-    pub async fn infer_batch(
-        &mut self,
-        jobs: Vec<InferenceJob>,
-    ) -> Vec<Result<Vec<InputInferenceResponse>, ServiceError>> {
-        let Some(first) = jobs.first() else {
-            return Vec::new();
-        };
-        if jobs.iter().any(|job| job.task != first.task) {
-            return jobs
-                .into_iter()
-                .map(|_| {
-                    Err(ServiceError::BadRequest(
-                        "an inference batch must contain one task".to_string(),
-                    ))
-                })
-                .collect();
-        }
-        let service_type = match ServiceType::from_task(&first.task) {
-            Ok(service_type) => service_type,
-            Err(error) => {
-                let message = error.to_string();
-                return jobs
-                    .into_iter()
-                    .map(|_| Err(ServiceError::BadRequest(message.clone())))
-                    .collect();
-            }
-        };
-        if let Err(error) = self.activate(service_type).await {
-            let message = error.to_string();
-            return jobs
-                .into_iter()
-                .map(|_| Err(ServiceError::Internal(message.clone())))
-                .collect();
-        }
+    pub async fn dispatcher(&mut self, task: &str) -> Result<InferenceDispatcher, ServiceError> {
+        let service_type = ServiceType::from_task(task)?;
+        self.activate(service_type).await?;
         let active = self
             .active
             .as_ref()
-            .expect("active service set by activate");
-        join_all(jobs.into_iter().map(|job| active.infer_inputs(job.inputs))).await
+            .expect("active service set by activate")
+            .clone();
+        Ok(InferenceDispatcher { active })
     }
 
     async fn activate(&mut self, service_type: ServiceType) -> Result<(), ServiceError> {
@@ -266,16 +257,18 @@ impl ServiceManager {
                 ))
             })?;
         let active = match service_type {
-            ServiceType::Ocr => ActiveService::Ocr(LocalProvider::new(&service).await?),
-            ServiceType::ImageTagging => {
-                ActiveService::ImageTagging(RamProvider::new(&service).await?)
-            }
-            ServiceType::ImageClustering => {
-                ActiveService::ImageClustering(ImageClusteringProvider::new(&service).await?)
-            }
-            ServiceType::FaceDetection => {
-                ActiveService::FaceDetection(FaceDetectionProvider::new(&service).await?)
-            }
+            ServiceType::Ocr => ActiveService::Ocr(Arc::new(
+                LocalProvider::new(&service, &self.config.storage).await?,
+            )),
+            ServiceType::ImageTagging => ActiveService::ImageTagging(Arc::new(
+                RamProvider::new(&service, &self.config.storage).await?,
+            )),
+            ServiceType::ImageClustering => ActiveService::ImageClustering(Arc::new(
+                ImageClusteringProvider::new(&service, &self.config.storage).await?,
+            )),
+            ServiceType::FaceDetection => ActiveService::FaceDetection(Arc::new(
+                FaceDetectionProvider::new(&service, &self.config.storage).await?,
+            )),
         };
         self.active = Some(active);
         Ok(())
@@ -293,6 +286,7 @@ pub struct LocalProvider {
     client: Client,
     config: ServiceConfig,
     child: Arc<Mutex<Child>>,
+    input_root: PathBuf,
 }
 
 impl Drop for LocalProvider {
@@ -319,18 +313,19 @@ struct OpenAiMessage {
 }
 
 impl LocalProvider {
-    async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+    async fn new(config: &ServiceConfig, storage: &StorageConfig) -> Result<Self, ServiceError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|error| {
                 ServiceError::Internal(format!("failed to build HTTP client: {error}"))
             })?;
-        let child = spawn_service_command(config)?;
+        let child = spawn_service_command(config, storage)?;
         let runtime = Self {
             client,
             config: config.clone(),
             child: Arc::new(Mutex::new(child)),
+            input_root: storage.runtime_mount_target.clone(),
         };
         if let Err(error) = runtime.wait_until_ready().await {
             if let Err(shutdown_error) = runtime.shutdown().await {
@@ -370,7 +365,7 @@ impl LocalProvider {
         }
     }
 
-    async fn shutdown(self) -> Result<(), ServiceError> {
+    async fn shutdown(&self) -> Result<(), ServiceError> {
         stop_service_child(&self.child, &self.config, "OCR").await
     }
 
@@ -387,20 +382,38 @@ impl LocalProvider {
     }
 }
 
+fn runtime_input_path(input_root: &Path, input: &InferenceInput) -> PathBuf {
+    input_root
+        .join(&input.job_id)
+        .join(format!("input-{}", input.sequence))
+}
+
+fn runtime_input_descriptor(input: &InferenceInput) -> serde_json::Value {
+    json!({
+        "jobId": input.job_id,
+        "sequence": input.sequence,
+        "byteSize": input.byte_size,
+        "contentHash": input.content_hash,
+        "mimeType": input.mime_type,
+    })
+}
+
 impl LocalProvider {
-    async fn infer(&self, image: &[u8], filename: &str) -> Result<InferenceResponse, ServiceError> {
-        let mime_type = mime_guess::from_path(filename)
-            .first_raw()
-            .filter(|value| value.starts_with("image/"))
-            .unwrap_or("image/jpeg");
-        let encoded = STANDARD.encode(image);
+    async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
+        let input_path = runtime_input_path(&self.input_root, input);
+        let image_url = reqwest::Url::from_file_path(&input_path).map_err(|_| {
+            ServiceError::Configuration(format!(
+                "OCR runtime input path is invalid: {}",
+                input_path.display()
+            ))
+        })?;
         let request = json!({
             "model": self.config.model,
             "messages": [{
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "<image>document parsing."},
-                    {"type": "image_url", "image_url": {"url": format!("data:{mime_type};base64,{encoded}")}}
+                    {"type": "image_url", "image_url": {"url": image_url.to_string()}}
                 ]
             }],
             "max_tokens": self.config.max_tokens,
@@ -421,7 +434,7 @@ impl LocalProvider {
             .send()
             .await
             .map_err(|error| {
-                ServiceError::Upstream(format!("local OCR request failed: {error}"))
+                ServiceError::RuntimeUnavailable(format!("local OCR request failed: {error}"))
             })?;
         let status = response.status();
         let body = response.text().await.map_err(|error| {
@@ -483,7 +496,7 @@ impl LocalProvider {
             responses.push(InputInferenceResponse {
                 sequence: input.sequence,
                 frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input.bytes, &input.filename).await?,
+                response: self.infer(&input).await?,
             });
         }
         Ok(responses)
@@ -511,7 +524,11 @@ struct TaggingResponse {
 }
 
 impl ManagedRuntime {
-    async fn new(config: &ServiceConfig, runtime_name: &'static str) -> Result<Self, ServiceError> {
+    async fn new(
+        config: &ServiceConfig,
+        storage: &StorageConfig,
+        runtime_name: &'static str,
+    ) -> Result<Self, ServiceError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
@@ -520,7 +537,7 @@ impl ManagedRuntime {
                     "failed to build {runtime_name} HTTP client: {error}"
                 ))
             })?;
-        let child = spawn_service_command(config)?;
+        let child = spawn_service_command(config, storage)?;
         let runtime = Self {
             client,
             config: config.clone(),
@@ -567,7 +584,7 @@ impl ManagedRuntime {
         }
     }
 
-    async fn shutdown(self) -> Result<(), ServiceError> {
+    async fn shutdown(&self) -> Result<(), ServiceError> {
         stop_service_child(&self.child, &self.config, self.runtime_name).await
     }
 
@@ -592,14 +609,16 @@ pub struct RamProvider {
 }
 
 impl RamProvider {
-    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+    pub async fn new(
+        config: &ServiceConfig,
+        storage: &StorageConfig,
+    ) -> Result<Self, ServiceError> {
         Ok(Self {
-            runtime: ManagedRuntime::new(config, "RAM++").await?,
+            runtime: ManagedRuntime::new(config, storage, "RAM++").await?,
         })
     }
 
-    pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
-        let encoded = STANDARD.encode(image);
+    pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
         let url = format!(
             "{}/infer",
             self.runtime.config.base_url.trim_end_matches('/')
@@ -608,10 +627,12 @@ impl RamProvider {
             .runtime
             .client
             .post(url)
-            .json(&json!({ "image": encoded }))
+            .json(&runtime_input_descriptor(input))
             .send()
             .await
-            .map_err(|error| ServiceError::Upstream(format!("RAM++ request failed: {error}")))?;
+            .map_err(|error| {
+                ServiceError::RuntimeUnavailable(format!("RAM++ request failed: {error}"))
+            })?;
         let status = response.status();
         let body = response.text().await.map_err(|error| {
             ServiceError::Upstream(format!("failed to read RAM++ response: {error}"))
@@ -650,13 +671,13 @@ impl RamProvider {
             responses.push(InputInferenceResponse {
                 sequence: input.sequence,
                 frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input.bytes).await?,
+                response: self.infer(&input).await?,
             });
         }
         Ok(responses)
     }
 
-    async fn shutdown(self) -> Result<(), ServiceError> {
+    async fn shutdown(&self) -> Result<(), ServiceError> {
         self.runtime.shutdown().await
     }
 }
@@ -676,14 +697,16 @@ struct ImageClusteringRuntimeResponse {
 }
 
 impl ImageClusteringProvider {
-    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+    pub async fn new(
+        config: &ServiceConfig,
+        storage: &StorageConfig,
+    ) -> Result<Self, ServiceError> {
         Ok(Self {
-            runtime: ManagedRuntime::new(config, "DINOv2").await?,
+            runtime: ManagedRuntime::new(config, storage, "DINOv2").await?,
         })
     }
 
-    pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
-        let encoded = STANDARD.encode(image);
+    pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
         let url = format!(
             "{}/infer",
             self.runtime.config.base_url.trim_end_matches('/')
@@ -692,10 +715,12 @@ impl ImageClusteringProvider {
             .runtime
             .client
             .post(url)
-            .json(&json!({ "image": encoded }))
+            .json(&runtime_input_descriptor(input))
             .send()
             .await
-            .map_err(|error| ServiceError::Upstream(format!("DINOv2 request failed: {error}")))?;
+            .map_err(|error| {
+                ServiceError::RuntimeUnavailable(format!("DINOv2 request failed: {error}"))
+            })?;
         let status = response.status();
         let body = response.text().await.map_err(|error| {
             ServiceError::Upstream(format!("failed to read DINOv2 response: {error}"))
@@ -739,7 +764,7 @@ impl ImageClusteringProvider {
             responses.push(InputInferenceResponse {
                 sequence: input.sequence,
                 frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input.bytes).await?,
+                response: self.infer(&input).await?,
             });
         }
         Ok(responses)
@@ -784,7 +809,7 @@ impl ImageClusteringProvider {
         Ok(())
     }
 
-    async fn shutdown(self) -> Result<(), ServiceError> {
+    async fn shutdown(&self) -> Result<(), ServiceError> {
         self.runtime.shutdown().await
     }
 }
@@ -804,6 +829,7 @@ struct FaceDetectionRuntimeResponse {
 struct FaceDetectionRuntimeFace {
     index: usize,
     bounding_box: FaceDetectionRuntimeBoundingBox,
+    eye_center: FaceDetectionRuntimePoint,
     confidence: f32,
     quality_score: f32,
     embedding: String,
@@ -820,14 +846,24 @@ struct FaceDetectionRuntimeBoundingBox {
     height: f32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FaceDetectionRuntimePoint {
+    x: f32,
+    y: f32,
+}
+
 impl FaceDetectionProvider {
-    pub async fn new(config: &ServiceConfig) -> Result<Self, ServiceError> {
+    pub async fn new(
+        config: &ServiceConfig,
+        storage: &StorageConfig,
+    ) -> Result<Self, ServiceError> {
         Ok(Self {
-            runtime: ManagedRuntime::new(config, "InsightFace").await?,
+            runtime: ManagedRuntime::new(config, storage, "InsightFace").await?,
         })
     }
 
-    pub async fn infer(&self, image: &[u8]) -> Result<InferenceResponse, ServiceError> {
+    pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
         let url = format!(
             "{}/infer",
             self.runtime.config.base_url.trim_end_matches('/')
@@ -836,12 +872,11 @@ impl FaceDetectionProvider {
             .runtime
             .client
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(image.to_vec())
+            .json(&runtime_input_descriptor(input))
             .send()
             .await
             .map_err(|error| {
-                ServiceError::Upstream(format!("InsightFace request failed: {error}"))
+                ServiceError::RuntimeUnavailable(format!("InsightFace request failed: {error}"))
             })?;
         let status = response.status();
         let body = response.text().await.map_err(|error| {
@@ -870,6 +905,10 @@ impl FaceDetectionProvider {
                     y: face.bounding_box.y,
                     width: face.bounding_box.width,
                     height: face.bounding_box.height,
+                },
+                eye_center: NormalizedPoint {
+                    x: face.eye_center.x,
+                    y: face.eye_center.y,
                 },
                 confidence: face.confidence,
                 quality_score: face.quality_score,
@@ -905,7 +944,7 @@ impl FaceDetectionProvider {
             responses.push(InputInferenceResponse {
                 sequence: input.sequence,
                 frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input.bytes).await?,
+                response: self.infer(&input).await?,
             });
         }
         Ok(responses)
@@ -923,6 +962,7 @@ impl FaceDetectionProvider {
                 )));
             }
             validate_normalized_face_box(&face.bounding_box)?;
+            validate_normalized_point(&face.eye_center, "eye center")?;
             validate_unit_score(face.confidence, "confidence")?;
             validate_unit_score(face.quality_score, "quality score")?;
             if face.embedding_encoding != "float32_le" {
@@ -946,7 +986,7 @@ impl FaceDetectionProvider {
         Ok(())
     }
 
-    async fn shutdown(self) -> Result<(), ServiceError> {
+    async fn shutdown(&self) -> Result<(), ServiceError> {
         self.runtime.shutdown().await
     }
 }
@@ -971,6 +1011,22 @@ fn validate_normalized_face_box(
         return Err(ServiceError::Upstream(
             "InsightFace returned an invalid normalized bounding box".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_normalized_point(
+    point: &FaceDetectionRuntimePoint,
+    point_name: &str,
+) -> Result<(), ServiceError> {
+    if !point.x.is_finite()
+        || !point.y.is_finite()
+        || !(0.0..=1.0).contains(&point.x)
+        || !(0.0..=1.0).contains(&point.y)
+    {
+        return Err(ServiceError::Upstream(format!(
+            "InsightFace returned an invalid normalized {point_name}"
+        )));
     }
     Ok(())
 }
@@ -1082,7 +1138,10 @@ async fn stop_service_child(
     Ok(())
 }
 
-fn spawn_service_command(config: &ServiceConfig) -> Result<Child, ServiceError> {
+fn spawn_service_command(
+    config: &ServiceConfig,
+    storage: &StorageConfig,
+) -> Result<Child, ServiceError> {
     let executable = config.docker_command.first().ok_or_else(|| {
         ServiceError::Configuration(format!(
             "{} service docker_command must not be empty",
@@ -1102,19 +1161,64 @@ fn spawn_service_command(config: &ServiceConfig) -> Result<Child, ServiceError> 
             .to_string_lossy()
             .into_owned()
     };
+    let runtime_input_path = if config.script_path.is_empty() {
+        String::new()
+    } else {
+        let script_parent = Path::new(&script_path).parent().ok_or_else(|| {
+            ServiceError::Configuration("runtime script has no parent directory".to_string())
+        })?;
+        std::fs::canonicalize(script_parent.join("runtime_input.py"))
+            .map_err(|error| {
+                ServiceError::Configuration(format!(
+                    "failed to resolve runtime input helper: {error}"
+                ))
+            })?
+            .to_string_lossy()
+            .into_owned()
+    };
+    let runtime_mount_source = if storage.runtime_mount_source.as_os_str().is_empty() {
+        std::fs::canonicalize(storage.queue_dir.join("processing"))
+            .map_err(|error| {
+                ServiceError::Configuration(format!(
+                    "failed to resolve runtime queue mount source: {error}"
+                ))
+            })?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        storage.runtime_mount_source.to_string_lossy().into_owned()
+    };
+    let runtime_mount_target = storage.runtime_mount_target.to_string_lossy();
+    let minimum_face_likelihood = config
+        .minimum_face_likelihood
+        .map(|likelihood| likelihood.to_string());
+    let minimum_face_resolution_pixels = config
+        .minimum_face_resolution_pixels
+        .map(|resolution| resolution.to_string());
     let args = config
         .docker_command
         .iter()
         .skip(1)
         .map(|arg| {
-            arg.replace("{script_path}", &script_path)
+            let mut argument = arg
+                .replace("{script_path}", &script_path)
+                .replace("{runtime_input_path}", &runtime_input_path)
                 .replace("{device}", &config.device)
                 .replace("{model}", &config.model)
                 .replace(
                     "{max_concurrent_jobs}",
                     &config.max_concurrent_jobs.to_string(),
                 )
-                .replace("{uv_bootstrap}", UV_BOOTSTRAP_COMMAND)
+                .replace("{runtime_mount_source}", &runtime_mount_source)
+                .replace("{runtime_mount_target}", &runtime_mount_target)
+                .replace("{uv_bootstrap}", UV_BOOTSTRAP_COMMAND);
+            if let Some(likelihood) = &minimum_face_likelihood {
+                argument = argument.replace("{minimum_face_likelihood}", likelihood);
+            }
+            if let Some(resolution) = &minimum_face_resolution_pixels {
+                argument = argument.replace("{minimum_face_resolution_pixels}", resolution);
+            }
+            argument
         })
         .collect::<Vec<_>>();
     let mut command = Command::new(executable);
@@ -1197,7 +1301,6 @@ mod tests {
     fn service_manager_starts_without_an_active_runtime() {
         let manager = ServiceManager::new(Arc::new(crate::config::Config {
             general: Default::default(),
-            logging: Default::default(),
             storage: Default::default(),
             callback: Default::default(),
             service: Vec::new(),

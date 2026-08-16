@@ -163,10 +163,19 @@ pub struct DeduplicateRunStatus {
 
 pub fn recover_interrupted_runs(pool: &DbPool) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
-    connection.execute(queries::deduplicate::RECOVER_SUBMITTING_JOBS, [])?;
-    connection.execute(queries::deduplicate::CANCEL_SUBMITTED_JOBS, [])?;
-    connection.execute(queries::deduplicate::FAIL_INTERRUPTED_RUNS, [])?;
-    execute_query(&connection, queries::deduplicate::MARK_ALL_DIRTY, &[])?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
+        ["image_clustering"],
+    )?;
+    transaction.execute(
+        queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK,
+        ["image_clustering"],
+    )?;
+    transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, ["image_clustering"])?;
+    transaction.execute(queries::deduplicate::FAIL_INTERRUPTED_RUNS, [])?;
+    transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -217,11 +226,19 @@ pub fn request_cancel(pool: &DbPool) -> AppResult<bool> {
         return Ok(false);
     }
     let connection = pool.get().map_err(AppError::Pool)?;
-    Ok(execute_query(
-        &connection,
-        queries::deduplicate::REQUEST_CANCEL,
-        &[&run.id],
-    )? > 0)
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
+        ["image_clustering"],
+    )?;
+    transaction.execute(
+        queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK,
+        ["image_clustering"],
+    )?;
+    transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, ["image_clustering"])?;
+    let cancelled = transaction.execute(queries::deduplicate::REQUEST_CANCEL, [run.id])? > 0;
+    transaction.commit()?;
+    Ok(cancelled)
 }
 
 pub fn clean(pool: &DbPool) -> AppResult<()> {

@@ -4,7 +4,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use momento_common::llm::{CancelJobsRequest, CancelJobsResponse};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -12,6 +14,8 @@ use crate::config::Config;
 use crate::error::ServiceError;
 use crate::provider::ServiceManager;
 use crate::scheduler::{QueueAdmission, QueueManifest, Scheduler};
+
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,10 +27,20 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/jobs/submit", post(submit))
+        .route("/api/v1/ai/cancel", post(cancel))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
+}
+
+async fn cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CancelJobsRequest>,
+) -> Result<Json<CancelJobsResponse>, ServiceError> {
+    validate_api_key(&headers, &state.config.general.api_key)?;
+    Ok(Json(state.scheduler.cancel_jobs(&request)?))
 }
 
 #[derive(Serialize)]
@@ -63,10 +77,19 @@ async fn submit(
     {
         match field.name() {
             Some("manifest") => {
-                let bytes = field
-                    .bytes()
+                let mut bytes = Vec::new();
+                while let Some(chunk) = field
+                    .chunk()
                     .await
-                    .map_err(|error| ServiceError::BadRequest(error.to_string()))?;
+                    .map_err(|error| ServiceError::BadRequest(error.to_string()))?
+                {
+                    if bytes.len() + chunk.len() > MAX_MANIFEST_BYTES {
+                        return Err(ServiceError::BadRequest(
+                            "manifest exceeds 1 MiB".to_string(),
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
                 if manifest.is_some() {
                     return Err(ServiceError::BadRequest(
                         "manifest may only be supplied once".to_string(),
@@ -97,7 +120,7 @@ async fn submit(
                             "multipart input has no manifest descriptor".to_string(),
                         )
                     })?;
-                let Some(QueueAdmission::Staging(staging)) = admission.as_ref() else {
+                let Some(QueueAdmission::Staging(staging)) = admission.as_mut() else {
                     while field
                         .chunk()
                         .await
@@ -107,23 +130,43 @@ async fn submit(
                     continue;
                 };
                 let input_path = staging.input_path(&descriptor)?;
-                let mut input_file = tokio::fs::File::create(input_path)
+                let mut input_file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(input_path)
                     .await
                     .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                let mut byte_count = 0_u64;
+                let mut hasher = Sha256::new();
                 while let Some(chunk) = field
                     .chunk()
                     .await
                     .map_err(|error| ServiceError::BadRequest(error.to_string()))?
                 {
+                    let chunk_size = u64::try_from(chunk.len()).map_err(|_| {
+                        ServiceError::BadRequest("multipart input chunk is too large".to_string())
+                    })?;
+                    byte_count = byte_count.checked_add(chunk_size).ok_or_else(|| {
+                        ServiceError::BadRequest(
+                            "multipart input exceeds descriptor size".to_string(),
+                        )
+                    })?;
+                    if byte_count > descriptor.byte_size {
+                        return Err(ServiceError::BadRequest(
+                            "multipart input exceeds descriptor size".to_string(),
+                        ));
+                    }
                     tokio::io::AsyncWriteExt::write_all(&mut input_file, &chunk)
                         .await
                         .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                    hasher.update(&chunk);
                 }
                 input_file
                     .sync_all()
                     .await
                     .map_err(|error| ServiceError::Internal(error.to_string()))?;
-                staging.verify_input(&descriptor)?;
+                drop(input_file);
+                staging.verify_input(&descriptor, byte_count, hasher.finalize())?;
             }
             _ => {
                 return Err(ServiceError::BadRequest(
@@ -137,14 +180,19 @@ async fn submit(
     })?;
     let admission =
         admission.ok_or_else(|| ServiceError::Internal("missing queue admission".to_string()))?;
-    let QueueAdmission::Staging(staging) = admission else {
-        return Ok(Json(
-            serde_json::json!({ "jobId": manifest.job_id, "status": "queued" }),
-        ));
+    let status = match admission {
+        QueueAdmission::Cancelled => "cancelled",
+        QueueAdmission::Duplicate => "queued",
+        QueueAdmission::Staging(staging) => {
+            if staging.commit()? {
+                "queued"
+            } else {
+                "cancelled"
+            }
+        }
     };
-    staging.commit()?;
     Ok(Json(
-        serde_json::json!({ "jobId": manifest.job_id, "status": "queued" }),
+        serde_json::json!({ "jobId": manifest.job_id, "status": status }),
     ))
 }
 

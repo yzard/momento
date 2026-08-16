@@ -1,0 +1,25 @@
+[package]
+name = "momento-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared infrastructure for Momento services"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+chrono = "0.4"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+[[test]]
+name = "integration"
+path = "../../tests/common/main.rs"

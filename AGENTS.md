@@ -7,6 +7,7 @@
 Momento is a self-hosted photo management application with:
 - **Backend**: Axum + SQLite (Rust) in `src/backend/`
 - **LLM service**: Separate Axum durable-inference queue in `src/backend_llm/`
+- **Common**: Shared Rust infrastructure used by both services in `src/common/`
 - **Frontend**: React + TypeScript + Vite + Tailwind in `src/frontend/`
 
 Monorepo managed with pnpm workspaces and Turborepo.
@@ -146,12 +147,36 @@ responses as permanent submission failures. A successful `2xx` means only that l
 durably admitted the job, not that inference has completed. The callback must return the same
 `jobId`, `mediaId`, `task`, and exact submitted `attempt`.
 
+The Momento submission worker keeps a global `max_in_flight` rolling window. It claims and streams
+a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
+remains. This transport window is independent from every model runtime's inference concurrency.
+
+Cancellation commits the Momento terminal state, an all-task or task-specific
+`llm_cancellation_scopes` outbox row, and matching exact `llm_job_cancellations` rows in one
+transaction. Momento immediately attempts and durably retries authenticated
+`POST /api/v1/ai/cancel` requests containing that scope and the exact job IDs. llm-service scans
+`.tmp`, `queuing`, `processing`, `callback_pending`, and `failed` for every matching task and writes
+job markers before deleting non-running data. A matching job already in `processing` finishes its
+local inference, then llm-service discards its result and queue directory without delivering a
+callback. Exact-ID markers prevent an admission that was already in flight from recreating
+cancelled work.
+
 ### Durable llm-service queue
 
 Admission streams files into `.tmp/<job-id>/`, validates all descriptors and bytes, syncs the
 staged data, and atomically renames the directory into `queuing/<job-id>/`. llm-service stores
 the submitted bytes unchanged. Duplicate job IDs in any durable state are acknowledged
 idempotently and are not enqueued twice.
+
+Admission computes byte counts and SHA-256 incrementally while writing and rejects a field before
+writing beyond its declared size. It never rereads a complete input into memory. Abandoned staging
+directories are removed when admission fails. Queue job count has no configured limit, but each
+manifest and input is bounded; deployments must monitor free space because an unbounded disk queue
+is not protection against an exhausted filesystem.
+
+Cancellation markers are stored as zero-byte files in `cancelled/`. They contain no media or model
+result data and remain durable so delayed or retried submissions with the same globally unique job
+ID cannot recreate cancelled work.
 
 ```text
 .tmp -> queuing -> processing -> deleted after a successful callback
@@ -177,26 +202,34 @@ subservice; model `base_url` values must use a loopback HTTP address. llm-servic
 a different machine from Momento, but it never delegates inference to a remote model provider.
 For each scheduler cycle:
 
-1. A separate callback loop retries due durable `callback_pending` results; it never gates model
-   inference and never reruns completed inference.
+1. A separate callback loop delivers durable `callback_pending` results through a rolling
+   `max_concurrent_deliveries` window. Never-attempted results take priority over retries, each
+   completed delivery immediately refills its slot, and callback work never gates model inference
+   or reruns completed inference.
 2. Read valid queued manifests and sort them by job ID.
 3. If the currently active task still has queued work, select that task to keep its runtime warm.
 4. Otherwise select the task belonging to the first sorted queued job.
-5. Claim at most the scheduler's global `dispatch_batch_size`, moving only same-task jobs from
-   `queuing` to `processing`.
-6. Activate or reuse the selected local runtime and dispatch the homogeneous batch. The scheduler
+5. Keep at most the scheduler's global `max_in_flight_jobs`, moving only same-task jobs from
+   `queuing` to `processing` and replenishing each slot as soon as its job completes.
+6. Keep only lightweight disk descriptors in the active window. Providers send validated job/input
+   descriptors to the active local runtime. The runtime reads bytes from the queue's read-only
+   `processing/` mount; providers never retransmit image payloads to same-machine subservices.
+7. Activate or reuse the selected local runtime and dispatch the homogeneous rolling window. The scheduler
    and provider do not apply a model concurrency limit.
-7. The model subservice alone enforces its configured `max_concurrent_jobs`; vLLM uses
+8. The model subservice alone enforces its configured `max_concurrent_jobs`; vLLM uses
    `--max-num-seqs`, and Python runtimes use their inference semaphore.
-8. Finish every claimed job independently, then immediately run another cycle while work remains.
+   Python runtimes acquire that semaphore before opening and reading each queued input, bounding
+   decoded image memory and applying HTTP backpressure.
+9. Finish every claimed job independently and refill its window slot immediately while matching work remains.
 
-This warm-task preference drains successive batches of one task before switching when that task
+This warm-task preference drains one task through a rolling window before switching when that task
 continues to have work. Switching task type shuts down the old runtime before starting and
 readiness-checking the new one. A runtime is also shut down when no inference job is claimed for
 `idle_shutdown_seconds`; callback delivery does not require or keep a model runtime active.
 
-One failed job does not prevent other batch jobs from finishing. Provider or runtime inference
-errors become durable failed callback payloads; inference is not retried by llm-service. Callback
+One failed job does not prevent other in-flight jobs from finishing. Provider or runtime inference
+errors become durable failed callback payloads. Loss of the local runtime transport is retried from
+the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Callback
 delivery uses its own timeout, fixed retry delay, and maximum-attempt policy. Any callback `2xx`
 deletes the queue directory; failure moves or keeps it in `callback_pending`, and retry exhaustion
 moves it to `failed`.
@@ -270,10 +303,29 @@ storage:
 config; everything else reads `constants::paths()`. Never hardcode a path under the data
 directory and never add a new `std::env::var` call — add a config field instead.
 
+Log paths are not configurable. Each service writes plain daily rotated files below its own
+`storage.data_dir/logs/` directory (`momento-api.YYYY-MM-DD.log` or
+`llm-service.YYYY-MM-DD.log`) and emits colorized output to stdout/stderr.
+
 llm-service has separate `storage.data_dir` and `storage.queue_dir` settings. Its queue directory
 must be durable and must not be a Momento originals, previews, or thumbnail directory. Queue jobs
 are accepted only with a non-empty hexadecimal Momento job ID and a manifest that appears before
 all `input-N` multipart fields.
+
+Model containers mount only `queue/processing` read-only. `storage.runtime_mount_source` is the
+absolute processing path in the Docker daemon host namespace; when empty, llm-service resolves
+`storage.queue_dir/processing` itself. `storage.runtime_mount_target` is the absolute path visible
+inside model containers. Local runtime requests contain job/input descriptors, never media bytes
+or caller-supplied paths.
+
+The `face_detection` service requires `minimum_face_likelihood` in `(0, 1]` and a positive
+`minimum_face_resolution_pixels`. A detection is returned only when its confidence reaches the
+likelihood threshold and both detected face-box dimensions reach the configured source-pixel
+resolution. Face results include a normalized `eyeCenter` derived from InsightFace's first two
+landmarks. Momento keeps the 256x256 portrait output size and centers that crop on `eyeCenter`.
+Momento groups faces whose embedding cosine similarity reaches
+`llm.face_group_similarity_threshold`. Its default is `0.55`; lower values are more tolerant and
+higher values are stricter.
 
 `schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
 breaking schema changes require a fresh database for development and playground data.
@@ -319,8 +371,8 @@ The script starts both binaries from `dist/`, never from `build/` and never from
 `dist/frontend`. It removes each component's `build/` and `dist/` subdirectory before
 building, so a run can never pick up a stale binary. Both trees are gitignored.
 
-`playground/logs/` holds the append-only logs from the *running* stack. Build artifacts
-do not belong there.
+`playground/logs/` holds Momento's daily runtime logs, while `playground/llm/logs/` holds
+llm-service's daily runtime logs. Build artifacts do not belong in either directory.
 
 ### Backend (src/backend)
 ```bash
@@ -479,7 +531,7 @@ src/
 │   └── Cargo.toml          # Rust dependencies
 │
 ├── backend_llm/            # llm-service binary: providers, manifest queue, scheduler
-│
+├── common/                 # shared Rust infrastructure for both service binaries
 └── frontend/
     ├── api/                # API client modules
     ├── components/         # React components
@@ -497,6 +549,7 @@ tests/                      # Mirrors src/ 1:1 — see below
 │   ├── routes/
 │   └── test_utils/
 ├── backend_llm/
+├── common/
 └── frontend/
 
 docs/                       # All project documentation
@@ -516,7 +569,7 @@ playground/                 # End-to-end config and data
 ├── thumbnails/             # Generated thumbnails
 ├── imports/                # Import staging area
 ├── webdav/                 # WebDAV processing area
-└── logs/                   # Runtime logs from momento-api and llm-service
+└── logs/                   # Daily runtime logs from momento-api
 
 build/                      # Intermediate build artifacts, never run from
 ├── backend/                # CARGO_TARGET_DIR for momento-api

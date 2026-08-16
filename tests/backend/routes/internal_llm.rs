@@ -147,6 +147,7 @@ async fn face_callback_accepts_llm_wire_shape_and_persists_crop_and_success_mark
         "faces": [{
             "index": 0,
             "boundingBox": {"x": 0.9, "y": 0.8, "width": 0.10000003, "height": 0.20000003},
+            "eyeCenter": {"x": 0.95, "y": 0.86},
             "confidence": 0.95,
             "qualityScore": 0.8,
             "embedding": embedding,
@@ -191,7 +192,10 @@ async fn face_callback_accepts_llm_wire_shape_and_persists_crop_and_success_mark
         .expect("result marker");
     assert_eq!(result_count, 1);
     assert!(box_x + box_width <= 1.0);
-    assert!(paths().previews.join(crop_path).is_file());
+    let crop_path = paths().previews.join(crop_path);
+    assert!(crop_path.is_file());
+    let crop = image::open(crop_path).expect("face crop image");
+    assert_eq!((crop.width(), crop.height()), (256, 256));
 }
 
 #[tokio::test]

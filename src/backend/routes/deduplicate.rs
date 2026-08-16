@@ -9,6 +9,7 @@ use crate::models::{
     DeduplicateActionResponse, DeduplicateGroup, DeduplicateGroupsRequest,
     DeduplicateGroupsResponse, DeduplicateStatusResponse,
 };
+use crate::processor::ai;
 use crate::processor::deduplicator::{
     clean, create_run, latest_run, queue_clustering_jobs, request_cancel,
 };
@@ -102,6 +103,11 @@ async fn cancel(
     RequireAdmin(_): RequireAdmin,
 ) -> AppResult<Json<DeduplicateActionResponse>> {
     let cancelled = request_cancel(&state.pool)?;
+    if cancelled {
+        if let Err(error) = ai::deliver_pending_cancellations(&state.config, &state.pool).await {
+            tracing::warn!("immediate LLM cancellation delivery failed: {error}");
+        }
+    }
     Ok(Json(DeduplicateActionResponse {
         message: if cancelled {
             "Deduplicate cancellation requested".to_string()

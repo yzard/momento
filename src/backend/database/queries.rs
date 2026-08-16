@@ -128,8 +128,25 @@ pub mod ai_jobs {
     pub const DELETE_TEXT_INPUTS_FOR_TASK: &str =
         "DELETE FROM media_text_inputs WHERE model_type = ?";
     pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
-    pub const CANCEL_ACTIVE_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
-    pub const CANCEL_ALL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted')";
+    pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted', 'failed')";
+    pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted', 'failed')";
+    pub const QUEUE_CANCELLATION_SCOPE_FOR_TASK: &str =
+        "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) VALUES ('task', ?)";
+    pub const QUEUE_ALL_CANCELLATION_SCOPE: &str =
+        "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) VALUES ('all', '')";
+    pub const QUEUE_CANCELLATIONS_FOR_TASK: &str = "INSERT OR IGNORE INTO llm_job_cancellations (job_id, task) SELECT id, task FROM llm_jobs WHERE task = ? AND status IN ('queued', 'submitting', 'submitted', 'failed')";
+    pub const QUEUE_ALL_CANCELLATIONS: &str = "INSERT OR IGNORE INTO llm_job_cancellations (job_id, task) SELECT id, task FROM llm_jobs WHERE status IN ('queued', 'submitting', 'submitted', 'failed')";
+    pub const SELECT_CANCELLATION_SCOPE: &str = "SELECT scope, task FROM llm_cancellation_scopes ORDER BY CASE scope WHEN 'all' THEN 0 ELSE 1 END, created_at, task LIMIT 1";
+    pub const SELECT_CANCELLATIONS_FOR_TASK: &str = "SELECT job_id FROM llm_job_cancellations WHERE task = ? ORDER BY created_at, job_id LIMIT ?";
+    pub const SELECT_ALL_CANCELLATIONS: &str =
+        "SELECT job_id FROM llm_job_cancellations ORDER BY created_at, job_id LIMIT ?";
+    pub const DELETE_CANCELLATION: &str = "DELETE FROM llm_job_cancellations WHERE job_id = ?";
+    pub const COUNT_CANCELLATIONS_FOR_TASK: &str =
+        "SELECT COUNT(*) FROM llm_job_cancellations WHERE task = ?";
+    pub const COUNT_ALL_CANCELLATIONS: &str = "SELECT COUNT(*) FROM llm_job_cancellations";
+    pub const DELETE_CANCELLATION_SCOPE_FOR_TASK: &str =
+        "DELETE FROM llm_cancellation_scopes WHERE scope = 'task' AND task = ?";
+    pub const DELETE_ALL_CANCELLATION_SCOPES: &str = "DELETE FROM llm_cancellation_scopes";
 }
 
 pub mod faces {
@@ -150,7 +167,9 @@ pub mod faces {
         "INSERT OR IGNORE INTO face_group_members (face_group_id, face_id) VALUES (?, ?)";
     pub const INSERT_FACE: &str = "INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, embedding, crop_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces WHERE media_id = ?";
-    pub const CANCEL_RECOVERED_CANCELLING_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
+    pub const CANCEL_RECOVERED_CANCELLING_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
+    pub const QUEUE_RECOVERED_CANCELLATION_SCOPE: &str = "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) SELECT 'task', 'face_detection' WHERE EXISTS (SELECT 1 FROM face_grouping_runs WHERE status = 'cancelling')";
+    pub const QUEUE_RECOVERED_CANCELLATIONS: &str = "INSERT OR IGNORE INTO llm_job_cancellations (job_id, task) SELECT id, task FROM llm_jobs WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
     pub const FINALIZE_RECOVERED_CANCELLING_RUNS: &str = "UPDATE face_grouping_runs SET status = 'cancelled', completed_at = datetime('now'), error = NULL WHERE status = 'cancelling'";
     pub const REQUEST_CANCEL_RUNS: &str =
         "UPDATE face_grouping_runs SET status = 'cancelling' WHERE status = 'running'";

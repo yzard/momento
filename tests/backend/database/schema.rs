@@ -52,9 +52,25 @@ fn creates_durable_metadata_and_ai_job_tables() {
             |row| row.get(0),
         )
         .expect("Failed to find metadata jobs table");
+    let cancellation_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["llm_job_cancellations"],
+            |row| row.get(0),
+        )
+        .expect("Failed to find LLM cancellation table");
+    let cancellation_scope_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["llm_cancellation_scopes"],
+            |row| row.get(0),
+        )
+        .expect("Failed to find LLM cancellation scope table");
 
     assert_eq!(table_name, "llm_jobs");
     assert_eq!(metadata_table, "media_metadata_jobs");
+    assert_eq!(cancellation_table, "llm_job_cancellations");
+    assert_eq!(cancellation_scope_table, "llm_cancellation_scopes");
 }
 
 #[test]

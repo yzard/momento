@@ -29,6 +29,12 @@ async fn cancel_cancels_all_active_ai_jobs() {
             [media_id],
         )
         .expect("Failed to insert AI job");
+    connection
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, task, status) VALUES ('1123456789abcdef0123456789abcdef', ?, 'ocr', 'failed')",
+            [media_id],
+        )
+        .expect("Failed to insert failed AI job");
     drop(connection);
     let server = TestServer::new(app).expect("Failed to create server");
 
@@ -40,12 +46,22 @@ async fn cancel_cancels_all_active_ai_jobs() {
 
     response.assert_status_ok();
     let body: Value = response.json();
-    assert_eq!(body["queuedJobs"], 1);
+    assert_eq!(body["queuedJobs"], 2);
     let connection = pool.get().expect("Failed to get connection");
-    let status: String = connection
-        .query_row("SELECT status FROM llm_jobs", [], |row| row.get(0))
-        .expect("Failed to load AI job status");
-    assert_eq!(status, "cancelled");
+    let cancelled_jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_jobs WHERE status = 'cancelled'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("Failed to count cancelled AI jobs");
+    assert_eq!(cancelled_jobs, 2);
+    let pending_cancellations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM llm_job_cancellations", [], |row| {
+            row.get(0)
+        })
+        .expect("Failed to count pending cancellations");
+    assert_eq!(pending_cancellations, 2);
 }
 
 #[tokio::test]
@@ -193,7 +209,8 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
         .json(&json!({}))
         .await
         .assert_status_ok();
-    momento_api::processor::face_detection::finalize_ready_runs(&pool).expect("finalize cancel");
+    momento_api::processor::face_detection::finalize_ready_runs(&pool, 0.55)
+        .expect("finalize cancel");
     server
         .post("/api/v1/ai/faces/clean")
         .add_header(AUTHORIZATION, authorization)

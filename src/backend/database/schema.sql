@@ -287,6 +287,20 @@ CREATE TABLE IF NOT EXISTS llm_job_inputs (
     FOREIGN KEY (job_id) REFERENCES llm_jobs(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS llm_job_cancellations (
+    job_id TEXT PRIMARY KEY,
+    task TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_cancellation_scopes (
+    scope TEXT NOT NULL CHECK (scope IN ('all', 'task')),
+    task TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (scope, task),
+    CHECK ((scope = 'all' AND task = '') OR (scope = 'task' AND task <> ''))
+);
+
 CREATE TABLE IF NOT EXISTS media_similarity_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trigger TEXT NOT NULL CHECK(trigger IN ('startup', 'scheduled', 'manual')),
