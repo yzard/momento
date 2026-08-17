@@ -11,7 +11,8 @@ if [ -n "${TZ:-}" ]; then
 fi
 
 umask "$UMASK"
-mkdir -p /data/cache /data/queue
+mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
+cp -a /opt/triton-cache/. /data/llm/cache/triton/
 chown -R "$PUID:$PGID" /data
 
 exec gosu "$PUID:$PGID" env HOME=/data "$@"

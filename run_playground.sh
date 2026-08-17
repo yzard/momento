@@ -12,11 +12,12 @@ for config_file in "$PLAYGROUND_DIR/config.toml" "$PLAYGROUND_DIR/config_llm.tom
     fi
 done
 
-mkdir -p "$PLAYGROUND_DIR/llm" "$PLAYGROUND_DIR/imports" "$PLAYGROUND_DIR/webdav"
+mkdir -p "$PLAYGROUND_DIR/llm" "$PLAYGROUND_DIR/logs" "$PLAYGROUND_DIR/imports" "$PLAYGROUND_DIR/webdav"
 
 export COMPOSE_PROJECT_NAME=momento-playground
 export MOMENTO_DATA_DIR="$PLAYGROUND_DIR"
 export LLM_DATA_DIR="$PLAYGROUND_DIR/llm"
+export LOG_DIR="$PLAYGROUND_DIR/logs"
 export LLM_CONFIG_FILE="$PLAYGROUND_DIR/config_llm.toml"
 export PUID="$(id -u)"
 export PGID="$(id -g)"

@@ -2,56 +2,90 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
-use momento_common::llm::{CancelJobsRequest, CancelJobsResponse};
+use momento_common::llm::{CancelJobsRequest, JobInputDescriptor, JobManifest};
 use momento_common::rolling::{run_rolling_window, RollingWindowControl};
-use reqwest::multipart::{Form, Part};
 use rusqlite::OptionalExtension;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use tokio_util::io::ReaderStream;
 
 use crate::config::Config;
 use crate::constants::{paths, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 
+pub mod result;
+pub mod transport;
+
+use transport::{LlmConnection, PreparedSubmissionInput, SubmissionOutcome, TransportHandle};
+
 const CANCELLATION_CHUNK_SIZE: usize = 1000;
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SubmissionManifest {
-    job_id: String,
-    media_id: i64,
-    task: String,
-    attempt: u32,
-    callback_url: String,
-    inputs: Vec<SubmissionInputDescriptor>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SubmissionInputDescriptor {
-    sequence: i64,
-    filename: String,
-    mime_type: String,
-    byte_size: u64,
-    content_hash: String,
-    input_kind: String,
-    frame_timestamp_ms: Option<i64>,
-}
-
-pub async fn run(config: Arc<Config>, pool: DbPool) {
+pub async fn run(config: Arc<Config>, pool: DbPool, handle: TransportHandle) {
     let interval =
         std::time::Duration::from_secs(config.llm_submission_worker.poll_interval_seconds);
     loop {
-        if config.llm.enabled {
-            if let Err(error) = deliver_pending_cancellations(&config, &pool).await {
-                tracing::warn!("LLM cancellation delivery failed: {error}");
-            }
-            if let Err(error) = submit_cycle(&config, &pool).await {
-                tracing::warn!("LLM submission cycle failed: {error}");
-            }
+        if !config.llm.enabled {
+            tokio::time::sleep(interval).await;
+            continue;
         }
+        let connection = match LlmConnection::connect(
+            &config.llm.service_url,
+            &config.llm.client_id,
+            &config.llm.api_key,
+            pool.clone(),
+        )
+        .await
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!("LLM WebSocket connection failed: {error}");
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+        };
+        tracing::info!(client_id = config.llm.client_id, "LLM WebSocket connected");
+        let submission_config = Arc::clone(&config);
+        let submission_pool = pool.clone();
+        let submission_connection = connection.clone();
+        let submission_task = tokio::spawn(async move {
+            let mut poll = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = submission_connection.closed() => return,
+                    _ = poll.tick() => {}
+                }
+                if let Err(error) =
+                    submit_cycle(&submission_config, &submission_pool, &submission_connection).await
+                {
+                    tracing::warn!("LLM submission cycle failed: {error}");
+                }
+            }
+        });
+        let cancellation_pool = pool.clone();
+        let cancellation_connection = connection.clone();
+        let cancellation_handle = handle.clone();
+        let cancellation_task = tokio::spawn(async move {
+            let mut poll = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = cancellation_connection.closed() => return,
+                    _ = poll.tick() => {}
+                    _ = cancellation_handle.notified() => {}
+                }
+                if let Err(error) =
+                    deliver_pending_cancellations(&cancellation_pool, &cancellation_connection)
+                        .await
+                {
+                    tracing::warn!("LLM cancellation delivery failed: {error}");
+                }
+            }
+        });
+        connection.closed().await;
+        submission_task.abort();
+        cancellation_task.abort();
+        tracing::warn!(
+            client_id = config.llm.client_id,
+            "LLM WebSocket disconnected"
+        );
         tokio::time::sleep(interval).await;
     }
 }
@@ -75,13 +109,9 @@ pub fn cancel_active_jobs(pool: &DbPool, task: Option<&str>) -> Result<usize, ru
 }
 
 pub async fn deliver_pending_cancellations(
-    config: &Config,
     pool: &DbPool,
+    connection: &LlmConnection,
 ) -> Result<usize, String> {
-    if !config.llm.enabled {
-        return Ok(0);
-    }
-    let client = reqwest::Client::new();
     let mut delivered = 0;
     loop {
         let cancellation = {
@@ -118,10 +148,8 @@ pub async fn deliver_pending_cancellations(
             (scope, task, job_ids)
         };
         let (scope, task, job_ids) = cancellation;
-        let response = client
-            .post(format!("{}/api/v1/ai/cancel", config.llm.service_url))
-            .header("x-api-key", &config.llm.api_key)
-            .json(&CancelJobsRequest {
+        let response = connection
+            .cancel(CancelJobsRequest {
                 all: scope == "all",
                 tasks: if scope == "all" {
                     Vec::new()
@@ -130,20 +158,8 @@ pub async fn deliver_pending_cancellations(
                 },
                 job_ids: job_ids.clone(),
             })
-            .send()
             .await
-            .map_err(|error| error.to_string())?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let detail = response.text().await.unwrap_or_default();
-            return Err(format!(
-                "llm service rejected cancellation: {status}: {detail}"
-            ));
-        }
-        let response = response
-            .json::<CancelJobsResponse>()
-            .await
-            .map_err(|error| format!("invalid llm cancellation response: {error}"))?;
+            .map_err(|error| format!("llm service rejected cancellation: {error}"))?;
         if response.requested_jobs != job_ids.len() {
             return Err("llm cancellation response count does not match request".to_string());
         }
@@ -216,19 +232,22 @@ pub fn queue_all(pool: &DbPool, image_tagging_enabled: bool) -> Result<usize, ru
         + queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, image_tagging_enabled)?)
 }
 
-async fn submit_cycle(config: &Config, pool: &DbPool) -> Result<(), String> {
+async fn submit_cycle(
+    config: &Config,
+    pool: &DbPool,
+    connection: &LlmConnection,
+) -> Result<(), String> {
     reclaim_stale_claims(pool)?;
     pool.get()
         .map_err(|error| error.to_string())?
         .execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])
         .map_err(|error| error.to_string())?;
-    let client = reqwest::Client::new();
     let first_error = Arc::new(tokio::sync::Mutex::new(None));
     run_rolling_window(
         NonZeroUsize::new(config.llm_submission_worker.max_in_flight)
             .expect("validated LLM submission window"),
         |capacity| claim_queued_jobs(pool, capacity),
-        |job| submit_claimed_job(config, pool, &client, job),
+        |job| submit_claimed_job(pool, connection, job),
         {
             let first_error = Arc::clone(&first_error);
             move |result| {
@@ -283,9 +302,8 @@ fn claim_queued_jobs(
 }
 
 async fn submit_claimed_job(
-    config: &Config,
     pool: &DbPool,
-    client: &reqwest::Client,
+    connection: &LlmConnection,
     (job_id, media_id, task, attempts): (String, i64, String, i64),
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -295,7 +313,7 @@ async fn submit_claimed_job(
         return mark_failed(pool, &job_id, "missing prepared AI inputs");
     }
     let mut descriptors = Vec::new();
-    let mut parts = Vec::new();
+    let mut prepared_inputs = Vec::new();
     for input in inputs {
         let input_path = paths().previews.join(&input.file_path);
         let input_size = match u64::try_from(input.byte_size) {
@@ -309,24 +327,19 @@ async fn submit_claimed_job(
         {
             return mark_failed(pool, &job_id, &error);
         }
-        let input_file = match tokio::fs::File::open(&input_path).await {
-            Ok(input_file) => input_file,
-            Err(error) => return mark_failed(pool, &job_id, &error.to_string()),
-        };
         if input_size == 0 {
             return mark_failed(pool, &job_id, "prepared AI input must not be empty");
         }
-        parts.push((
-            format!("input-{}", input.sequence),
-            Part::stream_with_length(
-                reqwest::Body::wrap_stream(ReaderStream::new(input_file)),
-                input_size,
-            )
-            .mime_str("application/octet-stream")
-            .map_err(|error| error.to_string())?,
-        ));
-        descriptors.push(SubmissionInputDescriptor {
-            sequence: input.sequence,
+        let sequence = match u32::try_from(input.sequence) {
+            Ok(sequence) => sequence,
+            Err(_) => return mark_failed(pool, &job_id, "prepared AI input sequence is invalid"),
+        };
+        prepared_inputs.push(PreparedSubmissionInput {
+            sequence,
+            path: input_path,
+        });
+        descriptors.push(JobInputDescriptor {
+            sequence,
             filename: input.filename,
             mime_type: input.mime_type,
             byte_size: input.byte_size as u64,
@@ -336,30 +349,15 @@ async fn submit_claimed_job(
         });
     }
     let verification_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let manifest = SubmissionManifest {
+    let manifest = JobManifest {
         job_id: job_id.clone(),
         media_id,
         task,
         attempt: (attempts + 1) as u32,
-        callback_url: config.llm.callback_url.clone(),
         inputs: descriptors,
     };
-    let mut form = Form::new().part(
-        "manifest",
-        Part::text(serde_json::to_string(&manifest).map_err(|error| error.to_string())?)
-            .mime_str("application/json")
-            .map_err(|error| error.to_string())?,
-    );
-    for (name, part) in parts {
-        form = form.part(name, part);
-    }
     let admission_started = Instant::now();
-    let response = client
-        .post(format!("{}/api/v1/jobs/submit", config.llm.service_url))
-        .header("x-api-key", &config.llm.api_key)
-        .multipart(form)
-        .send()
-        .await;
+    let response = connection.submit(manifest, prepared_inputs).await;
     tracing::debug!(
         job_id,
         task = task_name,
@@ -370,29 +368,29 @@ async fn submit_claimed_job(
     );
     let connection = pool.get().map_err(|error| error.to_string())?;
     match response {
-        Ok(response)
-            if response.status() == reqwest::StatusCode::ACCEPTED
-                || response.status().is_success() =>
-        {
-            connection
-                .execute(queries::ai_jobs::MARK_SUBMITTED, [&job_id])
-                .map_err(|error| error.to_string())?;
+        Ok(SubmissionOutcome::Acknowledged { status }) if status == "queued" => {
+            // The reader persists this transition before forwarding the acknowledgement so a
+            // result arriving in the next WebSocket frame cannot observe `submitting`.
         }
-        Ok(response) if response.status().is_server_error() => retry_job(
-            &connection,
+        Ok(SubmissionOutcome::Acknowledged { status }) => mark_failed(
+            pool,
             &job_id,
-            &format!("llm service error: {}", response.status()),
+            &format!("llm service acknowledged submission with status {status}"),
         )?,
-        Ok(response) => {
-            let status = response.status();
-            let detail = response.text().await.unwrap_or_default();
-            mark_failed(
-                pool,
-                &job_id,
-                &format!("llm service rejected submission: {status}: {detail}"),
-            )?
+        Ok(SubmissionOutcome::Rejected {
+            retryable: true,
+            error,
+        }) => retry_job(&connection, &job_id, &error)?,
+        Ok(SubmissionOutcome::Rejected {
+            retryable: false,
+            error,
+        }) => mark_failed(pool, &job_id, &error)?,
+        Err(error) => {
+            connection
+                .execute(queries::ai_jobs::REQUEUE_AMBIGUOUS, [&job_id])
+                .map_err(|database_error| database_error.to_string())?;
+            tracing::warn!(job_id, error, "LLM submission outcome was not acknowledged");
         }
-        Err(error) => retry_job(&connection, &job_id, &error.to_string())?,
     }
     Ok(())
 }

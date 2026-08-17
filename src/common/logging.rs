@@ -20,15 +20,15 @@ pub struct LoggingGuard {
 
 pub fn init_logging(
     data_dir: &Path,
-    application_name: &str,
+    log_filename_prefix: &str,
     default_filter: &str,
 ) -> io::Result<LoggingGuard> {
-    validate_application_name(application_name)?;
+    validate_log_filename_prefix(log_filename_prefix)?;
     let log_dir = data_dir.join("logs");
     fs::create_dir_all(&log_dir)?;
     let file = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
-        .filename_prefix(application_name)
+        .filename_prefix(log_filename_prefix)
         .filename_suffix("log")
         .build(log_dir)
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -40,19 +40,11 @@ pub fn init_logging(
         .or_else(std::io::stdout);
     let console_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .event_format(ApplicationEventFormatter::new(
-            application_name,
-            std::process::id(),
-            true,
-        ))
+        .event_format(EventFormatter::new(true))
         .with_writer(console_writer);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .event_format(ApplicationEventFormatter::new(
-            application_name,
-            std::process::id(),
-            false,
-        ))
+        .event_format(EventFormatter::new(false))
         .with_writer(file_writer);
 
     tracing_subscriber::registry()
@@ -66,21 +58,13 @@ pub fn init_logging(
     })
 }
 
-pub fn format_log_prefix(
-    timestamp: DateTime<Utc>,
-    level: &Level,
-    application_name: &str,
-    process_id: u32,
-    colorize: bool,
-) -> String {
+pub fn format_log_prefix(timestamp: DateTime<Utc>, level: &Level, colorize: bool) -> String {
     let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Micros, true);
     if !colorize {
-        return format!("{timestamp} {level} {application_name}[{process_id}]");
+        return format!("{timestamp} {level}");
     }
     let color = level_color(level);
-    format!(
-        "\u{1b}[2m{timestamp}\u{1b}[0m \u{1b}[{color}m{level} {application_name}[{process_id}]\u{1b}[0m"
-    )
+    format!("\u{1b}[2m{timestamp}\u{1b}[0m \u{1b}[{color}m{level}\u{1b}[0m")
 }
 
 fn level_color(level: &Level) -> u8 {
@@ -91,33 +75,27 @@ fn level_color(level: &Level) -> u8 {
     }
 }
 
-fn validate_application_name(application_name: &str) -> io::Result<()> {
-    if application_name.is_empty() || application_name.chars().any(char::is_whitespace) {
+fn validate_log_filename_prefix(log_filename_prefix: &str) -> io::Result<()> {
+    if log_filename_prefix.is_empty() || log_filename_prefix.chars().any(char::is_whitespace) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "application name must be non-empty and contain no whitespace",
+            "log filename prefix must be non-empty and contain no whitespace",
         ));
     }
     Ok(())
 }
 
-struct ApplicationEventFormatter {
-    application_name: Box<str>,
-    process_id: u32,
+struct EventFormatter {
     colorize: bool,
 }
 
-impl ApplicationEventFormatter {
-    fn new(application_name: &str, process_id: u32, colorize: bool) -> Self {
-        Self {
-            application_name: application_name.into(),
-            process_id,
-            colorize,
-        }
+impl EventFormatter {
+    fn new(colorize: bool) -> Self {
+        Self { colorize }
     }
 }
 
-impl<S, N> FormatEvent<S, N> for ApplicationEventFormatter
+impl<S, N> FormatEvent<S, N> for EventFormatter
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
     N: for<'writer> FormatFields<'writer> + 'static,
@@ -133,17 +111,11 @@ where
         if self.colorize {
             write!(
                 writer,
-                "\u{1b}[2m{timestamp}\u{1b}[0m \u{1b}[{}m{level} {}[{}] ",
-                level_color(level),
-                self.application_name,
-                self.process_id
+                "\u{1b}[2m{timestamp}\u{1b}[0m \u{1b}[{}m{level} ",
+                level_color(level)
             )?;
         } else {
-            write!(
-                writer,
-                "{timestamp} {level} {}[{}] ",
-                self.application_name, self.process_id
-            )?;
+            write!(writer, "{timestamp} {level} ")?;
         }
         context.format_fields(writer.by_ref(), event)?;
         if self.colorize {

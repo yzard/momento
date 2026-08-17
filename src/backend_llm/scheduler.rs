@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use momento_common::llm::{CancelJobsRequest, CancelJobsResponse};
+use momento_common::llm::{
+    CancelJobsRequest, CancelJobsResponse, JobInputDescriptor, JobInputResult, JobResult,
+};
 use momento_common::rolling::{run_rolling_window, RollingWindowControl};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,45 +16,35 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::config::{CallbackConfig, SchedulerConfig};
+use crate::config::SchedulerConfig;
 use crate::error::ServiceError;
 use crate::provider::{
     InferenceDispatcher, InferenceInput, InputInferenceResponse, ServiceManager, ServiceType,
 };
+use crate::transport::ResultDeliveryTransport;
 
 const MAX_INPUT_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_JOB_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_INPUTS_PER_JOB: usize = 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueManifest {
+    pub client_id: String,
     pub job_id: String,
     pub media_id: i64,
     pub task: String,
     pub attempt: u32,
-    pub inputs: Vec<QueueInputDescriptor>,
-    pub callback_url: String,
+    pub inputs: Vec<JobInputDescriptor>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct QueueInputDescriptor {
-    pub sequence: u32,
-    pub filename: String,
-    pub mime_type: String,
-    pub byte_size: u64,
-    pub content_hash: String,
-    pub input_kind: String,
-    pub frame_timestamp_ms: Option<i64>,
-}
+pub type QueueInputDescriptor = JobInputDescriptor;
 
 pub struct Scheduler {
     queue_dir: PathBuf,
     configuration: SchedulerConfig,
-    callback: CallbackConfig,
     manager: Arc<Mutex<ServiceManager>>,
-    client: reqwest::Client,
+    result_delivery: Arc<dyn ResultDeliveryTransport>,
 }
 
 struct ClaimedJob {
@@ -75,8 +67,8 @@ impl Scheduler {
     pub fn new(
         queue_dir: PathBuf,
         configuration: SchedulerConfig,
-        callback: CallbackConfig,
         manager: Arc<Mutex<ServiceManager>>,
+        result_delivery: Arc<dyn ResultDeliveryTransport>,
     ) -> Result<Self, ServiceError> {
         std::fs::create_dir_all(queue_dir.join("queuing")).map_err(io_error)?;
         std::fs::create_dir_all(queue_dir.join("processing")).map_err(io_error)?;
@@ -86,18 +78,11 @@ impl Scheduler {
         std::fs::create_dir_all(queue_dir.join(".tmp")).map_err(io_error)?;
         std::fs::create_dir_all(queue_dir.join(".deleting")).map_err(io_error)?;
         recover_queue(&queue_dir)?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                callback.request_timeout_seconds,
-            ))
-            .build()
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
         Ok(Self {
             queue_dir,
             configuration,
-            callback,
             manager,
-            client,
+            result_delivery,
         })
     }
 
@@ -108,12 +93,12 @@ impl Scheduler {
                 "jobId must be a non-empty hexadecimal identifier".to_string(),
             ));
         }
-        if manifest.inputs.is_empty()
+        if manifest.client_id.is_empty()
+            || manifest.inputs.is_empty()
             || manifest.inputs.len() > MAX_INPUTS_PER_JOB
-            || manifest.callback_url.is_empty()
         {
             return Err(ServiceError::BadRequest(
-                "between 1 and 1024 inputs and callbackUrl are required".to_string(),
+                "clientId and between 1 and 1024 inputs are required".to_string(),
             ));
         }
         let mut sequences = HashSet::with_capacity(manifest.inputs.len());
@@ -137,10 +122,20 @@ impl Scheduler {
                     .to_string(),
             ));
         }
-        if self.job_exists(&manifest.job_id) {
-            return Ok(QueueAdmission::Duplicate);
+        if let Some(existing) = self.existing_manifest(&manifest.job_id) {
+            if existing == manifest {
+                return Ok(QueueAdmission::Duplicate);
+            }
+            if existing.client_id == manifest.client_id {
+                return Err(ServiceError::Conflict(
+                    "job ID is already associated with a different manifest".to_string(),
+                ));
+            }
+            return Err(ServiceError::Conflict(
+                "job ID is already owned by another client".to_string(),
+            ));
         }
-        let cancelled = self.queue_dir.join("cancelled").join(&manifest.job_id);
+        let cancelled = self.cancellation_marker(&manifest.client_id, &manifest.job_id);
         if cancelled.exists() {
             return Ok(QueueAdmission::Cancelled);
         }
@@ -195,6 +190,7 @@ impl Scheduler {
 
     pub fn cancel_jobs(
         &self,
+        client_id: &str,
         request: &CancelJobsRequest,
     ) -> Result<CancelJobsResponse, ServiceError> {
         if request.all == !request.tasks.is_empty() {
@@ -234,11 +230,12 @@ impl Scheduler {
                 let Some(job_id) = entry.file_name().to_str().map(str::to_owned) else {
                     continue;
                 };
-                if request.all
-                    || self
-                        .read_manifest(&entry.path())
-                        .is_ok_and(|manifest| tasks.contains(manifest.task.as_str()))
-                {
+                let matches_client_and_scope =
+                    self.read_manifest(&entry.path()).is_ok_and(|manifest| {
+                        manifest.client_id == client_id
+                            && (request.all || tasks.contains(manifest.task.as_str()))
+                    });
+                if matches_client_and_scope {
                     job_ids.insert(job_id);
                 }
             }
@@ -250,7 +247,37 @@ impl Scheduler {
             missing_jobs: 0,
         };
         for job_id in job_ids {
-            let marker = self.queue_dir.join("cancelled").join(&job_id);
+            let owns_existing_job = [
+                ".tmp",
+                "queuing",
+                "processing",
+                "callback_pending",
+                "failed",
+            ]
+            .iter()
+            .filter_map(|state| {
+                self.read_manifest(&self.queue_dir.join(state).join(&job_id))
+                    .ok()
+            })
+            .any(|manifest| manifest.client_id == client_id);
+            if !owns_existing_job && !request.job_ids.contains(&job_id) {
+                continue;
+            }
+            if !owns_existing_job
+                && [
+                    ".tmp",
+                    "queuing",
+                    "processing",
+                    "callback_pending",
+                    "failed",
+                ]
+                .iter()
+                .any(|state| self.queue_dir.join(state).join(&job_id).exists())
+            {
+                response.missing_jobs += 1;
+                continue;
+            }
+            let marker = self.cancellation_marker(client_id, &job_id);
             let existed = !create_cancellation_marker(&marker)?;
             if self.queue_dir.join("processing").join(&job_id).exists() {
                 response.running_jobs += 1;
@@ -301,6 +328,12 @@ impl Scheduler {
         std::fs::remove_dir_all(&deleting).map_err(io_error)?;
         sync_directory(&self.queue_dir.join(".deleting"))?;
         Ok(true)
+    }
+
+    fn cancellation_marker(&self, client_id: &str, job_id: &str) -> PathBuf {
+        self.queue_dir
+            .join("cancelled")
+            .join(format!("{client_id}-{job_id}"))
     }
 }
 
@@ -367,7 +400,7 @@ impl QueueStaging {
         }
         if !self.verified_sequences.insert(descriptor.sequence) {
             return Err(ServiceError::BadRequest(
-                "multipart input sequence was supplied more than once".to_string(),
+                "input sequence was supplied more than once".to_string(),
             ));
         }
         Ok(())
@@ -421,7 +454,7 @@ impl QueueStaging {
             .iter()
             .find(|expected| expected.sequence == descriptor.sequence)
             .ok_or_else(|| {
-                ServiceError::BadRequest("multipart input has no manifest descriptor".to_string())
+                ServiceError::BadRequest("input has no manifest descriptor".to_string())
             })?;
         if expected != descriptor
             || descriptor.filename.is_empty()
@@ -430,7 +463,7 @@ impl QueueStaging {
             || descriptor.byte_size > MAX_INPUT_BYTES
         {
             return Err(ServiceError::BadRequest(
-                "multipart input descriptor does not match manifest".to_string(),
+                "input descriptor does not match manifest".to_string(),
             ));
         }
         Ok(())
@@ -449,7 +482,7 @@ impl Scheduler {
     pub async fn run(self: Arc<Self>) {
         tokio::join!(
             Arc::clone(&self).run_inference_loop(),
-            self.run_callback_loop()
+            self.run_result_delivery_loop()
         );
     }
 
@@ -472,10 +505,10 @@ impl Scheduler {
         }
     }
 
-    async fn run_callback_loop(self: Arc<Self>) {
+    async fn run_result_delivery_loop(self: Arc<Self>) {
         let interval = Duration::from_secs(self.configuration.poll_interval_seconds);
         loop {
-            if self.retry_callbacks().await > 0 {
+            if self.deliver_pending_results().await > 0 {
                 continue;
             }
             tokio::time::sleep(interval).await;
@@ -582,9 +615,7 @@ impl Scheduler {
         let mut claimed = Vec::with_capacity(limit);
         for (queue_path, manifest) in self.queued_jobs(task, limit) {
             if self
-                .queue_dir
-                .join("cancelled")
-                .join(&manifest.job_id)
+                .cancellation_marker(&manifest.client_id, &manifest.job_id)
                 .exists()
             {
                 let _ = self.remove_cancelled_job("queuing", &manifest.job_id);
@@ -711,41 +742,62 @@ impl Scheduler {
         inference: Result<Vec<InputInferenceResponse>, ServiceError>,
     ) {
         if self
-            .queue_dir
-            .join("cancelled")
-            .join(&manifest.job_id)
+            .cancellation_marker(&manifest.client_id, &manifest.job_id)
             .exists()
         {
             self.remove_finished_cancelled_job(&job_path);
             return;
         }
-        let callback = match inference {
+        let result = match inference {
             Ok(input_responses) => {
                 let Some(first_response) = input_responses.first() else {
                     self.fail(job_path, "inference returned no input results".to_string());
                     return;
                 };
-                serde_json::json!({"jobId": manifest.job_id, "mediaId": manifest.media_id, "task": manifest.task, "attempt": manifest.attempt, "status": "completed", "modelType": first_response.response.model_type, "modelVersion": first_response.response.model_version, "result": first_response.response, "inputResults": input_responses.into_iter().map(|input| serde_json::json!({"sequence": input.sequence, "frameTimestampMs": input.frame_timestamp_ms, "result": input.response})).collect::<Vec<_>>()})
+                let model_type = first_response.response.model_type.clone();
+                let model_version = first_response.response.model_version.clone();
+                let first_result = serde_json::to_value(&first_response.response)
+                    .expect("inference response must serialize");
+                JobResult {
+                    job_id: manifest.job_id.clone(),
+                    media_id: manifest.media_id,
+                    task: manifest.task.clone(),
+                    attempt: manifest.attempt,
+                    status: "completed".to_string(),
+                    model_type: Some(model_type),
+                    model_version: Some(model_version),
+                    result: Some(first_result),
+                    input_results: Some(
+                        input_responses
+                            .into_iter()
+                            .map(|input| JobInputResult {
+                                sequence: input.sequence,
+                                frame_timestamp_ms: input.frame_timestamp_ms,
+                                result: serde_json::to_value(input.response)
+                                    .expect("inference response must serialize"),
+                            })
+                            .collect(),
+                    ),
+                    error: None,
+                }
             }
             Err(ServiceError::RuntimeUnavailable(error)) => {
                 match self.requeue_runtime_failure(&job_path, &manifest, &error) {
                     Ok(true) => return,
-                    Ok(false) => {
-                        serde_json::json!({"jobId": manifest.job_id, "mediaId": manifest.media_id, "task": manifest.task, "attempt": manifest.attempt, "status": "failed", "retryable": false, "error": format!("local model runtime remained unavailable after {} attempts: {error}", self.configuration.runtime_max_attempts)})
-                    }
-                    Err(requeue_error) => {
-                        serde_json::json!({"jobId": manifest.job_id, "mediaId": manifest.media_id, "task": manifest.task, "attempt": manifest.attempt, "status": "failed", "retryable": false, "error": requeue_error.to_string()})
-                    }
+                    Ok(false) => failed_job_result(
+                        &manifest,
+                        format!(
+                            "local model runtime remained unavailable after {} attempts: {error}",
+                            self.configuration.runtime_max_attempts
+                        ),
+                    ),
+                    Err(requeue_error) => failed_job_result(&manifest, requeue_error.to_string()),
                 }
             }
-            Err(error) => {
-                serde_json::json!({"jobId": manifest.job_id, "mediaId": manifest.media_id, "task": manifest.task, "attempt": manifest.attempt, "status": "failed", "retryable": false, "error": error.to_string()})
-            }
+            Err(error) => failed_job_result(&manifest, error.to_string()),
         };
-        if let Err(error) = write_synced_file(
-            &job_path.join("result.json"),
-            callback.to_string().as_bytes(),
-        ) {
+        let result_bytes = serde_json::to_vec(&result).expect("job result must serialize");
+        if let Err(error) = write_synced_file(&job_path.join("result.json"), &result_bytes) {
             self.fail(job_path, error.to_string());
             return;
         }
@@ -756,9 +808,7 @@ impl Scheduler {
         match transition_directory(&job_path, &destination) {
             Ok(()) => {
                 if self
-                    .queue_dir
-                    .join("cancelled")
-                    .join(&manifest.job_id)
+                    .cancellation_marker(&manifest.client_id, &manifest.job_id)
                     .exists()
                 {
                     let _ = self.remove_cancelled_job("callback_pending", &manifest.job_id);
@@ -812,47 +862,50 @@ impl Scheduler {
         Ok(true)
     }
 
-    async fn retry_callbacks(&self) -> usize {
-        if self.callback.max_concurrent_deliveries == 0 {
+    async fn deliver_pending_results(&self) -> usize {
+        if self.configuration.result_delivery_max_concurrent_deliveries == 0 {
             return 0;
         }
-        let selection_limit = self.callback.max_concurrent_deliveries.saturating_mul(16);
-        let mut pending = VecDeque::from(self.select_due_callbacks(selection_limit));
+        let selection_limit = self
+            .configuration
+            .result_delivery_max_concurrent_deliveries
+            .saturating_mul(16);
+        let mut pending = VecDeque::from(self.select_due_results(selection_limit));
         if pending.is_empty() {
             return 0;
         }
         run_rolling_window(
-            NonZeroUsize::new(self.callback.max_concurrent_deliveries)
-                .expect("validated callback delivery window"),
+            NonZeroUsize::new(self.configuration.result_delivery_max_concurrent_deliveries)
+                .expect("validated result delivery window"),
             |capacity| {
                 Ok::<_, Infallible>((0..capacity).filter_map(|_| pending.pop_front()).collect())
             },
             |path| async move {
-                self.retry_callback(path.clone()).await;
+                self.deliver_result(path.clone()).await;
                 path
             },
             |_path: PathBuf| async { RollingWindowControl::Continue },
         )
         .await
-        .expect("infallible callback selection")
+        .expect("infallible result selection")
     }
 
-    fn select_due_callbacks(&self, limit: usize) -> Vec<PathBuf> {
+    fn select_due_results(&self, limit: usize) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(self.queue_dir.join("callback_pending")) else {
             return Vec::new();
         };
         let mut selected = Vec::with_capacity(limit);
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(priority) = self.callback_priority(&path) else {
+            let Some(priority) = self.result_delivery_priority(&path) else {
                 continue;
             };
-            insert_callback_path(&mut selected, (priority, path), limit);
+            insert_result_path(&mut selected, (priority, path), limit);
         }
         selected.into_iter().map(|(_, path)| path).collect()
     }
 
-    async fn retry_callback(&self, path: PathBuf) {
+    async fn deliver_result(&self, path: PathBuf) {
         let Ok(manifest) = self.read_manifest(&path) else {
             self.fail(path, "invalid manifest".to_string());
             return;
@@ -861,12 +914,20 @@ impl Scheduler {
             self.fail(path, "missing inference result".to_string());
             return;
         };
-        let Ok(callback) = serde_json::from_slice(&result) else {
+        let Ok(result) = serde_json::from_slice::<JobResult>(&result) else {
             self.fail(path, "invalid inference result".to_string());
             return;
         };
         match self
-            .deliver_callback(&manifest.callback_url, &callback)
+            .result_delivery
+            .deliver_result(
+                &manifest.client_id,
+                &result,
+                Duration::from_secs(
+                    self.configuration
+                        .result_delivery_acknowledgement_timeout_seconds,
+                ),
+            )
             .await
         {
             Ok(()) => {
@@ -877,26 +938,24 @@ impl Scheduler {
                 if let Err(error) = transition_directory(&path, &deleting_path) {
                     self.fail(
                         path,
-                        format!("callback acknowledged but cleanup transition failed: {error}"),
+                        format!("result acknowledged but cleanup transition failed: {error}"),
                     );
                     return;
                 }
                 if let Err(error) = tokio::fs::remove_dir_all(&deleting_path).await {
-                    warn!(
-                        "callback acknowledged but queue cleanup will resume at startup: {error}"
-                    );
+                    warn!("result acknowledged but queue cleanup will resume at startup: {error}");
                 }
             }
-            Err(callback_error) => {
-                self.log_callback_failure(&manifest, &callback_error);
-                if let Err(error) = self.record_callback_failure(&path, &callback_error) {
+            Err(delivery_error) => {
+                self.log_result_delivery_failure(&manifest, &delivery_error);
+                if let Err(error) = self.record_result_delivery_failure(&path, &delivery_error) {
                     self.fail(path, error.to_string());
                 }
             }
         }
     }
 
-    fn callback_priority(&self, job_path: &Path) -> Option<(u8, i64, String)> {
+    fn result_delivery_priority(&self, job_path: &Path) -> Option<(u8, i64, String)> {
         let metadata_path = job_path.join("callback.json");
         let Ok(bytes) = std::fs::read(metadata_path) else {
             return Some((
@@ -909,7 +968,7 @@ impl Scheduler {
                     .into_owned(),
             ));
         };
-        let Ok(metadata) = serde_json::from_slice::<CallbackState>(&bytes) else {
+        let Ok(metadata) = serde_json::from_slice::<ResultDeliveryState>(&bytes) else {
             return Some((
                 1,
                 i64::MIN,
@@ -934,58 +993,37 @@ impl Scheduler {
         ))
     }
 
-    fn record_callback_failure(&self, job_path: &Path, error: &str) -> Result<(), ServiceError> {
+    fn record_result_delivery_failure(
+        &self,
+        job_path: &Path,
+        error: &str,
+    ) -> Result<(), ServiceError> {
         let metadata_path = job_path.join("callback.json");
         let mut state = std::fs::read(&metadata_path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<CallbackState>(&bytes).ok())
+            .and_then(|bytes| serde_json::from_slice::<ResultDeliveryState>(&bytes).ok())
             .unwrap_or_default();
         state.attempts += 1;
         state.last_error = Some(error.to_string());
-        if state.attempts >= self.callback.max_attempts {
+        if state.attempts >= self.configuration.result_delivery_max_attempts {
             return Err(ServiceError::Upstream(format!(
-                "callback retry attempts exhausted after {} attempts: {error}",
+                "result delivery retry attempts exhausted after {} attempts: {error}",
                 state.attempts
             )));
         }
-        state.next_attempt_at =
-            chrono::Utc::now().timestamp() + self.callback.retry_delay_seconds as i64;
+        state.next_attempt_at = chrono::Utc::now().timestamp()
+            + self.configuration.result_delivery_retry_delay_seconds as i64;
         let bytes = serde_json::to_vec(&state)
             .map_err(|error| ServiceError::Internal(error.to_string()))?;
         write_synced_file(&metadata_path, &bytes)
     }
 
-    async fn deliver_callback(
-        &self,
-        callback_url: &str,
-        callback: &serde_json::Value,
-    ) -> Result<(), String> {
-        let response = self
-            .client
-            .post(callback_url)
-            .header("x-momento-callback-key", &self.callback.key)
-            .json(callback)
-            .send()
-            .await
-            .map_err(|error| format!("request failed: {error}"))?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        let response_body = response
-            .text()
-            .await
-            .map_err(|error| format!("HTTP {status}; failed to read response body: {error}"))?;
-        let response_body = response_body.chars().take(4096).collect::<String>();
-        Err(format!("HTTP {status}: {response_body}"))
-    }
-
-    fn log_callback_failure(&self, manifest: &QueueManifest, error: &str) {
+    fn log_result_delivery_failure(&self, manifest: &QueueManifest, error: &str) {
         tracing::warn!(
             job_id = %manifest.job_id,
-            callback_url = %manifest.callback_url,
+            client_id = %manifest.client_id,
             error = %error,
-            "LLM callback delivery failed"
+            "LLM result delivery failed"
         );
     }
 
@@ -993,14 +1031,20 @@ impl Scheduler {
         serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(io_error)?)
             .map_err(|error| ServiceError::BadRequest(error.to_string()))
     }
-    fn job_exists(&self, job_id: &str) -> bool {
+    fn existing_manifest(&self, job_id: &str) -> Option<QueueManifest> {
         ["queuing", "processing", "callback_pending", "failed"]
             .iter()
-            .any(|state| self.queue_dir.join(state).join(job_id).exists())
+            .find_map(|state| {
+                self.read_manifest(&self.queue_dir.join(state).join(job_id))
+                    .ok()
+            })
     }
     fn fail(&self, path: PathBuf, error: String) {
-        let job_id = path.file_name().unwrap_or_default();
-        if self.queue_dir.join("cancelled").join(job_id).exists() {
+        let cancelled = self.read_manifest(&path).is_ok_and(|manifest| {
+            self.cancellation_marker(&manifest.client_id, &manifest.job_id)
+                .exists()
+        });
+        if cancelled {
             if std::fs::remove_dir_all(&path).is_ok() {
                 if let Some(parent) = path.parent() {
                     let _ = sync_directory(parent);
@@ -1027,6 +1071,21 @@ pub fn select_task<'a>(
         .map(|(_, manifest)| manifest.task.as_str())
 }
 
+fn failed_job_result(manifest: &QueueManifest, error: String) -> JobResult {
+    JobResult {
+        job_id: manifest.job_id.clone(),
+        media_id: manifest.media_id,
+        task: manifest.task.clone(),
+        attempt: manifest.attempt,
+        status: "failed".to_string(),
+        model_type: None,
+        model_version: None,
+        result: None,
+        input_results: None,
+        error: Some(error),
+    }
+}
+
 fn insert_queued_job(
     selected: &mut Vec<(PathBuf, QueueManifest)>,
     candidate: (PathBuf, QueueManifest),
@@ -1047,7 +1106,7 @@ fn insert_queued_job(
     }
 }
 
-fn insert_callback_path(
+fn insert_result_path(
     selected: &mut Vec<((u8, i64, String), PathBuf)>,
     candidate: ((u8, i64, String), PathBuf),
     maximum_count: usize,
@@ -1068,7 +1127,7 @@ fn insert_callback_path(
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct CallbackState {
+struct ResultDeliveryState {
     attempts: usize,
     next_attempt_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

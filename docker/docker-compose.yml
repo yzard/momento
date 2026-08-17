@@ -11,7 +11,8 @@ services:
       UMASK: "${UMASK:-022}"
       TZ: "${TZ:-UTC}"
     volumes:
-      - ${LLM_DATA_DIR:-../playground/llm}:/data
+      - ${LLM_DATA_DIR:-../playground/llm}:/data/llm
+      - ${LOG_DIR:-../playground/logs}:/data/logs
       - ${LLM_CONFIG_FILE:-../playground/config_llm.toml}:/config/config_llm.toml:ro
     expose:
       - "8100"

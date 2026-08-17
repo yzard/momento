@@ -27,7 +27,7 @@ Model concurrency is enforced only by the active model subservice. Momento and t
 
 Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement. The scheduler keeps bounded job metadata in memory and sends only validated job/input descriptors to the active same-container model process. The model opens inputs from `queue/processing`; image bytes are never retransmitted over the local HTTP boundary. Queue job count is not configured, so operators must monitor disk capacity.
 
-AI cancellation is durable across machines. Momento records an all-task or task-specific scope plus exact job IDs in an outbox and retries the authenticated cancellation request until llm-service acknowledges it. llm-service removes matching staged, queued, callback-pending, and failed copies; matching inference already running finishes locally and is then discarded without callback delivery.
+AI cancellation is durable across machines. Momento records an all-task or task-specific scope plus exact job IDs in an outbox and retries the authenticated cancellation message until llm-service acknowledges it. llm-service removes matching staged, queued, result-pending, and failed copies; matching inference already running finishes locally and is then discarded without result delivery.
 
 ## Features
 
@@ -82,10 +82,12 @@ Run from any working directory:
 The script builds both images, passes the invoking UID/GID, starts the stack on a private Compose
 network, and removes the containers on exit. Open `http://localhost:8000`.
 
-Momento reaches `http://llm-service:8100`; callbacks use
-`http://momento-api:8000/api/v1/internal/llm/callback`. The checked-in playground configs share the
-same API and callback keys. Production deployments must replace those keys and persist Momento data
-and the llm-service queue independently.
+Momento maintains an authenticated WebSocket to
+`ws://llm-service:8100/api/v1/llm/connect`. Submissions, cancellations, acknowledgements, and
+results share that connection, so llm-service does not need a Momento address. The checked-in
+playground configs share one API key and identify the Momento connection as `playground`.
+Production deployments must replace that key and persist Momento data and the llm-service queue
+independently.
 
 ## Data
 
@@ -101,11 +103,15 @@ The Momento data directory contains the SQLite database and media files:
 ├── previews/
 ├── imports/
 ├── webdav/
-└── logs/
+├── logs/
+└── llm/
+    ├── cache/
+    └── queue/
 ```
 
 Back up the complete data directory, not only `database.sqlite`.
 
-Log locations are fixed: each service writes plain daily files named
-`<service>.YYYY-MM-DD.log` under its own `<data_dir>/logs/` directory. Console output remains
-colorized by level.
+Log locations are fixed: both services write plain daily files named
+`<service>.YYYY-MM-DD.log` under `<data_dir>/logs/`. Their event lines omit the service name and
+process ID, while console output remains colorized by level. llm-service keeps its durable queue
+and runtime cache under `<data_dir>/llm/`; deployments may persist that subtree independently.

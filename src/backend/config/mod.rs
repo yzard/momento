@@ -314,11 +314,9 @@ pub struct LlmConfig {
     #[serde(default = "default_llm_service_url")]
     pub service_url: String,
     #[serde(default)]
-    pub callback_url: String,
+    pub client_id: String,
     #[serde(default)]
     pub api_key: String,
-    #[serde(default)]
-    pub callback_key: String,
     #[serde(default)]
     pub image_tagging_enabled: bool,
     #[serde(default)]
@@ -359,7 +357,7 @@ impl CronjobConfig {
 }
 
 fn default_llm_service_url() -> String {
-    "http://127.0.0.1:8100".to_string()
+    "ws://127.0.0.1:8100/api/v1/llm/connect".to_string()
 }
 
 fn default_face_group_similarity_threshold() -> f32 {
@@ -371,9 +369,8 @@ impl Default for LlmConfig {
         Self {
             enabled: false,
             service_url: default_llm_service_url(),
-            callback_url: String::new(),
+            client_id: String::new(),
             api_key: String::new(),
-            callback_key: String::new(),
             image_tagging_enabled: false,
             deduplicate_enabled: false,
             face_detection_enabled: false,
@@ -434,9 +431,19 @@ impl LlmConfig {
                 "llm service_url is required when LLM is enabled",
             ));
         }
-        if self.callback_url.trim().is_empty() {
+        if !self.service_url.starts_with("ws://") && !self.service_url.starts_with("wss://") {
             return Err(std::io::Error::other(
-                "llm callback_url is required when LLM is enabled",
+                "llm service_url must use ws:// or wss:// when LLM is enabled",
+            ));
+        }
+        if !momento_common::llm::is_valid_client_id(&self.client_id) {
+            return Err(std::io::Error::other(
+                "llm client_id must contain 1 to 128 letters, numbers, hyphens, or underscores",
+            ));
+        }
+        if self.api_key.trim().is_empty() {
+            return Err(std::io::Error::other(
+                "llm api_key is required when LLM is enabled",
             ));
         }
         Ok(())

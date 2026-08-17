@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
-use crate::models::LlmInputResult;
 use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
+use momento_common::llm::JobInputResult;
 
 const EMBEDDING_DIMENSIONS: usize = 512;
 const BOUNDING_BOX_EPSILON: f64 = 1e-6;
@@ -56,17 +56,17 @@ impl Drop for FaceFileChanges {
     }
 }
 
-pub fn persist_callback(
+pub fn persist_result(
     transaction: &Transaction<'_>,
     job_id: &str,
     media_id: i64,
     model_type: &str,
     model_version: &str,
-    input_results: Option<&[LlmInputResult]>,
+    input_results: Option<&[JobInputResult]>,
 ) -> AppResult<FaceFileChanges> {
     if model_type != FACE_DETECTION_MODEL_TYPE {
         return Err(AppError::BadRequest(
-            "face detection callback modelType must be face_detection".to_string(),
+            "face detection result modelType must be face_detection".to_string(),
         ));
     }
     let input_results = input_results.ok_or_else(|| {
@@ -78,11 +78,11 @@ pub fn persist_callback(
             Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let callback_inputs = input_results
+    let result_inputs = input_results
         .iter()
-        .map(|result| (result.sequence, result.frame_timestamp_ms))
+        .map(|result| (i64::from(result.sequence), result.frame_timestamp_ms))
         .collect::<Vec<_>>();
-    if expected_inputs != callback_inputs {
+    if expected_inputs != result_inputs {
         return Err(AppError::BadRequest(
             "face_detection input correlation does not match prepared inputs".to_string(),
         ));
@@ -97,7 +97,7 @@ pub fn persist_callback(
             .ok_or_else(|| AppError::BadRequest("face_detection faces is required".to_string()))?;
         let mut indices = HashSet::new();
         for (expected_index, face_value) in face_values.iter().enumerate() {
-            let parsed = parse_face(input_result.sequence, face_value)?;
+            let parsed = parse_face(i64::from(input_result.sequence), face_value)?;
             if !indices.insert(parsed.index) {
                 return Err(AppError::BadRequest(
                     "face_detection face indices must be unique".to_string(),

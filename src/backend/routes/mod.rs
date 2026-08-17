@@ -5,7 +5,6 @@ mod deduplicate;
 mod faces;
 #[path = "import/mod.rs"]
 mod imports;
-mod internal;
 mod map;
 mod media;
 mod metadata;
@@ -36,8 +35,4 @@ pub fn api_router() -> Router<AppState> {
         .merge(imports::router())
         .merge(metadata::router())
         .merge(trash::router())
-}
-
-pub fn internal_router() -> Router<AppState> {
-    internal::router()
 }

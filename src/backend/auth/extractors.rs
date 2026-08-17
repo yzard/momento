@@ -22,6 +22,7 @@ pub struct CurrentUser {
 pub struct AppState {
     pub config: Arc<Config>,
     pub pool: DbPool,
+    pub llm_transport: crate::processor::ai::transport::TransportHandle,
 }
 
 #[derive(Deserialize)]

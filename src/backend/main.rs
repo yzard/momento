@@ -99,6 +99,7 @@ fn create_default_admin(
 fn start_background_tasks(
     config: Arc<momento_api::config::Config>,
     pool: momento_api::database::DbPool,
+    llm_transport: momento_api::processor::ai::transport::TransportHandle,
 ) {
     let config_clone = Arc::clone(&config);
     let pool_clone = pool.clone();
@@ -120,7 +121,7 @@ fn start_background_tasks(
     let ai_config = Arc::clone(&config);
     let ai_pool = pool.clone();
     tokio::spawn(async move {
-        ai::run(ai_config, ai_pool).await;
+        ai::run(ai_config, ai_pool, llm_transport).await;
     });
 
     let deduplicate_pool = pool.clone();
@@ -229,11 +230,13 @@ async fn main() {
     // Create default admin if needed
     create_default_admin(&pool, &config);
 
+    let llm_transport = momento_api::processor::ai::transport::TransportHandle::default();
+
     // Start background tasks
-    start_background_tasks(Arc::clone(&config), pool.clone());
+    start_background_tasks(Arc::clone(&config), pool.clone(), llm_transport.clone());
 
     // Create the application
-    let app = create_app(Arc::clone(&config), pool);
+    let app = create_app(Arc::clone(&config), pool, llm_transport);
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));

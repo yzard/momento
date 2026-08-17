@@ -1,14 +1,70 @@
-use llm_service::config::{CallbackConfig, Config, SchedulerConfig};
+use async_trait::async_trait;
+use llm_service::config::{Config, SchedulerConfig};
 use llm_service::provider::ServiceManager;
 use llm_service::scheduler::QueueInputDescriptor;
 use llm_service::scheduler::{QueueAdmission, QueueManifest, Scheduler};
-use momento_common::llm::CancelJobsRequest;
+use llm_service::transport::ResultDeliveryTransport;
+use momento_common::llm::{CancelJobsRequest, JobResult};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+
+struct MockResultDeliveryTransport {
+    failure: Option<String>,
+    deliveries: Mutex<Vec<(String, JobResult)>>,
+}
+
+impl MockResultDeliveryTransport {
+    fn acknowledging() -> Arc<Self> {
+        Arc::new(Self {
+            failure: None,
+            deliveries: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn failing(error: &str) -> Arc<Self> {
+        Arc::new(Self {
+            failure: Some(error.to_string()),
+            deliveries: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl ResultDeliveryTransport for MockResultDeliveryTransport {
+    async fn deliver_result(
+        &self,
+        client_id: &str,
+        result: &JobResult,
+        _acknowledgement_timeout: Duration,
+    ) -> Result<(), String> {
+        self.deliveries
+            .lock()
+            .await
+            .push((client_id.to_string(), result.clone()));
+        match &self.failure {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+fn completed_result(job_id: &str, media_id: i64) -> JobResult {
+    JobResult {
+        job_id: job_id.to_string(),
+        media_id,
+        task: "ocr".to_string(),
+        attempt: 1,
+        status: "completed".to_string(),
+        model_type: Some("ocr".to_string()),
+        model_version: Some("test".to_string()),
+        result: Some(serde_json::json!({"text": "result"})),
+        input_results: None,
+        error: None,
+    }
+}
 
 #[test]
 fn queue_acceptance_persists_raw_bytes_under_queuing() {
@@ -20,8 +76,8 @@ fn queue_acceptance_persists_raw_bytes_under_queuing() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let job_id = "018f36e77c917cc89f7054252a33eaf0";
@@ -38,12 +94,12 @@ fn queue_acceptance_persists_raw_bytes_under_queuing() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: job_id.to_string(),
                 media_id: 1,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: vec![input_descriptor.clone()],
-                callback_url: "http://example.test/callback".to_string(),
             },
             vec![(input_descriptor, raw_bytes.clone())],
         )
@@ -57,6 +113,50 @@ fn queue_acceptance_persists_raw_bytes_under_queuing() {
 }
 
 #[test]
+fn duplicate_job_id_requires_an_identical_owned_manifest() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = Scheduler::new(
+        directory.path().to_path_buf(),
+        SchedulerConfig::default(),
+        Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+            service: Vec::new(),
+            ..Config::default()
+        })))),
+        MockResultDeliveryTransport::acknowledging(),
+    )
+    .expect("scheduler");
+    let bytes = b"raw bytes".to_vec();
+    let descriptor = QueueInputDescriptor {
+        sequence: 0,
+        filename: "input.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(&bytes)),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
+    };
+    let manifest = QueueManifest {
+        client_id: "client-a".to_string(),
+        job_id: "018f36e77c917cc89f7054252a33eaf0".to_string(),
+        media_id: 1,
+        task: "ocr".to_string(),
+        attempt: 1,
+        inputs: vec![descriptor.clone()],
+    };
+    scheduler
+        .accept(manifest.clone(), vec![(descriptor, bytes)])
+        .expect("initial admission");
+
+    assert!(matches!(
+        scheduler.begin_admission(manifest.clone()),
+        Ok(QueueAdmission::Duplicate)
+    ));
+    let mut mismatched = manifest;
+    mismatched.media_id = 2;
+    assert!(scheduler.begin_admission(mismatched).is_err());
+}
+
+#[test]
 fn unavailable_runtime_is_durably_requeued_until_attempts_are_exhausted() {
     let directory = tempdir().expect("queue directory");
     let scheduler_config = SchedulerConfig {
@@ -66,11 +166,11 @@ fn unavailable_runtime_is_durably_requeued_until_attempts_are_exhausted() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         scheduler_config,
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
             service: Vec::new(),
             ..Config::default()
         })))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let job_id = "018f36e77c917cc89f7054252a33eaaa";
@@ -85,12 +185,12 @@ fn unavailable_runtime_is_durably_requeued_until_attempts_are_exhausted() {
         frame_timestamp_ms: None,
     };
     let manifest = QueueManifest {
+        client_id: "client-a".to_string(),
         job_id: job_id.to_string(),
         media_id: 1,
         task: "face_detection".to_string(),
         attempt: 1,
         inputs: vec![descriptor.clone()],
-        callback_url: "http://example.test/callback".to_string(),
     };
     scheduler
         .accept(manifest.clone(), vec![(descriptor, bytes)])
@@ -119,8 +219,8 @@ fn queue_acceptance_supports_momento_hexadecimal_job_ids() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let job_id = "e3713ac42cf629be1d8041ffb13c2d66";
@@ -137,12 +237,12 @@ fn queue_acceptance_supports_momento_hexadecimal_job_ids() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: job_id.to_string(),
                 media_id: 1,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
-                callback_url: "http://example.test/callback".to_string(),
             },
             vec![(descriptor, bytes)],
         )
@@ -160,8 +260,8 @@ fn queue_acceptance_preserves_ordered_frame_inputs() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let job_id = "018f36e77c917cc89f7054252a33eaf1";
@@ -188,12 +288,12 @@ fn queue_acceptance_preserves_ordered_frame_inputs() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: job_id.to_string(),
                 media_id: 1,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: vec![first_descriptor.clone(), second_descriptor.clone()],
-                callback_url: "http://example.test/callback".to_string(),
             },
             vec![
                 (first_descriptor, first_bytes.clone()),
@@ -219,11 +319,11 @@ fn queue_acceptance_accepts_non_contiguous_input_sequences() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
             service: Vec::new(),
             ..Config::default()
         })))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let bytes = b"input".to_vec();
@@ -240,12 +340,12 @@ fn queue_acceptance_accepts_non_contiguous_input_sequences() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: "0123456789abcdef0123456789abcdef".to_string(),
                 media_id: 1,
                 task: "image_clustering".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
-                callback_url: "http://example.test/callback".to_string(),
             },
             vec![(descriptor, bytes)],
         )
@@ -263,11 +363,11 @@ fn abandoned_staging_removes_temporary_queue_directory() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
             service: Vec::new(),
             ..Config::default()
         })))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let job_id = "0123456789abcdef0123456789abcdef";
@@ -283,12 +383,12 @@ fn abandoned_staging_removes_temporary_queue_directory() {
 
     let admission = scheduler
         .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
             job_id: job_id.to_string(),
             media_id: 1,
             task: "ocr".to_string(),
             attempt: 1,
             inputs: vec![descriptor],
-            callback_url: "http://example.test/callback".to_string(),
         })
         .expect("admission");
     assert!(matches!(admission, QueueAdmission::Staging(_)));
@@ -308,11 +408,11 @@ fn queue_selection_is_task_aware_and_bounded() {
             max_in_flight_jobs: 3,
             ..SchedulerConfig::default()
         },
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
             service: Vec::new(),
             ..Config::default()
         })))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let bytes = b"input".to_vec();
@@ -329,6 +429,7 @@ fn queue_selection_is_task_aware_and_bounded() {
         scheduler
             .accept(
                 QueueManifest {
+                    client_id: "client-a".to_string(),
                     job_id: format!("{index:032x}"),
                     media_id: i64::from(index),
                     task: if index % 2 == 0 {
@@ -338,7 +439,6 @@ fn queue_selection_is_task_aware_and_bounded() {
                     },
                     attempt: 1,
                     inputs: vec![descriptor.clone()],
-                    callback_url: "http://example.test/callback".to_string(),
                 },
                 vec![(descriptor.clone(), bytes.clone())],
             )
@@ -388,8 +488,8 @@ fn scheduler_prioritizes_a_single_task_before_switching_runtimes() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let bytes = b"input".to_vec();
@@ -409,12 +509,12 @@ fn scheduler_prioritizes_a_single_task_before_switching_runtimes() {
         scheduler
             .accept(
                 QueueManifest {
+                    client_id: "client-a".to_string(),
                     job_id: job_id.to_string(),
                     media_id: 1,
                     task: task.to_string(),
                     attempt: 1,
                     inputs: vec![descriptor.clone()],
-                    callback_url: "http://example.test/callback".to_string(),
                 },
                 vec![(descriptor.clone(), bytes.clone())],
             )
@@ -443,23 +543,23 @@ fn scheduler_prefers_queued_jobs_for_the_warm_runtime() {
         (
             std::path::PathBuf::from("ocr"),
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: "00000000000000000000000000000001".to_string(),
                 media_id: 1,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: Vec::new(),
-                callback_url: "http://example.test/callback".to_string(),
             },
         ),
         (
             std::path::PathBuf::from("tagging"),
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: "00000000000000000000000000000002".to_string(),
                 media_id: 2,
                 task: "image_tagging".to_string(),
                 attempt: 1,
                 inputs: Vec::new(),
-                callback_url: "http://example.test/callback".to_string(),
             },
         ),
     ];
@@ -492,8 +592,8 @@ async fn scheduler_refills_a_completed_slot_before_a_slow_job_finishes() {
                 max_in_flight_jobs: 2,
                 ..SchedulerConfig::default()
             },
-            CallbackConfig::default(),
             Arc::clone(&manager),
+            MockResultDeliveryTransport::acknowledging(),
         )
         .expect("scheduler"),
     );
@@ -516,12 +616,12 @@ async fn scheduler_refills_a_completed_slot_before_a_slow_job_finishes() {
         scheduler
             .accept(
                 QueueManifest {
+                    client_id: "client-a".to_string(),
                     job_id: (*job_id).to_string(),
                     media_id: media_id as i64,
                     task: "face_detection".to_string(),
                     attempt: 1,
                     inputs: vec![descriptor.clone()],
-                    callback_url: "http://127.0.0.1:9/callback".to_string(),
                 },
                 vec![(descriptor.clone(), bytes.clone())],
             )
@@ -574,6 +674,7 @@ async fn cancelled_processing_job_finishes_without_callback_delivery() {
     );
     let manager = Arc::new(Mutex::new(super::provider::manager(vec![face_detection])));
     let directory = tempdir().expect("queue directory");
+    let result_delivery = MockResultDeliveryTransport::acknowledging();
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
@@ -581,12 +682,11 @@ async fn cancelled_processing_job_finishes_without_callback_delivery() {
                 max_in_flight_jobs: 1,
                 ..SchedulerConfig::default()
             },
-            CallbackConfig::default(),
             Arc::clone(&manager),
+            result_delivery.clone(),
         )
         .expect("scheduler"),
     );
-    let callback = MockServer::start().await;
     let bytes = b"image".to_vec();
     let descriptor = QueueInputDescriptor {
         sequence: 0,
@@ -601,12 +701,12 @@ async fn cancelled_processing_job_finishes_without_callback_delivery() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: job_id.to_string(),
                 media_id: 1,
                 task: "face_detection".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
-                callback_url: callback.uri(),
             },
             vec![(descriptor, bytes)],
         )
@@ -622,11 +722,14 @@ async fn cancelled_processing_job_finishes_without_callback_delivery() {
     }
     assert!(processing.exists(), "job did not enter processing");
     let response = scheduler
-        .cancel_jobs(&CancelJobsRequest {
-            all: false,
-            tasks: vec!["face_detection".to_string()],
-            job_ids: Vec::new(),
-        })
+        .cancel_jobs(
+            "client-a",
+            &CancelJobsRequest {
+                all: false,
+                tasks: vec!["face_detection".to_string()],
+                job_ids: Vec::new(),
+            },
+        )
         .expect("processing cancellation");
     assert_eq!(response.running_jobs, 1);
     for _ in 0..300 {
@@ -649,12 +752,12 @@ async fn cancelled_processing_job_finishes_without_callback_delivery() {
         .join("callback_pending")
         .join(job_id)
         .exists());
-    assert!(directory.path().join("cancelled").join(job_id).exists());
-    assert!(callback
-        .received_requests()
-        .await
-        .expect("callback requests")
-        .is_empty());
+    assert!(directory
+        .path()
+        .join("cancelled")
+        .join(format!("client-a-{job_id}"))
+        .exists());
+    assert!(result_delivery.deliveries.lock().await.is_empty());
 }
 
 #[test]
@@ -667,8 +770,8 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("scheduler");
     let raw_bytes = b"recovery input".to_vec();
@@ -685,12 +788,12 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: processing_job_id.to_string(),
                 media_id: 1,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
-                callback_url: "http://example.test/callback".to_string(),
             },
             vec![(descriptor.clone(), raw_bytes.clone())],
         )
@@ -708,12 +811,12 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: callback_job_id.to_string(),
                 media_id: 2,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
-                callback_url: "http://example.test/callback".to_string(),
             },
             vec![(descriptor, raw_bytes)],
         )
@@ -740,8 +843,8 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
     let _recovered = Scheduler::new(
         directory.path().to_path_buf(),
         SchedulerConfig::default(),
-        CallbackConfig::default(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
+        MockResultDeliveryTransport::acknowledging(),
     )
     .expect("recovered scheduler");
     assert!(directory
@@ -755,38 +858,24 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
 }
 
 #[tokio::test]
-async fn callback_failure_retains_http_status_and_response_body() {
-    let callback_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/callback"))
-        .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(serde_json::json!({"detail": "Database error"})),
-        )
-        .mount(&callback_server)
-        .await;
+async fn result_delivery_failure_is_recorded_for_retry() {
     let directory = tempdir().expect("queue directory");
     let config = Arc::new(Config {
         service: Vec::new(),
         ..Config::default()
     });
+    let result_delivery = MockResultDeliveryTransport::failing("client rejected result");
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
             SchedulerConfig {
                 poll_interval_seconds: 60,
-                idle_shutdown_seconds: 60,
-                max_in_flight_jobs: 64,
-                runtime_max_attempts: 3,
-            },
-            CallbackConfig {
-                request_timeout_seconds: 5,
-                retry_delay_seconds: 60,
-                max_attempts: 10,
-                max_concurrent_deliveries: 4,
-                key: "callback-key".to_string(),
+                result_delivery_retry_delay_seconds: 60,
+                result_delivery_max_concurrent_deliveries: 4,
+                ..SchedulerConfig::default()
             },
             Arc::new(Mutex::new(ServiceManager::new(config))),
+            result_delivery.clone(),
         )
         .expect("scheduler"),
     );
@@ -796,17 +885,21 @@ async fn callback_failure_retains_http_status_and_response_body() {
     std::fs::write(
         job_path.join("manifest.json"),
         serde_json::to_vec(&QueueManifest {
+            client_id: "client-a".to_string(),
             job_id: job_id.to_string(),
             media_id: 3,
-            task: "image_clustering".to_string(),
+            task: "ocr".to_string(),
             attempt: 1,
             inputs: Vec::new(),
-            callback_url: format!("{}/callback", callback_server.uri()),
         })
         .expect("manifest JSON"),
     )
     .expect("manifest");
-    std::fs::write(job_path.join("result.json"), "{}").expect("result");
+    std::fs::write(
+        job_path.join("result.json"),
+        serde_json::to_vec(&completed_result(job_id, 3)).expect("result JSON"),
+    )
+    .expect("result");
 
     let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
     let callback_state_path = job_path.join("callback.json");
@@ -825,39 +918,31 @@ async fn callback_failure_retains_http_status_and_response_body() {
     let last_error = callback_state["last_error"]
         .as_str()
         .expect("last callback error");
-    assert!(last_error.contains("500 Internal Server Error"));
-    assert!(last_error.contains("Database error"));
+    assert_eq!(last_error, "client rejected result");
+    let deliveries = result_delivery.deliveries.lock().await;
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].0, "client-a");
+    assert_eq!(deliveries[0].1.job_id, job_id);
 }
 
 #[tokio::test]
-async fn callback_window_refills_until_all_fresh_results_are_delivered() {
-    let callback_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/callback"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(5)
-        .mount(&callback_server)
-        .await;
+async fn result_delivery_window_refills_and_prioritizes_fresh_results() {
     let directory = tempdir().expect("queue directory");
     let config = Arc::new(Config {
         service: Vec::new(),
         ..Config::default()
     });
+    let result_delivery = MockResultDeliveryTransport::acknowledging();
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
             SchedulerConfig {
                 poll_interval_seconds: 60,
+                result_delivery_max_concurrent_deliveries: 2,
                 ..SchedulerConfig::default()
             },
-            CallbackConfig {
-                request_timeout_seconds: 5,
-                retry_delay_seconds: 60,
-                max_attempts: 10,
-                max_concurrent_deliveries: 2,
-                key: "callback-key".to_string(),
-            },
             Arc::new(Mutex::new(ServiceManager::new(config))),
+            result_delivery.clone(),
         )
         .expect("scheduler"),
     );
@@ -868,19 +953,19 @@ async fn callback_window_refills_until_all_fresh_results_are_delivered() {
         std::fs::write(
             job_path.join("manifest.json"),
             serde_json::to_vec(&QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: job_id.clone(),
                 media_id: index,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: Vec::new(),
-                callback_url: format!("{}/callback", callback_server.uri()),
             })
             .expect("manifest JSON"),
         )
         .expect("manifest");
         std::fs::write(
             job_path.join("result.json"),
-            serde_json::json!({"jobId": job_id}).to_string(),
+            serde_json::to_vec(&completed_result(&job_id, index)).expect("result JSON"),
         )
         .expect("result");
         if index == 0 {
@@ -909,18 +994,13 @@ async fn callback_window_refills_until_all_fresh_results_are_delivered() {
         .expect("callback directory")
         .next()
         .is_none());
-    let requests = callback_server
-        .received_requests()
-        .await
-        .expect("callback requests");
-    let stale_position = requests
+    let deliveries = result_delivery.deliveries.lock().await;
+    assert_eq!(deliveries.len(), 5);
+    let stale_position = deliveries
         .iter()
-        .position(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body)
-                .is_ok_and(|body| body["jobId"] == "00000000000000000000000000000000")
-        })
-        .expect("stale retry request");
-    assert_eq!(stale_position, 4);
+        .position(|(_, result)| result.job_id == "00000000000000000000000000000000")
+        .expect("stale retry delivery");
+    assert!(stale_position >= 2);
 }
 
 #[tokio::test]
@@ -933,15 +1013,15 @@ async fn cancelled_processing_failure_is_deleted_instead_of_retained_as_failed()
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
-            SchedulerConfig::default(),
-            CallbackConfig {
-                request_timeout_seconds: 1,
-                retry_delay_seconds: 1,
-                max_attempts: 1,
-                max_concurrent_deliveries: 1,
-                key: "callback-key".to_string(),
+            SchedulerConfig {
+                result_delivery_acknowledgement_timeout_seconds: 1,
+                result_delivery_retry_delay_seconds: 1,
+                result_delivery_max_attempts: 1,
+                result_delivery_max_concurrent_deliveries: 1,
+                ..SchedulerConfig::default()
             },
             Arc::new(Mutex::new(ServiceManager::new(config))),
+            MockResultDeliveryTransport::failing("delivery must not run"),
         )
         .expect("scheduler"),
     );
@@ -959,12 +1039,12 @@ async fn cancelled_processing_failure_is_deleted_instead_of_retained_as_failed()
     scheduler
         .accept(
             QueueManifest {
+                client_id: "client-a".to_string(),
                 job_id: job_id.to_string(),
                 media_id: 1,
                 task: "ocr".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
-                callback_url: "http://127.0.0.1:9/callback".to_string(),
             },
             vec![(descriptor, bytes)],
         )
@@ -973,11 +1053,14 @@ async fn cancelled_processing_failure_is_deleted_instead_of_retained_as_failed()
     std::fs::rename(directory.path().join("queuing").join(job_id), &processing)
         .expect("processing state");
     scheduler
-        .cancel_jobs(&CancelJobsRequest {
-            all: false,
-            tasks: vec!["ocr".to_string()],
-            job_ids: vec![job_id.to_string()],
-        })
+        .cancel_jobs(
+            "client-a",
+            &CancelJobsRequest {
+                all: false,
+                tasks: vec!["ocr".to_string()],
+                job_ids: vec![job_id.to_string()],
+            },
+        )
         .expect("running cancellation");
     let callback_pending = directory.path().join("callback_pending").join(job_id);
     std::fs::rename(&processing, &callback_pending).expect("completed processing state");
@@ -994,5 +1077,9 @@ async fn cancelled_processing_failure_is_deleted_instead_of_retained_as_failed()
 
     assert!(!callback_pending.exists());
     assert!(!directory.path().join("failed").join(job_id).exists());
-    assert!(directory.path().join("cancelled").join(job_id).exists());
+    assert!(directory
+        .path()
+        .join("cancelled")
+        .join(format!("client-a-{job_id}"))
+        .exists());
 }

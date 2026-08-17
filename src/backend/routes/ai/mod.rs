@@ -313,9 +313,7 @@ async fn cancel(
 }
 
 async fn deliver_cancellations(state: &AppState) {
-    if let Err(error) = ai::deliver_pending_cancellations(&state.config, &state.pool).await {
-        tracing::warn!("immediate LLM cancellation delivery failed: {error}");
-    }
+    state.llm_transport.wake();
 }
 
 async fn trigger_ocr(

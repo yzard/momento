@@ -42,7 +42,7 @@ pub fn create_test_app() -> (Router, DbPool) {
     init_test_paths();
     let pool = create_test_db();
     let config = Arc::new(Config::default());
-    let app = create_app(config, pool.clone());
+    let app = create_app(config, pool.clone(), Default::default());
     (app, pool)
 }
 

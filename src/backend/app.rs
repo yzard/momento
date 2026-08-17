@@ -16,7 +16,7 @@ use crate::auth::AppState;
 use crate::config::Config;
 use crate::database::DbPool;
 use crate::logging::request_logger;
-use crate::routes::{api_router, internal_router};
+use crate::routes::api_router;
 use crate::webdav::webdav_router;
 use crate::VERSION;
 
@@ -33,10 +33,15 @@ async fn healthcheck() -> Json<HealthcheckResponse> {
     })
 }
 
-pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
+pub fn create_app(
+    config: Arc<Config>,
+    pool: DbPool,
+    llm_transport: crate::processor::ai::transport::TransportHandle,
+) -> Router {
     let state = AppState {
         config: config.clone(),
         pool,
+        llm_transport,
     };
 
     let cors = CorsLayer::new()
@@ -46,8 +51,7 @@ pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
 
     let api_routes = Router::new()
         .route("/healthcheck", get(healthcheck))
-        .merge(api_router())
-        .merge(internal_router());
+        .merge(api_router());
 
     let mut app = Router::new()
         .nest("/api/v1", api_routes)

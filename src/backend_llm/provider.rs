@@ -1526,7 +1526,7 @@ mod tests {
     fn service_manager_starts_without_an_active_runtime() {
         let manager = ServiceManager::new(Arc::new(crate::config::Config {
             server: Default::default(),
-            callback: Default::default(),
+            scheduler: Default::default(),
             service: Vec::new(),
         }));
         assert_eq!(manager.active_name(), "on-demand");

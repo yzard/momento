@@ -1,47 +1,11 @@
-use axum::{
-    extract::State,
-    http::header::HeaderMap,
-    response::{IntoResponse, Response},
-    routing::post,
-    Json, Router,
-};
+use momento_common::llm::{JobInputResult, JobResult};
 use rusqlite::{Transaction, TransactionBehavior};
 
-use crate::auth::AppState;
-use crate::database::queries;
+use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
-use crate::models::LlmCallbackRequest;
 
-pub fn router() -> Router<AppState> {
-    Router::new().route("/internal/llm/callback", post(callback))
-}
-
-async fn callback(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<LlmCallbackRequest>,
-) -> Response {
-    match process_callback(&state, &headers, request) {
-        Ok(response) => response.into_response(),
-        Err(error) => callback_error_response(error),
-    }
-}
-
-fn process_callback(
-    state: &AppState,
-    headers: &HeaderMap,
-    request: LlmCallbackRequest,
-) -> AppResult<Json<serde_json::Value>> {
-    let callback_key = headers
-        .get("x-momento-callback-key")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if state.config.llm.callback_key.is_empty() || callback_key != state.config.llm.callback_key {
-        return Err(AppError::Authentication(
-            "invalid LLM callback key".to_string(),
-        ));
-    }
-    let connection = state.pool.get()?;
+pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
+    let connection = pool.get()?;
     let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
     let job: (i64, String, i64, String) = transaction
         .query_row(
@@ -50,22 +14,22 @@ fn process_callback(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|_| AppError::NotFound("LLM job not found".to_string()))?;
-    if job.0 != request.media_id || job.1 != request.task || job.2 != request.attempt {
+    if job.0 != request.media_id || job.1 != request.task || job.2 != i64::from(request.attempt) {
         return Err(AppError::Conflict(
-            "LLM callback does not match submitted job".to_string(),
+            "LLM result does not match submitted job".to_string(),
         ));
     }
     if matches!(job.3.as_str(), "completed" | "failed" | "cancelled") {
-        return Ok(Json(serde_json::json!({"status":"acknowledged"})));
+        return Ok(());
     }
     if job.3 != "submitted" {
         return Err(AppError::Conflict(
-            "LLM callback job is not awaiting a result".to_string(),
+            "LLM job is not awaiting a result".to_string(),
         ));
     }
     if !matches!(request.status.as_str(), "completed" | "failed") {
         return Err(AppError::BadRequest(
-            "LLM callback status must be completed or failed".to_string(),
+            "LLM result status must be completed or failed".to_string(),
         ));
     }
     let mut face_file_changes = None;
@@ -91,7 +55,7 @@ fn process_callback(
                 request.input_results.as_deref(),
             )?;
         } else if request.task == "face_detection" {
-            face_file_changes = Some(crate::processor::face_detection::persist_callback(
+            face_file_changes = Some(crate::processor::face_detection::persist_result(
                 &transaction,
                 &request.job_id,
                 request.media_id,
@@ -101,7 +65,7 @@ fn process_callback(
             )?);
         } else {
             return Err(AppError::BadRequest(
-                "completed callback task is not supported".to_string(),
+                "completed result task is not supported".to_string(),
             ));
         }
         if transaction.execute(
@@ -110,7 +74,7 @@ fn process_callback(
         )? != 1
         {
             return Err(AppError::Conflict(
-                "LLM callback job changed during persistence".to_string(),
+                "LLM job changed during result persistence".to_string(),
             ));
         }
     } else if transaction.execute(
@@ -125,24 +89,14 @@ fn process_callback(
     )? != 1
     {
         return Err(AppError::Conflict(
-            "LLM callback job changed during persistence".to_string(),
+            "LLM job changed during result persistence".to_string(),
         ));
     }
     transaction.commit()?;
     if let Some(changes) = face_file_changes {
         changes.commit();
     }
-    Ok(Json(serde_json::json!({"status":"acknowledged"})))
-}
-
-fn callback_error_response(error: AppError) -> Response {
-    let detail = error.to_string();
-    let response = error.into_response();
-    let status = response.status();
-    if !status.is_server_error() {
-        return response;
-    }
-    (status, Json(serde_json::json!({"detail": detail}))).into_response()
+    Ok(())
 }
 
 fn persist_text_results(
@@ -151,7 +105,7 @@ fn persist_text_results(
     model_type: &str,
     model_version: &str,
     result: &serde_json::Value,
-    input_results: Option<&[crate::models::LlmInputResult]>,
+    input_results: Option<&[JobInputResult]>,
 ) -> AppResult<()> {
     let text = input_results
         .filter(|results| !results.is_empty())

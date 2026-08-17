@@ -26,6 +26,8 @@ ARG DINOV2_REVISION=ed25f3a31f01632728cabb09d1542f84ab7b0056
 ARG RAM_CHECKPOINT_REVISION=84d4aee3a0265c4e0df1f714f0572011d1bf2ec3
 ARG BERT_TOKENIZER_REVISION=86b5e0934494bd15c9632b12f734a8a67f723594
 ARG BUFFALO_L_RELEASE=v0.7
+ARG RAM_CHECKPOINT_SHA256=497c178836ba66698ca226c7895317e6e800034be986452dbd2593298d50e87d
+ARG BUFFALO_L_SHA256=80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f
 
 FROM ${RUST_IMAGE} AS rust-builder
 
@@ -38,11 +40,82 @@ RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --locked --manifest
 
 FROM ${UV_IMAGE} AS uv
 
-FROM ${CUDA_IMAGE}
+FROM ${CUDA_IMAGE} AS runtime-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/opt/models/huggingface \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    RUST_BACKTRACE=full \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    XDG_CACHE_HOME=/data/cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gosu \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    python3 \
+    python3-venv \
+    tini \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS build-tools
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    python3-dev \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /usr/local/bin/uv
+
+FROM build-tools AS ocr-builder
 
 ARG VLLM_VERSION
 ARG VLLM_CUDA_VERSION
 ARG OCR_PYTHON_VERSION
+
+RUN uv python install "${OCR_PYTHON_VERSION}" \
+    && uv venv --python "${OCR_PYTHON_VERSION}" /opt/venvs/ocr
+
+RUN uv pip install --python /opt/venvs/ocr/bin/python \
+    --extra-index-url "https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}" \
+    --index-strategy unsafe-best-match \
+    "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_28_x86_64.whl" \
+    && uv pip check --python /opt/venvs/ocr/bin/python \
+    && /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert vllm.__version__ == '${VLLM_VERSION}'"
+
+# The complete OCR environment is larger than GHCR's layer limit. The final image copies
+# its CUDA Python packages and the remainder from separate build-stage snapshots.
+FROM ocr-builder AS ocr-without-nvidia
+
+RUN rm -rf /opt/venvs/ocr/lib/python3.12/site-packages/nvidia
+
+FROM ocr-builder AS triton-launcher-builder
+
+# Triton's launcher is a host Python extension whose cache key depends on its source and
+# platform. Link it against NVIDIA's development stub; the real driver satisfies the same
+# libcuda.so.1 dependency when the final container starts with GPU access.
+RUN apt-get update && apt-get install -y --no-install-recommends cuda-driver-dev-12-9 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s libcuda.so /usr/local/cuda-12.9/targets/x86_64-linux/lib/stubs/libcuda.so.1 \
+    && LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib/stubs \
+       TRITON_LIBCUDA_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib/stubs \
+       TRITON_CACHE_DIR=/opt/triton-cache \
+       /opt/venvs/ocr/bin/python -c "from triton.backends.nvidia.driver import CudaUtils; CudaUtils()"
+
+FROM build-tools AS python-builder
+
 ARG TORCH_VERSION
 ARG TORCHVISION_VERSION
 ARG TRANSFORMERS_RAM_VERSION
@@ -58,70 +131,34 @@ ARG INSIGHTFACE_VERSION
 ARG ONNXRUNTIME_GPU_VERSION
 ARG CLIP_COMMIT
 ARG RAM_COMMIT
-ARG UNLIMITED_OCR_REVISION
-ARG DINOV2_REVISION
-ARG RAM_CHECKPOINT_REVISION
-ARG BERT_TOKENIZER_REVISION
-ARG BUFFALO_L_RELEASE
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    HF_HOME=/opt/models/huggingface \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 \
-    PYTHONUNBUFFERED=1 \
-    RUST_BACKTRACE=full \
-    UV_NO_CACHE=1 \
-    UV_PYTHON_INSTALL_DIR=/opt/python \
-    XDG_CACHE_HOME=/data/cache
+# RAM and DINOv2 use the same CUDA Torch build. Installing it into the shared system site
+# packages keeps one copy while each venv retains its required Transformers version.
+RUN uv pip install --system --python /usr/bin/python3 \
+    --index-url https://download.pytorch.org/whl/cu128 \
+    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    curl \
-    git \
-    gosu \
-    libgl1 \
-    libglib2.0-0 \
-    libgomp1 \
-    python3 \
-    python3-dev \
-    python3-venv \
-    tini \
-    tzdata \
-    unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=uv /uv /usr/local/bin/uv
-
-RUN uv python install "${OCR_PYTHON_VERSION}" \
-    && uv venv --python "${OCR_PYTHON_VERSION}" /opt/venvs/ocr \
-    && uv venv --python /usr/bin/python3 /opt/venvs/ram \
-    && uv venv --python /usr/bin/python3 /opt/venvs/dinov2 \
+RUN uv venv --python /usr/bin/python3 --system-site-packages /opt/venvs/ram \
+    && uv venv --python /usr/bin/python3 --system-site-packages /opt/venvs/dinov2 \
     && uv venv --python /usr/bin/python3 /opt/venvs/insightface
 
-RUN uv pip install --python /opt/venvs/ocr/bin/python \
-    --extra-index-url "https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}" \
-    --index-strategy unsafe-best-match \
-    "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_28_x86_64.whl"
-
 RUN uv pip install --python /opt/venvs/ram/bin/python \
-    --index-url https://download.pytorch.org/whl/cu128 \
-    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
-    && uv pip install --python /opt/venvs/ram/bin/python \
     "transformers==${TRANSFORMERS_RAM_VERSION}" \
     "huggingface_hub==${HUGGINGFACE_HUB_RAM_VERSION}" \
-    "timm==${TIMM_VERSION}" \
-    "fairscale==${FAIRSCALE_VERSION}" \
     "numpy==${NUMPY_VERSION}" \
     "scipy==${SCIPY_VERSION}" \
     "Pillow==${PILLOW_VERSION}" \
+    ftfy \
+    packaging \
+    regex \
+    tqdm \
+    && uv pip install --python /opt/venvs/ram/bin/python --no-deps \
+    "timm==${TIMM_VERSION}" \
+    "fairscale==${FAIRSCALE_VERSION}" \
     "git+https://github.com/openai/CLIP.git@${CLIP_COMMIT}" \
     "git+https://github.com/xinyu1205/recognize-anything.git@${RAM_COMMIT}"
 
 RUN uv pip install --python /opt/venvs/dinov2/bin/python \
-    --index-url https://download.pytorch.org/whl/cu128 \
-    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
-    && uv pip install --python /opt/venvs/dinov2/bin/python \
     "transformers==${TRANSFORMERS_DINOV2_VERSION}" \
     "Pillow==${PILLOW_VERSION}"
 
@@ -132,31 +169,98 @@ RUN uv pip install --python /opt/venvs/insightface/bin/python \
     "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
     "Pillow==${PILLOW_VERSION}"
 
+RUN uv pip check --system --python /usr/bin/python3 \
+    && uv pip check --python /opt/venvs/insightface/bin/python \
+    && /opt/venvs/ram/bin/python -c "import clip, fairscale, ram, timm, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
+    && /opt/venvs/dinov2/bin/python -c "import torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
+    && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime"
+
+FROM ocr-builder AS unlimited-ocr-model
+
+ARG UNLIMITED_OCR_REVISION
+
 RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ocr/bin/python -c \
     "from huggingface_hub import snapshot_download; snapshot_download('baidu/Unlimited-OCR', revision='${UNLIMITED_OCR_REVISION}', local_dir='/opt/models/unlimited-ocr')" \
-    && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/dinov2/bin/python -c \
+    && rm -rf /opt/models/unlimited-ocr/.cache
+
+FROM python-builder AS dinov2-model
+
+ARG DINOV2_REVISION
+
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/dinov2/bin/python -c \
     "from huggingface_hub import snapshot_download; snapshot_download('facebook/dinov2-small', revision='${DINOV2_REVISION}', local_dir='/opt/models/dinov2-small', allow_patterns=['config.json', 'model.safetensors', 'preprocessor_config.json'])" \
-    && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ram/bin/python -c \
-    "from huggingface_hub import snapshot_download; snapshot_download('bert-base-uncased', revision='${BERT_TOKENIZER_REVISION}', cache_dir='/opt/models/huggingface')" \
-    && mkdir -p /opt/models/ram \
+    && rm -rf /opt/models/dinov2-small/.cache
+
+FROM python-builder AS bert-tokenizer-model
+
+ARG BERT_TOKENIZER_REVISION
+
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ram/bin/python -c \
+    "from huggingface_hub import snapshot_download; snapshot_download('bert-base-uncased', revision='${BERT_TOKENIZER_REVISION}', cache_dir='/opt/models/huggingface/hub', allow_patterns=['config.json', 'special_tokens_map.json', 'tokenizer.json', 'tokenizer_config.json', 'vocab.txt'])" \
+    && mkdir -p /opt/models/huggingface/hub/models--bert-base-uncased/refs \
+    && printf '%s' "${BERT_TOKENIZER_REVISION}" > /opt/models/huggingface/hub/models--bert-base-uncased/refs/main
+
+FROM build-tools AS ram-model
+
+ARG RAM_CHECKPOINT_REVISION
+ARG RAM_CHECKPOINT_SHA256
+
+RUN mkdir -p /opt/models/ram \
     && curl --fail --location --retry 3 \
     "https://huggingface.co/xinyu1205/recognize-anything-plus-model/resolve/${RAM_CHECKPOINT_REVISION}/ram_plus_swin_large_14m.pth" \
     --output /opt/models/ram/ram_plus_swin_large_14m.pth \
-    && mkdir -p /opt/models/insightface/models/buffalo_l \
+    && echo "${RAM_CHECKPOINT_SHA256}  /opt/models/ram/ram_plus_swin_large_14m.pth" | sha256sum --check -
+
+FROM build-tools AS insightface-model
+
+ARG BUFFALO_L_RELEASE
+ARG BUFFALO_L_SHA256
+
+RUN mkdir -p /opt/models/insightface/models/buffalo_l \
     && curl --fail --location --retry 3 \
     "https://github.com/deepinsight/insightface/releases/download/${BUFFALO_L_RELEASE}/buffalo_l.zip" \
     --output /tmp/buffalo_l.zip \
+    && echo "${BUFFALO_L_SHA256}  /tmp/buffalo_l.zip" | sha256sum --check - \
     && unzip /tmp/buffalo_l.zip -d /opt/models/insightface/models/buffalo_l \
     && rm /tmp/buffalo_l.zip
 
-RUN uv pip check --python /opt/venvs/ocr/bin/python \
-    && uv pip check --python /opt/venvs/ram/bin/python \
-    && uv pip check --python /opt/venvs/dinov2/bin/python \
-    && uv pip check --python /opt/venvs/insightface/bin/python \
-    && /opt/venvs/ocr/bin/python -c "import sys, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()" \
-    && /opt/venvs/ram/bin/python -c "import ram, torch; from pathlib import Path; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()" \
-    && /opt/venvs/dinov2/bin/python -c "from transformers import AutoConfig; config = AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True); assert config.hidden_size == 384" \
-    && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"
+FROM runtime-base
+
+ARG SOURCE_REPOSITORY=https://github.com/yzard/momento
+ARG TRANSFORMERS_RAM_VERSION
+ARG TRANSFORMERS_DINOV2_VERSION
+
+LABEL org.opencontainers.image.source="${SOURCE_REPOSITORY}" \
+      org.opencontainers.image.description="Momento managed local AI inference service"
+
+ENV NO_ALBUMENTATIONS_UPDATE=1 \
+    TRITON_CACHE_DIR=/data/llm/cache/triton \
+    XDG_CACHE_HOME=/data/llm/cache
+
+# Keep every copied artifact in an independently reusable, GHCR-safe layer.
+COPY --from=ocr-builder /opt/python /opt/python
+COPY --from=ocr-without-nvidia /opt/venvs/ocr /opt/venvs/ocr
+COPY --from=ocr-builder /opt/venvs/ocr/lib/python3.12/site-packages/nvidia /opt/venvs/ocr/lib/python3.12/site-packages/nvidia
+COPY --from=triton-launcher-builder /opt/triton-cache /opt/triton-cache
+COPY --from=python-builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
+COPY --from=python-builder /opt/venvs/ram /opt/venvs/ram
+COPY --from=python-builder /opt/venvs/dinov2 /opt/venvs/dinov2
+COPY --from=python-builder /opt/venvs/insightface /opt/venvs/insightface
+COPY --from=unlimited-ocr-model /opt/models/unlimited-ocr /opt/models/unlimited-ocr
+COPY --from=dinov2-model /opt/models/dinov2-small /opt/models/dinov2-small
+COPY --from=bert-tokenizer-model /opt/models/huggingface /opt/models/huggingface
+COPY --from=ram-model /opt/models/ram /opt/models/ram
+COPY --from=insightface-model /opt/models/insightface /opt/models/insightface
+
+RUN set -eux; \
+    ! command -v cc; \
+    test -n "$(find /opt/triton-cache -name 'cuda_utils*.so' -print -quit)"; \
+    export XDG_CACHE_HOME=/tmp/verification-cache; \
+    /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()"; \
+    /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
+    /opt/venvs/dinov2/bin/python -c "import torch, transformers; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True).hidden_size == 384"; \
+    /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"; \
+    rm -rf /tmp/verification-cache
 
 WORKDIR /app
 
@@ -165,7 +269,7 @@ COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
 RUN chmod +x /entrypoint_llm.sh \
-    && mkdir -p /data/cache /data/queue
+    && mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
 
 EXPOSE 8100
 

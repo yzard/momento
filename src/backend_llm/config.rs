@@ -9,7 +9,7 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
-    pub callback: CallbackConfig,
+    pub scheduler: SchedulerConfig,
     #[serde(default)]
     pub service: Vec<ServiceConfig>,
 }
@@ -25,8 +25,6 @@ pub struct ServerConfig {
     pub api_key: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
-    #[serde(default)]
-    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -40,6 +38,14 @@ pub struct SchedulerConfig {
     pub max_in_flight_jobs: usize,
     #[serde(default = "default_runtime_max_attempts")]
     pub runtime_max_attempts: usize,
+    #[serde(default = "default_result_delivery_acknowledgement_timeout_seconds")]
+    pub result_delivery_acknowledgement_timeout_seconds: u64,
+    #[serde(default = "default_result_delivery_retry_delay_seconds")]
+    pub result_delivery_retry_delay_seconds: u64,
+    #[serde(default = "default_result_delivery_max_attempts")]
+    pub result_delivery_max_attempts: usize,
+    #[serde(default = "default_result_delivery_max_concurrent_deliveries")]
+    pub result_delivery_max_concurrent_deliveries: usize,
 }
 
 fn default_poll_interval_seconds() -> u64 {
@@ -58,6 +64,22 @@ fn default_runtime_max_attempts() -> usize {
     3
 }
 
+fn default_result_delivery_acknowledgement_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_result_delivery_retry_delay_seconds() -> u64 {
+    30
+}
+
+fn default_result_delivery_max_attempts() -> usize {
+    10
+}
+
+fn default_result_delivery_max_concurrent_deliveries() -> usize {
+    16
+}
+
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
@@ -65,51 +87,18 @@ impl Default for SchedulerConfig {
             idle_shutdown_seconds: default_idle_shutdown_seconds(),
             max_in_flight_jobs: default_max_in_flight_jobs(),
             runtime_max_attempts: default_runtime_max_attempts(),
+            result_delivery_acknowledgement_timeout_seconds:
+                default_result_delivery_acknowledgement_timeout_seconds(),
+            result_delivery_retry_delay_seconds: default_result_delivery_retry_delay_seconds(),
+            result_delivery_max_attempts: default_result_delivery_max_attempts(),
+            result_delivery_max_concurrent_deliveries:
+                default_result_delivery_max_concurrent_deliveries(),
         }
     }
 }
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from("/data")
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CallbackConfig {
-    #[serde(default = "default_callback_timeout_seconds")]
-    pub request_timeout_seconds: u64,
-    #[serde(default = "default_callback_retry_delay_seconds")]
-    pub retry_delay_seconds: u64,
-    #[serde(default = "default_callback_max_attempts")]
-    pub max_attempts: usize,
-    #[serde(default = "default_callback_max_concurrent_deliveries")]
-    pub max_concurrent_deliveries: usize,
-    #[serde(default)]
-    pub key: String,
-}
-
-fn default_callback_timeout_seconds() -> u64 {
-    30
-}
-fn default_callback_retry_delay_seconds() -> u64 {
-    30
-}
-fn default_callback_max_attempts() -> usize {
-    10
-}
-fn default_callback_max_concurrent_deliveries() -> usize {
-    16
-}
-
-impl Default for CallbackConfig {
-    fn default() -> Self {
-        Self {
-            request_timeout_seconds: default_callback_timeout_seconds(),
-            retry_delay_seconds: default_callback_retry_delay_seconds(),
-            max_attempts: default_callback_max_attempts(),
-            max_concurrent_deliveries: default_callback_max_concurrent_deliveries(),
-            key: String::new(),
-        }
-    }
 }
 
 fn default_host() -> String {
@@ -127,14 +116,17 @@ impl Default for ServerConfig {
             port: default_port(),
             api_key: String::new(),
             data_dir: default_data_dir(),
-            scheduler: SchedulerConfig::default(),
         }
     }
 }
 
 impl ServerConfig {
+    pub fn llm_dir(&self) -> PathBuf {
+        self.data_dir.join("llm")
+    }
+
     pub fn queue_dir(&self) -> PathBuf {
-        self.data_dir.join("queue")
+        self.llm_dir().join("queue")
     }
 
     pub fn processing_dir(&self) -> PathBuf {
@@ -142,7 +134,7 @@ impl ServerConfig {
     }
 
     pub fn cache_dir(&self) -> PathBuf {
-        self.data_dir.join("cache")
+        self.llm_dir().join("cache")
     }
 }
 
@@ -209,24 +201,31 @@ impl Config {
                 "server.data_dir must not be empty".to_string(),
             ));
         }
-        if self.server.scheduler.poll_interval_seconds == 0
-            || self.server.scheduler.idle_shutdown_seconds == 0
-            || self.server.scheduler.max_in_flight_jobs == 0
-            || self.server.scheduler.runtime_max_attempts == 0
+        if self.server.api_key.trim().is_empty() {
+            return Err(ServiceError::Configuration(
+                "server.api_key must not be empty".to_string(),
+            ));
+        }
+        if self.scheduler.poll_interval_seconds == 0
+            || self.scheduler.idle_shutdown_seconds == 0
+            || self.scheduler.max_in_flight_jobs == 0
+            || self.scheduler.runtime_max_attempts == 0
         {
             return Err(ServiceError::Configuration(
                 "scheduler poll interval, idle shutdown timeout, max in-flight jobs, and runtime attempts must be positive"
                     .to_string(),
             ));
         }
-        if self.callback.request_timeout_seconds == 0
-            || self.callback.retry_delay_seconds == 0
-            || self.callback.max_attempts == 0
-            || self.callback.max_concurrent_deliveries == 0
+        if self
+            .scheduler
+            .result_delivery_acknowledgement_timeout_seconds
+            == 0
+            || self.scheduler.result_delivery_retry_delay_seconds == 0
+            || self.scheduler.result_delivery_max_attempts == 0
+            || self.scheduler.result_delivery_max_concurrent_deliveries == 0
         {
             return Err(ServiceError::Configuration(
-                "callback timeout, retry delay, attempts, and concurrency must be positive"
-                    .to_string(),
+                "result delivery acknowledgement timeout, retry delay, attempts, and concurrency must be positive".to_string(),
             ));
         }
         if self.service.is_empty() {
@@ -358,8 +357,11 @@ mod tests {
 
     fn local_config() -> Config {
         Config {
-            server: ServerConfig::default(),
-            callback: CallbackConfig::default(),
+            server: ServerConfig {
+                api_key: "test-key".to_string(),
+                ..ServerConfig::default()
+            },
+            scheduler: SchedulerConfig::default(),
             service: vec![service("ocr")],
         }
     }

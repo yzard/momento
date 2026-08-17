@@ -52,17 +52,18 @@ import
   -> metadata job
   -> task-ready inputs in Momento previews + media_ai_inputs descriptors
   -> durable Momento llm_jobs row
-  -> manifest-first multipart submission
+  -> authenticated client-aware WebSocket submission
   -> durable llm-service disk queue
   -> one task runtime performs inference
-  -> authenticated callback
+  -> result returned on the originating client's WebSocket
   -> transactional Momento result persistence + terminal job state
+  -> result acknowledgement
   -> optional separately scheduled downstream work
 ```
 
 No stage runs its downstream stage inline. Import only creates metadata work; metadata prepares
 inputs; an AI trigger creates inference jobs; the Momento submission worker sends them;
-llm-service performs inference; the callback persists results. Type-specific work after inference,
+llm-service performs inference; the WebSocket result handler persists results. Type-specific work after inference,
 such as deduplication cluster generation, is another scheduled stage.
 
 Local and WebDAV imports use the same `finalize_staged_original` implementation. A source is
@@ -83,17 +84,19 @@ The primary implementation points are:
 
 - `src/backend/processor/metadata/generation.rs`: prepare task inputs.
 - `src/backend/processor/metadata_worker.rs`: verify required inputs before metadata completes.
-- `src/backend/processor/ai/mod.rs`: create/claim jobs, verify bytes, and submit requests.
-- `src/backend/routes/internal/llm.rs`: authenticate, validate, and persist callbacks.
-- `src/backend_llm/routes.rs`: authenticate and stream multipart admission.
-- `src/backend_llm/scheduler.rs`: durable queue, batching, callbacks, retries, and recovery.
+- `src/backend/processor/ai/mod.rs`: create/claim jobs and verify prepared bytes.
+- `src/backend/processor/ai/transport.rs`: connect, stream jobs, cancel, and receive results.
+- `src/backend/processor/ai/result.rs`: validate and transactionally persist results.
+- `src/backend_llm/routes.rs`: authenticate clients and stream WebSocket admission.
+- `src/backend_llm/transport.rs`: active-client registry and result acknowledgements.
+- `src/backend_llm/scheduler.rs`: durable queue, batching, result retries, and recovery.
 - `src/backend_llm/provider.rs`: task registry, local runtime lifecycle, and inference dispatch.
 
 New source and test paths must follow the repository's resource hierarchy and test-mirroring
 convention; existing flat route, query, and frontend API modules are layout debt, not templates to
 copy. All AI control and status endpoints require an administrator. User-facing duplicate-group
 and face-group browsing uses normal authenticated access and filters through `media_access`.
-Internal LLM callbacks use the configured callback key rather than a user JWT.
+The LLM WebSocket uses the configured client ID and shared API key rather than a user JWT.
 
 Metadata jobs use `queued`, `processing`, `completed`, and `failed` states. Workers atomically
 claim rows, reclaim expired processing leases, retry through `available_at`, and verify every
@@ -114,28 +117,32 @@ job; they are never submitted. The request is self-contained because llm-service
 raw prepared bytes rather than Momento file paths.
 
 Multi-input jobs preserve every descriptor's `sequence` and optional `frameTimestampMs` through
-the queue, provider response, callback, and input-level persistence. Concurrency is across jobs;
+the queue, provider response, result message, and input-level persistence. Concurrency is across jobs;
 inputs within one job are currently inferred sequentially in descriptor order. A new type must
 define explicit aggregation and persistence semantics for all inputs rather than silently using
 only the first result.
 
 ### Submission wire contract
 
-Momento sends:
+Momento opens:
 
 ```text
-POST <llm-service>/api/v1/jobs/submit
+GET ws[s]://<llm-service>/api/v1/llm/connect
 x-api-key: <configured API key>
-Content-Type: multipart/form-data
-
-part 1: manifest                 application/json
-part 2+: input-<sequence>        raw prepared bytes
+x-momento-client-id: <configured client ID>
+Sec-WebSocket-Protocol: momento-llm-v1
 ```
 
-The manifest is camel-case JSON with:
+The API key is shared by every allowed Momento client. Client IDs contain only letters, numbers,
+hyphens, and underscores. llm-service keeps active client IDs only in memory: different IDs may be
+connected concurrently, but a second live connection using the same ID is rejected. The ID is
+stored in each durable job manifest so a disconnected client can reconnect and receive its own
+pending results.
+
+Submission control messages are camel-case tagged JSON. Momento sends `submissionStart` with:
 
 ```text
-jobId, mediaId, task, attempt, callbackUrl, inputs[]
+jobId, mediaId, task, attempt, inputs[]
 ```
 
 Each input descriptor contains:
@@ -144,11 +151,19 @@ Each input descriptor contains:
 sequence, filename, mimeType, byteSize, contentHash, inputKind, frameTimestampMs
 ```
 
-The `manifest` part must appear before every `input-N` part. A non-empty hexadecimal `jobId`, a
-known task, a non-empty callback URL, and at least one input are required. Every declared input
-must be present, non-empty, and exactly match its descriptor's byte size and SHA-256 hash. The
-current admission contract accepts image MIME types; supporting audio, text, or another payload
-requires deliberately extending the shared descriptor and admission abstractions.
+llm-service returns `submissionReady` before bytes are sent. Momento then streams bounded binary
+frames containing the job ID, input sequence, and at most 64 KiB of raw prepared bytes. Each input
+ends with `inputFinished`; the job ends with `submissionFinished`. A non-empty hexadecimal `jobId`,
+a known task, and at least one input are required. Every declared input must be present, non-empty,
+and exactly match its descriptor's byte size and SHA-256 hash. The current admission contract
+accepts image MIME types; supporting another payload requires deliberately extending the shared
+descriptor and admission abstractions.
+
+`submissionAcknowledged` is sent only after llm-service has synced the staged files and atomically
+renamed the directory into `queuing`. Duplicate IDs owned by the same client are acknowledged
+idempotently; an ID already owned by another client is rejected. Rejections explicitly state
+whether they are retryable. A lost connection before an acknowledgement requeues the Momento job
+without changing its correlation attempt, allowing the same durable admission to be replayed.
 
 Momento job states follow:
 
@@ -158,10 +173,10 @@ queued -> submitting -> submitted -> completed | failed
 queued | submitting | submitted -> cancelled
 ```
 
-Momento retries network errors and llm-service `5xx` responses, but treats other non-`2xx`
-responses as permanent submission failures. A successful `2xx` means only that llm-service has
-durably admitted the job, not that inference has completed. The callback must return the same
-`jobId`, `mediaId`, `task`, and exact submitted `attempt`.
+Momento retries transport and retryable admission errors but treats permanent rejections as
+submission failures. An acknowledgement means only that llm-service has durably admitted the job,
+not that inference has completed. The result must return the same `jobId`, `mediaId`, `task`, and
+exact submitted `attempt`.
 
 The Momento submission worker keeps a global `max_in_flight` rolling window. It claims and streams
 a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
@@ -175,19 +190,22 @@ existing queued jobs; it does not create task jobs. Submission reads the immutab
 Cancellation commits the Momento terminal state, an all-task or task-specific
 `llm_cancellation_scopes` outbox row, and matching exact `llm_job_cancellations` rows in one
 transaction. Momento immediately attempts and durably retries authenticated
-`POST /api/v1/ai/cancel` requests containing that scope and the exact job IDs. llm-service scans
+`cancelJobs` WebSocket messages containing that scope and the exact job IDs. llm-service scopes
+every cancellation to the authenticated client, scans
 `.tmp`, `queuing`, `processing`, `callback_pending`, and `failed` for every matching task and writes
 job markers before deleting non-running data. A matching job already in `processing` finishes its
 local inference, then llm-service discards its result and queue directory without delivering a
-callback. Exact-ID markers prevent an admission that was already in flight from recreating
-cancelled work.
+result. Exact-ID markers prevent an admission that was already in flight from recreating
+cancelled work. Cancellation acknowledgements remove the matching Momento outbox rows; a
+disconnect or rejection leaves them for retry.
 
 ### Durable llm-service queue
 
 Admission streams files into `.tmp/<job-id>/`, validates all descriptors and bytes, syncs the
 staged data, and atomically renames the directory into `queuing/<job-id>/`. llm-service stores
-the submitted bytes unchanged. Duplicate job IDs in any durable state are acknowledged
-idempotently and are not enqueued twice.
+the submitted bytes unchanged. Each manifest records the authenticated client ID. Duplicate job
+IDs owned by that client are acknowledged idempotently and are not enqueued twice; cross-client
+collisions are rejected.
 
 Admission computes byte counts and SHA-256 incrementally while writing and rejects a field before
 writing beyond its declared size. It never rereads a complete input into memory. Abandoned staging
@@ -195,12 +213,12 @@ directories are removed when admission fails. Queue job count has no configured 
 manifest and input is bounded; deployments must monitor free space because an unbounded disk queue
 is not protection against an exhausted filesystem.
 
-Cancellation markers are stored as zero-byte files in `cancelled/`. They contain no media or model
-result data and remain durable so delayed or retried submissions with the same globally unique job
-ID cannot recreate cancelled work.
+Cancellation markers are stored as client-scoped zero-byte files in `cancelled/`. They contain no
+media or model result data and remain durable so delayed or retried submissions from that client
+cannot recreate cancelled work.
 
 ```text
-.tmp -> queuing -> processing -> deleted after a successful callback
+.tmp -> queuing -> processing -> deleted after a successful result acknowledgement
                             \-> callback_pending -> deleted after a successful retry
                                                  \-> failed after retry exhaustion
                   processing -> failed for terminal local queue/processing failure
@@ -208,13 +226,13 @@ ID cannot recreate cancelled work.
 
 Each job directory contains `manifest.json` and `input-N` files. Inference adds `result.json`;
 callback retry state adds `callback.json`; terminal queue failures add `failure.json`. There is
-no `completed/` directory and no configurable queue-size limit. A successful callback is the
-acknowledgement that permits deletion of all llm-service job data.
+no `completed/` directory and no configurable queue-size limit. A matching WebSocket result
+acknowledgement permits deletion of all llm-service job data.
 
 Startup recovery removes incomplete `.tmp` admissions, moves interrupted `processing` jobs back
 to `queuing`, keeps `callback_pending` jobs that already have `result.json`, and requeues callback
 jobs that do not have a durable result. Therefore interrupted inference may run again, while a
-completed inference awaiting callback is delivered again without rerunning the model.
+completed inference awaiting acknowledgement is delivered again without rerunning the model.
 
 ### Multiple-request scheduling
 
@@ -225,10 +243,10 @@ download. llm-service itself may run on a different machine from Momento, but it
 inference to a remote model provider.
 For each scheduler cycle:
 
-1. A separate callback loop delivers durable `callback_pending` results through a rolling
-   `max_concurrent_deliveries` window. Never-attempted results take priority over retries, each
-   completed delivery immediately refills its slot, and callback work never gates model inference
-   or reruns completed inference.
+1. A separate result-delivery loop sends durable `callback_pending` results through a rolling
+   `result_delivery_max_concurrent_deliveries` window. Never-attempted results take priority over
+   retries, each completed delivery immediately refills its slot, and result delivery never gates
+   model inference or reruns completed inference.
 2. Read valid queued manifests and sort them by job ID.
 3. If the currently active task still has queued work, select that task to keep its runtime warm.
 4. Otherwise select the task belonging to the first sorted queued job.
@@ -248,31 +266,32 @@ For each scheduler cycle:
 This warm-task preference drains one task through a rolling window before switching when that task
 continues to have work. Switching task type shuts down the old runtime before starting and
 readiness-checking the new one. A runtime is also shut down when no inference job is claimed for
-`idle_shutdown_seconds`; callback delivery does not require or keep a model runtime active.
+`idle_shutdown_seconds`; result delivery does not require or keep a model runtime active.
 Each runtime is started in its own process group. Switching or idle shutdown sends the whole group
 `SIGTERM`, waits for the bounded shutdown timeout, and escalates to `SIGKILL` so vLLM workers do
 not survive their parent process.
 
 One failed job does not prevent other in-flight jobs from finishing. Provider or runtime inference
-errors become durable failed callback payloads. Loss of the local runtime transport is retried from
-the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Callback
-delivery uses its own timeout, fixed retry delay, and maximum-attempt policy. Any callback `2xx`
-deletes the queue directory; failure moves or keeps it in `callback_pending`, and retry exhaustion
-moves it to `failed`.
+errors become durable failed result payloads. Loss of the local runtime transport is retried from
+the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Result
+delivery uses its acknowledgement timeout, fixed retry delay, and maximum-attempt policy. A result
+acknowledgement deletes the queue directory; rejection, timeout, or disconnect moves or keeps it in
+`callback_pending`, and retry exhaustion moves it to `failed`.
 
-### Callback contract
+### Result contract
 
-llm-service posts `result.json` to the manifest's callback URL with
-`x-momento-callback-key`. A completed payload contains matching correlation fields,
+llm-service sends `result.json` on the active WebSocket matching the manifest's client ID. A
+completed payload contains matching correlation fields,
 `status = completed`, model type/version, a top-level result derived from the first input, and
 ordered `inputResults` carrying each original sequence and frame timestamp. A failed payload
 contains `status = failed` and an error.
 
-Momento validates the callback key and correlation fields inside an immediate SQLite transaction.
-Only a matching `submitted` job may transition to `completed` or `failed`. Result persistence and
-the terminal state transition commit atomically. Matching callbacks for an already terminal job
-are acknowledged idempotently; late callbacks for cancelled jobs are acknowledged without
-persisting results.
+Momento validates correlation fields inside an immediate SQLite transaction. Only a matching
+`submitted` job may transition to `completed` or `failed`. Result persistence and the terminal
+state transition commit atomically. Matching results for an already terminal job are acknowledged
+idempotently; late results for cancelled jobs are acknowledged without persisting results. Momento
+sends `resultAcknowledged` only after this transaction commits; validation or persistence errors
+send `resultRejected` so llm-service retains and retries the durable result.
 
 Persistence is deliberately type-specific. OCR and tagging store present text results in
 input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
@@ -284,7 +303,7 @@ requirement for explicit validation, storage, clean/reset behavior, and optional
 scheduling for each inference type.
 
 Deduplication start and scheduled execution create a durable run plus image-clustering jobs and
-return without running inference inline. Clustering callbacks only persist similarity data;
+return without running inference inline. Clustering results only persist similarity data;
 `finalize_ready_runs` separately creates duplicate groups after the run's jobs are terminal.
 Cancellation prevents further creation and finalization. Startup marks interrupted runs failed and
 schedules replacement work rather than resuming the same run record.
@@ -302,17 +321,17 @@ type-specific queue/scheduler.
    active-job uniqueness, status, cancellation, reset, clean, retry, and any run relationship.
 3. Add administrator trigger/status API behavior and matching frontend API/UI behavior where the
    task is user-controllable.
-4. Reuse the shared Momento `llm_jobs` submission worker and manifest-first multipart protocol.
+4. Reuse the shared Momento `llm_jobs` submission worker and manifest-first WebSocket protocol.
 5. Register the task in llm-service `ServiceType`, configuration validation, `ActiveService`,
    provider dispatch, and local runtime activation/readiness/liveness/shutdown.
 6. Keep scheduler dispatch batches homogeneous, enforce `max_concurrent_jobs` only inside the
    local model subservice, and preserve ordered per-input correlation in provider responses.
-7. Extend the callback DTO only for required result fields, then add strict type-specific result
+7. Extend the result DTO only for required fields, then add strict type-specific result
    validation and transactional persistence in Momento.
-8. Define failure, cancellation, restart recovery, duplicate callback, multi-input aggregation,
+8. Define failure, cancellation, restart recovery, duplicate result, multi-input aggregation,
    clean/reset, and optional downstream-stage semantics explicitly.
-9. Add mirrored tests for preparation and eligibility, multipart admission and raw-byte
-   preservation, runtime reuse/switching, configured concurrency, result validation, callback
+9. Add mirrored tests for preparation and eligibility, WebSocket admission and raw-byte
+   preservation, runtime reuse/switching, configured concurrency, result validation, result
    retries/idempotency, persistence, cancellation, and recovery.
 
 Metadata generation lives in `processor/metadata/`; `processor/regenerator.rs` does not exist.
@@ -338,17 +357,18 @@ static_dir = "/app/static"  # built frontend served as a fallback
 config; everything else reads `constants::paths()`. Never hardcode a path under the data
 directory and never add a new `std::env::var` call — add a config field instead.
 
-Log paths are not configurable. Each service writes plain daily rotated files below its own
-`server.data_dir/logs/` directory (`momento-api.YYYY-MM-DD.log` or
-`llm-service.YYYY-MM-DD.log`). File logs never contain ANSI escapes. Console logs keep the
-timestamp dim regardless of severity, then color the level, application/process prefix, message,
-and structured fields as one span: DEBUG/INFO white, WARN yellow, and ERROR/fatal paths red.
+Log paths are not configurable. Each service writes plain daily rotated files below
+`server.data_dir/logs/` (`momento-api.YYYY-MM-DD.log` or `llm-service.YYYY-MM-DD.log`). Log events
+contain the timestamp, level, message, and structured fields; they do not repeat the service name
+or process ID. File logs never contain ANSI escapes. Console logs keep the timestamp dim regardless
+of severity, then color the level, message, and structured fields as one span: DEBUG/INFO white,
+WARN yellow, and ERROR/fatal paths red.
 
 llm-service configures only `server.data_dir`; its durable queue and runtime cache are fixed at
-`server.data_dir/queue/` and `server.data_dir/cache/`. This data directory must be durable and
-must not be a Momento originals, previews, or thumbnail directory. Queue jobs are accepted only
-with a non-empty hexadecimal Momento job ID and a manifest that appears before all `input-N`
-multipart fields.
+`server.data_dir/llm/queue/` and `server.data_dir/llm/cache/`, while its logs remain in
+`server.data_dir/logs/`. The `llm/` subtree must be durable and must not expose Momento originals,
+previews, or thumbnails to llm-service. Queue jobs are accepted only with a non-empty hexadecimal
+Momento job ID and a manifest sent before its binary input frames.
 
 Runtime executables, scripts, model paths, model versions, loopback URLs, CUDA device selection,
 and embedding dimensions are owned by `RuntimeCatalog` and the llm-service image, not TOML.
@@ -356,9 +376,12 @@ Service configuration retains only enablement, startup/request timeouts, model c
 token limits, and task-specific thresholds. Local runtime requests contain job/input descriptors,
 never media bytes or caller-supplied paths.
 
-`llm.service_url` is resolved by Momento and `llm.callback_url` is resolved by llm-service; neither
-may be inferred from a bind address. Deployments persist Momento data and the llm-service queue
-independently and never share Momento originals, previews, or thumbnails with llm-service.
+`llm.service_url` is a complete `ws://` or `wss://` URL resolved by Momento; `0.0.0.0` is only a
+server bind address and is never a client destination. llm-service has no Momento address. Its
+top-level `[scheduler]` section owns inference settings and every result-delivery setting, with
+result-delivery fields prefixed by `result_delivery_`. Deployments persist Momento data and the
+llm-service queue independently and never share Momento originals, previews, or thumbnails with
+llm-service.
 
 ### Face detection and grouping
 
@@ -432,12 +455,13 @@ model weights. Docker layer caching avoids repeating package/model downloads whe
 not change.
 
 The script passes the invoking UID/GID, mounts `playground/` as Momento data, mounts
-`playground/llm/` as the independent llm-service data/queue directory, and tears down both
-containers on exit. It never mounts the Docker socket. Runtime model processes are spawned inside
-the llm-service container, so inference never creates additional containers.
+`playground/llm/` at the llm-service's `/data/llm/` state directory, and mounts
+`playground/logs/` at its `/data/logs/` directory. It tears down both containers on exit and never
+mounts the Docker socket. Runtime model processes are spawned inside the llm-service container, so
+inference never creates additional containers.
 
-`playground/logs/` holds Momento's daily runtime logs, while `playground/llm/logs/` holds
-llm-service's daily runtime logs. Build artifacts do not belong in either directory.
+`playground/logs/` holds both services' daily runtime logs. llm-service queue and runtime cache
+data remain below `playground/llm/`. Build artifacts do not belong in either directory.
 
 ### Backend (src/backend)
 ```bash
@@ -584,7 +608,6 @@ src/
 │   ├── routes/             # Public and internal Axum route handlers
 │   │   ├── ai/             # AI control/status endpoints
 │   │   ├── import/         # Local/WebDAV import endpoints
-│   │   └── internal/llm/   # Callback-key authenticated LLM callback
 │   ├── utils/              # Helpers (datetime, geocoding)
 │   ├── webdav/             # WebDAV server and upload processing
 │   ├── app.rs              # App factory
@@ -672,7 +695,7 @@ one means moving or deleting the other. A directory present in `src/` but missin
 - Bearer token in `Authorization` header
 - Token refresh via `/api/v1/user/refresh`
 - Basic auth only for initial login (`/api/v1/user/authenticate`)
-- `/api/v1/internal/llm/callback` is the exception: it uses `x-momento-callback-key`, never a JWT.
+- The outbound llm-service WebSocket uses `x-momento-client-id` and `x-api-key`, never a user JWT.
 
 **Request/Response**:
 - All bodies are JSON

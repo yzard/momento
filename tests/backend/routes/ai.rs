@@ -148,7 +148,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.face_detection_enabled = true;
-    let app = create_app(Arc::new(config), pool.clone());
+    let app = create_app(Arc::new(config), pool.clone(), Default::default());
     let user_id = create_test_user(&pool, "face-ai-admin", "face-ai-admin@example.com");
     let media_id = create_test_media(&pool, "face-ai.jpg");
     let connection = pool.get().expect("connection");

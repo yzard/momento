@@ -297,6 +297,31 @@ fn test_load_config_requires_llm_service_url() {
 }
 
 #[test]
+fn test_load_config_requires_websocket_client_identity_and_key() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[llm]\nenabled = true\nservice_url = \"http://127.0.0.1:8100\"\nclient_id = \"client_a\"\napi_key = \"key\"\n",
+    );
+    let error = load_config(&path).expect_err("HTTP LLM URL must be rejected");
+    assert!(error.to_string().contains("ws:// or wss://"));
+
+    let path = write_config(
+        &dir,
+        "[llm]\nenabled = true\nservice_url = \"ws://127.0.0.1:8100/api/v1/llm/connect\"\napi_key = \"key\"\n",
+    );
+    let error = load_config(&path).expect_err("LLM client ID must be required");
+    assert!(error.to_string().contains("client_id"));
+
+    let path = write_config(
+        &dir,
+        "[llm]\nenabled = true\nservice_url = \"ws://127.0.0.1:8100/api/v1/llm/connect\"\nclient_id = \"client_a\"\n",
+    );
+    let error = load_config(&path).expect_err("LLM API key must be required");
+    assert!(error.to_string().contains("api_key"));
+}
+
+#[test]
 fn test_load_config_rejects_configurable_security_algorithm() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(&dir, "[security]\nalgorithm = \"HS512\"\n");

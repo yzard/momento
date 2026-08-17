@@ -33,7 +33,7 @@ parser.add_argument('--cache-dir', required=True)
 parser.add_argument('--minimum-face-likelihood', type=float)
 parser.add_argument('--minimum-face-resolution-pixels', type=int)
 arguments = parser.parse_args()
-expected_cache_dir = os.path.join(os.path.dirname(arguments.start_log), 'cache')
+expected_cache_dir = os.path.join(os.path.dirname(arguments.start_log), 'llm', 'cache')
 if arguments.cache_dir != expected_cache_dir:
     raise RuntimeError('invalid runtime cache directory')
 if os.environ.get('XDG_CACHE_HOME') != expected_cache_dir:
@@ -295,7 +295,7 @@ pub(super) fn manager(services: Vec<(ServiceConfig, RuntimeSpec)>) -> ServiceMan
         .parent()
         .expect("fixture script parent")
         .to_path_buf();
-    fs::create_dir_all(fixture_root.join("queue/processing")).expect("test processing queue");
+    fs::create_dir_all(fixture_root.join("llm/queue/processing")).expect("test processing queue");
     let (services, runtimes): (Vec<_>, Vec<_>) = services.into_iter().unzip();
     ServiceManager::with_runtime_catalog(
         Arc::new(Config {
@@ -303,7 +303,7 @@ pub(super) fn manager(services: Vec<(ServiceConfig, RuntimeSpec)>) -> ServiceMan
                 data_dir: fixture_root,
                 ..ServerConfig::default()
             },
-            callback: Default::default(),
+            scheduler: Default::default(),
             service: services,
         }),
         RuntimeCatalog::new(runtimes),

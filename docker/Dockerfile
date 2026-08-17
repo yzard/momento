@@ -22,6 +22,11 @@ RUN CARGO_TARGET_DIR=/app/build/backend/target cargo build --release --manifest-
 
 FROM alpine:latest
 
+ARG SOURCE_REPOSITORY=https://github.com/yzard/momento
+
+LABEL org.opencontainers.image.source="${SOURCE_REPOSITORY}" \
+      org.opencontainers.image.description="Momento self-hosted photo management service"
+
 WORKDIR /app
 
 RUN apk add --no-cache \

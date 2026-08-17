@@ -8,6 +8,7 @@ use llm_service::config::Config;
 use llm_service::provider::ServiceManager;
 use llm_service::routes::{serve, AppState};
 use llm_service::scheduler::Scheduler;
+use llm_service::transport::ConnectionRegistry;
 
 fn config_path() -> Result<PathBuf, String> {
     let mut args = std::env::args().skip(1);
@@ -67,12 +68,13 @@ async fn main() {
     let manager = Arc::new(tokio::sync::Mutex::new(ServiceManager::new(Arc::clone(
         &config,
     ))));
+    let connections = Arc::new(ConnectionRegistry::default());
     let scheduler = Arc::new(
         Scheduler::new(
             config.server.queue_dir(),
-            config.server.scheduler.clone(),
-            config.callback.clone(),
+            config.scheduler.clone(),
             Arc::clone(&manager),
+            connections.clone(),
         )
         .expect("Failed to initialize LLM disk queue"),
     );
@@ -81,6 +83,7 @@ async fn main() {
         config,
         manager,
         scheduler,
+        connections,
     };
     if let Err(error) = serve(listener, state).await {
         tracing::error!("LLM service failed: {error}");
