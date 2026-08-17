@@ -23,6 +23,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub pool: DbPool,
     pub llm_transport: crate::processor::ai::transport::TransportHandle,
+    pub webdav_request_gate: crate::webdav::WebDAVRequestGate,
 }
 
 #[derive(Deserialize)]

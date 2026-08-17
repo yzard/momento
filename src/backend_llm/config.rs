@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use momento_common::config_file::write_new_config;
+
 use crate::error::ServiceError;
+
+pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("default.toml");
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -168,6 +172,12 @@ fn default_max_tokens() -> u32 {
 }
 
 impl Config {
+    pub fn save_default(path: &Path) -> Result<(), ServiceError> {
+        write_new_config(path, DEFAULT_CONFIG_TEMPLATE).map_err(|error| {
+            ServiceError::Configuration(format!("failed to write {}: {error}", path.display()))
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Self, ServiceError> {
         let content = std::fs::read_to_string(path).map_err(|error| {
             ServiceError::Configuration(format!("failed to read {}: {error}", path.display()))

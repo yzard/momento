@@ -381,6 +381,7 @@ async fn import_flattens_originals_and_moves_supplemental_metadata() {
         momento_api::processor::import::ImportSource::Local,
         user_id,
         &pool,
+        false,
     )
     .await
     .expect("import");

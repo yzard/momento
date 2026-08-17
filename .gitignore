@@ -75,6 +75,7 @@ pnpm-debug.log*
 /playground/database.sqlite
 /playground/database.sqlite-*
 /playground/imports/
+/playground/llm/
 /playground/originals/
 /playground/previews/
 /playground/thumbnails/

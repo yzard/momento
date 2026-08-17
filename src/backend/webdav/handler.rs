@@ -1,22 +1,66 @@
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     extract::Request,
-    http::{header, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::Response,
 };
 use dav_server::{fakels::FakeLs, localfs::LocalFs, DavHandler};
 use http_body_util::BodyExt;
+use percent_encoding::percent_decode_str;
 use std::path::Path;
+use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, error, info, trace};
 
-pub fn create_dav_handler(webdav_root: &Path) -> DavHandler {
+pub fn validate_upload_size(
+    method: &Method,
+    headers: &HeaderMap,
+    max_upload_bytes: u64,
+) -> Result<(), StatusCode> {
+    if !matches!(*method, Method::PUT | Method::PATCH) {
+        return Ok(());
+    }
+
+    let declared_size = headers
+        .get(header::CONTENT_LENGTH)
+        .or_else(|| headers.get("x-expected-entity-length"))
+        .ok_or(StatusCode::LENGTH_REQUIRED)?
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    if declared_size > max_upload_bytes {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(())
+}
+
+pub fn contains_reserved_path(path: &str) -> bool {
+    let Ok(decoded_path) = percent_decode_str(path).decode_utf8() else {
+        return true;
+    };
+    decoded_path
+        .split('/')
+        .any(|segment| segment == ".processing")
+}
+
+pub fn create_dav_handler(webdav_root: &Path, mount_path: &str) -> DavHandler {
     std::fs::create_dir_all(webdav_root).ok();
 
     DavHandler::builder()
+        .strip_prefix(mount_path)
         .filesystem(LocalFs::new(webdav_root, false, false, false))
         .locksystem(FakeLs::new())
         .autoindex(true)
         .build_handler()
+}
+
+pub fn guard_response_body(response: Response, request_permit: OwnedSemaphorePermit) -> Response {
+    let (parts, body) = response.into_parts();
+    let guarded_body = body.map_frame(move |frame| {
+        let _request_permit = &request_permit;
+        frame
+    });
+    Response::from_parts(parts, Body::new(guarded_body))
 }
 
 pub async fn handle_webdav_request(dav_handler: DavHandler, request: Request) -> Response {
@@ -70,21 +114,6 @@ pub async fn handle_webdav_request(dav_handler: DavHandler, request: Request) ->
         resp_parts.status = StatusCode::NO_CONTENT;
     }
 
-    let resp_bytes: Bytes = match BodyExt::collect(resp_body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => {
-            error!(
-                "WebDAV response body read failed: {} {} (status={}, error={})",
-                method, path, resp_parts.status, e
-            );
-            trace!("WebDAV response body read error details: {:?}", e);
-            return Response::builder()
-                .status(500)
-                .body(Body::from("Failed to read response body"))
-                .unwrap();
-        }
-    };
-
     if resp_parts.status.is_server_error() {
         error!(
             "WebDAV server error: {} {} -> {}",
@@ -102,5 +131,5 @@ pub async fn handle_webdav_request(dav_handler: DavHandler, request: Request) ->
         );
     }
 
-    Response::from_parts(resp_parts, Body::from(resp_bytes))
+    Response::from_parts(resp_parts, Body::new(resp_body))
 }

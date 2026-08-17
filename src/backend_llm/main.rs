@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use momento_common::config_cli::{parse_config_command, ConfigCommand};
 use momento_common::logging::init_logging;
 use tracing::info;
 
@@ -10,36 +10,31 @@ use llm_service::routes::{serve, AppState};
 use llm_service::scheduler::Scheduler;
 use llm_service::transport::ConnectionRegistry;
 
-fn config_path() -> Result<PathBuf, String> {
-    let mut args = std::env::args().skip(1);
-    let Some(arg) = args.next() else {
-        return Err("missing required argument: -c|--config PATH".to_string());
-    };
-    if arg == "-h" || arg == "--help" {
-        println!("Usage: llm-service -c|--config PATH");
-        std::process::exit(0);
-    }
-    if arg != "-c" && arg != "--config" {
-        return Err(format!("unknown argument: {arg}"));
-    }
-
-    let path = args
-        .next()
-        .ok_or_else(|| format!("{arg} requires a config path"))?;
-    if let Some(extra) = args.next() {
-        return Err(format!("unknown argument: {extra}"));
-    }
-    Ok(PathBuf::from(path))
-}
-
 #[tokio::main]
 async fn main() {
-    let path = match config_path() {
-        Ok(path) => path,
+    let command = match parse_config_command(std::env::args().skip(1)) {
+        Ok(command) => command,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
+    };
+    let path = match command {
+        ConfigCommand::Help => {
+            println!("Usage: llm-service -c|--config PATH [--init-config]");
+            return;
+        }
+        ConfigCommand::Initialize(path) => match Config::save_default(&path) {
+            Ok(()) => {
+                println!("Default configuration saved to {:?}", path);
+                return;
+            }
+            Err(error) => {
+                eprintln!("Failed to save default configuration: {error}");
+                std::process::exit(1);
+            }
+        },
+        ConfigCommand::Run(path) => path,
     };
     let config = match Config::load(&path) {
         Ok(config) => Arc::new(config),

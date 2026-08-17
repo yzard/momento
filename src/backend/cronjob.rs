@@ -6,11 +6,53 @@ use cron::Schedule;
 use tracing::{info, warn};
 
 use crate::config::{Config, CronjobConfig};
+use crate::constants::{IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::processor::deduplicator::{
     create_run, latest_run, log_schedule_start, queue_clustering_jobs,
 };
+use crate::processor::{ai, face_detection};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledTask {
+    Ocr,
+    ImageTagging,
+    Deduplicate,
+    FaceDetection,
+}
+
+impl ScheduledTask {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ocr => "ocr",
+            Self::ImageTagging => "image_tagging",
+            Self::Deduplicate => "deduplicate",
+            Self::FaceDetection => "face_detection",
+        }
+    }
+
+    fn cron_expression(self, config: &CronjobConfig) -> &str {
+        match self {
+            Self::Ocr => &config.ocr_cron,
+            Self::ImageTagging => &config.image_tagging_cron,
+            Self::Deduplicate => &config.deduplicate_cron,
+            Self::FaceDetection => &config.face_detection_cron,
+        }
+    }
+
+    fn is_enabled(self, config: &Config) -> bool {
+        if !config.llm.enabled {
+            return false;
+        }
+        match self {
+            Self::Ocr => true,
+            Self::ImageTagging => config.llm.image_tagging_enabled,
+            Self::Deduplicate => config.llm.deduplicate_enabled,
+            Self::FaceDetection => config.llm.face_detection_enabled,
+        }
+    }
+}
 
 pub fn next_scheduled_at(
     config: &CronjobConfig,
@@ -32,21 +74,83 @@ pub fn next_scheduled_at(
 }
 
 pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool) {
-    let mut cronjobs = Vec::new();
-    if config.llm.deduplicate_enabled {
-        let deduplicate_config = Arc::clone(&config);
-        let deduplicate_pool = pool.clone();
-        cronjobs.push(tokio::spawn(async move {
-            run_deduplicate_cronjob(deduplicate_config, deduplicate_pool).await;
-        }));
-    } else {
-        info!("Scheduled deduplicate scans are disabled");
+    let mut cronjobs = tokio::task::JoinSet::new();
+    for task in [
+        ScheduledTask::Ocr,
+        ScheduledTask::ImageTagging,
+        ScheduledTask::Deduplicate,
+        ScheduledTask::FaceDetection,
+    ] {
+        if !task.is_enabled(&config) {
+            info!(task = task.name(), "Scheduled AI task is disabled");
+            continue;
+        }
+        let task_config = Arc::clone(&config);
+        let task_pool = pool.clone();
+        cronjobs.spawn(async move {
+            if task == ScheduledTask::Deduplicate {
+                run_deduplicate_cronjob(task_config, task_pool).await;
+            } else {
+                run_task_cronjob(task_config, task_pool, task).await;
+            }
+        });
     }
 
-    for cronjob in cronjobs {
-        if let Err(error) = cronjob.await {
+    while let Some(cronjob) = cronjobs.join_next().await {
+        if let Err(error) = cronjob {
             warn!("Cronjob task stopped unexpectedly: {error}");
         }
+    }
+}
+
+async fn run_task_cronjob(config: Arc<Config>, pool: DbPool, task: ScheduledTask) {
+    loop {
+        let now = Utc::now();
+        let next = match next_scheduled_at(
+            &config.cronjob,
+            task.cron_expression(&config.cronjob),
+            task.name(),
+            now,
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                warn!(task = task.name(), "Schedule evaluation failed: {error}");
+                return;
+            }
+        };
+        let delay = (next - now)
+            .to_std()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(1));
+        tokio::time::sleep(delay).await;
+        match run_scheduled_occurrence(&config, &pool, task, &next.to_rfc3339()) {
+            Ok(queued) => info!(task = task.name(), queued, "Scheduled AI task queued"),
+            Err(error) => warn!(task = task.name(), "Scheduled AI task failed: {error}"),
+        }
+    }
+}
+
+pub fn run_scheduled_occurrence(
+    config: &Config,
+    pool: &DbPool,
+    task: ScheduledTask,
+    scheduled_for: &str,
+) -> AppResult<usize> {
+    if !task.is_enabled(config) {
+        return Ok(0);
+    }
+    match task {
+        ScheduledTask::Ocr => {
+            ai::queue_task(pool, OCR_MODEL_TYPE, true).map_err(AppError::Database)
+        }
+        ScheduledTask::ImageTagging => {
+            ai::queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, true).map_err(AppError::Database)
+        }
+        ScheduledTask::Deduplicate => match create_run(pool, "scheduled", Some(scheduled_for)) {
+            Ok(run_id) => queue_clustering_jobs(pool, run_id),
+            Err(AppError::Conflict(_)) => Ok(0),
+            Err(error) => Err(error),
+        },
+        ScheduledTask::FaceDetection => face_detection::start(pool, true),
     }
 }
 
@@ -75,16 +179,9 @@ async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool) {
         tokio::time::sleep(delay).await;
         let scheduled_for = next.to_rfc3339();
         log_schedule_start(&scheduled_for);
-        match create_run(&pool, "scheduled", Some(&scheduled_for)) {
-            Ok(run_id) => {
-                if let Err(error) = queue_clustering_jobs(&pool, run_id) {
-                    warn!("Could not queue scheduled deduplicate jobs: {error}");
-                }
-            }
-            Err(AppError::Conflict(_)) => {
-                info!("Deduplicate schedule skipped because a scan is already running")
-            }
-            Err(error) => warn!("Could not create scheduled deduplicate run: {}", error),
+        match run_scheduled_occurrence(&config, &pool, ScheduledTask::Deduplicate, &scheduled_for) {
+            Ok(queued) => info!(queued, "Scheduled deduplicate jobs queued"),
+            Err(error) => warn!("Could not queue scheduled deduplicate jobs: {error}"),
         }
     }
 }

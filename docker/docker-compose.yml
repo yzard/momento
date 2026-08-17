@@ -13,7 +13,7 @@ services:
     volumes:
       - ${LLM_DATA_DIR:-../playground/llm}:/data/llm
       - ${LOG_DIR:-../playground/logs}:/data/logs
-      - ${LLM_CONFIG_FILE:-../playground/config_llm.toml}:/config/config_llm.toml:ro
+      - ${LLM_CONFIG_FILE:-../playground/config_llm.toml}:/config/config_llm.toml
     expose:
       - "8100"
     gpus: all

@@ -37,7 +37,7 @@ export default function MetadataPanel() {
 
   return <div className="bg-card/30 rounded-xl border border-border/50 p-6 backdrop-blur-sm">
     <h3 className="text-lg font-medium mb-4 text-foreground">Metadata</h3>
-    <p className="text-muted-foreground mb-6 font-light">Generate metadata, thumbnails, and prepared AI inputs. OCR and image tagging submit automatically after metadata completes.</p>
+    <p className="text-muted-foreground mb-6 font-light">Generate metadata, thumbnails, and prepared AI inputs. AI jobs are queued by their administrator controls or configured schedules.</p>
     <div className="flex flex-col sm:flex-row gap-4">
       <button type="button" onClick={() => void runAction(metadataApi.generate)} disabled={isSubmitting} className="flex-1 px-6 py-4 bg-primary/5 border border-primary/20 text-primary font-bold text-sm uppercase tracking-wider rounded-lg flex items-center justify-center gap-3 transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50">
         {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Generate

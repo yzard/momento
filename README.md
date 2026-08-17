@@ -58,6 +58,77 @@ Momento detects faces and groups images containing similar people. Administrator
 
 **Spend Audit:** Planned functionality will use receipt OCR and analysis to help review spending from receipt photos.
 
+## Docker Compose
+
+Published images are available from Docker Hub:
+
+- [`zhuoyin/momento`](https://hub.docker.com/r/zhuoyin/momento)
+- [`zhuoyin/momento-llm-service`](https://hub.docker.com/r/zhuoyin/momento-llm-service)
+
+No data subdirectories or configuration files need to be created manually. Docker and the two
+container entrypoints create them on first startup, including `data/config.toml` and
+`data/llm-config/config_llm.toml`. The generated `[llm].api_key` and `[server].api_key` match.
+Replace that shared key, the security secret, and the administrator password in both generated
+files before exposing the service, then restart the containers.
+
+```yaml
+services:
+  llm-service:
+    image: zhuoyin/momento-llm-service:latest
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - ./data/llm:/data/llm
+      - ./data/logs:/data/logs
+      - ./data/llm-config:/config
+    expose:
+      - "8100"
+    gpus: all
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+  momento-api:
+    image: zhuoyin/momento:latest
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      llm-service:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+```
+
+Start the stack and open `http://localhost:8000`:
+
+```bash
+docker compose up -d
+```
+
+The llm-service image requires an NVIDIA GPU, a compatible host driver, and NVIDIA Container
+Toolkit. It is large because all model runtimes and weights are included for offline activation.
+The generated `[cronjob]` section contains independent schedules for OCR, image tagging,
+deduplication, and face detection. `deduplicate_cron` intentionally keeps its feature name because
+it starts the complete deduplication pipeline; `image_clustering` is only that pipeline's inference
+stage.
+
 ## Docker Playground
 
 The playground builds and starts exactly two containers: `momento-api` and `llm-service`.
@@ -89,6 +160,19 @@ playground configs share one API key and identify the Momento connection as `pla
 Production deployments must replace that key and persist Momento data and the llm-service queue
 independently.
 
+## PhotoSync WebDAV
+
+WebDAV is always available at `/webdav`. Configure PhotoSync with the complete server URL, such
+as `https://photos.example.com/webdav/`, and use an active Momento user's username and password
+with WebDAV/Basic authentication. Use HTTPS whenever the service is reachable outside a trusted
+local network.
+
+PhotoSync may create directories, upload to a hidden temporary filename, and rename the completed
+file into place. Momento supports that OPTIONS, PROPFIND, MKCOL, PUT, and MOVE sequence. Completed
+files are staged below `/data/webdav/<username>/`, imported for that user after the configured
+stability interval, and removed from the staging directory after a successful import. PUT and
+PATCH requests must declare their byte size and cannot exceed `webdav.max_upload_bytes`.
+
 ## Data
 
 The Momento data directory contains the SQLite database and media files:
@@ -97,13 +181,17 @@ The Momento data directory contains the SQLite database and media files:
 /data/
 ├── config.toml
 ├── database.sqlite
+├── albums/
 ├── originals/
 ├── thumbnails/
 ├── thumbnails_tiny/
 ├── previews/
 ├── imports/
 ├── webdav/
+├── trash/
 ├── logs/
+├── llm-config/
+│   └── config_llm.toml
 └── llm/
     ├── cache/
     └── queue/

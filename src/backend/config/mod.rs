@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use momento_common::config_file::write_new_config;
+
+pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("default.toml");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -114,8 +118,6 @@ impl Default for AdminConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebDAVConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_webdav_mount_path")]
     pub mount_path: String,
     #[serde(default = "default_webdav_realm")]
@@ -143,7 +145,6 @@ fn default_webdav_realm() -> String {
 impl Default for WebDAVConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             mount_path: default_webdav_mount_path(),
             realm: default_webdav_realm(),
             max_upload_bytes: default_max_upload_bytes(),
@@ -173,6 +174,40 @@ fn default_stable_file_age() -> u64 {
 
 fn default_max_concurrent_processing() -> usize {
     2
+}
+
+impl WebDAVConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.max_upload_bytes == 0 {
+            return Err(std::io::Error::other(
+                "webdav max_upload_bytes must be positive",
+            ));
+        }
+        if self.max_concurrent_requests == 0 || self.max_concurrent_requests > u32::MAX as usize {
+            return Err(std::io::Error::other(
+                "webdav max_concurrent_requests must be within 1..=u32::MAX",
+            ));
+        }
+        if self.poll_interval_seconds == 0 || self.max_concurrent_processing == 0 {
+            return Err(std::io::Error::other(
+                "webdav poll interval and max concurrent processing must be positive",
+            ));
+        }
+        let mount_segment = self.mount_path.strip_prefix('/').unwrap_or_default();
+        if mount_segment.is_empty()
+            || matches!(mount_segment, "." | "..")
+            || !self.mount_path.starts_with('/')
+            || self.mount_path.ends_with('/')
+            || !mount_segment
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-._~".contains(character))
+        {
+            return Err(std::io::Error::other(
+                "webdav mount_path must be one unreserved literal path segment beginning with '/'",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,15 +365,46 @@ pub struct LlmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CronjobConfig {
+    #[serde(default = "default_cronjob_timezone")]
     pub timezone: String,
+    #[serde(default = "default_ocr_cron")]
+    pub ocr_cron: String,
+    #[serde(default = "default_image_tagging_cron")]
+    pub image_tagging_cron: String,
+    #[serde(default = "default_deduplicate_cron")]
     pub deduplicate_cron: String,
+    #[serde(default = "default_face_detection_cron")]
+    pub face_detection_cron: String,
+}
+
+fn default_cronjob_timezone() -> String {
+    "Etc/UTC".to_string()
+}
+
+fn default_ocr_cron() -> String {
+    "0 1 * * *".to_string()
+}
+
+fn default_image_tagging_cron() -> String {
+    "0 2 * * *".to_string()
+}
+
+fn default_deduplicate_cron() -> String {
+    "0 3 * * *".to_string()
+}
+
+fn default_face_detection_cron() -> String {
+    "0 4 * * *".to_string()
 }
 
 impl Default for CronjobConfig {
     fn default() -> Self {
         Self {
-            timezone: "Etc/UTC".to_string(),
-            deduplicate_cron: "0 3 * * *".to_string(),
+            timezone: default_cronjob_timezone(),
+            ocr_cron: default_ocr_cron(),
+            image_tagging_cron: default_image_tagging_cron(),
+            deduplicate_cron: default_deduplicate_cron(),
+            face_detection_cron: default_face_detection_cron(),
         }
     }
 }
@@ -348,10 +414,17 @@ impl CronjobConfig {
         self.timezone
             .parse::<chrono_tz::Tz>()
             .map_err(|error| std::io::Error::other(format!("invalid cronjob timezone: {error}")))?;
-        let normalized_cron = format!("0 {} *", self.deduplicate_cron);
-        normalized_cron.parse::<cron::Schedule>().map_err(|error| {
-            std::io::Error::other(format!("invalid deduplicate cronjob: {error}"))
-        })?;
+        for (name, expression) in [
+            ("ocr", &self.ocr_cron),
+            ("image_tagging", &self.image_tagging_cron),
+            ("deduplicate", &self.deduplicate_cron),
+            ("face_detection", &self.face_detection_cron),
+        ] {
+            let normalized_cron = format!("0 {expression} *");
+            normalized_cron.parse::<cron::Schedule>().map_err(|error| {
+                std::io::Error::other(format!("invalid {name} cronjob: {error}"))
+            })?;
+        }
         Ok(())
     }
 }
@@ -490,6 +563,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     let config: Config = toml::from_str(&content).map_err(|e| {
         std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
     })?;
+    config.webdav.validate()?;
     config.llm.validate()?;
     config.llm_submission_worker.validate()?;
     config.cronjob.validate()?;
@@ -497,11 +571,5 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
 }
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let config = Config::default();
-    let toml = toml::to_string_pretty(&config).map_err(|e| std::io::Error::other(e.to_string()))?;
-    fs::write(config_path, toml)
+    write_new_config(config_path, DEFAULT_CONFIG_TEMPLATE)
 }

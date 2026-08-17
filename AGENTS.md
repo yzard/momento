@@ -308,6 +308,12 @@ return without running inference inline. Clustering results only persist similar
 Cancellation prevents further creation and finalization. Startup marks interrupted runs failed and
 schedules replacement work rather than resuming the same run record.
 
+Momento has independent five-field cron schedules for OCR, image tagging, deduplication, and face
+detection. They are evaluated in the configured IANA timezone and create work through the same
+durable processor operations as manual triggers. The field remains `deduplicate_cron`, not
+`image_clustering_cron`, because it starts the complete deduplication pipeline; image clustering is
+only its inference stage. Global LLM enablement and each task's feature flag gate scheduled work.
+
 ### Adding an inference type
 
 Every new inference type must use one exact snake-case task identifier and propagate through all
@@ -344,6 +350,12 @@ Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH` and read
 environment variables. A missing or malformed config is a hard startup failure — it never
 falls back to defaults, because that would silently start the server against the wrong
 data directory.
+
+Both binaries also support `--init-config`, which writes their source-owned commented operational
+template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
+`/data/config.toml` for Momento and `/config/config_llm.toml` for llm-service. The templates exactly
+match `playground/config.toml` and `playground/config_llm.toml`, including their shared example API
+key. Normal startup never generates or replaces a configuration file.
 
 Momento filesystem locations derive from `server.data_dir`:
 
@@ -422,10 +434,10 @@ groups in the frontend, and do not use raw face count in place of distinct acces
 `schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
 breaking schema changes require a fresh database for development and playground data.
 
-`docker/Dockerfile` and `docker/entrypoint.sh` are the one place environment variables
-belong (`PUID`/`PGID`/`UMASK`/`TZ`); they translate into the config file the entrypoint
-generates, and `CMD` passes `-c /data/config.toml`. `RUST_LOG` and `RUST_BACKTRACE` are
-ecosystem-standard runtime knobs read by `tracing-subscriber`, not application config.
+The Dockerfiles and entrypoints are the one place environment variables belong
+(`PUID`/`PGID`/`UMASK`/`TZ`); they prepare filesystem ownership and invoke each binary with its
+generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read
+by `tracing-subscriber`, not application config.
 
 ---
 
@@ -440,7 +452,7 @@ pnpm lint                 # Lint all packages
 pnpm test                 # Run all tests
 
 ./run_playground.sh       # Build and run the two-container playground stack
-./build_docker.sh         # Build and push both Docker images
+./build_docker.sh github yzard  # Build and push both Docker images to GHCR
 ```
 
 `run_playground.sh` and `build_docker.sh` are the only scripts at the git root. Both
@@ -499,7 +511,8 @@ All Docker files live in `docker/`; `build_docker.sh` at the git root drives the
 with the git root as the build context.
 
 ```bash
-./build_docker.sh                                        # Build and push both images
+./build_docker.sh github yzard                           # Build and push both images to GHCR
+./build_docker.sh docker yzard                           # Build and push both images to Docker Hub
 docker compose -f docker/docker-compose.yml up --build   # Full stack
 ```
 
@@ -658,7 +671,7 @@ playground/                 # End-to-end config and data
 ├── thumbnails/             # Generated thumbnails
 ├── imports/                # Import staging area
 ├── webdav/                 # WebDAV processing area
-└── logs/                   # Daily runtime logs from momento-api
+└── logs/                   # Daily runtime logs from both services
 
 build/                      # Optional local intermediate build artifacts
 dist/                       # Optional local final build artifacts

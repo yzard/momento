@@ -37,11 +37,13 @@ pub fn create_app(
     config: Arc<Config>,
     pool: DbPool,
     llm_transport: crate::processor::ai::transport::TransportHandle,
+    webdav_request_gate: crate::webdav::WebDAVRequestGate,
 ) -> Router {
     let state = AppState {
         config: config.clone(),
         pool,
         llm_transport,
+        webdav_request_gate,
     };
 
     let cors = CorsLayer::new()
@@ -51,14 +53,14 @@ pub fn create_app(
 
     let api_routes = Router::new()
         .route("/healthcheck", get(healthcheck))
-        .merge(api_router());
+        .merge(api_router())
+        .layer(cors);
 
     let mut app = Router::new()
         .nest("/api/v1", api_routes)
         .merge(webdav_router(state.clone()))
         .layer(DefaultBodyLimit::disable())
         .layer(middleware::from_fn(request_logger))
-        .layer(cors)
         .with_state(state);
 
     // Serve static files if frontend exists
@@ -69,8 +71,13 @@ pub fn create_app(
             let static_dir = static_dir.clone();
             async move {
                 let path = req.uri().path().trim_start_matches('/');
+                let webdav_path = config.webdav.mount_path.trim_start_matches('/');
 
-                if path.starts_with("webdav") {
+                if path == webdav_path
+                    || path
+                        .strip_prefix(webdav_path)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                {
                     return (StatusCode::NOT_FOUND, "Not Found").into_response();
                 }
 

@@ -269,7 +269,7 @@ COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
 RUN chmod +x /entrypoint_llm.sh \
-    && mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
+    && mkdir -p /config /data/llm/cache/triton /data/llm/queue /data/logs
 
 EXPOSE 8100
 

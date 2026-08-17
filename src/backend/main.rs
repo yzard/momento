@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use momento_common::config_cli::{parse_config_command, ConfigCommand};
 use momento_common::logging::init_logging;
 
 use momento_api::app::create_app;
@@ -11,58 +12,28 @@ use momento_api::cronjob::run_cronjobs;
 use momento_api::database::{create_pool, init_database, queries};
 use momento_api::logging::install_panic_hook;
 use momento_api::processor::ai;
-use momento_api::processor::import::recover_interrupted_imports;
-use momento_api::processor::import::start_webdav_import_job;
+use momento_api::processor::import::{
+    recover_interrupted_imports, recover_webdav_claims, start_webdav_import_job,
+};
 use momento_api::processor::metadata_worker;
 use momento_api::routes::cleanup_expired_trash;
 
-struct Cli {
-    config_path: std::path::PathBuf,
-    init_config: bool,
-}
-
-fn parse_cli() -> Result<Cli, String> {
-    let mut args = std::env::args().skip(1);
-    let mut config_path: Option<std::path::PathBuf> = None;
-    let mut init_config = false;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-c" | "--config" => {
-                let path = args
-                    .next()
-                    .ok_or_else(|| format!("{arg} requires a config path"))?;
-                config_path = Some(std::path::PathBuf::from(path));
-            }
-            "--init-config" => init_config = true,
-            "-h" | "--help" => {
-                println!("Usage: momento-api -c|--config PATH [--init-config]");
-                std::process::exit(0);
-            }
-            _ => return Err(format!("unknown argument: {arg}")),
-        }
-    }
-
-    let config_path = config_path.ok_or("missing required argument: -c|--config PATH")?;
-
-    Ok(Cli {
-        config_path,
-        init_config,
-    })
-}
-
-fn init_directories() {
+fn init_directories() -> std::io::Result<()> {
     let paths = paths();
     for dir in [
         &paths.data,
         &paths.originals,
         &paths.thumbnails,
+        &paths.thumbnails_tiny,
         &paths.previews,
         &paths.imports,
+        &paths.albums,
+        &paths.trash,
         &paths.webdav,
     ] {
-        std::fs::create_dir_all(dir).ok();
+        std::fs::create_dir_all(dir)?;
     }
+    Ok(())
 }
 
 fn create_default_admin(
@@ -100,6 +71,7 @@ fn start_background_tasks(
     config: Arc<momento_api::config::Config>,
     pool: momento_api::database::DbPool,
     llm_transport: momento_api::processor::ai::transport::TransportHandle,
+    webdav_request_gate: momento_api::webdav::WebDAVRequestGate,
 ) {
     let config_clone = Arc::clone(&config);
     let pool_clone = pool.clone();
@@ -152,40 +124,43 @@ fn start_background_tasks(
         }
     });
 
-    if config.webdav.enabled {
-        let webdav_config = Arc::clone(&config);
-        let webdav_pool = pool.clone();
-        tokio::spawn(async move {
-            start_webdav_import_job(webdav_config, webdav_pool).await;
-        });
-    }
+    let webdav_config = Arc::clone(&config);
+    let webdav_pool = pool.clone();
+    let webdav_request_gate = Arc::clone(&webdav_request_gate);
+    tokio::spawn(async move {
+        start_webdav_import_job(webdav_config, webdav_pool, webdav_request_gate).await;
+    });
 }
 
 #[tokio::main]
 async fn main() {
-    let cli = match parse_cli() {
-        Ok(cli) => cli,
+    let command = match parse_config_command(std::env::args().skip(1)) {
+        Ok(command) => command,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
-
-    if cli.init_config {
-        match save_default_config(&cli.config_path) {
+    let config_path = match command {
+        ConfigCommand::Help => {
+            println!("Usage: momento-api -c|--config PATH [--init-config]");
+            return;
+        }
+        ConfigCommand::Initialize(config_path) => match save_default_config(&config_path) {
             Ok(_) => {
-                println!("Default configuration saved to {:?}", cli.config_path);
-                std::process::exit(0);
+                println!("Default configuration saved to {:?}", config_path);
+                return;
             }
             Err(e) => {
                 eprintln!("Failed to save default configuration: {}", e);
                 std::process::exit(1);
             }
-        }
-    }
+        },
+        ConfigCommand::Run(config_path) => config_path,
+    };
 
     // Load configuration
-    let config = match load_config(&cli.config_path) {
+    let config = match load_config(&config_path) {
         Ok(config) => Arc::new(config),
         Err(e) => {
             eprintln!("Failed to load configuration: {}", e);
@@ -210,7 +185,8 @@ async fn main() {
     install_panic_hook();
 
     // Initialize directories
-    init_directories();
+    init_directories().expect("Failed to initialize data directories");
+    recover_webdav_claims(&paths().webdav).expect("Failed to recover interrupted WebDAV imports");
 
     // Create database pool
     let pool = create_pool().expect("Failed to create database pool");
@@ -231,12 +207,20 @@ async fn main() {
     create_default_admin(&pool, &config);
 
     let llm_transport = momento_api::processor::ai::transport::TransportHandle::default();
+    let webdav_request_gate = Arc::new(tokio::sync::Semaphore::new(
+        config.webdav.max_concurrent_requests,
+    ));
 
     // Start background tasks
-    start_background_tasks(Arc::clone(&config), pool.clone(), llm_transport.clone());
+    start_background_tasks(
+        Arc::clone(&config),
+        pool.clone(),
+        llm_transport.clone(),
+        Arc::clone(&webdav_request_gate),
+    );
 
     // Create the application
-    let app = create_app(Arc::clone(&config), pool, llm_transport);
+    let app = create_app(config.clone(), pool, llm_transport, webdav_request_gate);
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));

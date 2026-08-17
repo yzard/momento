@@ -14,7 +14,17 @@ fi
 
 umask "$UMASK"
 
-mkdir -p /data/originals /data/thumbnails /data/imports /data/previews /data/trash /data/albums
+mkdir -p \
+    /data/albums \
+    /data/imports \
+    /data/llm \
+    /data/logs \
+    /data/originals \
+    /data/previews \
+    /data/thumbnails \
+    /data/thumbnails_tiny \
+    /data/trash \
+    /data/webdav
 
 chown -R "$PUID:$PGID" /data
 

@@ -1,0 +1,58 @@
+# llm-service configuration generated on first container startup.
+# Runtime executables, model paths, and model versions are owned by the image.
+
+[server]
+# llm-service is reached by Momento over the private container network.
+host = "0.0.0.0"
+port = 8100
+# This must exactly match llm.api_key in the Momento config.toml.
+api_key = "change-me-llm-service-key"
+# Queue and runtime cache data live below data_dir/llm; logs live below data_dir/logs.
+data_dir = "/data"
+
+[scheduler]
+# The scheduler drains one task type at a time to keep its model runtime warm.
+poll_interval_seconds = 5
+idle_shutdown_seconds = 60
+max_in_flight_jobs = 128
+runtime_max_attempts = 3
+# Durable results are retried until Momento acknowledges persistence.
+result_delivery_acknowledgement_timeout_seconds = 30
+result_delivery_retry_delay_seconds = 30
+result_delivery_max_attempts = 10
+result_delivery_max_concurrent_deliveries = 16
+
+[[service]]
+# Unlimited-OCR through the image-owned vLLM runtime.
+enabled = true
+model_type = "ocr"
+startup_timeout_seconds = 1800
+request_timeout_seconds = 1800
+max_tokens = 8192
+max_concurrent_jobs = 100
+
+[[service]]
+# RAM++ image tagging.
+enabled = true
+model_type = "image_tagging"
+startup_timeout_seconds = 900
+request_timeout_seconds = 180
+max_concurrent_jobs = 16
+
+[[service]]
+# DINOv2 embeddings and perceptual hashes used by deduplication.
+enabled = true
+model_type = "image_clustering"
+startup_timeout_seconds = 900
+request_timeout_seconds = 180
+max_concurrent_jobs = 32
+
+[[service]]
+# InsightFace detection and embeddings. Resolution is measured on each face box.
+enabled = true
+model_type = "face_detection"
+startup_timeout_seconds = 900
+request_timeout_seconds = 180
+max_concurrent_jobs = 16
+minimum_face_likelihood = 0.60
+minimum_face_resolution_pixels = 100

@@ -1,6 +1,6 @@
-use llm_service::config::Config;
+use llm_service::config::{Config, DEFAULT_CONFIG_TEMPLATE};
 use std::io::Write;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 fn local_ocr_configuration(extra: &str) -> String {
     format!(
@@ -153,11 +153,8 @@ fn rejects_configurable_logging_path() {
 fn loads_playground_toml_configuration() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../playground/config_llm.toml");
-    if !path.exists() {
-        return;
-    }
-
     let config = Config::load(&path).expect("Playground TOML configuration should load");
+    let playground = std::fs::read_to_string(&path).expect("Playground config must exist");
     let clustering = config.service_for("image_clustering").unwrap();
     let face_detection = config.service_for("face_detection").unwrap();
     let tagging = config.service_for("image_tagging").unwrap();
@@ -187,6 +184,34 @@ fn loads_playground_toml_configuration() {
     assert!(face_detection
         .minimum_face_resolution_pixels
         .is_some_and(|resolution| resolution > 0));
+    assert_eq!(playground, DEFAULT_CONFIG_TEMPLATE);
+}
+
+#[test]
+fn saves_commented_operational_default_configuration() {
+    let directory = TempDir::new().expect("Failed to create config fixture");
+    let path = directory.path().join("config").join("config_llm.toml");
+
+    Config::save_default(&path).expect("Default config should be saved");
+    let generated = std::fs::read_to_string(&path).expect("Generated config must be readable");
+    let config = Config::load(&path).expect("Generated config must load");
+
+    assert_eq!(generated, DEFAULT_CONFIG_TEMPLATE);
+    assert!(generated.contains("# Durable results are retried"));
+    assert_eq!(config.service.len(), 4);
+    assert_eq!(config.server.api_key, "change-me-llm-service-key");
+}
+
+#[test]
+fn default_configuration_does_not_replace_an_existing_file() {
+    let directory = TempDir::new().expect("Failed to create config fixture");
+    let path = directory.path().join("config_llm.toml");
+    std::fs::write(&path, "existing").expect("Failed to write existing config");
+
+    let error = Config::save_default(&path).expect_err("Existing config must not be replaced");
+
+    assert!(error.to_string().contains("File exists"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing");
 }
 
 #[test]

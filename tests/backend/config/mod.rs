@@ -1,13 +1,13 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use momento_api::config::{load_config, save_default_config, Config};
+use momento_api::config::{load_config, save_default_config, Config, DEFAULT_CONFIG_TEMPLATE};
 use tempfile::TempDir;
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
     let contents = format!(
-        "{contents}\n[cronjob]\ntimezone = \"Etc/UTC\"\ndeduplicate_cron = \"0 3 * * *\"\n"
+        "{contents}\n[cronjob]\ntimezone = \"Etc/UTC\"\nocr_cron = \"0 1 * * *\"\nimage_tagging_cron = \"0 2 * * *\"\ndeduplicate_cron = \"0 3 * * *\"\nface_detection_cron = \"0 4 * * *\"\n"
     );
     std::fs::write(&path, contents).expect("Failed to write test config");
     path
@@ -98,6 +98,24 @@ fn test_load_config_omitted_sections_use_defaults() {
 }
 
 #[test]
+fn test_existing_cronjob_section_receives_new_schedule_defaults() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[cronjob]\ntimezone = \"Etc/UTC\"\ndeduplicate_cron = \"30 3 * * *\"\n",
+    )
+    .expect("Failed to write existing config");
+
+    let config = load_config(&path).expect("Existing cronjob config should remain valid");
+
+    assert_eq!(config.cronjob.ocr_cron, "0 1 * * *");
+    assert_eq!(config.cronjob.image_tagging_cron, "0 2 * * *");
+    assert_eq!(config.cronjob.deduplicate_cron, "30 3 * * *");
+    assert_eq!(config.cronjob.face_detection_cron, "0 4 * * *");
+}
+
+#[test]
 fn test_server_path_defaults_match_container_layout() {
     let config = Config::default();
 
@@ -120,12 +138,11 @@ fn test_load_config_reads_flat_webdav_settings() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[webdav]\nenabled = true\nmount_path = \"/photos\"\nrealm = \"Photos\"\nmax_upload_bytes = 1234\nmax_concurrent_requests = 7\npoll_interval_seconds = 3\nstable_file_age_seconds = 11\nmax_concurrent_processing = 4\n",
+        "[webdav]\nmount_path = \"/photos\"\nrealm = \"Photos\"\nmax_upload_bytes = 1234\nmax_concurrent_requests = 7\npoll_interval_seconds = 3\nstable_file_age_seconds = 11\nmax_concurrent_processing = 4\n",
     );
 
     let config = load_config(&path).expect("Failed to load flat WebDAV config");
 
-    assert!(config.webdav.enabled);
     assert_eq!(config.webdav.mount_path, "/photos");
     assert_eq!(config.webdav.realm, "Photos");
     assert_eq!(config.webdav.max_upload_bytes, 1234);
@@ -133,6 +150,37 @@ fn test_load_config_reads_flat_webdav_settings() {
     assert_eq!(config.webdav.poll_interval_seconds, 3);
     assert_eq!(config.webdav.stable_file_age_seconds, 11);
     assert_eq!(config.webdav.max_concurrent_processing, 4);
+}
+
+#[test]
+fn test_load_config_rejects_removed_webdav_enabled_setting() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[webdav]\nenabled = false\n");
+
+    let error = load_config(&path).expect_err("WebDAV enablement must not be configurable");
+
+    assert!(error.to_string().contains("enabled"));
+}
+
+#[test]
+fn test_load_config_rejects_invalid_webdav_runtime_settings() {
+    for (setting, value) in [
+        ("max_upload_bytes", "0"),
+        ("max_concurrent_requests", "0"),
+        ("poll_interval_seconds", "0"),
+        ("max_concurrent_processing", "0"),
+        ("mount_path", "\"/nested/photos\""),
+        ("mount_path", "\"/photos/\""),
+        ("mount_path", "\"/.\""),
+        ("mount_path", "\"/..\""),
+        ("mount_path", "\"/photo%73\""),
+    ] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(&dir, &format!("[webdav]\n{setting} = {value}\n"));
+        let error = load_config(&path).expect_err("Invalid WebDAV setting must be rejected");
+
+        assert!(error.to_string().contains("webdav"), "{error}");
+    }
 }
 
 #[test]
@@ -200,13 +248,16 @@ fn test_save_default_config_round_trips() {
 
     save_default_config(&path).expect("Failed to save default config");
     let config = load_config(&path).expect("Failed to reload saved config");
-    let defaults = Config::default();
 
-    assert_eq!(config.server.data_dir, defaults.server.data_dir);
-    assert_eq!(config.server.static_dir, defaults.server.static_dir);
-    assert_eq!(config.server.port, defaults.server.port);
+    assert_eq!(config.server.data_dir, PathBuf::from("/data"));
+    assert_eq!(config.server.static_dir, PathBuf::from("/app/static"));
+    assert_eq!(config.server.port, 8000);
+    assert!(config.llm.enabled);
+    assert_eq!(config.metadata.thumbnails_max_size, 1200);
 
     let generated = std::fs::read_to_string(path).expect("Failed to read generated config");
+    assert_eq!(generated, DEFAULT_CONFIG_TEMPLATE);
+    assert!(generated.contains("# Five-field cron expressions"));
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
     assert!(generated["metadata_worker"].get("batch_size").is_none());
     assert!(generated.get("storage").is_none());
@@ -219,10 +270,22 @@ fn test_save_default_config_round_trips() {
     assert!(generated["webdav"].get("processing").is_none());
     assert_eq!(
         generated["metadata"]["thumbnails_max_size"].as_integer(),
-        Some(i64::from(defaults.metadata.thumbnails_max_size))
+        Some(1200)
     );
     assert!(generated.get("thumbnails").is_none());
     assert!(generated.get("reverse_geocoding").is_none());
+}
+
+#[test]
+fn test_save_default_config_does_not_replace_existing_config() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "existing").expect("Failed to write existing config");
+
+    let error = save_default_config(&path).expect_err("Existing config must not be replaced");
+
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing");
 }
 
 #[test]
@@ -260,18 +323,34 @@ fn test_load_config_rejects_invalid_face_group_similarity_threshold() {
 }
 
 #[test]
-fn test_load_config_rejects_invalid_deduplicate_schedule() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
-    let path = write_config(&dir, "");
-    let contents = std::fs::read_to_string(&path)
-        .expect("Failed to read config")
-        .replace(
-            "deduplicate_cron = \"0 3 * * *\"",
-            "deduplicate_cron = \"invalid\"",
-        );
-    std::fs::write(&path, contents).expect("Failed to update config");
+fn test_load_config_rejects_each_invalid_ai_schedule() {
+    for (field, expression) in [
+        ("ocr_cron", "0 1 * * *"),
+        ("image_tagging_cron", "0 2 * * *"),
+        ("deduplicate_cron", "0 3 * * *"),
+        ("face_detection_cron", "0 4 * * *"),
+    ] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(&dir, "");
+        let contents = std::fs::read_to_string(&path)
+            .expect("Failed to read config")
+            .replace(
+                &format!("{field} = \"{expression}\""),
+                &format!("{field} = \"invalid\""),
+            );
+        std::fs::write(&path, contents).expect("Failed to update config");
 
-    assert!(load_config(&path).is_err());
+        let error = load_config(&path).expect_err("Invalid schedule must fail");
+        assert!(error.to_string().contains(field.trim_end_matches("_cron")));
+    }
+}
+
+#[test]
+fn playground_config_matches_the_generated_template() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../playground/config.toml");
+    let playground = std::fs::read_to_string(path).expect("Playground config must exist");
+
+    assert_eq!(playground, DEFAULT_CONFIG_TEMPLATE);
 }
 
 #[test]

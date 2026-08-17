@@ -27,6 +27,7 @@ describe('MetadataPanel', () => {
   it('generates metadata and shows status metrics', async () => {
     render(<MetadataPanel />)
 
+    expect(screen.getByText(/AI jobs are queued by their administrator controls or configured schedules/)).toBeTruthy()
     await userEvent.click(await screen.findByText('Generate'))
 
     expect(mocks.generate).toHaveBeenCalledOnce()

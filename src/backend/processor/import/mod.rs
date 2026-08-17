@@ -125,12 +125,15 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
                     ImportSource::Local,
                     settings.user_id,
                     &settings.pool,
+                    settings.delete_after_import,
                 )
                 .await;
                 match import_result {
                     Ok(_) if settings.delete_after_import => {
                         if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
-                            warn!(path = %source_path.display(), "local imported file cleanup failed: {error}");
+                            if error.kind() != std::io::ErrorKind::NotFound {
+                                warn!(path = %source_path.display(), "local imported file cleanup failed: {error}");
+                            }
                         }
                         let _ = remove_claim_directory(&claimed_path).await;
                         update_import_progress(&settings.pool, job_id, true, None);
@@ -178,6 +181,7 @@ pub async fn finalize_staged_original(
     import_source: ImportSource,
     user_id: i64,
     pool: &DbPool,
+    delete_source: bool,
 ) -> AppResult<i64> {
     let source_metadata = tokio::fs::metadata(source_path).await?;
     if !source_metadata.is_file() {
@@ -235,8 +239,12 @@ pub async fn finalize_staged_original(
             AppError::Internal("temporary original path has no parent".to_string())
         })?;
         tokio::fs::create_dir_all(temporary_parent).await?;
-        tokio::fs::copy(source_path, &temporary_path).await?;
-        tokio::fs::rename(&temporary_path, &final_path).await?;
+        if delete_source {
+            tokio::fs::rename(source_path, &final_path).await?;
+        } else {
+            tokio::fs::copy(source_path, &temporary_path).await?;
+            tokio::fs::rename(&temporary_path, &final_path).await?;
+        }
         move_supplemental_metadata(source_path, &final_supplemental_metadata_path).await?;
 
         let connection = pool.get()?;
@@ -317,11 +325,17 @@ pub fn recover_interrupted_imports(pool: &DbPool) -> AppResult<()> {
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    for (media_id, file_path, original_filename) in interrupted_imports {
-        if paths().originals.join(&file_path).is_file() {
+    for (media_id, _temporary_file_path, original_filename) in interrupted_imports {
+        let final_filename = build_original_filename(media_id, Path::new(&original_filename));
+        let final_relative_path = PathBuf::from(&final_filename);
+        if paths().originals.join(&final_relative_path).is_file() {
             connection.execute(
                 queries::import::MARK_IMPORTED,
-                rusqlite::params![original_filename, file_path, media_id],
+                rusqlite::params![
+                    original_filename,
+                    final_relative_path.to_string_lossy(),
+                    media_id
+                ],
             )?;
             connection.execute(queries::metadata_jobs::INSERT_QUEUED, [media_id])?;
         } else {
@@ -334,18 +348,99 @@ pub fn recover_interrupted_imports(pool: &DbPool) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn start_webdav_import_job(config: Arc<Config>, pool: DbPool) {
-    if !config.webdav.enabled {
-        return;
+pub fn recover_webdav_claims(root: &Path) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().is_some_and(|name| name == ".processing") {
+            restore_webdav_claim_directory(&path)?;
+            continue;
+        }
+        recover_webdav_claims(&path)?;
     }
+    Ok(())
+}
+
+fn restore_webdav_claim_directory(processing_directory: &Path) -> std::io::Result<()> {
+    let source_directory = processing_directory
+        .parent()
+        .ok_or_else(|| std::io::Error::other("WebDAV processing directory has no parent"))?;
+    for claim_entry in std::fs::read_dir(processing_directory)? {
+        let claim_entry = claim_entry?;
+        let claim_directory = claim_entry.path();
+        if !claim_directory.is_dir() {
+            continue;
+        }
+        expose_claim_directory(source_directory, &claim_directory)?;
+    }
+    if std::fs::read_dir(processing_directory)?.next().is_none() {
+        std::fs::remove_dir(processing_directory)?;
+    }
+    Ok(())
+}
+
+fn expose_claim_directory(source_directory: &Path, claim_directory: &Path) -> std::io::Result<()> {
+    let claim_name = claim_directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("claim");
+    let mut recovered_directory = source_directory.join(format!("recovered-{claim_name}"));
+    let mut suffix = 1;
+    while recovered_directory.exists() {
+        recovered_directory = source_directory.join(format!("recovered-{claim_name}-{suffix}"));
+        suffix += 1;
+    }
+    std::fs::rename(claim_directory, recovered_directory)
+}
+
+async fn expose_claim_for_retry(claimed_path: &Path) -> std::io::Result<()> {
+    let claim_directory = claimed_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("claimed source has no parent"))?;
+    let processing_directory = claim_directory
+        .parent()
+        .ok_or_else(|| std::io::Error::other("claimed source has no processing directory"))?;
+    let source_directory = processing_directory
+        .parent()
+        .ok_or_else(|| std::io::Error::other("claimed source has no source directory"))?;
+    expose_claim_directory(source_directory, claim_directory)?;
+    if std::fs::read_dir(processing_directory)?.next().is_none() {
+        tokio::fs::remove_dir(processing_directory).await?;
+    }
+    Ok(())
+}
+
+pub async fn start_webdav_import_job(
+    config: Arc<Config>,
+    pool: DbPool,
+    webdav_request_gate: crate::webdav::WebDAVRequestGate,
+) {
     let poll_interval = std::time::Duration::from_secs(config.webdav.poll_interval_seconds);
     loop {
-        run_webdav_import_cycle(&config, &pool).await;
+        run_webdav_import_cycle(&config, &pool, &webdav_request_gate).await;
         tokio::time::sleep(poll_interval).await;
     }
 }
 
-async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
+pub async fn run_webdav_import_cycle(
+    config: &Config,
+    pool: &DbPool,
+    webdav_request_gate: &crate::webdav::WebDAVRequestGate,
+) {
+    let Ok(upload_barrier) = Arc::clone(webdav_request_gate)
+        .acquire_many_owned(config.webdav.max_concurrent_requests as u32)
+        .await
+    else {
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(&paths().webdav) else {
         return;
     };
@@ -376,34 +471,36 @@ async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
             rusqlite::params![pending_imports.len() as i64, job_id],
         );
     }
+    let mut claimed_imports = Vec::with_capacity(pending_imports.len());
+    for (source_path, user_id) in pending_imports {
+        match claim_source(&source_path).await {
+            Ok(claimed_path) => claimed_imports.push((source_path, claimed_path, user_id)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => update_import_progress(pool, job_id, false, Some(error.to_string())),
+        }
+    }
+    drop(upload_barrier);
     let semaphore = Arc::new(Semaphore::new(
         config.webdav.max_concurrent_processing.max(1),
     ));
     let mut tasks = JoinSet::new();
-    for (source_path, user_id) in pending_imports {
+    for (source_path, claimed_path, user_id) in claimed_imports {
         let pool = pool.clone();
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
                 let Ok(_permit) = semaphore.acquire().await else {
                     return;
                 };
-                let claimed_path = match claim_source(&source_path).await {
-                    Ok(claimed_path) => claimed_path,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-                    Err(error) => {
-                        update_import_progress(&pool, job_id, false, Some(error.to_string()));
-                        return;
-                    }
-                };
-                if let Err(error) = finalize_staged_original(&claimed_path, ImportSource::Webdav, user_id, &pool).await {
+                if let Err(error) = finalize_staged_original(&claimed_path, ImportSource::Webdav, user_id, &pool, true).await {
                     warn!(path = %source_path.display(), "WebDAV import failed: {error}");
-                    let _ = restore_claim(&claimed_path, &source_path).await;
+                    let _ = expose_claim_for_retry(&claimed_path).await;
                     update_import_progress(&pool, job_id, false, Some(error.to_string()));
-                } else if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
-                    warn!(path = %source_path.display(), "WebDAV imported file cleanup failed: {error}");
-                    let _ = remove_claim_directory(&claimed_path).await;
-                    update_import_progress(&pool, job_id, true, None);
                 } else {
+                    if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            warn!(path = %source_path.display(), "WebDAV imported file cleanup failed: {error}");
+                        }
+                    }
                     let _ = remove_claim_directory(&claimed_path).await;
                     update_import_progress(&pool, job_id, true, None);
                 }
