@@ -87,6 +87,34 @@ def normalized_eye_center(keypoints, image_width, image_height):
     }
 
 
+def face_frontality_score(keypoints):
+    if keypoints is None or len(keypoints) < 5:
+        raise RuntimeError("detector did not return five face landmarks")
+    landmarks = [
+        (float(keypoint[0]), float(keypoint[1]))
+        for keypoint in keypoints[:5]
+        if len(keypoint) >= 2
+    ]
+    if len(landmarks) != 5 or any(
+        not math.isfinite(coordinate)
+        for landmark in landmarks
+        for coordinate in landmark
+    ):
+        raise RuntimeError("detector returned invalid face landmarks")
+    left_eye, right_eye, nose, left_mouth, right_mouth = landmarks
+    eye_span = abs(right_eye[0] - left_eye[0])
+    if eye_span <= 1e-6:
+        raise RuntimeError("detector returned overlapping eye landmarks")
+    eye_center_x = (left_eye[0] + right_eye[0]) / 2.0
+    mouth_center_x = (left_mouth[0] + right_mouth[0]) / 2.0
+    half_eye_span = eye_span / 2.0
+    roll_error = abs(right_eye[1] - left_eye[1]) / eye_span
+    nose_offset = abs(nose[0] - eye_center_x) / half_eye_span
+    mouth_offset = abs(mouth_center_x - eye_center_x) / half_eye_span
+    frontality_error = (roll_error * 0.25) + (nose_offset * 0.45) + (mouth_offset * 0.3)
+    return round(1.0 - min(frontality_error, 1.0), 6)
+
+
 def face_meets_thresholds(
     confidence,
     bounding_box,
@@ -182,6 +210,7 @@ class FaceDetectionRuntime:
                     ),
                     "confidence": confidence,
                     "qualityScore": quality_score(confidence, bounding_box),
+                    "frontalityScore": face_frontality_score(face.kps),
                     "embedding": encode_float32_le(embedding),
                     "embeddingEncoding": EMBEDDING_ENCODING,
                     "embeddingDimensions": EMBEDDING_DIMENSIONS,

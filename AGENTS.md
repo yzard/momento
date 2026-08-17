@@ -322,7 +322,10 @@ The `face_detection` service requires `minimum_face_likelihood` in `(0, 1]` and 
 `minimum_face_resolution_pixels`. A detection is returned only when its confidence reaches the
 likelihood threshold and both detected face-box dimensions reach the configured source-pixel
 resolution. Face results include a normalized `eyeCenter` derived from InsightFace's first two
-landmarks. Momento keeps the 256x256 portrait output size and centers that crop on `eyeCenter`.
+landmarks and a normalized `frontalityScore` derived from all five landmarks. Momento keeps the
+256x256 portrait output size and centers that crop on `eyeCenter`. After automatic grouping and
+manual merges, representative thumbnails are selected lexicographically by normalized face-box
+center distance to the media center, then frontality, quality, confidence, and face ID.
 Momento groups faces whose embedding cosine similarity reaches
 `llm.face_group_similarity_threshold`. Its default is `0.55`; lower values are more tolerant and
 higher values are stricter.

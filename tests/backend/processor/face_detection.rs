@@ -12,7 +12,13 @@ fn embedding() -> String {
     base64::engine::general_purpose::STANDARD.encode(values)
 }
 
-fn insert_face(connection: &rusqlite::Connection, media_id: i64, embedding: &[u8]) {
+fn insert_face(
+    connection: &rusqlite::Connection,
+    media_id: i64,
+    bounding_box: (f64, f64, f64, f64),
+    frontality: f64,
+    embedding: &[u8],
+) -> i64 {
     connection
         .execute(
             queries::faces::INSERT_FACE,
@@ -20,17 +26,19 @@ fn insert_face(connection: &rusqlite::Connection, media_id: i64, embedding: &[u8
                 media_id,
                 0_i64,
                 0_i64,
-                0.0_f64,
-                0.0_f64,
+                bounding_box.0,
+                bounding_box.1,
+                bounding_box.2,
+                bounding_box.3,
                 1.0_f64,
                 1.0_f64,
-                1.0_f64,
-                1.0_f64,
+                frontality,
                 embedding,
                 "faces/test.jpg"
             ],
         )
         .expect("face");
+    connection.last_insert_rowid()
 }
 
 #[test]
@@ -71,7 +79,7 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
     let results = vec![LlmInputResult {
         sequence: 0,
         frame_timestamp_ms: None,
-        result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "eyeCenter": { "x": 0.5, "y": 0.3 }, "confidence": 1.0, "qualityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
+        result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "eyeCenter": { "x": 0.5, "y": 0.3 }, "confidence": 1.0, "qualityScore": 1.0, "frontalityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
     }];
     assert!(face_detection::persist_callback(
         &transaction,
@@ -155,7 +163,7 @@ fn face_grouping_creates_deterministic_group_for_matching_embeddings() {
         .decode(embedding())
         .expect("embedding");
     for media_id in [first_media_id, second_media_id] {
-        insert_face(&connection, media_id, &embedding);
+        insert_face(&connection, media_id, (0.0, 0.0, 1.0, 1.0), 1.0, &embedding);
     }
     connection
         .execute(queries::faces::INSERT_GROUPING_RUN, [])
@@ -188,8 +196,20 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
         .chain(std::iter::repeat_n(0.0_f32, 510))
         .flat_map(f32::to_le_bytes)
         .collect::<Vec<_>>();
-    insert_face(&connection, first_media_id, &first_embedding);
-    insert_face(&connection, second_media_id, &second_embedding);
+    insert_face(
+        &connection,
+        first_media_id,
+        (0.0, 0.0, 1.0, 1.0),
+        1.0,
+        &first_embedding,
+    );
+    insert_face(
+        &connection,
+        second_media_id,
+        (0.0, 0.0, 1.0, 1.0),
+        1.0,
+        &second_embedding,
+    );
     connection
         .execute(queries::faces::INSERT_GROUPING_RUN, [])
         .expect("strict grouping run");
@@ -213,6 +233,77 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
         .query_row("SELECT COUNT(*) FROM face_groups", [], |row| row.get(0))
         .expect("tolerant group count");
     assert_eq!(tolerant_groups, 1);
+}
+
+#[test]
+fn face_group_representative_prioritizes_media_center_then_frontality() {
+    init_test_paths();
+    let pool = create_test_db();
+    let media_ids = ["center.jpg", "frontal.jpg", "tie-low.jpg", "tie-high.jpg"]
+        .map(|filename| create_test_media(&pool, filename));
+    let first_embedding = [1.0_f32]
+        .into_iter()
+        .chain(std::iter::repeat_n(0.0_f32, 511))
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let second_embedding = [0.0_f32, 1.0_f32]
+        .into_iter()
+        .chain(std::iter::repeat_n(0.0_f32, 510))
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let connection = pool.get().expect("connection");
+    let center_face_id = insert_face(
+        &connection,
+        media_ids[0],
+        (0.4, 0.4, 0.2, 0.2),
+        0.1,
+        &first_embedding,
+    );
+    insert_face(
+        &connection,
+        media_ids[1],
+        (0.41, 0.4, 0.2, 0.2),
+        1.0,
+        &first_embedding,
+    );
+    insert_face(
+        &connection,
+        media_ids[2],
+        (0.3, 0.4, 0.2, 0.2),
+        0.1,
+        &second_embedding,
+    );
+    let frontal_face_id = insert_face(
+        &connection,
+        media_ids[3],
+        (0.3, 0.4, 0.2, 0.2),
+        0.9,
+        &second_embedding,
+    );
+    connection
+        .execute(queries::faces::INSERT_GROUPING_RUN, [])
+        .expect("grouping run");
+    drop(connection);
+
+    face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize grouping");
+    let connection = pool.get().expect("connection");
+    let center_group_representative: i64 = connection
+        .query_row(
+            "SELECT face_groups.representative_face_id FROM face_groups JOIN face_group_members ON face_group_members.face_group_id = face_groups.id WHERE face_group_members.face_id = ?",
+            [center_face_id],
+            |row| row.get(0),
+        )
+        .expect("center group representative");
+    let tie_group_representative: i64 = connection
+        .query_row(
+            "SELECT face_groups.representative_face_id FROM face_groups JOIN face_group_members ON face_group_members.face_group_id = face_groups.id WHERE face_group_members.face_id = ?",
+            [frontal_face_id],
+            |row| row.get(0),
+        )
+        .expect("tie group representative");
+
+    assert_eq!(center_group_representative, center_face_id);
+    assert_eq!(tie_group_representative, frontal_face_id);
 }
 
 #[test]
@@ -321,6 +412,7 @@ fn automatic_regrouping_does_not_duplicate_manually_merged_faces() {
                     0,
                     0.0,
                     0.0,
+                    1.0,
                     1.0,
                     1.0,
                     1.0,

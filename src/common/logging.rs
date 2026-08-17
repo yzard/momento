@@ -39,7 +39,7 @@ pub fn init_logging(
         .with_max_level(Level::WARN)
         .or_else(std::io::stdout);
     let console_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(true)
+        .with_ansi(false)
         .event_format(ApplicationEventFormatter::new(
             application_name,
             std::process::id(),
@@ -73,26 +73,22 @@ pub fn format_log_prefix(
     process_id: u32,
     colorize: bool,
 ) -> String {
-    let level = format_level(level, colorize);
+    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Micros, true);
+    if !colorize {
+        return format!("{timestamp} {level} {application_name}[{process_id}]");
+    }
+    let color = level_color(level);
     format!(
-        "{} {} {}[{}]",
-        timestamp.to_rfc3339_opts(SecondsFormat::Micros, true),
-        level,
-        application_name,
-        process_id
+        "\u{1b}[2m{timestamp}\u{1b}[0m \u{1b}[{color}m{level} {application_name}[{process_id}]\u{1b}[0m"
     )
 }
 
-fn format_level(level: &Level, colorize: bool) -> String {
-    if !colorize {
-        return level.to_string();
-    }
-    let color = match *level {
+fn level_color(level: &Level) -> u8 {
+    match *level {
         Level::WARN => 33,
         Level::ERROR => 31,
         _ => 37,
-    };
-    format!("\u{1b}[{color}m{level}\u{1b}[0m")
+    }
 }
 
 fn validate_application_name(application_name: &str) -> io::Result<()> {
@@ -132,15 +128,28 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
-        let prefix = format_log_prefix(
-            Utc::now(),
-            event.metadata().level(),
-            &self.application_name,
-            self.process_id,
-            self.colorize,
-        );
-        write!(writer, "{prefix} ")?;
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+        let level = event.metadata().level();
+        if self.colorize {
+            write!(
+                writer,
+                "\u{1b}[2m{timestamp}\u{1b}[0m \u{1b}[{}m{level} {}[{}] ",
+                level_color(level),
+                self.application_name,
+                self.process_id
+            )?;
+        } else {
+            write!(
+                writer,
+                "{timestamp} {level} {}[{}] ",
+                self.application_name, self.process_id
+            )?;
+        }
         context.format_fields(writer.by_ref(), event)?;
-        writeln!(writer)
+        if self.colorize {
+            writeln!(writer, "\u{1b}[0m")
+        } else {
+            writeln!(writer)
+        }
     }
 }

@@ -150,6 +150,7 @@ async fn face_callback_accepts_llm_wire_shape_and_persists_crop_and_success_mark
             "eyeCenter": {"x": 0.95, "y": 0.86},
             "confidence": 0.95,
             "qualityScore": 0.8,
+            "frontalityScore": 0.9,
             "embedding": embedding,
             "embeddingEncoding": "float32_le",
             "embeddingDimensions": 512
@@ -176,11 +177,11 @@ async fn face_callback_accepts_llm_wire_shape_and_persists_crop_and_success_mark
         .assert_status_ok();
 
     let connection = pool.get().expect("connection");
-    let (crop_path, box_x, box_width): (String, f64, f64) = connection
+    let (crop_path, box_x, box_width, frontality): (String, f64, f64, f64) = connection
         .query_row(
-            "SELECT crop_path, x, width FROM media_faces WHERE media_id = ?",
+            "SELECT crop_path, x, width, frontality FROM media_faces WHERE media_id = ?",
             [media_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("face row");
     let result_count: i64 = connection
@@ -192,6 +193,7 @@ async fn face_callback_accepts_llm_wire_shape_and_persists_crop_and_success_mark
         .expect("result marker");
     assert_eq!(result_count, 1);
     assert!(box_x + box_width <= 1.0);
+    assert_eq!(frontality, 0.9);
     let crop_path = paths().previews.join(crop_path);
     assert!(crop_path.is_file());
     let crop = image::open(crop_path).expect("face crop image");

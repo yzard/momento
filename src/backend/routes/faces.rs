@@ -153,7 +153,8 @@ async fn merge_groups(
     for face_id in members {
         transaction.execute(queries::faces::INSERT_MEMBER, [target_id, face_id])?;
     }
-    transaction.execute(queries::faces::UPDATE_MANUAL_GROUP, [target_id, target_id])?;
+    transaction.execute(queries::faces::UPDATE_MANUAL_GROUP, [target_id])?;
+    transaction.execute(queries::faces::UPDATE_GROUP_REPRESENTATIVE, [target_id])?;
     for source_id in ordered_ids.into_iter().skip(1) {
         transaction.execute(queries::faces::DELETE_GROUP, [source_id])?;
     }

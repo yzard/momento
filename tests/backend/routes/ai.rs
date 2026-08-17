@@ -162,7 +162,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
         )
         .expect("metadata job");
     connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'ai/face.jpg', 'face.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("face input");
-    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, embedding, crop_path) VALUES (?, 0, 0, 0, 0, 1, 1, 1, 1, X'00000000', 'faces/test.jpg')", [media_id]).expect("face");
+    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, 0, 0, 1, 1, 1, 1, 1, X'00000000', 'faces/test.jpg')", [media_id]).expect("face");
     let face_id = connection.last_insert_rowid();
     connection
         .execute(

@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS media_faces (
     height REAL NOT NULL,
     confidence REAL NOT NULL,
     quality REAL NOT NULL,
+    frontality REAL NOT NULL CHECK(frontality >= 0.0 AND frontality <= 1.0),
     embedding BLOB NOT NULL,
     crop_path TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

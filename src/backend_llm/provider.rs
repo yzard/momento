@@ -50,6 +50,7 @@ pub struct FaceDetection {
     pub eye_center: NormalizedPoint,
     pub confidence: f32,
     pub quality_score: f32,
+    pub frontality_score: f32,
     pub embedding: String,
     pub embedding_encoding: String,
     pub embedding_dimensions: usize,
@@ -832,6 +833,7 @@ struct FaceDetectionRuntimeFace {
     eye_center: FaceDetectionRuntimePoint,
     confidence: f32,
     quality_score: f32,
+    frontality_score: f32,
     embedding: String,
     embedding_encoding: String,
     embedding_dimensions: usize,
@@ -912,6 +914,7 @@ impl FaceDetectionProvider {
                 },
                 confidence: face.confidence,
                 quality_score: face.quality_score,
+                frontality_score: face.frontality_score,
                 embedding: face.embedding,
                 embedding_encoding: face.embedding_encoding,
                 embedding_dimensions: face.embedding_dimensions,
@@ -965,6 +968,7 @@ impl FaceDetectionProvider {
             validate_normalized_point(&face.eye_center, "eye center")?;
             validate_unit_score(face.confidence, "confidence")?;
             validate_unit_score(face.quality_score, "quality score")?;
+            validate_unit_score(face.frontality_score, "frontality score")?;
             if face.embedding_encoding != "float32_le" {
                 return Err(ServiceError::Upstream(format!(
                     "InsightFace returned unsupported embedding encoding `{}`",

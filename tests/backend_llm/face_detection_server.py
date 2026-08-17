@@ -72,6 +72,17 @@ class FaceDetectionServerTests(unittest.TestCase):
             )
         )
 
+    def test_frontality_score_prefers_centered_level_landmarks(self):
+        frontal = FACE_DETECTION_SERVER.face_frontality_score(
+            [[30, 30], [70, 30], [50, 50], [35, 70], [65, 70]]
+        )
+        turned = FACE_DETECTION_SERVER.face_frontality_score(
+            [[30, 30], [70, 36], [62, 50], [45, 70], [70, 70]]
+        )
+
+        self.assertEqual(frontal, 1.0)
+        self.assertGreater(frontal, turned)
+
     def test_select_providers_requires_cuda_execution_provider(self):
         class FakeOnnxRuntime:
             @staticmethod

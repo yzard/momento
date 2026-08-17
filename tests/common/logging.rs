@@ -73,6 +73,9 @@ fn console_levels_use_requested_ansi_colors() {
         (Level::ERROR, 31),
     ] {
         let prefix = format_log_prefix(timestamp, &level, "momento-api", 12345, true);
-        assert!(prefix.contains(&format!("\u{1b}[{color}m{level}\u{1b}[0m")));
+        assert!(prefix.starts_with("\u{1b}[2m2026-08-16T01:22:38.000000Z\u{1b}[0m "));
+        assert!(prefix.ends_with(&format!(
+            "\u{1b}[{color}m{level} momento-api[12345]\u{1b}[0m"
+        )));
     }
 }

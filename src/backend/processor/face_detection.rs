@@ -26,6 +26,7 @@ struct FaceResult {
     eye_center_y: f64,
     confidence: f64,
     quality: f64,
+    frontality: f64,
     embedding: Vec<u8>,
 }
 
@@ -142,6 +143,7 @@ pub fn persist_callback(
                 face.height,
                 face.confidence,
                 face.quality,
+                face.frontality,
                 face.embedding,
                 crop_path
             ],
@@ -279,6 +281,7 @@ fn parse_face(sequence: i64, value: &serde_json::Value) -> AppResult<FaceResult>
         eye_center_y: eye_coordinate("y")?,
         confidence: scalar("confidence")?,
         quality: scalar("qualityScore")?,
+        frontality: scalar("frontalityScore")?,
         embedding: bytes,
     })
 }
@@ -445,12 +448,15 @@ pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> Ap
         let group_id = if let Some(index) = matching {
             groups[index].0
         } else {
-            transaction.execute(queries::faces::INSERT_GROUP, [face_id])?;
+            transaction.execute(queries::faces::INSERT_GROUP, [])?;
             let group_id = transaction.last_insert_rowid();
             groups.push((group_id, embedding));
             group_id
         };
         transaction.execute(queries::faces::INSERT_MEMBER, [group_id, face_id])?;
+    }
+    for (group_id, _) in &groups {
+        transaction.execute(queries::faces::UPDATE_GROUP_REPRESENTATIVE, [group_id])?;
     }
     transaction.execute(
         queries::faces::MARK_RUN,
