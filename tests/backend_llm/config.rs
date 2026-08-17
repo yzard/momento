@@ -108,8 +108,13 @@ fn loads_playground_toml_configuration() {
     assert_eq!(clustering.embedding_dimensions, 384);
     assert_eq!(face_detection.model, "buffalo_l");
     assert_eq!(face_detection.embedding_dimensions, 512);
-    assert_eq!(face_detection.minimum_face_likelihood, Some(0.58));
-    assert_eq!(face_detection.minimum_face_resolution_pixels, Some(100));
+    let minimum_face_likelihood = face_detection
+        .minimum_face_likelihood
+        .expect("face likelihood threshold");
+    assert!(minimum_face_likelihood > 0.0 && minimum_face_likelihood <= 1.0);
+    assert!(face_detection
+        .minimum_face_resolution_pixels
+        .is_some_and(|resolution| resolution > 0));
 }
 
 #[test]

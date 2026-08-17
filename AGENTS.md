@@ -41,8 +41,9 @@ Three rules are worth repeating because they are the ones most often violated:
 ## LLM Task Scheduling
 
 Every AI inference type follows one staged, durable propagation pattern. Current task identifiers
-are `ocr`, `image_tagging`, and `image_clustering`; adding another identifier means extending this
-same pattern end to end, not creating a direct or type-specific transport path.
+are `ocr`, `image_tagging`, `image_clustering`, and `face_detection`; adding another identifier
+means extending this same pattern end to end, not creating a direct or type-specific transport
+path.
 
 ### End-to-end ownership
 
@@ -250,9 +251,11 @@ persisting results.
 
 Persistence is deliberately type-specific. OCR and tagging validate text-like results, store
 input-level rows in `media_text_inputs`, and derive ordered media-level text in `media_text`.
-Clustering validates its embedding/hash result and updates similarity tables. A generic transport
-response does not remove the requirement for explicit validation, storage, clean/reset behavior,
-and optional downstream scheduling for each inference type.
+Clustering validates its embedding/hash result and updates similarity tables. Face detection
+validates bounding boxes, eye centers, confidence, quality, frontality, and 512-dimensional
+embeddings before writing crops and face rows. A generic transport response does not remove the
+requirement for explicit validation, storage, clean/reset behavior, and optional downstream
+scheduling for each inference type.
 
 ### Adding an inference type
 
@@ -305,7 +308,9 @@ directory and never add a new `std::env::var` call — add a config field instea
 
 Log paths are not configurable. Each service writes plain daily rotated files below its own
 `storage.data_dir/logs/` directory (`momento-api.YYYY-MM-DD.log` or
-`llm-service.YYYY-MM-DD.log`) and emits colorized output to stdout/stderr.
+`llm-service.YYYY-MM-DD.log`). File logs never contain ANSI escapes. Console logs keep the
+timestamp dim regardless of severity, then color the level, application/process prefix, message,
+and structured fields as one span: DEBUG/INFO white, WARN yellow, and ERROR/fatal paths red.
 
 llm-service has separate `storage.data_dir` and `storage.queue_dir` settings. Its queue directory
 must be durable and must not be a Momento originals, previews, or thumbnail directory. Queue jobs
@@ -318,17 +323,41 @@ absolute processing path in the Docker daemon host namespace; when empty, llm-se
 inside model containers. Local runtime requests contain job/input descriptors, never media bytes
 or caller-supplied paths.
 
+### Face detection and grouping
+
 The `face_detection` service requires `minimum_face_likelihood` in `(0, 1]` and a positive
-`minimum_face_resolution_pixels`. A detection is returned only when its confidence reaches the
-likelihood threshold and both detected face-box dimensions reach the configured source-pixel
-resolution. Face results include a normalized `eyeCenter` derived from InsightFace's first two
-landmarks and a normalized `frontalityScore` derived from all five landmarks. Momento keeps the
-256x256 portrait output size and centers that crop on `eyeCenter`. After automatic grouping and
-manual merges, representative thumbnails are selected lexicographically by normalized face-box
-center distance to the media center, then frontality, quality, confidence, and face ID.
-Momento groups faces whose embedding cosine similarity reaches
-`llm.face_group_similarity_threshold`. Its default is `0.55`; lower values are more tolerant and
-higher values are stricter.
+`minimum_face_resolution_pixels`. These values belong to the llm-service face service entry and
+are passed explicitly to the local runtime. A detection is returned only when its confidence
+reaches the likelihood threshold and both detected face-box dimensions reach the configured
+source-pixel resolution. Tests that load playground configuration validate the values and
+placeholders rather than pinning locally tuned thresholds.
+
+Face results include a normalized `eyeCenter` derived from InsightFace's first two landmarks and a
+normalized `frontalityScore` derived from all five landmarks. Frontality accounts for eye-line
+roll plus nose and mouth-center horizontal offsets, is constrained to `[0, 1]`, and is persisted
+with the face row. Momento keeps the 256x256 portrait output size and the existing crop dimensions;
+only the crop origin changes so the portrait is centered on `eyeCenter`, subject to image-edge
+clamping.
+
+Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
+seed embedding that first created each group. A face joins the first seed whose cosine similarity
+reaches `llm.face_group_similarity_threshold`; the default is `0.55`, lower values are more
+tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use the
+thumbnail representative, compare every member pair, apply transitive closure, or run a second
+group-to-group merge pass. Manual groups remain excluded from automatic regrouping. Changing these
+semantics requires explicit false-merge analysis and grouping tests, not just changing the
+thumbnail representative.
+
+`face_groups.representative_face_id` is a thumbnail choice, not the grouping seed. Select it only
+after automatic membership is complete and select it again after a manual merge. The ordering is
+lexicographic: normalized squared face-box-center distance to media center ascending, then
+frontality descending, quality descending, confidence descending, and face ID ascending. If the
+global representative is not visible to a requesting user, thumbnail lookup applies the same
+ordering to that user's accessible members.
+
+The face-group list is sorted in the backend before `LIMIT`/`OFFSET`: distinct visible media count
+descending, then face-group ID ascending as the stable tie-breaker. Do not sort paginated face
+groups in the frontend, and do not use raw face count in place of distinct accessible media count.
 
 `schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
 breaking schema changes require a fresh database for development and playground data.
