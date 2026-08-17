@@ -7,6 +7,7 @@ use momento_api::processor::metadata::{
 use std::fs;
 
 mod reset;
+mod reverse_geocoding;
 
 #[test]
 fn loads_google_photos_supplemental_metadata() {

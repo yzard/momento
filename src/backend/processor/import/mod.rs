@@ -338,8 +338,7 @@ pub async fn start_webdav_import_job(config: Arc<Config>, pool: DbPool) {
     if !config.webdav.enabled {
         return;
     }
-    let poll_interval =
-        std::time::Duration::from_secs(config.webdav.processing.poll_interval_seconds);
+    let poll_interval = std::time::Duration::from_secs(config.webdav.poll_interval_seconds);
     loop {
         run_webdav_import_cycle(&config, &pool).await;
         tokio::time::sleep(poll_interval).await;
@@ -360,12 +359,9 @@ async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
             continue;
         };
         pending_imports.extend(
-            collect_stable_webdav_files(
-                &user_directory,
-                config.webdav.processing.stable_file_age_seconds,
-            )
-            .into_iter()
-            .map(|source_path| (source_path, user_id)),
+            collect_stable_webdav_files(&user_directory, config.webdav.stable_file_age_seconds)
+                .into_iter()
+                .map(|source_path| (source_path, user_id)),
         );
     }
     if pending_imports.is_empty() {
@@ -381,7 +377,7 @@ async fn run_webdav_import_cycle(config: &Config, pool: &DbPool) {
         );
     }
     let semaphore = Arc::new(Semaphore::new(
-        config.webdav.processing.max_concurrent_processing.max(1),
+        config.webdav.max_concurrent_processing.max(1),
     ));
     let mut tasks = JoinSet::new();
     for (source_path, user_id) in pending_imports {

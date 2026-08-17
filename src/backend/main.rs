@@ -193,10 +193,10 @@ async fn main() {
     };
 
     // Derive every filesystem location from the configured data directory
-    init_paths(&config.storage.data_dir);
+    init_paths(&config.server.data_dir);
 
     let _logging_guard = match init_logging(
-        &config.storage.data_dir,
+        &config.server.data_dir,
         "momento-api",
         "momento_api=info,tower_http=warn",
     ) {

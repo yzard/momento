@@ -21,7 +21,7 @@ source of truth, and this file only records what is specific to Momento.
 
 | Skill | Governs |
 |-------|---------|
-| `project-structure` | Where every file goes: `src/`, `tests/` mirroring it 1:1, `docs/`, `playground/`, `build/`, `dist/`, `docker/` |
+| `project-structure` | Where every file goes: `src/`, tests mirroring new source paths, `playground/`, `build/`, `dist/`, `docker/` |
 | `add-modify-codebase` | How changes land: breaking changes over shims, refactor over copy-paste, unit tests for touched code |
 | `general-coding` | Guard clauses, no broad catch, no default arguments, no backward-compat layers, no environment variables in source |
 | `naming-conventions` | Cross-layer name consistency (database → Rust → TypeScript) |
@@ -65,11 +65,19 @@ inputs; an AI trigger creates inference jobs; the Momento submission worker send
 llm-service performs inference; the callback persists results. Type-specific work after inference,
 such as deduplication cluster generation, is another scheduled stage.
 
+Local and WebDAV imports use the same `finalize_staged_original` implementation. A source is
+claimed before finalization; import validates and stores the original, creates media ownership,
+marks the media imported, and queues exactly one metadata job. Import does not calculate the
+content hash, generate metadata or thumbnails, prepare AI inputs, or create LLM jobs. Identical
+file content may therefore receive different media IDs. Source cleanup failure after a committed
+import is logged as a warning rather than changing the durable import result.
+
 Momento owns all media preparation. It applies orientation, generates thumbnails or previews,
-chooses video frame timestamps, extracts frames, crops/resizes, and records descriptors before an
-inference job is eligible. llm-service may decode bytes and perform model-required tensor
-transforms, but it never reads Momento paths, generates task inputs, or assumes a shared
-filesystem.
+extracts the current representative first video frame, crops/resizes, and records descriptors
+before an inference job is eligible. The transport supports multiple ordered inputs even though
+current metadata generation creates one prepared input per task. llm-service may decode bytes and
+perform model-required tensor transforms, but it never reads Momento paths, generates task inputs,
+or assumes a shared filesystem.
 
 The primary implementation points are:
 
@@ -81,10 +89,17 @@ The primary implementation points are:
 - `src/backend_llm/scheduler.rs`: durable queue, batching, callbacks, retries, and recovery.
 - `src/backend_llm/provider.rs`: task registry, local runtime lifecycle, and inference dispatch.
 
-API and source directories mirror each other: `/import/*`, `/metadata/*`, `/ai/*`, and
-`/internal/llm/*` have matching backend routes, processors, models, queries, frontend API
-callers, and mirrored tests. AI triggers require an administrator. Internal LLM callbacks use
-the configured callback key rather than a user JWT.
+New source and test paths must follow the repository's resource hierarchy and test-mirroring
+convention; existing flat route, query, and frontend API modules are layout debt, not templates to
+copy. All AI control and status endpoints require an administrator. User-facing duplicate-group
+and face-group browsing uses normal authenticated access and filters through `media_access`.
+Internal LLM callbacks use the configured callback key rather than a user JWT.
+
+Metadata jobs use `queued`, `processing`, `completed`, and `failed` states. Workers atomically
+claim rows, reclaim expired processing leases, retry through `available_at`, and verify every
+enabled task's prepared inputs before completion. Metadata reset currently deletes matching AI
+job rows directly; do not claim that reset uses the cancellation outbox unless that implementation
+is changed.
 
 ### Prepared input contract
 
@@ -152,6 +167,11 @@ The Momento submission worker keeps a global `max_in_flight` rolling window. It 
 a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
 remains. This transport window is independent from every model runtime's inference concurrency.
 
+OCR eligibility is independent of image-tagging configuration. Tagging, clustering, and face
+detection are queued only through their enabled trigger or run paths. The submission worker sends
+existing queued jobs; it does not create task jobs. Submission reads the immutable
+`llm_job_inputs` snapshot created with each job rather than re-querying live `media_ai_inputs`.
+
 Cancellation commits the Momento terminal state, an all-task or task-specific
 `llm_cancellation_scopes` outbox row, and matching exact `llm_job_cancellations` rows in one
 transaction. Momento immediately attempts and durably retries authenticated
@@ -198,9 +218,11 @@ completed inference awaiting callback is delivered again without rerunning the m
 
 ### Multiple-request scheduling
 
-Only one model runtime may be active in llm-service. Every model provider is a local managed
-subservice; model `base_url` values must use a loopback HTTP address. llm-service itself may run on
-a different machine from Momento, but it never delegates inference to a remote model provider.
+Only one model runtime may be active in llm-service. Every model provider is a managed process in
+the llm-service container and listens only on its application-owned loopback address. Packages and
+model weights are installed in the image; activation performs no package installation or model
+download. llm-service itself may run on a different machine from Momento, but it never delegates
+inference to a remote model provider.
 For each scheduler cycle:
 
 1. A separate callback loop delivers durable `callback_pending` results through a rolling
@@ -213,8 +235,8 @@ For each scheduler cycle:
 5. Keep at most the scheduler's global `max_in_flight_jobs`, moving only same-task jobs from
    `queuing` to `processing` and replenishing each slot as soon as its job completes.
 6. Keep only lightweight disk descriptors in the active window. Providers send validated job/input
-   descriptors to the active local runtime. The runtime reads bytes from the queue's read-only
-   `processing/` mount; providers never retransmit image payloads to same-machine subservices.
+   descriptors to the active local runtime. The runtime opens the derived file below
+   `queue/processing`; providers never retransmit image payloads to same-container subservices.
 7. Activate or reuse the selected local runtime and dispatch the homogeneous rolling window. The scheduler
    and provider do not apply a model concurrency limit.
 8. The model subservice alone enforces its configured `max_concurrent_jobs`; vLLM uses
@@ -227,6 +249,9 @@ This warm-task preference drains one task through a rolling window before switch
 continues to have work. Switching task type shuts down the old runtime before starting and
 readiness-checking the new one. A runtime is also shut down when no inference job is claimed for
 `idle_shutdown_seconds`; callback delivery does not require or keep a model runtime active.
+Each runtime is started in its own process group. Switching or idle shutdown sends the whole group
+`SIGTERM`, waits for the bounded shutdown timeout, and escalates to `SIGKILL` so vLLM workers do
+not survive their parent process.
 
 One failed job does not prevent other in-flight jobs from finishing. Provider or runtime inference
 errors become durable failed callback payloads. Loss of the local runtime transport is retried from
@@ -249,13 +274,20 @@ the terminal state transition commit atomically. Matching callbacks for an alrea
 are acknowledged idempotently; late callbacks for cancelled jobs are acknowledged without
 persisting results.
 
-Persistence is deliberately type-specific. OCR and tagging validate text-like results, store
-input-level rows in `media_text_inputs`, and derive ordered media-level text in `media_text`.
-Clustering validates its embedding/hash result and updates similarity tables. Face detection
+Persistence is deliberately type-specific. OCR and tagging store present text results in
+input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
+text currently becomes an empty string. Clustering validates its embedding/hash result and updates
+similarity tables. Face detection
 validates bounding boxes, eye centers, confidence, quality, frontality, and 512-dimensional
 embeddings before writing crops and face rows. A generic transport response does not remove the
 requirement for explicit validation, storage, clean/reset behavior, and optional downstream
 scheduling for each inference type.
+
+Deduplication start and scheduled execution create a durable run plus image-clustering jobs and
+return without running inference inline. Clustering callbacks only persist similarity data;
+`finalize_ready_runs` separately creates duplicate groups after the run's jobs are terminal.
+Cancellation prevents further creation and finalization. Startup marks interrupted runs failed and
+schedules replacement work rather than resuming the same run record.
 
 ### Adding an inference type
 
@@ -294,34 +326,39 @@ environment variables. A missing or malformed config is a hard startup failure �
 falls back to defaults, because that would silently start the server against the wrong
 data directory.
 
-Momento filesystem locations derive from `storage.data_dir`:
+Momento filesystem locations derive from `server.data_dir`:
 
-```yaml
-storage:
-  data_dir: /data          # database.sqlite, originals/, thumbnails/, previews/, imports/, webdav/, ...
-  static_dir: /app/static  # built frontend served as a fallback
+```toml
+[server]
+data_dir = "/data"          # database.sqlite, originals/, thumbnails/, previews/, imports/, webdav/, ...
+static_dir = "/app/static"  # built frontend served as a fallback
 ```
 
-`main` calls `constants::init_paths(&config.storage.data_dir)` once after parsing the
+`main` calls `constants::init_paths(&config.server.data_dir)` once after parsing the
 config; everything else reads `constants::paths()`. Never hardcode a path under the data
 directory and never add a new `std::env::var` call — add a config field instead.
 
 Log paths are not configurable. Each service writes plain daily rotated files below its own
-`storage.data_dir/logs/` directory (`momento-api.YYYY-MM-DD.log` or
+`server.data_dir/logs/` directory (`momento-api.YYYY-MM-DD.log` or
 `llm-service.YYYY-MM-DD.log`). File logs never contain ANSI escapes. Console logs keep the
 timestamp dim regardless of severity, then color the level, application/process prefix, message,
 and structured fields as one span: DEBUG/INFO white, WARN yellow, and ERROR/fatal paths red.
 
-llm-service has separate `storage.data_dir` and `storage.queue_dir` settings. Its queue directory
-must be durable and must not be a Momento originals, previews, or thumbnail directory. Queue jobs
-are accepted only with a non-empty hexadecimal Momento job ID and a manifest that appears before
-all `input-N` multipart fields.
+llm-service configures only `server.data_dir`; its durable queue and runtime cache are fixed at
+`server.data_dir/queue/` and `server.data_dir/cache/`. This data directory must be durable and
+must not be a Momento originals, previews, or thumbnail directory. Queue jobs are accepted only
+with a non-empty hexadecimal Momento job ID and a manifest that appears before all `input-N`
+multipart fields.
 
-Model containers mount only `queue/processing` read-only. `storage.runtime_mount_source` is the
-absolute processing path in the Docker daemon host namespace; when empty, llm-service resolves
-`storage.queue_dir/processing` itself. `storage.runtime_mount_target` is the absolute path visible
-inside model containers. Local runtime requests contain job/input descriptors, never media bytes
-or caller-supplied paths.
+Runtime executables, scripts, model paths, model versions, loopback URLs, CUDA device selection,
+and embedding dimensions are owned by `RuntimeCatalog` and the llm-service image, not TOML.
+Service configuration retains only enablement, startup/request timeouts, model concurrency, OCR
+token limits, and task-specific thresholds. Local runtime requests contain job/input descriptors,
+never media bytes or caller-supplied paths.
+
+`llm.service_url` is resolved by Momento and `llm.callback_url` is resolved by llm-service; neither
+may be inferred from a bind address. Deployments persist Momento data and the llm-service queue
+independently and never share Momento originals, previews, or thumbnails with llm-service.
 
 ### Face detection and grouping
 
@@ -330,7 +367,7 @@ The `face_detection` service requires `minimum_face_likelihood` in `(0, 1]` and 
 are passed explicitly to the local runtime. A detection is returned only when its confidence
 reaches the likelihood threshold and both detected face-box dimensions reach the configured
 source-pixel resolution. Tests that load playground configuration validate the values and
-placeholders rather than pinning locally tuned thresholds.
+required ranges rather than pinning locally tuned thresholds.
 
 Face results include a normalized `eyeCenter` derived from InsightFace's first two landmarks and a
 normalized `frontalityScore` derived from all five landmarks. Frontality accounts for eye-line
@@ -379,29 +416,25 @@ pnpm dev                  # Dev servers (backend + frontend)
 pnpm lint                 # Lint all packages
 pnpm test                 # Run all tests
 
-./run_playground.sh       # Full stack against playground/config.toml
-./build_docker.sh         # Build the Docker image (cds into docker/)
+./run_playground.sh       # Build and run the two-container playground stack
+./build_docker.sh         # Build and push both Docker images
 ```
 
 `run_playground.sh` and `build_docker.sh` are the only scripts at the git root. Both
 resolve paths from their own location, so they work from any working directory.
 
-### Where build output goes
+### Playground containers
 
-`run_playground.sh` writes nothing into `src/` or `playground/`. Intermediate artifacts
-go to `build/`, final artifacts to `dist/`, both at the git root, one subdirectory per
-component:
+`run_playground.sh` uses `docker/docker-compose.yml` to build and start exactly two containers:
+`momento-api` and `llm-service`. It does not compile or run host binaries. The Momento image embeds
+the built frontend, while the llm-service image embeds four isolated Python environments and all
+model weights. Docker layer caching avoids repeating package/model downloads when their inputs do
+not change.
 
-| Component | Intermediate | Final |
-|-----------|--------------|-------|
-| `momento-api` | `build/backend/target/` (`CARGO_TARGET_DIR`) | `dist/backend/momento-api` |
-| `llm-service` | `build/llm/target/` (`CARGO_TARGET_DIR`) | `dist/llm/llm-service` |
-| frontend | `build/frontend/workspace/` (staged pnpm workspace) | `dist/frontend/` |
-
-The script starts both binaries from `dist/`, never from `build/` and never from
-`src/backend/target/release/`, and `storage.static_dir` in `playground/config.toml` is
-`dist/frontend`. It removes each component's `build/` and `dist/` subdirectory before
-building, so a run can never pick up a stale binary. Both trees are gitignored.
+The script passes the invoking UID/GID, mounts `playground/` as Momento data, mounts
+`playground/llm/` as the independent llm-service data/queue directory, and tears down both
+containers on exit. It never mounts the Docker socket. Runtime model processes are spawned inside
+the llm-service container, so inference never creates additional containers.
 
 `playground/logs/` holds Momento's daily runtime logs, while `playground/llm/logs/` holds
 llm-service's daily runtime logs. Build artifacts do not belong in either directory.
@@ -442,13 +475,13 @@ All Docker files live in `docker/`; `build_docker.sh` at the git root drives the
 with the git root as the build context.
 
 ```bash
-./build_docker.sh                                        # Build image
+./build_docker.sh                                        # Build and push both images
 docker compose -f docker/docker-compose.yml up --build   # Full stack
 ```
 
-The ignore file is `docker/Dockerfile.dockerignore`, not `.dockerignore` — Docker
-resolves ignore files against the build context (the git root), so that name is what
-BuildKit actually honors from inside `docker/`.
+The ignore files are `docker/Dockerfile.dockerignore` and
+`docker/Dockerfile.llm.dockerignore`, not `.dockerignore`. Docker resolves ignore files against the
+build context, so each file is named for the Dockerfile that uses it.
 
 ---
 
@@ -584,13 +617,14 @@ tests/                      # Mirrors src/ 1:1 — see below
 ├── common/
 └── frontend/
 
-docs/                       # All project documentation
-
 docker/
 ├── Dockerfile
 ├── Dockerfile.dockerignore # NOT .dockerignore — context is the git root
+├── Dockerfile.llm
+├── Dockerfile.llm.dockerignore
 ├── docker-compose.yml
-└── entrypoint.sh
+├── entrypoint.sh
+└── entrypoint_llm.sh
 
 playground/                 # End-to-end config and data
 ├── config.toml             # The one config run_playground.sh starts the stack with
@@ -603,25 +637,18 @@ playground/                 # End-to-end config and data
 ├── webdav/                 # WebDAV processing area
 └── logs/                   # Daily runtime logs from momento-api
 
-build/                      # Intermediate build artifacts, never run from
-├── backend/                # CARGO_TARGET_DIR for momento-api
-├── llm/                    # CARGO_TARGET_DIR for llm-service
-└── frontend/               # Staged pnpm workspace and Vite intermediates
+build/                      # Optional local intermediate build artifacts
+dist/                       # Optional local final build artifacts
 
-dist/                       # What run_playground.sh actually executes and serves
-├── backend/momento-api
-├── llm/llm-service
-└── frontend/               # Built frontend — storage.static_dir points here
-
-build_docker.sh             # Builds the Docker image
-run_playground.sh           # Builds into build/ and dist/, runs against playground/
+build_docker.sh             # Builds and pushes both images
+run_playground.sh           # Builds and starts the two-container playground stack
 ```
 
 ### The `tests/` mirror
 
-`tests/` is an exact structural mirror of `src/`. A source file's test location is
-derived mechanically — swap the leading `src/` for `tests/` and keep every intermediate
-directory:
+New tests must structurally mirror `src/`. A new source file's test location is derived
+mechanically by swapping the leading `src/` for `tests/` and keeping every intermediate
+directory. Existing flat tests are layout debt and should not be copied:
 
 ```
 src/backend/routes/map.rs              →  tests/backend/routes/map.rs

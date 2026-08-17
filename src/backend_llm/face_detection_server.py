@@ -20,6 +20,13 @@ EMBEDDING_ENCODING = "float32_le"
 REQUIRED_MODULES = ["detection", "recognition"]
 
 
+def require_model_directory(cache_directory, model_name):
+    model_directory = Path(cache_directory) / "models" / model_name
+    if not model_directory.is_dir():
+        raise RuntimeError(f"InsightFace model is missing: {model_directory}")
+    return model_directory
+
+
 class InvalidImageError(ValueError):
     """The request body is not a readable image."""
 
@@ -151,6 +158,7 @@ class FaceDetectionRuntime:
 
         if model_name != "buffalo_l":
             raise RuntimeError(f"unsupported InsightFace model: {model_name}")
+        require_model_directory(cache_directory, model_name)
         self.application = FaceAnalysis(
             name=model_name,
             root=cache_directory,

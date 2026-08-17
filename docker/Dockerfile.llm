@@ -1,29 +1,173 @@
-FROM rust:1-alpine AS builder
+ARG RUST_IMAGE=rust:1-bookworm
+ARG CUDA_IMAGE=nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.22
+
+ARG VLLM_VERSION=0.27.1
+ARG VLLM_CUDA_VERSION=129
+ARG OCR_PYTHON_VERSION=3.12.11
+ARG TORCH_VERSION=2.7.0
+ARG TORCHVISION_VERSION=0.22.0
+ARG TRANSFORMERS_RAM_VERSION=4.30.2
+ARG TRANSFORMERS_DINOV2_VERSION=4.46.3
+ARG HUGGINGFACE_HUB_RAM_VERSION=0.24.7
+ARG TIMM_VERSION=0.4.12
+ARG FAIRSCALE_VERSION=0.4.4
+ARG NUMPY_VERSION=1.26.4
+ARG SCIPY_VERSION=1.15.3
+ARG PILLOW_VERSION=11.2.1
+ARG CYTHON_VERSION=3.1.2
+ARG INSIGHTFACE_VERSION=0.7.3
+ARG ONNXRUNTIME_GPU_VERSION=1.22.0
+
+ARG CLIP_COMMIT=d05afc436d78f1c48dc0dbf8e5980a9d471f35f6
+ARG RAM_COMMIT=7cb804a8609e9f4b1a50b7f31436d2df40bb9481
+ARG UNLIMITED_OCR_REVISION=07dea832e22aefee32ad281d4b80551282e1c168
+ARG DINOV2_REVISION=ed25f3a31f01632728cabb09d1542f84ab7b0056
+ARG RAM_CHECKPOINT_REVISION=84d4aee3a0265c4e0df1f714f0572011d1bf2ec3
+ARG BERT_TOKENIZER_REVISION=86b5e0934494bd15c9632b12f734a8a67f723594
+ARG BUFFALO_L_RELEASE=v0.7
+
+FROM ${RUST_IMAGE} AS rust-builder
 
 WORKDIR /app
-
-RUN apk add --no-cache musl-dev
 
 COPY src/backend_llm ./src/backend_llm
 COPY src/common ./src/common
 
-RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --manifest-path /app/src/backend_llm/Cargo.toml
+RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --locked --manifest-path /app/src/backend_llm/Cargo.toml
 
-FROM alpine:latest
+FROM ${UV_IMAGE} AS uv
 
-RUN apk add --no-cache ca-certificates docker-cli su-exec tzdata wget
+FROM ${CUDA_IMAGE}
+
+ARG VLLM_VERSION
+ARG VLLM_CUDA_VERSION
+ARG OCR_PYTHON_VERSION
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TRANSFORMERS_RAM_VERSION
+ARG TRANSFORMERS_DINOV2_VERSION
+ARG HUGGINGFACE_HUB_RAM_VERSION
+ARG TIMM_VERSION
+ARG FAIRSCALE_VERSION
+ARG NUMPY_VERSION
+ARG SCIPY_VERSION
+ARG PILLOW_VERSION
+ARG CYTHON_VERSION
+ARG INSIGHTFACE_VERSION
+ARG ONNXRUNTIME_GPU_VERSION
+ARG CLIP_COMMIT
+ARG RAM_COMMIT
+ARG UNLIMITED_OCR_REVISION
+ARG DINOV2_REVISION
+ARG RAM_CHECKPOINT_REVISION
+ARG BERT_TOKENIZER_REVISION
+ARG BUFFALO_L_RELEASE
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/opt/models/huggingface \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    PYTHONUNBUFFERED=1 \
+    RUST_BACKTRACE=full \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    XDG_CACHE_HOME=/data/cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    gosu \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    python3 \
+    python3-dev \
+    python3-venv \
+    tini \
+    tzdata \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /usr/local/bin/uv
+
+RUN uv python install "${OCR_PYTHON_VERSION}" \
+    && uv venv --python "${OCR_PYTHON_VERSION}" /opt/venvs/ocr \
+    && uv venv --python /usr/bin/python3 /opt/venvs/ram \
+    && uv venv --python /usr/bin/python3 /opt/venvs/dinov2 \
+    && uv venv --python /usr/bin/python3 /opt/venvs/insightface
+
+RUN uv pip install --python /opt/venvs/ocr/bin/python \
+    --extra-index-url "https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}" \
+    --index-strategy unsafe-best-match \
+    "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_28_x86_64.whl"
+
+RUN uv pip install --python /opt/venvs/ram/bin/python \
+    --index-url https://download.pytorch.org/whl/cu128 \
+    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+    && uv pip install --python /opt/venvs/ram/bin/python \
+    "transformers==${TRANSFORMERS_RAM_VERSION}" \
+    "huggingface_hub==${HUGGINGFACE_HUB_RAM_VERSION}" \
+    "timm==${TIMM_VERSION}" \
+    "fairscale==${FAIRSCALE_VERSION}" \
+    "numpy==${NUMPY_VERSION}" \
+    "scipy==${SCIPY_VERSION}" \
+    "Pillow==${PILLOW_VERSION}" \
+    "git+https://github.com/openai/CLIP.git@${CLIP_COMMIT}" \
+    "git+https://github.com/xinyu1205/recognize-anything.git@${RAM_COMMIT}"
+
+RUN uv pip install --python /opt/venvs/dinov2/bin/python \
+    --index-url https://download.pytorch.org/whl/cu128 \
+    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+    && uv pip install --python /opt/venvs/dinov2/bin/python \
+    "transformers==${TRANSFORMERS_DINOV2_VERSION}" \
+    "Pillow==${PILLOW_VERSION}"
+
+RUN uv pip install --python /opt/venvs/insightface/bin/python \
+    "numpy==${NUMPY_VERSION}" \
+    "Cython==${CYTHON_VERSION}" \
+    "insightface==${INSIGHTFACE_VERSION}" \
+    "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
+    "Pillow==${PILLOW_VERSION}"
+
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ocr/bin/python -c \
+    "from huggingface_hub import snapshot_download; snapshot_download('baidu/Unlimited-OCR', revision='${UNLIMITED_OCR_REVISION}', local_dir='/opt/models/unlimited-ocr')" \
+    && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/dinov2/bin/python -c \
+    "from huggingface_hub import snapshot_download; snapshot_download('facebook/dinov2-small', revision='${DINOV2_REVISION}', local_dir='/opt/models/dinov2-small', allow_patterns=['config.json', 'model.safetensors', 'preprocessor_config.json'])" \
+    && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ram/bin/python -c \
+    "from huggingface_hub import snapshot_download; snapshot_download('bert-base-uncased', revision='${BERT_TOKENIZER_REVISION}', cache_dir='/opt/models/huggingface')" \
+    && mkdir -p /opt/models/ram \
+    && curl --fail --location --retry 3 \
+    "https://huggingface.co/xinyu1205/recognize-anything-plus-model/resolve/${RAM_CHECKPOINT_REVISION}/ram_plus_swin_large_14m.pth" \
+    --output /opt/models/ram/ram_plus_swin_large_14m.pth \
+    && mkdir -p /opt/models/insightface/models/buffalo_l \
+    && curl --fail --location --retry 3 \
+    "https://github.com/deepinsight/insightface/releases/download/${BUFFALO_L_RELEASE}/buffalo_l.zip" \
+    --output /tmp/buffalo_l.zip \
+    && unzip /tmp/buffalo_l.zip -d /opt/models/insightface/models/buffalo_l \
+    && rm /tmp/buffalo_l.zip
+
+RUN uv pip check --python /opt/venvs/ocr/bin/python \
+    && uv pip check --python /opt/venvs/ram/bin/python \
+    && uv pip check --python /opt/venvs/dinov2/bin/python \
+    && uv pip check --python /opt/venvs/insightface/bin/python \
+    && /opt/venvs/ocr/bin/python -c "import sys, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()" \
+    && /opt/venvs/ram/bin/python -c "import ram, torch; from pathlib import Path; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()" \
+    && /opt/venvs/dinov2/bin/python -c "from transformers import AutoConfig; config = AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True); assert config.hidden_size == 384" \
+    && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"
 
 WORKDIR /app
 
-COPY --from=builder /app/build/target/release/llm-service /app/llm-service
-COPY src/backend_llm/*.py /app/src/backend_llm/
+COPY --from=rust-builder /app/build/target/release/llm-service /app/llm-service
+COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
-RUN chmod +x /entrypoint_llm.sh && mkdir -p /data
-
-ENV RUST_BACKTRACE=full
+RUN chmod +x /entrypoint_llm.sh \
+    && mkdir -p /data/cache /data/queue
 
 EXPOSE 8100
 
-ENTRYPOINT ["/entrypoint_llm.sh"]
-CMD ["/app/llm-service", "-c", "/data/config_llm.toml"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint_llm.sh"]
+CMD ["/app/llm-service", "-c", "/config/config_llm.toml"]

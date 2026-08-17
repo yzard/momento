@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Every filesystem location the backend writes to, derived from the configured
-/// `storage.data_dir`.
+/// `server.data_dir`.
 #[derive(Debug)]
 pub struct Paths {
     pub data: PathBuf,

@@ -47,7 +47,7 @@ fn scoped_cancellation_cleans_matching_jobs_in_every_state() {
     let config = Arc::new(Config::default());
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
-        config.general.scheduler.clone(),
+        config.server.scheduler.clone(),
         config.callback.clone(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
     )
@@ -126,7 +126,7 @@ async fn submission_has_no_framework_multipart_body_limit() {
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
-            config.general.scheduler.clone(),
+            config.server.scheduler.clone(),
             config.callback.clone(),
             Arc::new(Mutex::new(ServiceManager::new(Arc::clone(&config)))),
         )
@@ -172,7 +172,7 @@ async fn oversized_streaming_input_is_rejected_and_removes_staging() {
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
-            config.general.scheduler.clone(),
+            config.server.scheduler.clone(),
             config.callback.clone(),
             Arc::new(Mutex::new(ServiceManager::new(Arc::clone(&config)))),
         )
@@ -218,13 +218,13 @@ async fn oversized_streaming_input_is_rejected_and_removes_staging() {
 async fn cancellation_removes_non_running_states_and_leaves_processing_jobs() {
     let directory = tempdir().expect("queue directory");
     let mut config = Config::default();
-    config.general.api_key = "cancel-key".to_string();
+    config.server.api_key = "cancel-key".to_string();
     let config = Arc::new(config);
     let manager = Arc::new(Mutex::new(ServiceManager::new(Arc::clone(&config))));
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
-            config.general.scheduler.clone(),
+            config.server.scheduler.clone(),
             config.callback.clone(),
             Arc::clone(&manager),
         )
@@ -309,7 +309,7 @@ fn cancellation_marker_rejects_late_admission_without_storing_payloads() {
     let config = Arc::new(Config::default());
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
-        config.general.scheduler.clone(),
+        config.server.scheduler.clone(),
         config.callback.clone(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
     )
@@ -337,7 +337,7 @@ fn cancellation_during_staging_prevents_the_atomic_queue_commit() {
     let config = Arc::new(Config::default());
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
-        config.general.scheduler.clone(),
+        config.server.scheduler.clone(),
         config.callback.clone(),
         Arc::new(Mutex::new(ServiceManager::new(config))),
     )
@@ -391,7 +391,7 @@ fn concurrent_cancellation_retries_create_one_idempotent_marker() {
     let scheduler = Arc::new(
         Scheduler::new(
             directory.path().to_path_buf(),
-            config.general.scheduler.clone(),
+            config.server.scheduler.clone(),
             config.callback.clone(),
             Arc::new(Mutex::new(ServiceManager::new(config))),
         )

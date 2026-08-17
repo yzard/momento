@@ -90,9 +90,11 @@ class ImageClusteringRuntime:
         self.torch = torch
         self.device = select_device(requested_device, torch)
         self.processor = AutoImageProcessor.from_pretrained(
-            model_name, cache_dir=cache_directory
+            model_name, cache_dir=cache_directory, local_files_only=True
         )
-        self.model = AutoModel.from_pretrained(model_name, cache_dir=cache_directory)
+        self.model = AutoModel.from_pretrained(
+            model_name, cache_dir=cache_directory, local_files_only=True
+        )
         hidden_size = int(self.model.config.hidden_size)
         if hidden_size != EMBEDDING_DIMENSIONS:
             raise RuntimeError(

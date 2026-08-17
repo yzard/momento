@@ -58,7 +58,7 @@ pub fn create_app(config: Arc<Config>, pool: DbPool) -> Router {
         .with_state(state);
 
     // Serve static files if frontend exists
-    let static_dir = config.storage.static_dir.clone();
+    let static_dir = config.server.static_dir.clone();
 
     if static_dir.exists() {
         app = app.fallback(move |req: Request<Body>| {

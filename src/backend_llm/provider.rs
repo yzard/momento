@@ -13,10 +13,20 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::adapters::{normalize_unlimited_ocr_text, UNLIMITED_OCR_MODEL};
-use crate::config::{Config, ServiceConfig, StorageConfig};
+use crate::config::{Config, ServerConfig, ServiceConfig};
 use crate::error::ServiceError;
 
-const UV_BOOTSTRAP_COMMAND: &str = "UV_VERSION=0.8.22; UV_MACHINE=$(uname -m); if [ \"$UV_MACHINE\" = \"x86_64\" ]; then UV_TARGET=x86_64-unknown-linux-gnu; elif [ \"$UV_MACHINE\" = \"aarch64\" ] || [ \"$UV_MACHINE\" = \"arm64\" ]; then UV_TARGET=aarch64-unknown-linux-gnu; else echo \"Unsupported uv architecture: $UV_MACHINE\" >&2; exit 1; fi; python -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \"https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz\" /tmp/uv.tar.gz && tar -xzf /tmp/uv.tar.gz -C /tmp && install \"/tmp/uv-$UV_TARGET/uv\" /usr/local/bin/uv";
+const RUNTIME_HOST: &str = "127.0.0.1";
+const RUNTIME_INPUT_PLACEHOLDER: &str = "{input_root}";
+const RUNTIME_CACHE_PLACEHOLDER: &str = "{cache_dir}";
+const RUNTIME_CONCURRENCY_PLACEHOLDER: &str = "{max_concurrent_jobs}";
+const FACE_LIKELIHOOD_PLACEHOLDER: &str = "{minimum_face_likelihood}";
+const FACE_RESOLUTION_PLACEHOLDER: &str = "{minimum_face_resolution_pixels}";
+const SYSTEM_RUNTIME_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const CLUSTERING_EMBEDDING_DIMENSIONS: usize = 384;
+const FACE_EMBEDDING_DIMENSIONS: usize = 512;
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const RUNTIME_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceResponse {
@@ -95,6 +105,171 @@ pub enum ServiceType {
     ImageTagging,
     ImageClustering,
     FaceDetection,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSpec {
+    pub service_type: ServiceType,
+    pub executable: PathBuf,
+    pub arguments: Vec<String>,
+    pub environment: Vec<(String, String)>,
+    pub base_url: String,
+    pub model: String,
+    pub model_version: String,
+    pub embedding_dimensions: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCatalog {
+    specs: Vec<RuntimeSpec>,
+}
+
+impl RuntimeCatalog {
+    pub fn new(specs: Vec<RuntimeSpec>) -> Self {
+        Self { specs }
+    }
+
+    pub fn production() -> Self {
+        Self::new(vec![
+            RuntimeSpec {
+                service_type: ServiceType::Ocr,
+                executable: PathBuf::from("/opt/venvs/ocr/bin/python"),
+                arguments: vec![
+                    "-m",
+                    "vllm.entrypoints.openai.api_server",
+                    "--model",
+                    "/opt/models/unlimited-ocr",
+                    "--served-model-name",
+                    UNLIMITED_OCR_MODEL,
+                    "--trust-remote-code",
+                    "--logits-processors",
+                    "vllm.model_executor.models.unlimited_ocr:NGramPerReqLogitsProcessor",
+                    "--host",
+                    RUNTIME_HOST,
+                    "--port",
+                    "8400",
+                    "--no-enable-prefix-caching",
+                    "--mm-processor-cache-gb",
+                    "0",
+                    "--max-num-batched-tokens",
+                    "8192",
+                    "--max-num-seqs",
+                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--allowed-local-media-path",
+                    RUNTIME_INPUT_PLACEHOLDER,
+                    "--gpu-memory-utilization",
+                    "0.65",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                environment: vec![("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string())],
+                base_url: "http://127.0.0.1:8400/v1".to_string(),
+                model: UNLIMITED_OCR_MODEL.to_string(),
+                model_version: "unlimited_ocr".to_string(),
+                embedding_dimensions: 0,
+            },
+            RuntimeSpec {
+                service_type: ServiceType::ImageTagging,
+                executable: PathBuf::from("/opt/venvs/ram/bin/python"),
+                arguments: vec![
+                    "/app/runtimes/ram_server.py",
+                    "--checkpoint",
+                    "/opt/models/ram/ram_plus_swin_large_14m.pth",
+                    "--host",
+                    RUNTIME_HOST,
+                    "--port",
+                    "8200",
+                    "--device",
+                    "cuda:0",
+                    "--max-concurrent-jobs",
+                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--input-root",
+                    RUNTIME_INPUT_PLACEHOLDER,
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                environment: Vec::new(),
+                base_url: "http://127.0.0.1:8200".to_string(),
+                model: String::new(),
+                model_version: "ram++".to_string(),
+                embedding_dimensions: 0,
+            },
+            RuntimeSpec {
+                service_type: ServiceType::ImageClustering,
+                executable: PathBuf::from("/opt/venvs/dinov2/bin/python"),
+                arguments: vec![
+                    "/app/runtimes/image_clustering_server.py",
+                    "--model",
+                    "/opt/models/dinov2-small",
+                    "--cache-dir",
+                    "{cache_dir}/huggingface",
+                    "--device",
+                    "cuda:0",
+                    "--host",
+                    RUNTIME_HOST,
+                    "--port",
+                    "8300",
+                    "--max-concurrent-jobs",
+                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--input-root",
+                    RUNTIME_INPUT_PLACEHOLDER,
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                environment: Vec::new(),
+                base_url: "http://127.0.0.1:8300".to_string(),
+                model: "facebook/dinov2-small".to_string(),
+                model_version: "dinov2-small".to_string(),
+                embedding_dimensions: CLUSTERING_EMBEDDING_DIMENSIONS,
+            },
+            RuntimeSpec {
+                service_type: ServiceType::FaceDetection,
+                executable: PathBuf::from("/opt/venvs/insightface/bin/python"),
+                arguments: vec![
+                    "/app/runtimes/face_detection_server.py",
+                    "--model",
+                    "buffalo_l",
+                    "--cache-dir",
+                    "/opt/models/insightface",
+                    "--host",
+                    RUNTIME_HOST,
+                    "--port",
+                    "8500",
+                    "--max-concurrent-jobs",
+                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--input-root",
+                    RUNTIME_INPUT_PLACEHOLDER,
+                    "--minimum-face-likelihood",
+                    FACE_LIKELIHOOD_PLACEHOLDER,
+                    "--minimum-face-resolution-pixels",
+                    FACE_RESOLUTION_PLACEHOLDER,
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                environment: Vec::new(),
+                base_url: "http://127.0.0.1:8500".to_string(),
+                model: "buffalo_l".to_string(),
+                model_version: "buffalo_l".to_string(),
+                embedding_dimensions: FACE_EMBEDDING_DIMENSIONS,
+            },
+        ])
+    }
+
+    fn get(&self, service_type: ServiceType) -> Result<&RuntimeSpec, ServiceError> {
+        self.specs
+            .iter()
+            .find(|spec| spec.service_type == service_type)
+            .ok_or_else(|| {
+                ServiceError::Configuration(format!(
+                    "no runtime specification exists for {}",
+                    service_type.as_str()
+                ))
+            })
+    }
 }
 
 impl ServiceType {
@@ -202,13 +377,19 @@ impl InferenceDispatcher {
 
 pub struct ServiceManager {
     config: Arc<Config>,
+    runtimes: RuntimeCatalog,
     active: Option<ActiveService>,
 }
 
 impl ServiceManager {
     pub fn new(config: Arc<Config>) -> Self {
+        Self::with_runtime_catalog(config, RuntimeCatalog::production())
+    }
+
+    pub fn with_runtime_catalog(config: Arc<Config>, runtimes: RuntimeCatalog) -> Self {
         Self {
             config,
+            runtimes,
             active: None,
         }
     }
@@ -257,18 +438,19 @@ impl ServiceManager {
                     service_type.config_key()
                 ))
             })?;
+        let runtime = self.runtimes.get(service_type)?.clone();
         let active = match service_type {
             ServiceType::Ocr => ActiveService::Ocr(Arc::new(
-                LocalProvider::new(&service, &self.config.storage).await?,
+                LocalProvider::new(&service, &runtime, &self.config.server).await?,
             )),
             ServiceType::ImageTagging => ActiveService::ImageTagging(Arc::new(
-                RamProvider::new(&service, &self.config.storage).await?,
+                RamProvider::new(&service, &runtime, &self.config.server).await?,
             )),
             ServiceType::ImageClustering => ActiveService::ImageClustering(Arc::new(
-                ImageClusteringProvider::new(&service, &self.config.storage).await?,
+                ImageClusteringProvider::new(&service, &runtime, &self.config.server).await?,
             )),
             ServiceType::FaceDetection => ActiveService::FaceDetection(Arc::new(
-                FaceDetectionProvider::new(&service, &self.config.storage).await?,
+                FaceDetectionProvider::new(&service, &runtime, &self.config.server).await?,
             )),
         };
         self.active = Some(active);
@@ -286,14 +468,16 @@ impl ServiceManager {
 pub struct LocalProvider {
     client: Client,
     config: ServiceConfig,
+    runtime: RuntimeSpec,
     child: Arc<Mutex<Child>>,
+    process_id: u32,
     input_root: PathBuf,
 }
 
 impl Drop for LocalProvider {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.try_lock() {
-            let _ = child.start_kill();
+            kill_runtime_process_group(&mut child, self.process_id);
         }
     }
 }
@@ -314,19 +498,29 @@ struct OpenAiMessage {
 }
 
 impl LocalProvider {
-    async fn new(config: &ServiceConfig, storage: &StorageConfig) -> Result<Self, ServiceError> {
+    async fn new(
+        config: &ServiceConfig,
+        runtime: &RuntimeSpec,
+        server: &ServerConfig,
+    ) -> Result<Self, ServiceError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_seconds))
             .build()
             .map_err(|error| {
                 ServiceError::Internal(format!("failed to build HTTP client: {error}"))
             })?;
-        let child = spawn_service_command(config, storage)?;
+        let input_root = runtime_input_root(server)?;
+        let child = spawn_service_command(config, runtime, &input_root, &server.cache_dir())?;
+        let process_id = child.id().ok_or_else(|| {
+            ServiceError::Internal("OCR runtime has no process ID after startup".to_string())
+        })?;
         let runtime = Self {
             client,
             config: config.clone(),
+            runtime: runtime.clone(),
             child: Arc::new(Mutex::new(child)),
-            input_root: storage.runtime_mount_target.clone(),
+            process_id,
+            input_root,
         };
         if let Err(error) = runtime.wait_until_ready().await {
             if let Err(shutdown_error) = runtime.shutdown().await {
@@ -341,11 +535,11 @@ impl LocalProvider {
 
     async fn wait_until_ready(&self) -> Result<(), ServiceError> {
         let started = Instant::now();
-        let models_url = format!("{}/models", self.config.base_url.trim_end_matches('/'));
+        let models_url = format!("{}/models", self.runtime.base_url.trim_end_matches('/'));
         loop {
             if let Ok(response) = self.client.get(&models_url).send().await {
                 if response.status().is_success() {
-                    info!("local OCR runtime is ready at {}", self.config.base_url);
+                    info!("local OCR runtime is ready at {}", self.runtime.base_url);
                     return Ok(());
                 }
             }
@@ -367,7 +561,7 @@ impl LocalProvider {
     }
 
     async fn shutdown(&self) -> Result<(), ServiceError> {
-        stop_service_child(&self.child, &self.config, "OCR").await
+        stop_service_child(&self.child, self.process_id, "OCR").await
     }
 
     async fn is_alive(&self) -> Result<bool, ServiceError> {
@@ -409,7 +603,7 @@ impl LocalProvider {
             ))
         })?;
         let request = json!({
-            "model": self.config.model,
+            "model": self.runtime.model,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -426,7 +620,7 @@ impl LocalProvider {
         });
         let url = format!(
             "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
+            self.runtime.base_url.trim_end_matches('/')
         );
         let response = self
             .client
@@ -462,7 +656,7 @@ impl LocalProvider {
             .ok_or_else(|| {
                 ServiceError::Upstream("local OCR response had no choices".to_string())
             })?;
-        let text = if self.config.model == UNLIMITED_OCR_MODEL {
+        let text = if self.runtime.model == UNLIMITED_OCR_MODEL {
             normalize_unlimited_ocr_text(raw_text)
         } else {
             raw_text.trim().to_string()
@@ -473,7 +667,7 @@ impl LocalProvider {
             markdown: text,
             provider: self.name().to_string(),
             model_type: "ocr".to_string(),
-            model_version: self.config.model_version.clone(),
+            model_version: self.runtime.model_version.clone(),
             tags: Vec::new(),
             embedding: None,
             embedding_encoding: None,
@@ -507,14 +701,16 @@ impl LocalProvider {
 struct ManagedRuntime {
     client: Client,
     config: ServiceConfig,
+    spec: RuntimeSpec,
     child: Arc<Mutex<Child>>,
+    process_id: u32,
     runtime_name: &'static str,
 }
 
 impl Drop for ManagedRuntime {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.try_lock() {
-            let _ = child.start_kill();
+            kill_runtime_process_group(&mut child, self.process_id);
         }
     }
 }
@@ -527,7 +723,8 @@ struct TaggingResponse {
 impl ManagedRuntime {
     async fn new(
         config: &ServiceConfig,
-        storage: &StorageConfig,
+        spec: &RuntimeSpec,
+        server: &ServerConfig,
         runtime_name: &'static str,
     ) -> Result<Self, ServiceError> {
         let client = Client::builder()
@@ -538,11 +735,19 @@ impl ManagedRuntime {
                     "failed to build {runtime_name} HTTP client: {error}"
                 ))
             })?;
-        let child = spawn_service_command(config, storage)?;
+        let input_root = runtime_input_root(server)?;
+        let child = spawn_service_command(config, spec, &input_root, &server.cache_dir())?;
+        let process_id = child.id().ok_or_else(|| {
+            ServiceError::Internal(format!(
+                "{runtime_name} runtime has no process ID after startup"
+            ))
+        })?;
         let runtime = Self {
             client,
             config: config.clone(),
+            spec: spec.clone(),
             child: Arc::new(Mutex::new(child)),
+            process_id,
             runtime_name,
         };
         if let Err(error) = runtime.wait_until_ready().await {
@@ -558,13 +763,13 @@ impl ManagedRuntime {
 
     async fn wait_until_ready(&self) -> Result<(), ServiceError> {
         let started = Instant::now();
-        let url = format!("{}/ready", self.config.base_url.trim_end_matches('/'));
+        let url = format!("{}/ready", self.spec.base_url.trim_end_matches('/'));
         loop {
             if let Ok(response) = self.client.get(&url).send().await {
                 if response.status().is_success() {
                     info!(
                         "{} runtime is ready at {}",
-                        self.runtime_name, self.config.base_url
+                        self.runtime_name, self.spec.base_url
                     );
                     return Ok(());
                 }
@@ -586,7 +791,7 @@ impl ManagedRuntime {
     }
 
     async fn shutdown(&self) -> Result<(), ServiceError> {
-        stop_service_child(&self.child, &self.config, self.runtime_name).await
+        stop_service_child(&self.child, self.process_id, self.runtime_name).await
     }
 
     async fn is_alive(&self) -> Result<bool, ServiceError> {
@@ -612,18 +817,16 @@ pub struct RamProvider {
 impl RamProvider {
     pub async fn new(
         config: &ServiceConfig,
-        storage: &StorageConfig,
+        runtime: &RuntimeSpec,
+        server: &ServerConfig,
     ) -> Result<Self, ServiceError> {
         Ok(Self {
-            runtime: ManagedRuntime::new(config, storage, "RAM++").await?,
+            runtime: ManagedRuntime::new(config, runtime, server, "RAM++").await?,
         })
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!(
-            "{}/infer",
-            self.runtime.config.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
         let response = self
             .runtime
             .client
@@ -652,7 +855,7 @@ impl RamProvider {
             markdown: text,
             provider: "ram++".to_string(),
             model_type: "image_tagging".to_string(),
-            model_version: self.runtime.config.model_version.clone(),
+            model_version: self.runtime.spec.model_version.clone(),
             tags: result.tags,
             embedding: None,
             embedding_encoding: None,
@@ -700,18 +903,16 @@ struct ImageClusteringRuntimeResponse {
 impl ImageClusteringProvider {
     pub async fn new(
         config: &ServiceConfig,
-        storage: &StorageConfig,
+        runtime: &RuntimeSpec,
+        server: &ServerConfig,
     ) -> Result<Self, ServiceError> {
         Ok(Self {
-            runtime: ManagedRuntime::new(config, storage, "DINOv2").await?,
+            runtime: ManagedRuntime::new(config, runtime, server, "DINOv2").await?,
         })
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!(
-            "{}/infer",
-            self.runtime.config.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
         let response = self
             .runtime
             .client
@@ -745,7 +946,7 @@ impl ImageClusteringProvider {
             markdown: String::new(),
             provider: "dinov2".to_string(),
             model_type: "image_clustering".to_string(),
-            model_version: self.runtime.config.model_version.clone(),
+            model_version: self.runtime.spec.model_version.clone(),
             tags: Vec::new(),
             embedding: Some(clustering_response.embedding),
             embedding_encoding: Some(clustering_response.embedding_encoding),
@@ -781,10 +982,10 @@ impl ImageClusteringProvider {
                 response.embedding_encoding
             )));
         }
-        if response.embedding_dimensions != self.runtime.config.embedding_dimensions {
+        if response.embedding_dimensions != self.runtime.spec.embedding_dimensions {
             return Err(ServiceError::Upstream(format!(
                 "DINOv2 returned {} dimensions; expected {}",
-                response.embedding_dimensions, self.runtime.config.embedding_dimensions
+                response.embedding_dimensions, self.runtime.spec.embedding_dimensions
             )));
         }
         validate_normalized_embedding(
@@ -858,18 +1059,16 @@ struct FaceDetectionRuntimePoint {
 impl FaceDetectionProvider {
     pub async fn new(
         config: &ServiceConfig,
-        storage: &StorageConfig,
+        runtime: &RuntimeSpec,
+        server: &ServerConfig,
     ) -> Result<Self, ServiceError> {
         Ok(Self {
-            runtime: ManagedRuntime::new(config, storage, "InsightFace").await?,
+            runtime: ManagedRuntime::new(config, runtime, server, "InsightFace").await?,
         })
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!(
-            "{}/infer",
-            self.runtime.config.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
         let response = self
             .runtime
             .client
@@ -927,7 +1126,7 @@ impl FaceDetectionProvider {
             markdown: String::new(),
             provider: "insightface".to_string(),
             model_type: "face_detection".to_string(),
-            model_version: self.runtime.config.model_version.clone(),
+            model_version: self.runtime.spec.model_version.clone(),
             tags: Vec::new(),
             embedding: None,
             embedding_encoding: None,
@@ -975,10 +1174,10 @@ impl FaceDetectionProvider {
                     face.embedding_encoding
                 )));
             }
-            if face.embedding_dimensions != self.runtime.config.embedding_dimensions {
+            if face.embedding_dimensions != self.runtime.spec.embedding_dimensions {
                 return Err(ServiceError::Upstream(format!(
                     "InsightFace returned {} dimensions; expected {}",
-                    face.embedding_dimensions, self.runtime.config.embedding_dimensions
+                    face.embedding_dimensions, self.runtime.spec.embedding_dimensions
                 )));
             }
             validate_normalized_embedding(
@@ -1083,158 +1282,180 @@ fn validate_normalized_embedding(
     Ok(())
 }
 
-fn configured_container_name(config: &ServiceConfig) -> Option<&str> {
-    config
-        .docker_command
-        .windows(2)
-        .find(|arguments| arguments[0] == "--name")
-        .map(|arguments| arguments[1].as_str())
-}
-
 async fn stop_service_child(
     child: &Arc<Mutex<Child>>,
-    config: &ServiceConfig,
+    process_id: u32,
     runtime_name: &str,
 ) -> Result<(), ServiceError> {
     let mut child = child.lock().await;
-    if child
+    let child_exited = child
         .try_wait()
         .map_err(|error| {
             ServiceError::Internal(format!("failed to inspect {runtime_name} runtime: {error}"))
         })?
-        .is_some()
+        .is_some();
+    if child_exited
+        && !process_group_exists(process_id).map_err(|error| {
+            ServiceError::Internal(format!(
+                "failed to inspect {runtime_name} runtime process group: {error}"
+            ))
+        })?
     {
         return Ok(());
     }
 
-    if let Some(container_name) = configured_container_name(config) {
-        let stop_output = Command::new("docker")
-            .args(["stop", "--time", "10", container_name])
-            .output()
-            .await
-            .map_err(|error| {
-                ServiceError::Internal(format!(
-                    "failed to run docker stop for {runtime_name}: {error}"
-                ))
-            })?;
-        if !stop_output.status.success() {
-            let _ = Command::new("docker")
-                .args(["rm", "-f", container_name])
-                .output()
-                .await;
-        }
-        child.wait().await.map_err(|error| {
-            ServiceError::Internal(format!(
-                "failed to wait for {runtime_name} docker client: {error}"
-            ))
-        })?;
-        return Ok(());
-    }
-
-    child.start_kill().map_err(|error| {
-        ServiceError::Internal(format!("failed to stop {runtime_name} runtime: {error}"))
-    })?;
-    child.wait().await.map_err(|error| {
+    signal_process_group(process_id, libc::SIGTERM).map_err(|error| {
         ServiceError::Internal(format!(
-            "failed to wait for {runtime_name} runtime: {error}"
+            "failed to terminate {runtime_name} runtime: {error}"
         ))
     })?;
+    match tokio::time::timeout(
+        RUNTIME_SHUTDOWN_TIMEOUT,
+        wait_for_process_group_exit(&mut child, process_id),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|error| {
+            ServiceError::Internal(format!(
+                "failed to wait for {runtime_name} runtime: {error}"
+            ))
+        })?,
+        Err(_) => {
+            signal_process_group(process_id, libc::SIGKILL).map_err(|error| {
+                ServiceError::Internal(format!("failed to kill {runtime_name} runtime: {error}"))
+            })?;
+            tokio::time::timeout(
+                RUNTIME_SHUTDOWN_TIMEOUT,
+                wait_for_process_group_exit(&mut child, process_id),
+            )
+            .await
+            .map_err(|_| {
+                ServiceError::Internal(format!(
+                    "{runtime_name} runtime process group survived forced shutdown"
+                ))
+            })?
+            .map_err(|error| {
+                ServiceError::Internal(format!(
+                    "failed to reap {runtime_name} runtime after forced shutdown: {error}"
+                ))
+            })?;
+        }
+    }
     Ok(())
+}
+
+async fn wait_for_process_group_exit(child: &mut Child, process_id: u32) -> std::io::Result<()> {
+    loop {
+        let child_exited = child.try_wait()?.is_some();
+        if child_exited && !process_group_exists(process_id)? {
+            return Ok(());
+        }
+        tokio::time::sleep(RUNTIME_PROCESS_POLL_INTERVAL).await;
+    }
+}
+
+fn runtime_input_root(server: &ServerConfig) -> Result<PathBuf, ServiceError> {
+    std::fs::canonicalize(server.processing_dir()).map_err(|error| {
+        ServiceError::Configuration(format!(
+            "failed to resolve runtime queue input directory: {error}"
+        ))
+    })
+}
+
+fn signal_process_group(process_id: u32, signal: libc::c_int) -> std::io::Result<()> {
+    let result = unsafe { libc::kill(-(process_id as libc::pid_t), signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error)
+}
+
+fn process_group_exists(process_id: u32) -> std::io::Result<bool> {
+    let result = unsafe { libc::kill(-(process_id as libc::pid_t), 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+fn kill_runtime_process_group(child: &mut Child, process_id: u32) {
+    let _ = signal_process_group(process_id, libc::SIGKILL);
+    let _ = child.start_kill();
 }
 
 fn spawn_service_command(
     config: &ServiceConfig,
-    storage: &StorageConfig,
+    runtime: &RuntimeSpec,
+    input_root: &Path,
+    cache_dir: &Path,
 ) -> Result<Child, ServiceError> {
-    let executable = config.docker_command.first().ok_or_else(|| {
+    let input_root = input_root.to_string_lossy();
+    std::fs::create_dir_all(cache_dir).map_err(|error| {
         ServiceError::Configuration(format!(
-            "{} service docker_command must not be empty",
-            config.model_type
+            "failed to create runtime cache directory {}: {error}",
+            cache_dir.display()
         ))
     })?;
-    let script_path = if config.script_path.is_empty() {
-        String::new()
-    } else {
-        std::fs::canonicalize(&config.script_path)
-            .map_err(|error| {
-                ServiceError::Configuration(format!(
-                    "failed to resolve {} service script {}: {error}",
-                    config.model_type, config.script_path
-                ))
-            })?
-            .to_string_lossy()
-            .into_owned()
-    };
-    let runtime_input_path = if config.script_path.is_empty() {
-        String::new()
-    } else {
-        let script_parent = Path::new(&script_path).parent().ok_or_else(|| {
-            ServiceError::Configuration("runtime script has no parent directory".to_string())
-        })?;
-        std::fs::canonicalize(script_parent.join("runtime_input.py"))
-            .map_err(|error| {
-                ServiceError::Configuration(format!(
-                    "failed to resolve runtime input helper: {error}"
-                ))
-            })?
-            .to_string_lossy()
-            .into_owned()
-    };
-    let runtime_mount_source = if storage.runtime_mount_source.as_os_str().is_empty() {
-        std::fs::canonicalize(storage.queue_dir.join("processing"))
-            .map_err(|error| {
-                ServiceError::Configuration(format!(
-                    "failed to resolve runtime queue mount source: {error}"
-                ))
-            })?
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        storage.runtime_mount_source.to_string_lossy().into_owned()
-    };
-    let runtime_mount_target = storage.runtime_mount_target.to_string_lossy();
+    let cache_dir = cache_dir.to_string_lossy();
     let minimum_face_likelihood = config
         .minimum_face_likelihood
         .map(|likelihood| likelihood.to_string());
     let minimum_face_resolution_pixels = config
         .minimum_face_resolution_pixels
         .map(|resolution| resolution.to_string());
-    let args = config
-        .docker_command
+    let args = runtime
+        .arguments
         .iter()
-        .skip(1)
         .map(|arg| {
-            let mut argument = arg
-                .replace("{script_path}", &script_path)
-                .replace("{runtime_input_path}", &runtime_input_path)
-                .replace("{device}", &config.device)
-                .replace("{model}", &config.model)
-                .replace(
-                    "{max_concurrent_jobs}",
-                    &config.max_concurrent_jobs.to_string(),
-                )
-                .replace("{runtime_mount_source}", &runtime_mount_source)
-                .replace("{runtime_mount_target}", &runtime_mount_target)
-                .replace("{uv_bootstrap}", UV_BOOTSTRAP_COMMAND);
+            let mut argument = arg.replace(RUNTIME_INPUT_PLACEHOLDER, &input_root).replace(
+                RUNTIME_CONCURRENCY_PLACEHOLDER,
+                &config.max_concurrent_jobs.to_string(),
+            );
+            argument = argument.replace(RUNTIME_CACHE_PLACEHOLDER, &cache_dir);
             if let Some(likelihood) = &minimum_face_likelihood {
-                argument = argument.replace("{minimum_face_likelihood}", likelihood);
+                argument = argument.replace(FACE_LIKELIHOOD_PLACEHOLDER, likelihood);
             }
             if let Some(resolution) = &minimum_face_resolution_pixels {
-                argument = argument.replace("{minimum_face_resolution_pixels}", resolution);
+                argument = argument.replace(FACE_RESOLUTION_PLACEHOLDER, resolution);
             }
             argument
         })
         .collect::<Vec<_>>();
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&runtime.executable);
+    if let Some(executable_directory) = runtime
+        .executable
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        command.env(
+            "PATH",
+            format!("{}:{SYSTEM_RUNTIME_PATH}", executable_directory.display()),
+        );
+    }
     command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .envs(runtime.environment.iter().cloned())
+        .env("XDG_CACHE_HOME", cache_dir.as_ref())
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .process_group(0);
     let mut child = command.spawn().map_err(|error| {
         ServiceError::Configuration(format!(
-            "failed to start {} service command `{executable}`: {error}",
-            config.model_type
+            "failed to start {} runtime `{}`: {error}",
+            config.model_type,
+            runtime.executable.display()
         ))
     })?;
     forward_child_output(&mut child, &config.model_type);
@@ -1298,14 +1519,13 @@ fn redact_base64_token(output: &mut String, text: &str, start: Option<usize>, en
 
 #[cfg(test)]
 mod tests {
-    use super::{ServiceManager, ServiceType};
+    use super::{RuntimeCatalog, ServiceManager, ServiceType};
     use std::sync::Arc;
 
     #[test]
     fn service_manager_starts_without_an_active_runtime() {
         let manager = ServiceManager::new(Arc::new(crate::config::Config {
-            general: Default::default(),
-            storage: Default::default(),
+            server: Default::default(),
             callback: Default::default(),
             service: Vec::new(),
         }));
@@ -1316,5 +1536,29 @@ mod tests {
     fn service_type_rejects_unknown_tasks() {
         assert!(ServiceType::from_task("object_detection").is_err());
         assert_eq!(ServiceType::from_task("ocr").unwrap(), ServiceType::Ocr);
+    }
+
+    #[test]
+    fn production_runtimes_are_image_owned_direct_commands() {
+        let runtimes = RuntimeCatalog::production();
+
+        for service_type in [
+            ServiceType::Ocr,
+            ServiceType::ImageTagging,
+            ServiceType::ImageClustering,
+            ServiceType::FaceDetection,
+        ] {
+            let runtime = runtimes.get(service_type).expect("production runtime");
+            assert!(runtime.executable.starts_with("/opt/venvs"));
+            assert!(!runtime.arguments.iter().any(|argument| {
+                argument == "sh" || argument == "bash" || argument.contains("pip install")
+            }));
+        }
+
+        let ocr = runtimes.get(ServiceType::Ocr).expect("OCR runtime");
+        assert!(ocr
+            .environment
+            .iter()
+            .any(|(name, value)| { name == "VLLM_USE_FLASHINFER_SAMPLER" && value == "0" }));
     }
 }

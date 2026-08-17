@@ -35,9 +35,7 @@ pub async fn generate_media_metadata(
     let content_hash = calculate_file_hash(&original_path)
         .await
         .map_err(|error| error.to_string())?;
-    let metadata =
-        generate_complete_metadata(&original_path, &media_type, Some(&config.reverse_geocoding))
-            .await;
+    let metadata = generate_complete_metadata(&original_path, &media_type, &config.metadata).await;
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
     let tiny_thumbnail_path = paths().thumbnails_tiny.join(&thumbnail_relative);
@@ -53,7 +51,7 @@ pub async fn generate_media_metadata(
         &media_type,
         &original_path,
         &thumbnail_path,
-        config.thumbnails.max_size,
+        config.metadata.thumbnails_max_size,
         config,
     )
     .await;
@@ -64,7 +62,7 @@ pub async fn generate_media_metadata(
         &media_type,
         &original_path,
         &tiny_thumbnail_path,
-        config.thumbnails.tiny_size,
+        config.metadata.thumbnails_tiny_size,
         config,
     )
     .await;
@@ -161,7 +159,7 @@ async fn generate_thumbnail(
             original_path,
             output_path,
             maximum_size,
-            config.thumbnails.quality,
+            config.metadata.thumbnails_quality,
         )
         .await;
     }
@@ -169,8 +167,8 @@ async fn generate_thumbnail(
         original_path,
         output_path,
         maximum_size,
-        config.thumbnails.quality,
-        config.thumbnails.video_frame_quality,
+        config.metadata.thumbnails_quality,
+        config.metadata.thumbnails_video_frame_quality,
     )
     .await
 }

@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -16,6 +17,12 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default)]
     pub debug: bool,
+    /// Root for the database and every generated media directory.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    /// Built frontend served as the HTTP fallback.
+    #[serde(default = "default_static_dir")]
+    pub static_dir: PathBuf,
 }
 
 fn default_host() -> String {
@@ -32,18 +39,10 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             debug: false,
+            data_dir: default_data_dir(),
+            static_dir: default_static_dir(),
         }
     }
-}
-
-/// Filesystem locations. `data_dir` is the root every media directory and the database
-/// are derived from; `static_dir` holds the built frontend the server falls back to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageConfig {
-    #[serde(default = "default_data_dir")]
-    pub data_dir: PathBuf,
-    #[serde(default = "default_static_dir")]
-    pub static_dir: PathBuf,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -52,15 +51,6 @@ fn default_data_dir() -> PathBuf {
 
 fn default_static_dir() -> PathBuf {
     PathBuf::from("/app/static")
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            data_dir: default_data_dir(),
-            static_dir: default_static_dir(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +112,7 @@ impl Default for AdminConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebDAVConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -129,10 +120,16 @@ pub struct WebDAVConfig {
     pub mount_path: String,
     #[serde(default = "default_webdav_realm")]
     pub realm: String,
-    #[serde(default)]
-    pub limits: WebDAVLimits,
-    #[serde(default)]
-    pub processing: WebDAVProcessing,
+    #[serde(default = "default_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "default_stable_file_age")]
+    pub stable_file_age_seconds: u64,
+    #[serde(default = "default_max_concurrent_processing")]
+    pub max_concurrent_processing: usize,
 }
 
 fn default_webdav_mount_path() -> String {
@@ -149,18 +146,13 @@ impl Default for WebDAVConfig {
             enabled: false,
             mount_path: default_webdav_mount_path(),
             realm: default_webdav_realm(),
-            limits: WebDAVLimits::default(),
-            processing: WebDAVProcessing::default(),
+            max_upload_bytes: default_max_upload_bytes(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            poll_interval_seconds: default_poll_interval(),
+            stable_file_age_seconds: default_stable_file_age(),
+            max_concurrent_processing: default_max_concurrent_processing(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebDAVLimits {
-    #[serde(default = "default_max_upload_bytes")]
-    pub max_upload_bytes: u64,
-    #[serde(default = "default_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
 }
 
 fn default_max_upload_bytes() -> u64 {
@@ -169,25 +161,6 @@ fn default_max_upload_bytes() -> u64 {
 
 fn default_max_concurrent_requests() -> usize {
     16
-}
-
-impl Default for WebDAVLimits {
-    fn default() -> Self {
-        Self {
-            max_upload_bytes: default_max_upload_bytes(),
-            max_concurrent_requests: default_max_concurrent_requests(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebDAVProcessing {
-    #[serde(default = "default_poll_interval")]
-    pub poll_interval_seconds: u64,
-    #[serde(default = "default_stable_file_age")]
-    pub stable_file_age_seconds: u64,
-    #[serde(default = "default_max_concurrent_processing")]
-    pub max_concurrent_processing: usize,
 }
 
 fn default_poll_interval() -> u64 {
@@ -202,99 +175,79 @@ fn default_max_concurrent_processing() -> usize {
     2
 }
 
-impl Default for WebDAVProcessing {
-    fn default() -> Self {
-        Self {
-            poll_interval_seconds: default_poll_interval(),
-            stable_file_age_seconds: default_stable_file_age(),
-            max_concurrent_processing: default_max_concurrent_processing(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThumbnailConfig {
-    #[serde(default = "default_max_size")]
-    pub max_size: u32,
-    #[serde(default = "default_tiny_size")]
-    pub tiny_size: u32,
-    #[serde(default = "default_quality")]
-    pub quality: u8,
-    #[serde(default = "default_video_frame_quality")]
-    pub video_frame_quality: u8,
+#[serde(deny_unknown_fields)]
+pub struct MetadataConfig {
+    #[serde(default = "default_thumbnails_max_size")]
+    pub thumbnails_max_size: u32,
+    #[serde(default = "default_thumbnails_tiny_size")]
+    pub thumbnails_tiny_size: u32,
+    #[serde(default = "default_thumbnails_quality")]
+    pub thumbnails_quality: u8,
+    #[serde(default = "default_thumbnails_video_frame_quality")]
+    pub thumbnails_video_frame_quality: u8,
+    #[serde(default = "default_reverse_geocoding_enabled")]
+    pub reverse_geocoding_enabled: bool,
+    #[serde(default = "default_reverse_geocoding_base_url")]
+    pub reverse_geocoding_base_url: String,
+    #[serde(default = "default_reverse_geocoding_user_agent")]
+    pub reverse_geocoding_user_agent: String,
+    #[serde(default = "default_reverse_geocoding_timeout_seconds")]
+    pub reverse_geocoding_timeout_seconds: u64,
+    #[serde(default = "default_reverse_geocoding_rate_limit_seconds")]
+    pub reverse_geocoding_rate_limit_seconds: f64,
 }
 
-fn default_max_size() -> u32 {
+fn default_thumbnails_max_size() -> u32 {
     DEFAULT_THUMBNAIL_SIZE
 }
 
-fn default_tiny_size() -> u32 {
+fn default_thumbnails_tiny_size() -> u32 {
     DEFAULT_TINY_THUMBNAIL_SIZE
 }
 
-fn default_quality() -> u8 {
+fn default_thumbnails_quality() -> u8 {
     DEFAULT_THUMBNAIL_QUALITY
 }
 
-fn default_video_frame_quality() -> u8 {
+fn default_thumbnails_video_frame_quality() -> u8 {
     DEFAULT_VIDEO_FRAME_QUALITY
 }
 
-impl Default for ThumbnailConfig {
+impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
-            max_size: default_max_size(),
-            tiny_size: default_tiny_size(),
-            quality: default_quality(),
-            video_frame_quality: default_video_frame_quality(),
+            thumbnails_max_size: default_thumbnails_max_size(),
+            thumbnails_tiny_size: default_thumbnails_tiny_size(),
+            thumbnails_quality: default_thumbnails_quality(),
+            thumbnails_video_frame_quality: default_thumbnails_video_frame_quality(),
+            reverse_geocoding_enabled: default_reverse_geocoding_enabled(),
+            reverse_geocoding_base_url: default_reverse_geocoding_base_url(),
+            reverse_geocoding_user_agent: default_reverse_geocoding_user_agent(),
+            reverse_geocoding_timeout_seconds: default_reverse_geocoding_timeout_seconds(),
+            reverse_geocoding_rate_limit_seconds: default_reverse_geocoding_rate_limit_seconds(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReverseGeocodingConfig {
-    #[serde(default = "default_geo_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_base_url")]
-    pub base_url: String,
-    #[serde(default = "default_user_agent")]
-    pub user_agent: String,
-    #[serde(default = "default_timeout_seconds")]
-    pub timeout_seconds: u64,
-    #[serde(default = "default_rate_limit_seconds")]
-    pub rate_limit_seconds: f64,
-}
-
-fn default_geo_enabled() -> bool {
+fn default_reverse_geocoding_enabled() -> bool {
     true
 }
 
-fn default_base_url() -> String {
+fn default_reverse_geocoding_base_url() -> String {
     "https://nominatim.openstreetmap.org/reverse".to_string()
 }
 
-fn default_user_agent() -> String {
+fn default_reverse_geocoding_user_agent() -> String {
     "Momento/1.0 (self-hosted)".to_string()
 }
 
-fn default_timeout_seconds() -> u64 {
+fn default_reverse_geocoding_timeout_seconds() -> u64 {
     10
 }
 
-fn default_rate_limit_seconds() -> f64 {
+fn default_reverse_geocoding_rate_limit_seconds() -> f64 {
     1.0
-}
-
-impl Default for ReverseGeocodingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_geo_enabled(),
-            base_url: default_base_url(),
-            user_agent: default_user_agent(),
-            timeout_seconds: default_timeout_seconds(),
-            rate_limit_seconds: default_rate_limit_seconds(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,17 +449,13 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
-    pub storage: StorageConfig,
-    #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
     pub admin: AdminConfig,
     #[serde(default)]
     pub webdav: WebDAVConfig,
     #[serde(default)]
-    pub thumbnails: ThumbnailConfig,
-    #[serde(default)]
-    pub reverse_geocoding: ReverseGeocodingConfig,
+    pub metadata: MetadataConfig,
     #[serde(default)]
     pub regenerate: RegenerateConfig,
     #[serde(default)]

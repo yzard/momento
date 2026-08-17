@@ -47,14 +47,14 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let _logging_guard = match init_logging(&config.storage.data_dir, "llm-service", "info") {
+    let _logging_guard = match init_logging(&config.server.data_dir, "llm-service", "info") {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("Failed to initialize logging: {error}");
             std::process::exit(1);
         }
     };
-    let address = format!("{}:{}", config.general.host, config.general.port);
+    let address = format!("{}:{}", config.server.host, config.server.port);
     let listener = match tokio::net::TcpListener::bind(&address).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -69,8 +69,8 @@ async fn main() {
     ))));
     let scheduler = Arc::new(
         Scheduler::new(
-            config.storage.queue_dir.clone(),
-            config.general.scheduler.clone(),
+            config.server.queue_dir(),
+            config.server.scheduler.clone(),
             config.callback.clone(),
             Arc::clone(&manager),
         )

@@ -1,5 +1,6 @@
 use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
 use filetime::{set_file_times, FileTime};
+use momento_api::config::MetadataConfig;
 use momento_api::constants::paths;
 use momento_api::database::{queries, DbConn};
 use momento_api::processor::import::{
@@ -7,9 +8,38 @@ use momento_api::processor::import::{
 };
 use momento_api::processor::media_processor::{
     apply_file_times, build_original_filename, calculate_geohash, capture_file_times,
-    delete_from_rtree, insert_into_rtree,
+    delete_from_rtree, generate_complete_metadata, insert_into_rtree,
 };
 use std::fs;
+
+#[tokio::test]
+async fn complete_metadata_uses_combined_metadata_config() {
+    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+    let media_path = directory.path().join("photo.jpg");
+    let sidecar_path = directory
+        .path()
+        .join("photo.jpg.supplemental-metadata.json");
+    image::RgbImage::new(2, 3)
+        .save(&media_path)
+        .expect("Failed to save image fixture");
+    fs::write(
+        sidecar_path,
+        r#"{"geoData":{"latitude":40.759,"longitude":-73.9859}}"#,
+    )
+    .expect("Failed to save supplemental metadata fixture");
+    let config = MetadataConfig {
+        reverse_geocoding_enabled: false,
+        ..MetadataConfig::default()
+    };
+
+    let metadata = generate_complete_metadata(&media_path, "image", &config).await;
+
+    assert_eq!(metadata.gps_latitude, Some(40.759));
+    assert_eq!(metadata.gps_longitude, Some(-73.9859));
+    assert_eq!(metadata.location_city, None);
+    assert_eq!(metadata.location_state, None);
+    assert_eq!(metadata.location_country, None);
+}
 
 #[test]
 fn original_filename_preserves_stem_and_extension() {

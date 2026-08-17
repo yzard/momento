@@ -1,4 +1,5 @@
 #!/bin/sh
+set -eu
 
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
@@ -6,29 +7,21 @@ UMASK=${UMASK:-022}
 
 echo "Starting with PUID=$PUID, PGID=$PGID, UMASK=$UMASK"
 
-if [ -n "$TZ" ]; then
+if [ -n "${TZ:-}" ]; then
     echo "Setting timezone to $TZ"
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-fi
-
-if ! getent group momento > /dev/null 2>&1; then
-    addgroup -g "$PGID" momento
-fi
-
-if ! id momento > /dev/null 2>&1; then
-    adduser -u "$PUID" -G momento -h /app -D momento
 fi
 
 umask "$UMASK"
 
 mkdir -p /data/originals /data/thumbnails /data/imports /data/previews /data/trash /data/albums
 
-chown -R momento:momento /data
+chown -R "$PUID:$PGID" /data
 
 if [ ! -f /data/config.toml ]; then
-    su-exec momento:momento /app/momento-api -c /data/config.toml --init-config
+    su-exec "$PUID:$PGID" env HOME=/data /app/momento-api -c /data/config.toml --init-config
 fi
 
-echo "Running as user momento ($(id -u momento):$(id -g momento))"
+echo "Running as user $PUID:$PGID"
 
-exec su-exec momento:momento "$@"
+exec su-exec "$PUID:$PGID" env HOME=/data "$@"

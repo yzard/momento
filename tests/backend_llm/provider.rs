@@ -1,9 +1,12 @@
 use futures::stream::{FuturesUnordered, StreamExt};
-use llm_service::config::{Config, GeneralConfig, ServiceConfig, StorageConfig};
-use llm_service::provider::{InferenceInput, ServiceManager};
+use llm_service::config::{Config, ServerConfig, ServiceConfig};
+use llm_service::provider::{
+    InferenceInput, RuntimeCatalog, RuntimeSpec, ServiceManager, ServiceType,
+};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{NamedTempFile, TempDir};
@@ -13,6 +16,7 @@ import argparse
 import base64
 import json
 import os
+import subprocess
 import struct
 import threading
 import time
@@ -25,9 +29,15 @@ parser.add_argument('--start-log', required=True)
 parser.add_argument('--max-concurrent-jobs', required=True, type=int)
 parser.add_argument('--input-root', required=True)
 parser.add_argument('--mount-source', required=True)
+parser.add_argument('--cache-dir', required=True)
 parser.add_argument('--minimum-face-likelihood', type=float)
 parser.add_argument('--minimum-face-resolution-pixels', type=int)
 arguments = parser.parse_args()
+expected_cache_dir = os.path.join(os.path.dirname(arguments.start_log), 'cache')
+if arguments.cache_dir != expected_cache_dir:
+    raise RuntimeError('invalid runtime cache directory')
+if os.environ.get('XDG_CACHE_HOME') != expected_cache_dir:
+    raise RuntimeError('invalid runtime cache environment')
 if 'face_detection' in arguments.mode:
     if arguments.minimum_face_likelihood != 0.8:
         raise RuntimeError('invalid minimum face likelihood')
@@ -36,6 +46,31 @@ if 'face_detection' in arguments.mode:
 
 with open(arguments.start_log, 'a', encoding='utf-8') as output:
     output.write(arguments.mode + ':' + str(arguments.max_concurrent_jobs) + '\n')
+
+def start_worker(duration_seconds):
+    worker_ready = arguments.start_log + '.worker-ready'
+    worker = subprocess.Popen([
+        'python3',
+        '-c',
+        "import signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], 'w').close(); time.sleep(float(sys.argv[2]))",
+        worker_ready,
+        str(duration_seconds),
+    ])
+    while not os.path.exists(worker_ready):
+        time.sleep(0.01)
+    with open(arguments.start_log, 'a', encoding='utf-8') as output:
+        output.write('worker:' + str(worker.pid) + '\n')
+    return worker
+
+if arguments.mode == 'process_tree_image_tagging':
+    worker = start_worker(2)
+if arguments.mode == 'crashed_process_tree_image_tagging':
+    worker = start_worker(2)
+    os._exit(1)
+if arguments.mode == 'runtime_path_image_tagging':
+    subprocess.run(['runtime-helper'], check=True)
+    if os.environ.get('RUNTIME_TEST_SETTING') != 'enabled':
+        raise RuntimeError('runtime environment was not applied')
 
 active_requests = 0
 maximum_active_requests = 0
@@ -79,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
         if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType'}:
             self.send_json(400, {'detail': 'invalid input descriptor'})
             return
-        if arguments.mode == 'image_tagging':
+        if arguments.mode in ('image_tagging', 'process_tree_image_tagging', 'runtime_path_image_tagging'):
             self.send_json(200, {'tags': ['person', 'bicycle']})
             return
         if arguments.mode in ('face_detection', 'slow_face_detection', 'rolling_face_detection'):
@@ -177,10 +212,9 @@ pub(super) fn service(
     port: u16,
     script_path: &Path,
     start_log: &Path,
-) -> ServiceConfig {
-    let mut docker_command = vec![
-        "python3".to_string(),
-        "{script_path}".to_string(),
+) -> (ServiceConfig, RuntimeSpec) {
+    let mut arguments = vec![
+        script_path.to_string_lossy().into_owned(),
         "--mode".to_string(),
         mode.to_string(),
         "--port".to_string(),
@@ -190,80 +224,90 @@ pub(super) fn service(
         "--max-concurrent-jobs".to_string(),
         "{max_concurrent_jobs}".to_string(),
         "--input-root".to_string(),
-        "{runtime_mount_target}".to_string(),
+        "{input_root}".to_string(),
         "--mount-source".to_string(),
-        "{runtime_mount_source}".to_string(),
+        "{input_root}".to_string(),
+        "--cache-dir".to_string(),
+        "{cache_dir}".to_string(),
     ];
     if model_type == "face_detection" {
-        docker_command.extend([
+        arguments.extend([
             "--minimum-face-likelihood".to_string(),
             "{minimum_face_likelihood}".to_string(),
             "--minimum-face-resolution-pixels".to_string(),
             "{minimum_face_resolution_pixels}".to_string(),
         ]);
     }
-    ServiceConfig {
-        enabled: true,
-        model_type: model_type.to_string(),
-        model_version: if model_type == "ocr" {
-            "unlimited_ocr".to_string()
-        } else if model_type == "image_clustering" {
-            "dinov2-small".to_string()
-        } else if model_type == "face_detection" {
-            "buffalo_l".to_string()
-        } else {
-            "ram++".to_string()
+    let model_version = if model_type == "ocr" {
+        "unlimited_ocr".to_string()
+    } else if model_type == "image_clustering" {
+        "dinov2-small".to_string()
+    } else if model_type == "face_detection" {
+        "buffalo_l".to_string()
+    } else {
+        "ram++".to_string()
+    };
+    let service_type = ServiceType::from_task(model_type).expect("known test service");
+    (
+        ServiceConfig {
+            enabled: true,
+            model_type: model_type.to_string(),
+            startup_timeout_seconds: 5,
+            request_timeout_seconds: 5,
+            max_tokens: 8192,
+            minimum_face_likelihood: (model_type == "face_detection").then_some(0.8),
+            minimum_face_resolution_pixels: (model_type == "face_detection").then_some(112),
+            max_concurrent_jobs: 2,
         },
-        docker_command,
-        device: "cpu".to_string(),
-        base_url: if model_type == "ocr" {
-            format!("http://127.0.0.1:{port}/v1")
-        } else {
-            format!("http://127.0.0.1:{port}")
+        RuntimeSpec {
+            service_type,
+            executable: Path::new("python3").to_path_buf(),
+            arguments,
+            environment: Vec::new(),
+            base_url: if model_type == "ocr" {
+                format!("http://127.0.0.1:{port}/v1")
+            } else {
+                format!("http://127.0.0.1:{port}")
+            },
+            model: if model_type == "ocr" {
+                "baidu/Unlimited-OCR".to_string()
+            } else if model_type == "image_clustering" {
+                "facebook/dinov2-small".to_string()
+            } else if model_type == "face_detection" {
+                "buffalo_l".to_string()
+            } else {
+                String::new()
+            },
+            model_version,
+            embedding_dimensions: if model_type == "image_clustering" {
+                384
+            } else if model_type == "face_detection" {
+                512
+            } else {
+                0
+            },
         },
-        model: if model_type == "ocr" {
-            "baidu/Unlimited-OCR".to_string()
-        } else if model_type == "image_clustering" {
-            "facebook/dinov2-small".to_string()
-        } else if model_type == "face_detection" {
-            "buffalo_l".to_string()
-        } else {
-            String::new()
-        },
-        script_path: script_path.to_string_lossy().into_owned(),
-        startup_timeout_seconds: 5,
-        request_timeout_seconds: 5,
-        max_tokens: 0,
-        embedding_dimensions: if model_type == "image_clustering" {
-            384
-        } else if model_type == "face_detection" {
-            512
-        } else {
-            0
-        },
-        minimum_face_likelihood: (model_type == "face_detection").then_some(0.8),
-        minimum_face_resolution_pixels: (model_type == "face_detection").then_some(112),
-        max_concurrent_jobs: 2,
-    }
+    )
 }
 
-pub(super) fn manager(services: Vec<ServiceConfig>) -> ServiceManager {
-    let fixture_root = Path::new(&services[0].script_path)
+pub(super) fn manager(services: Vec<(ServiceConfig, RuntimeSpec)>) -> ServiceManager {
+    let fixture_root = Path::new(&services[0].1.arguments[0])
         .parent()
-        .expect("fixture script parent");
-    let queue_dir = fixture_root.join("queue");
-    fs::create_dir_all(queue_dir.join("processing")).expect("test processing queue");
-    ServiceManager::new(Arc::new(Config {
-        general: GeneralConfig::default(),
-        storage: StorageConfig {
-            data_dir: fixture_root.to_path_buf(),
-            queue_dir: queue_dir.clone(),
-            runtime_mount_source: Path::new("").to_path_buf(),
-            runtime_mount_target: queue_dir.join("processing"),
-        },
-        callback: Default::default(),
-        service: services,
-    }))
+        .expect("fixture script parent")
+        .to_path_buf();
+    fs::create_dir_all(fixture_root.join("queue/processing")).expect("test processing queue");
+    let (services, runtimes): (Vec<_>, Vec<_>) = services.into_iter().unzip();
+    ServiceManager::with_runtime_catalog(
+        Arc::new(Config {
+            server: ServerConfig {
+                data_dir: fixture_root,
+                ..ServerConfig::default()
+            },
+            callback: Default::default(),
+            service: services,
+        }),
+        RuntimeCatalog::new(runtimes),
+    )
 }
 
 pub(super) fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -380,6 +424,109 @@ async fn manager_reuses_a_runtime_and_switches_for_a_different_task() {
         .await
         .expect("Runtime should stop cleanly");
     assert_eq!(manager.active_name(), "on-demand");
+}
+
+#[tokio::test]
+async fn manager_shutdown_terminates_the_runtime_process_group() {
+    let (_directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let tagging = service(
+        "image_tagging",
+        "process_tree_image_tagging",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![tagging]);
+
+    infer_one(&mut manager, "image_tagging", b"image", "image.jpg")
+        .await
+        .expect("tagging request");
+    let worker_pid = fs::read_to_string(&start_log)
+        .expect("runtime log")
+        .lines()
+        .find_map(|line| line.strip_prefix("worker:"))
+        .expect("worker pid")
+        .parse::<i32>()
+        .expect("numeric worker pid");
+
+    manager.shutdown().await.expect("runtime shutdown");
+
+    for _ in 0..100 {
+        let result = unsafe { libc::kill(worker_pid, 0) };
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("runtime worker {worker_pid} survived process-group shutdown");
+}
+
+#[tokio::test]
+async fn manager_cleans_up_process_group_after_runtime_leader_exits() {
+    let (_directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let tagging = service(
+        "image_tagging",
+        "crashed_process_tree_image_tagging",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![tagging]);
+
+    let activation = manager.dispatcher("image_tagging").await;
+    assert!(
+        activation.is_err(),
+        "crashed runtime should fail activation"
+    );
+    let worker_pid = fs::read_to_string(&start_log)
+        .expect("runtime log")
+        .lines()
+        .find_map(|line| line.strip_prefix("worker:"))
+        .expect("worker pid")
+        .parse::<i32>()
+        .expect("numeric worker pid");
+
+    for _ in 0..100 {
+        let result = unsafe { libc::kill(worker_pid, 0) };
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("runtime worker {worker_pid} survived leader cleanup");
+}
+
+#[tokio::test]
+async fn manager_applies_the_runtime_environment_and_executable_path() {
+    let (directory, script_path, start_log) = fixture();
+    let runtime_bin = directory.path().join("runtime-bin");
+    fs::create_dir(&runtime_bin).expect("runtime bin directory");
+    let python = runtime_bin.join("python");
+    fs::write(&python, "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n").expect("python wrapper");
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("python permissions");
+    let helper = runtime_bin.join("runtime-helper");
+    fs::write(&helper, "#!/bin/sh\nexit 0\n").expect("runtime helper");
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("helper permissions");
+    let port = available_port();
+    let (config, mut runtime) = service(
+        "image_tagging",
+        "runtime_path_image_tagging",
+        port,
+        &script_path,
+        &start_log,
+    );
+    runtime.executable = python;
+    runtime.environment = vec![("RUNTIME_TEST_SETTING".to_string(), "enabled".to_string())];
+    let mut manager = manager(vec![(config, runtime)]);
+
+    let response = infer_one(&mut manager, "image_tagging", b"image", "image.jpg")
+        .await
+        .expect("runtime helper should resolve from the executable directory");
+
+    assert_eq!(response.tags, vec!["person", "bicycle"]);
+    manager.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]

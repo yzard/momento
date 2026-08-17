@@ -39,7 +39,7 @@ async fn cancel(
     headers: HeaderMap,
     Json(request): Json<CancelJobsRequest>,
 ) -> Result<Json<CancelJobsResponse>, ServiceError> {
-    validate_api_key(&headers, &state.config.general.api_key)?;
+    validate_api_key(&headers, &state.config.server.api_key)?;
     Ok(Json(state.scheduler.cancel_jobs(&request)?))
 }
 
@@ -67,7 +67,7 @@ async fn submit(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, ServiceError> {
-    validate_api_key(&headers, &state.config.general.api_key)?;
+    validate_api_key(&headers, &state.config.server.api_key)?;
     let mut manifest = None;
     let mut admission = None;
     while let Some(mut field) = multipart

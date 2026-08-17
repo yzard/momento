@@ -43,6 +43,7 @@ pub async fn generate_media_metadata(
 }
 
 mod generation;
+pub mod reverse_geocoding;
 
 pub fn supplemental_metadata_path(file_path: &Path) -> Option<std::path::PathBuf> {
     let file_name = file_path.file_name()?.to_str()?;

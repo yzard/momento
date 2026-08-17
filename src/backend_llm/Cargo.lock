@@ -869,6 +869,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures",
+ "libc",
  "momento-common",
  "reqwest",
  "serde",

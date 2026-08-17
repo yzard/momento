@@ -98,6 +98,17 @@ class FaceDetectionServerTests(unittest.TestCase):
             ["detection", "recognition"],
         )
 
+    def test_model_directory_must_be_baked_into_the_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "model is missing"):
+                FACE_DETECTION_SERVER.require_model_directory(directory, "buffalo_l")
+            model_directory = Path(directory) / "models" / "buffalo_l"
+            model_directory.mkdir(parents=True)
+            self.assertEqual(
+                FACE_DETECTION_SERVER.require_model_directory(directory, "buffalo_l"),
+                model_directory,
+            )
+
     def test_inference_endpoint_reads_the_queued_image_descriptor(self):
         class RecordingRuntime:
             received = None

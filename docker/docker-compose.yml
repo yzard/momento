@@ -1,33 +1,49 @@
 services:
   llm-service:
+    image: momento-llm-service:playground
     build:
       context: ..
       dockerfile: docker/Dockerfile.llm
-    network_mode: host
-    command: ["/app/llm-service", "-c", "/data/config_llm.toml"]
+    command: ["/app/llm-service", "-c", "/config/config_llm.toml"]
     environment:
-      PUID: "1000"
-      PGID: "1000"
-      UMASK: "022"
-      TZ: "UTC"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
     volumes:
-      - /srv/momento/llm:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LLM_DATA_DIR:-../playground/llm}:/data
+      - ${LLM_CONFIG_FILE:-../playground/config_llm.toml}:/config/config_llm.toml:ro
+    expose:
+      - "8100"
+    gpus: all
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 45s
     restart: unless-stopped
 
-  momento:
+  momento-api:
+    image: momento-api:playground
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    network_mode: host
     command: ["/app/momento-api", "-c", "/data/config.toml"]
     environment:
-      PUID: "1000"
-      PGID: "1000"
-      UMASK: "022"
-      TZ: "UTC"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
     volumes:
-      - /srv/momento/data:/data
+      - ${MOMENTO_DATA_DIR:-../playground}:/data
+    ports:
+      - "${MOMENTO_PORT:-8000}:8000"
     depends_on:
-      - llm-service
+      llm-service:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 30s
     restart: unless-stopped

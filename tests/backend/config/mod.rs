@@ -14,18 +14,18 @@ fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
 }
 
 #[test]
-fn test_load_config_reads_storage_paths() {
+fn test_load_config_reads_server_paths() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[storage]\ndata_dir = \"/srv/momento/data\"\nstatic_dir = \"/srv/momento/static\"\n",
+        "[server]\ndata_dir = \"/srv/momento/data\"\nstatic_dir = \"/srv/momento/static\"\n",
     );
 
     let config = load_config(&path).expect("Failed to load config");
 
-    assert_eq!(config.storage.data_dir, PathBuf::from("/srv/momento/data"));
+    assert_eq!(config.server.data_dir, PathBuf::from("/srv/momento/data"));
     assert_eq!(
-        config.storage.static_dir,
+        config.server.static_dir,
         PathBuf::from("/srv/momento/static")
     );
 }
@@ -93,16 +93,104 @@ fn test_load_config_omitted_sections_use_defaults() {
     let defaults = Config::default();
 
     assert_eq!(config.server.port, 9001);
-    assert_eq!(config.storage.data_dir, defaults.storage.data_dir);
-    assert_eq!(config.storage.static_dir, defaults.storage.static_dir);
+    assert_eq!(config.server.data_dir, defaults.server.data_dir);
+    assert_eq!(config.server.static_dir, defaults.server.static_dir);
 }
 
 #[test]
-fn test_storage_defaults_match_container_layout() {
+fn test_server_path_defaults_match_container_layout() {
     let config = Config::default();
 
-    assert_eq!(config.storage.data_dir, PathBuf::from("/data"));
-    assert_eq!(config.storage.static_dir, PathBuf::from("/app/static"));
+    assert_eq!(config.server.data_dir, PathBuf::from("/data"));
+    assert_eq!(config.server.static_dir, PathBuf::from("/app/static"));
+}
+
+#[test]
+fn test_load_config_rejects_removed_storage_section() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[storage]\ndata_dir = \"/data\"\n");
+
+    let error = load_config(&path).expect_err("Storage section must be rejected");
+
+    assert!(error.to_string().contains("storage"));
+}
+
+#[test]
+fn test_load_config_reads_flat_webdav_settings() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[webdav]\nenabled = true\nmount_path = \"/photos\"\nrealm = \"Photos\"\nmax_upload_bytes = 1234\nmax_concurrent_requests = 7\npoll_interval_seconds = 3\nstable_file_age_seconds = 11\nmax_concurrent_processing = 4\n",
+    );
+
+    let config = load_config(&path).expect("Failed to load flat WebDAV config");
+
+    assert!(config.webdav.enabled);
+    assert_eq!(config.webdav.mount_path, "/photos");
+    assert_eq!(config.webdav.realm, "Photos");
+    assert_eq!(config.webdav.max_upload_bytes, 1234);
+    assert_eq!(config.webdav.max_concurrent_requests, 7);
+    assert_eq!(config.webdav.poll_interval_seconds, 3);
+    assert_eq!(config.webdav.stable_file_age_seconds, 11);
+    assert_eq!(config.webdav.max_concurrent_processing, 4);
+}
+
+#[test]
+fn test_load_config_rejects_nested_webdav_settings() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[webdav.limits]\nmax_upload_bytes = 1234\n");
+
+    let error = load_config(&path).expect_err("Nested WebDAV settings must be rejected");
+
+    assert!(error.to_string().contains("limits"));
+}
+
+#[test]
+fn test_load_config_reads_combined_metadata_settings() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[metadata]\nthumbnails_max_size = 1600\nthumbnails_tiny_size = 400\nthumbnails_quality = 90\nthumbnails_video_frame_quality = 80\nreverse_geocoding_enabled = false\nreverse_geocoding_base_url = \"https://example.com/reverse\"\nreverse_geocoding_user_agent = \"Momento test\"\nreverse_geocoding_timeout_seconds = 12\nreverse_geocoding_rate_limit_seconds = 2.5\n",
+    );
+
+    let config = load_config(&path).expect("Failed to load combined metadata config");
+
+    assert_eq!(config.metadata.thumbnails_max_size, 1600);
+    assert_eq!(config.metadata.thumbnails_tiny_size, 400);
+    assert_eq!(config.metadata.thumbnails_quality, 90);
+    assert_eq!(config.metadata.thumbnails_video_frame_quality, 80);
+    assert!(!config.metadata.reverse_geocoding_enabled);
+    assert_eq!(
+        config.metadata.reverse_geocoding_base_url,
+        "https://example.com/reverse"
+    );
+    assert_eq!(config.metadata.reverse_geocoding_user_agent, "Momento test");
+    assert_eq!(config.metadata.reverse_geocoding_timeout_seconds, 12);
+    assert_eq!(config.metadata.reverse_geocoding_rate_limit_seconds, 2.5);
+}
+
+#[test]
+fn test_load_config_rejects_replaced_metadata_sections() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+
+    for section in ["thumbnails", "reverse_geocoding"] {
+        let path = write_config(&dir, &format!("[{section}]\nenabled = true\n"));
+        let error = load_config(&path).expect_err("Replaced metadata section must be rejected");
+
+        assert!(error.to_string().contains(section));
+    }
+}
+
+#[test]
+fn test_load_config_rejects_unprefixed_metadata_settings() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+
+    for (setting, value) in [("max_size", "1600"), ("enabled", "false")] {
+        let path = write_config(&dir, &format!("[metadata]\n{setting} = {value}\n"));
+        let error = load_config(&path).expect_err("Unprefixed metadata setting must be rejected");
+
+        assert!(error.to_string().contains(setting));
+    }
 }
 
 #[test]
@@ -114,13 +202,27 @@ fn test_save_default_config_round_trips() {
     let config = load_config(&path).expect("Failed to reload saved config");
     let defaults = Config::default();
 
-    assert_eq!(config.storage.data_dir, defaults.storage.data_dir);
-    assert_eq!(config.storage.static_dir, defaults.storage.static_dir);
+    assert_eq!(config.server.data_dir, defaults.server.data_dir);
+    assert_eq!(config.server.static_dir, defaults.server.static_dir);
     assert_eq!(config.server.port, defaults.server.port);
 
     let generated = std::fs::read_to_string(path).expect("Failed to read generated config");
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
     assert!(generated["metadata_worker"].get("batch_size").is_none());
+    assert!(generated.get("storage").is_none());
+    assert_eq!(generated["server"]["data_dir"].as_str(), Some("/data"));
+    assert_eq!(
+        generated["webdav"]["max_upload_bytes"].as_integer(),
+        Some(10_737_418_240)
+    );
+    assert!(generated["webdav"].get("limits").is_none());
+    assert!(generated["webdav"].get("processing").is_none());
+    assert_eq!(
+        generated["metadata"]["thumbnails_max_size"].as_integer(),
+        Some(i64::from(defaults.metadata.thumbnails_max_size))
+    );
+    assert!(generated.get("thumbnails").is_none());
+    assert!(generated.get("reverse_geocoding").is_none());
 }
 
 #[test]

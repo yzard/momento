@@ -3,13 +3,11 @@
 
 import argparse
 import json
-import shutil
 import threading
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from urllib.request import urlopen
 
 import torch
 from PIL import Image, ImageFile
@@ -19,11 +17,6 @@ warnings.filterwarnings("ignore", category=FutureWarning, module=r"fairscale\..*
 from ram import get_transform, inference_ram
 from ram.models import ram_plus
 from runtime_input import read_runtime_input
-
-RAM_PLUS_CHECKPOINT_URL = (
-    "https://huggingface.co/xinyu1205/recognize-anything-plus-model/"
-    "resolve/main/ram_plus_swin_large_14m.pth"
-)
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -42,15 +35,11 @@ def parse_tags(raw_tags):
     return [tag.strip() for tag in raw_tags.split(" | ") if tag.strip()]
 
 
-def ensure_checkpoint(checkpoint):
+def require_checkpoint(checkpoint):
     path = Path(checkpoint)
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(f"{path.suffix}.download")
-    with urlopen(RAM_PLUS_CHECKPOINT_URL) as response, temporary_path.open("wb") as output:
-        shutil.copyfileobj(response, output)
-    temporary_path.replace(path)
+    if not path.is_file():
+        raise RuntimeError(f"RAM++ checkpoint is missing: {path}")
+    return path
 
 
 class TaggingRuntime:
@@ -141,7 +130,7 @@ def main():
     if args.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
 
-    ensure_checkpoint(args.checkpoint)
+    require_checkpoint(args.checkpoint)
     Handler.runtime = TaggingRuntime(args.checkpoint, args.image_size, args.device)
     Handler.inference_slots = create_inference_slots(args.max_concurrent_jobs)
     Handler.input_root = Path(args.input_root)

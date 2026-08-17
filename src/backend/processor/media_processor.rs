@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::config::{LlmConfig, ReverseGeocodingConfig, ThumbnailConfig};
+use crate::config::{LlmConfig, MetadataConfig};
 use crate::constants::{paths, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
 use crate::database::{execute_query, fetch_one, queries, DbConn, DbPool};
 use crate::processor::metadata::{
     apply_supplemental_metadata, extract_image_metadata, extract_video_metadata,
-    load_supplemental_metadata, normalize_gps_coordinates, MediaMetadata,
+    load_supplemental_metadata, normalize_gps_coordinates, reverse_geocoding::reverse_geocode,
+    MediaMetadata,
 };
 use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
 use crate::utils::hash::calculate_file_hash;
@@ -40,8 +41,7 @@ pub fn apply_file_times(
 #[derive(Clone)]
 pub struct MediaProcessingContext {
     pub user_id: i64,
-    pub thumbnails: ThumbnailConfig,
-    pub reverse_geocoding: Option<ReverseGeocodingConfig>,
+    pub metadata: MetadataConfig,
     pub llm: LlmConfig,
     pub pool: DbPool,
 }
@@ -221,72 +221,10 @@ pub async fn generate_thumbnails(
     (normal_relative, tiny_relative)
 }
 
-pub async fn reverse_geocode(
-    config: &ReverseGeocodingConfig,
-    latitude: f64,
-    longitude: f64,
-) -> (Option<String>, Option<String>, Option<String>) {
-    if !config.enabled {
-        return (None, None, None);
-    }
-
-    let url = format!(
-        "{}?format=json&lat={}&lon={}&zoom=10&addressdetails=1",
-        config.base_url, latitude, longitude
-    );
-
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.timeout_seconds))
-        .user_agent(&config.user_agent)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return (None, None, None),
-    };
-
-    let response = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(_) => return (None, None, None),
-    };
-
-    let json: serde_json::Value = match response.json().await {
-        Ok(j) => j,
-        Err(_) => return (None, None, None),
-    };
-
-    let address = json.get("address");
-    if address.is_none() {
-        return (None, None, None);
-    }
-
-    let address = address.unwrap();
-    let city = address
-        .get("city")
-        .or_else(|| address.get("town"))
-        .or_else(|| address.get("village"))
-        .or_else(|| address.get("hamlet"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let state = address
-        .get("state")
-        .or_else(|| address.get("region"))
-        .or_else(|| address.get("province"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let country = address
-        .get("country")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    (city, state, country)
-}
-
 pub async fn generate_complete_metadata(
     source_path: &Path,
     media_type: &str,
-    reverse_geo_config: Option<&ReverseGeocodingConfig>,
+    metadata_config: &MetadataConfig,
 ) -> MediaMetadata {
     let mut metadata = if media_type == "image" {
         extract_image_metadata(source_path).await
@@ -310,31 +248,30 @@ pub async fn generate_complete_metadata(
         }
     }
 
-    if let Some(geo_config) = reverse_geo_config {
-        if geo_config.enabled
-            && (metadata.location_state.is_none() || metadata.location_country.is_none())
-        {
-            let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude)
-            else {
-                return metadata;
-            };
-            let (city, state, country) = reverse_geocode(geo_config, latitude, longitude).await;
-            if city.is_some() {
-                metadata.location_city = city;
-            }
-            if state.is_some() {
-                metadata.location_state = state;
-            }
-            if country.is_some() {
-                metadata.location_country = country;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_secs_f64(
-                geo_config.rate_limit_seconds,
-            ))
-            .await;
-        }
+    if !metadata_config.reverse_geocoding_enabled
+        || (metadata.location_state.is_some() && metadata.location_country.is_some())
+    {
+        return metadata;
     }
+
+    let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude) else {
+        return metadata;
+    };
+    let (city, state, country) = reverse_geocode(metadata_config, latitude, longitude).await;
+    if city.is_some() {
+        metadata.location_city = city;
+    }
+    if state.is_some() {
+        metadata.location_state = state;
+    }
+    if country.is_some() {
+        metadata.location_country = country;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs_f64(
+        metadata_config.reverse_geocoding_rate_limit_seconds,
+    ))
+    .await;
 
     metadata
 }
@@ -406,9 +343,7 @@ pub async fn process_media_file(
         }
     }
 
-    let metadata =
-        generate_complete_metadata(source_path, media_type, context.reverse_geocoding.as_ref())
-            .await;
+    let metadata = generate_complete_metadata(source_path, media_type, &context.metadata).await;
     let (temporary_path, temporary_relative_path, temporary_filename) =
         match save_original_file(source_path) {
             Ok(res) => res,
@@ -556,10 +491,10 @@ pub async fn process_media_file(
     let (thumbnail_relative, _tiny_thumbnail_relative) = generate_thumbnails(
         &dest_path,
         media_type,
-        context.thumbnails.max_size,
-        context.thumbnails.tiny_size,
-        context.thumbnails.quality,
-        context.thumbnails.video_frame_quality,
+        context.metadata.thumbnails_max_size,
+        context.metadata.thumbnails_tiny_size,
+        context.metadata.thumbnails_quality,
+        context.metadata.thumbnails_video_frame_quality,
     )
     .await;
 

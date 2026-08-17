@@ -17,7 +17,7 @@ Momento stores its application data in SQLite and keeps original media, thumbnai
 
 ## AI Architecture
 
-Momento prepares every AI input itself. For a photo it sends a prepared image; for a video it sends prepared frames. Each request contains the raw input bytes and their descriptors, so `llm-service` does not need access to Momento's filesystem.
+Momento prepares every AI input itself. For a photo it sends a prepared image; for a video it currently sends a prepared representative frame. Each request contains the raw input bytes and its descriptor, while the transport preserves multiple ordered inputs for future preparation strategies. `llm-service` does not need access to Momento's filesystem.
 
 `llm-service` is designed to keep only one AI model loaded at a time. This allows systems with about 16 GB of GPU memory to use several different AI features without loading every model together.
 
@@ -25,7 +25,7 @@ Jobs are grouped by type. The scheduler keeps a bounded rolling window for one t
 
 Model concurrency is enforced only by the active model subservice. Momento and the llm-service scheduler do not apply model-specific concurrency limits.
 
-Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement. The scheduler keeps bounded job metadata in memory and sends only validated job/input descriptors to the active same-machine model. Model containers read inputs from the queue's read-only `processing/` mount; image bytes are never retransmitted over the local HTTP boundary. Queue job count is not configured, so operators must monitor disk capacity.
+Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement. The scheduler keeps bounded job metadata in memory and sends only validated job/input descriptors to the active same-container model process. The model opens inputs from `queue/processing`; image bytes are never retransmitted over the local HTTP boundary. Queue job count is not configured, so operators must monitor disk capacity.
 
 AI cancellation is durable across machines. Momento records an all-task or task-specific scope plus exact job IDs in an outbox and retries the authenticated cancellation request until llm-service acknowledges it. llm-service removes matching staged, queued, callback-pending, and failed copies; matching inference already running finishes locally and is then discarded without callback delivery.
 
@@ -58,68 +58,34 @@ Momento detects faces and groups images containing similar people. Administrator
 
 **Spend Audit:** Planned functionality will use receipt OCR and analysis to help review spending from receipt photos.
 
-## Docker Compose Example
+## Docker Playground
 
-The following `docker/docker-compose.yml` example builds both services from this repository. It uses host networking on Linux because the default local AI configuration starts model runtimes as separate Docker containers.
+The playground builds and starts exactly two containers: `momento-api` and `llm-service`.
+Model runtimes are processes inside `llm-service`; the deployment does not mount the Docker socket
+or create model containers. The CUDA 12.9 llm-service image contains isolated environments and
+baked model weights for Unlimited-OCR, RAM++, DINOv2-small, and InsightFace `buffalo_l`, so task
+activation performs no package installation or model download.
 
-```yaml
-services:
-  llm-service:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.llm
-    network_mode: host
-    command: ["/app/llm-service", "-c", "/data/config_llm.toml"]
-    environment:
-      PUID: "1000"
-      PGID: "1000"
-      UMASK: "022"
-      TZ: "UTC"
-    volumes:
-      - /srv/momento/llm:/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
+Requirements:
 
-  momento:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    network_mode: host
-    command: ["/app/momento-api", "-c", "/data/config.toml"]
-    environment:
-      PUID: "1000"
-      PGID: "1000"
-      UMASK: "022"
-      TZ: "UTC"
-    volumes:
-      - /srv/momento/data:/data
-    depends_on:
-      - llm-service
-    restart: unless-stopped
-```
+- Docker with the Compose plugin.
+- An NVIDIA GPU, compatible host driver, and NVIDIA Container Toolkit.
+- Sufficient disk space for the large model image and at least 8 GiB shared memory for vLLM.
+- Review of the bundled model licenses before redistributing the llm-service image.
 
-Before starting:
-
-1. Create `/srv/momento/llm/config_llm.toml`. `playground/config_llm.toml` is an example; set `storage.queue_dir = "/data/queue"`, `storage.runtime_mount_source = "/srv/momento/llm/queue/processing"`, and `storage.runtime_mount_target = "/momento-inputs"`. The source uses the Docker host path because the llm-service starts sibling model containers through the host Docker socket.
-2. Start Momento once to generate `/srv/momento/data/config.toml`, then configure its `[llm]` section.
-3. Use the same API key in Momento's `llm.api_key` and llm-service's `general.api_key`.
-4. Use the same callback key in Momento's `llm.callback_key` and llm-service's `callback.key`.
-5. When both services use host networking, set `llm.service_url` to `http://127.0.0.1:8100` and `llm.callback_url` to `http://127.0.0.1:8000/api/v1/internal/llm/callback`.
-6. Local AI models require an NVIDIA GPU, the NVIDIA Container Toolkit, and permission for `llm-service` to use the Docker socket.
-
-Start the stack from the repository root:
-
-```bash
-docker compose -f docker/docker-compose.yml up --build -d
-```
-
-Open `http://localhost:8000`.
-
-For development, the repository also provides:
+Run from any working directory:
 
 ```bash
 ./run_playground.sh
 ```
+
+The script builds both images, passes the invoking UID/GID, starts the stack on a private Compose
+network, and removes the containers on exit. Open `http://localhost:8000`.
+
+Momento reaches `http://llm-service:8100`; callbacks use
+`http://momento-api:8000/api/v1/internal/llm/callback`. The checked-in playground configs share the
+same API and callback keys. Production deployments must replace those keys and persist Momento data
+and the llm-service queue independently.
 
 ## Data
 

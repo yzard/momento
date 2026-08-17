@@ -1,0 +1,23 @@
+# Build artifacts and dependencies
+build/
+dist/
+**/target/
+node_modules/
+.pnpm-store/
+.turbo/
+
+# Runtime data
+playground/
+data/
+*.sqlite
+*.sqlite-*
+*.log
+
+# Development metadata
+.git/
+.idea/
+.vscode/
+.env*
+docs/
+tests/
+AGENTS.md

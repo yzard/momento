@@ -2,16 +2,15 @@
 set -euo pipefail
 
 TAG=$(date +%Y%m%d)
-IMAGE_NAME="zhuoyin/momento"
+MOMENTO_IMAGE="zhuoyin/momento"
+LLM_IMAGE="zhuoyin/momento-llm-service"
 
 cd "$(dirname "$0")/docker"
 
-echo "Building Docker image: ${IMAGE_NAME}:${TAG}..."
-docker build -f Dockerfile -t "${IMAGE_NAME}:${TAG}" -t "${IMAGE_NAME}:latest" ..
+docker build -f Dockerfile -t "${MOMENTO_IMAGE}:${TAG}" -t "${MOMENTO_IMAGE}:latest" ..
+docker build -f Dockerfile.llm -t "${LLM_IMAGE}:${TAG}" -t "${LLM_IMAGE}:latest" ..
 
-echo "Build complete: ${IMAGE_NAME}:${TAG}"
-
-echo "Pushing Docker images to registry..."
-docker push "${IMAGE_NAME}:${TAG}"
-docker push "${IMAGE_NAME}:latest"
-echo "Push complete: ${IMAGE_NAME}:${TAG} and ${IMAGE_NAME}:latest"
+docker push "${MOMENTO_IMAGE}:${TAG}"
+docker push "${MOMENTO_IMAGE}:latest"
+docker push "${LLM_IMAGE}:${TAG}"
+docker push "${LLM_IMAGE}:latest"
