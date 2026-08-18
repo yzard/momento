@@ -1,5 +1,4 @@
 import { useState, type FormEvent } from 'react'
-import { authApi } from '../../api/auth'
 import { useAuth } from '../../hooks/useAuth'
 import { cn } from '../../lib/utils'
 
@@ -8,7 +7,7 @@ interface ChangePasswordProps {
 }
 
 export default function ChangePassword({ onComplete }: ChangePasswordProps) {
-  const { refreshUser } = useAuth()
+  const { changePassword } = useAuth()
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -32,8 +31,7 @@ export default function ChangePassword({ onComplete }: ChangePasswordProps) {
     setIsLoading(true)
 
     try {
-      await authApi.changePassword(currentPassword, newPassword)
-      await refreshUser()
+      await changePassword(currentPassword, newPassword)
       setCurrentPassword('')
       setNewPassword('')
       setConfirmPassword('')
@@ -105,4 +103,3 @@ export default function ChangePassword({ onComplete }: ChangePasswordProps) {
     </form>
   )
 }
-

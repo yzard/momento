@@ -314,7 +314,7 @@ fn queue_acceptance_preserves_ordered_frame_inputs() {
 }
 
 #[test]
-fn queue_acceptance_accepts_non_contiguous_input_sequences() {
+fn queue_acceptance_recognizes_image_aesthetics_with_non_contiguous_sequences() {
     let directory = tempdir().expect("queue directory");
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
@@ -343,7 +343,7 @@ fn queue_acceptance_accepts_non_contiguous_input_sequences() {
                 client_id: "client-a".to_string(),
                 job_id: "0123456789abcdef0123456789abcdef".to_string(),
                 media_id: 1,
-                task: "image_clustering".to_string(),
+                task: "image_aesthetics".to_string(),
                 attempt: 1,
                 inputs: vec![descriptor.clone()],
             },

@@ -143,6 +143,125 @@ async fn clean_ocr_removes_ocr_results_and_jobs() {
 }
 
 #[tokio::test]
+async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
+    init_test_paths();
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.llm.image_aesthetics_enabled = true;
+    let app = create_app(
+        Arc::new(config),
+        pool.clone(),
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let user_id = create_test_user(&pool, "aesthetics-admin", "aesthetics-admin@example.com");
+    let media_id = create_test_media(&pool, "aesthetics.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("aesthetics input");
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", admin_token(user_id));
+
+    let trigger = server
+        .post("/api/v1/ai/image_aesthetics/trigger")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({}))
+        .await;
+    trigger.assert_status_ok();
+    assert_eq!(trigger.json::<Value>()["queuedJobs"], 1);
+    let status = server
+        .post("/api/v1/ai/image_aesthetics/status")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({}))
+        .await;
+    status.assert_status_ok();
+    assert_eq!(status.json::<Value>()["queuedJobs"], 1);
+    server
+        .post("/api/v1/ai/image_aesthetics/cancel")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({}))
+        .await
+        .assert_status_ok();
+    let connection = pool.get().expect("connection");
+    connection.execute("INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', 'test', 0.5, 0.5, 0.5, 0.5, 0.5)", [media_id]).expect("aesthetics result");
+    drop(connection);
+    server
+        .post("/api/v1/ai/image_aesthetics/clean")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({}))
+        .await
+        .assert_status_ok();
+
+    let connection = pool.get().expect("connection");
+    let result_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM media_aesthetics", [], |row| {
+            row.get(0)
+        })
+        .expect("aesthetics result count");
+    let job_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_jobs WHERE task = 'image_aesthetics'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("aesthetics job count");
+    assert_eq!(result_count, 0);
+    assert_eq!(job_count, 0);
+}
+
+#[tokio::test]
+async fn image_aesthetics_reset_does_not_queue_when_disabled() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(
+        &pool,
+        "disabled-aesthetics-admin",
+        "disabled-aesthetics-admin@example.com",
+    );
+    let media_id = create_test_media(&pool, "disabled-aesthetics.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("aesthetics input");
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+
+    let response = server
+        .post("/api/v1/ai/image_aesthetics/reset")
+        .add_header(AUTHORIZATION, format!("Bearer {}", admin_token(user_id)))
+        .json(&json!({}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>()["queuedJobs"], 0);
+    let jobs: i64 = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT COUNT(*) FROM llm_jobs WHERE task = 'image_aesthetics'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("job count");
+    assert_eq!(jobs, 0);
+}
+
+#[tokio::test]
 async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     init_test_paths();
     let pool = create_test_db();

@@ -7,6 +7,30 @@ interface MediaDetailsProps {
   className?: string
 }
 
+function ordinalDay(day: number): string {
+  const lastTwoDigits = day % 100
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 13) return `${day}th`
+
+  if (day % 10 === 1) return `${day}st`
+  if (day % 10 === 2) return `${day}nd`
+  if (day % 10 === 3) return `${day}rd`
+  return `${day}th`
+}
+
+function formatDateTaken(dateTaken: string | null): string | null {
+  if (!dateTaken) return null
+
+  const date = new Date(dateTaken)
+  if (Number.isNaN(date.getTime())) return null
+
+  const time = date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).replace(/\s/g, '')
+  const month = date.toLocaleDateString('en-US', { month: 'short' })
+  return `${time}, ${month} ${ordinalDay(date.getDate())}, ${date.getFullYear()}`
+}
+
 export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
   const formatFileSize = (bytes: number | null) => {
     if (bytes === null) return null
@@ -40,7 +64,7 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
   )
 
   const details = [
-    { icon: Calendar, label: 'Date Taken', value: rawValue(media.dateTaken) },
+    { icon: Calendar, label: 'Date Taken', value: formatDateTaken(media.dateTaken) },
     { icon: isPhone ? Smartphone : Camera, label: 'Camera', value: combineValues(media.cameraMake, media.cameraModel) },
     { icon: Camera, label: 'Lens', value: combineValues(media.lensMake, media.lensModel) },
     { icon: Camera, label: 'ISO', value: rawValue(media.iso) },
@@ -56,7 +80,6 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     { icon: FileType, label: 'Duration Seconds', value: rawValue(media.durationSeconds) },
     { icon: FileType, label: 'File Size', value: formatFileSize(media.fileSize) },
     { icon: FileType, label: 'Video Codec', value: rawValue(media.videoCodec) },
-    { icon: FileType, label: 'Original Filename', value: rawValue(media.originalFilename) },
     { icon: FileType, label: 'Stored Filename', value: rawValue(media.filename) },
     { icon: MapPin, label: 'Location', value: locationValue },
     { icon: MapPin, label: 'GPS (Lat, Long, Alt)', value: gpsValue },

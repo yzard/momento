@@ -195,7 +195,7 @@ describe('Deduplicate page', () => {
     mocks.groups.mockResolvedValue({
       groups: [{
         clusterId: 10,
-        items: [createMedia(1, 'one.jpg'), createMedia(2, 'two.jpg')],
+        items: [createMedia(1, 'two.jpg'), createMedia(2, 'one.jpg')],
       }],
       nextCursor: null,
       hasMore: false,
@@ -204,14 +204,20 @@ describe('Deduplicate page', () => {
     })
     renderPage()
 
-    await user.click(await screen.findByRole('button', { name: 'Select one.jpg' }))
+    const inspectButtons = await screen.findAllByRole('button', { name: /^Inspect / })
+    expect(inspectButtons.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Inspect one.jpg',
+      'Inspect two.jpg',
+    ])
+
+    await user.click(screen.getByRole('button', { name: 'Select one.jpg' }))
     expect(screen.getAllByText('1 selected')).toHaveLength(2)
     expect(mocks.lightbox).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: 'Inspect two.jpg' }))
-    expect(screen.getByTestId('lightbox').textContent).toBe('1,2:1')
+    expect(screen.getByTestId('lightbox').textContent).toBe('2,1:1')
     expect(mocks.lightbox).toHaveBeenCalledWith(expect.objectContaining({
-      mediaIds: [1, 2],
+      mediaIds: [2, 1],
       currentIndex: 1,
     }))
   })

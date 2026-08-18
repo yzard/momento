@@ -6,11 +6,13 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         toml::from_str(default_config_template()).expect("rendered template must be valid TOML");
     let runtime_defaults = Config::default();
 
-    assert_eq!(
-        template["llm"]["face_group_similarity_threshold"].as_float(),
-        Some(f64::from(
-            runtime_defaults.llm.face_group_similarity_threshold
-        ))
+    let template_threshold = template["llm"]["face_group_similarity_threshold"]
+        .as_float()
+        .expect("template threshold");
+    assert!(
+        (template_threshold - f64::from(runtime_defaults.llm.face_group_similarity_threshold))
+            .abs()
+            < f64::from(f32::EPSILON)
     );
     assert!(!default_config_template().contains("{{"));
 }

@@ -8,6 +8,7 @@ mod imports;
 mod map;
 mod media;
 mod metadata;
+mod places;
 mod public;
 mod share;
 mod trash;
@@ -30,6 +31,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(media::preview_router())
         .merge(albums::router())
         .merge(map::router())
+        .merge(places::router())
         .merge(share::router())
         .merge(public::router())
         .merge(imports::router())

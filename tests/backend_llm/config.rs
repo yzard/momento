@@ -158,6 +158,7 @@ fn loads_playground_toml_configuration() {
     let config = Config::load(&path).expect("Playground TOML configuration should load");
     let playground = std::fs::read_to_string(&path).expect("Playground config must exist");
     let clustering = config.service_for("image_clustering").unwrap();
+    let aesthetics = config.service_for("image_aesthetics").unwrap();
     let face_detection = config.service_for("face_detection").unwrap();
     let tagging = config.service_for("image_tagging").unwrap();
     let ocr = config.service_for("ocr").unwrap();
@@ -175,6 +176,7 @@ fn loads_playground_toml_configuration() {
     assert_eq!(ocr.max_concurrent_jobs, 100);
     assert_eq!(tagging.max_concurrent_jobs, 16);
     assert_eq!(clustering.max_concurrent_jobs, 32);
+    assert_eq!(aesthetics.max_concurrent_jobs, 16);
     assert_eq!(face_detection.max_concurrent_jobs, 16);
     assert_eq!(
         config.scheduler.result_delivery_max_concurrent_deliveries,
@@ -200,7 +202,7 @@ fn saves_commented_operational_default_configuration() {
 
     assert_eq!(generated, default_config_template());
     assert!(generated.contains("# Durable results are retried"));
-    assert_eq!(config.service.len(), 4);
+    assert_eq!(config.service.len(), 5);
     assert_eq!(config.server.api_key, "change-me-llm-service-key");
 }
 
@@ -239,4 +241,24 @@ fn rejects_enabled_service_without_concurrency_limit() {
 
     let error = Config::load(file.path()).expect_err("zero limit must be rejected");
     assert!(error.to_string().contains("max_concurrent_jobs"));
+}
+
+#[test]
+fn validates_image_aesthetics_timeouts_without_model_configuration() {
+    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    write!(
+        file,
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\n",
+        local_ocr_configuration("")
+    )
+    .expect("Failed to write config fixture");
+
+    let config = Config::load(file.path()).expect("Image aesthetics config should load");
+    let aesthetics = config
+        .service_for("image_aesthetics")
+        .expect("enabled aesthetics service");
+
+    assert_eq!(aesthetics.max_concurrent_jobs, 2);
+    assert_eq!(aesthetics.startup_timeout_seconds, 1);
+    assert_eq!(aesthetics.request_timeout_seconds, 1);
 }

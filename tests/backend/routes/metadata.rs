@@ -50,6 +50,7 @@ fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
     connection.execute("INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, 'ocr', 'test', 'text')", [media_id]).expect("text");
     connection.execute("INSERT INTO media_text_inputs (media_id, model_type, sequence, model_version, string) VALUES (?, 'ocr', 0, 'test', 'frame text')", [media_id]).expect("input text");
     connection.execute("INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, processing_status) VALUES (?, 'hash', 'test', 'test', X'00000000', 0, 1)", [media_id]).expect("index");
+    connection.execute("INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', 'test', 0.5, 0.5, 0.5, 0.5, 0.5)", [media_id]).expect("aesthetics");
     drop(connection);
     momento_api::processor::metadata_worker::reset_all(&pool).expect("reset");
     let connection = pool.get().expect("connection");
@@ -58,6 +59,7 @@ fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
         "media_text",
         "media_text_inputs",
         "media_similarity_index",
+        "media_aesthetics",
     ] {
         let count: i64 = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -69,7 +71,7 @@ fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
 }
 
 #[test]
-fn ocr_queueing_does_not_depend_on_image_tagging_configuration() {
+fn queue_all_keeps_ocr_independent_of_optional_tasks() {
     let (_application, pool) = create_test_app();
     let media_id = create_test_media(&pool, "ocr-input.jpg");
     let connection = pool.get().expect("connection");
@@ -81,5 +83,29 @@ fn ocr_queueing_does_not_depend_on_image_tagging_configuration() {
         .expect("metadata job");
     connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
     drop(connection);
-    assert_eq!(ai::queue_task(&pool, "ocr", false).expect("queue ocr"), 1);
+    assert_eq!(ai::queue_all(&pool, false, false).expect("queue ocr"), 1);
+}
+
+#[test]
+fn image_aesthetics_queueing_uses_its_result_table_and_enablement() {
+    let (_application, pool) = create_test_app();
+    let media_id = create_test_media(&pool, "aesthetics-input.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
+    drop(connection);
+
+    assert_eq!(
+        ai::queue_task(&pool, "image_aesthetics", false).expect("disabled queue"),
+        0
+    );
+    assert_eq!(
+        ai::queue_task(&pool, "image_aesthetics", true).expect("enabled queue"),
+        1
+    );
 }

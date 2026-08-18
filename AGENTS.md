@@ -41,7 +41,7 @@ Three rules are worth repeating because they are the ones most often violated:
 ## LLM Task Scheduling
 
 Every AI inference type follows one staged, durable propagation pattern. Current task identifiers
-are `ocr`, `image_tagging`, `image_clustering`, and `face_detection`; adding another identifier
+are `ocr`, `image_tagging`, `image_clustering`, `image_aesthetics`, and `face_detection`; adding another identifier
 means extending this same pattern end to end, not creating a direct or type-specific transport
 path.
 
@@ -182,7 +182,7 @@ The Momento submission worker keeps a global `max_in_flight` rolling window. It 
 a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
 remains. This transport window is independent from every model runtime's inference concurrency.
 
-OCR eligibility is independent of image-tagging configuration. Tagging, clustering, and face
+OCR eligibility is independent of image-tagging configuration. Tagging, clustering, aesthetics, and face
 detection are queued only through their enabled trigger or run paths. The submission worker sends
 existing queued jobs; it does not create task jobs. Submission reads the immutable
 `llm_job_inputs` snapshot created with each job rather than re-querying live `media_ai_inputs`.
@@ -198,6 +198,8 @@ local inference, then llm-service discards its result and queue directory withou
 result. Exact-ID markers prevent an admission that was already in flight from recreating
 cancelled work. Cancellation acknowledgements remove the matching Momento outbox rows; a
 disconnect or rejection leaves them for retry.
+Queued jobs matching a pending task or all-task cancellation scope are not submitted until that
+scope is acknowledged. This keeps reset replacements from racing ahead of their cancellation.
 
 ### Durable llm-service queue
 
@@ -295,7 +297,9 @@ send `resultRejected` so llm-service retains and retries the durable result.
 
 Persistence is deliberately type-specific. OCR and tagging store present text results in
 input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
-text currently becomes an empty string. Clustering validates its embedding/hash result and updates
+text currently becomes an empty string. Aesthetics validates five finite scores in `[0, 1]`, stores
+ordered input-level scores in `media_aesthetic_inputs`, and stores the first-input aggregate in
+`media_aesthetics`. Clustering validates its embedding/hash result and updates
 similarity tables. Face detection
 validates bounding boxes, eye centers, confidence, quality, frontality, and 512-dimensional
 embeddings before writing crops and face rows. A generic transport response does not remove the
@@ -308,7 +312,7 @@ return without running inference inline. Clustering results only persist similar
 Cancellation prevents further creation and finalization. Startup marks interrupted runs failed and
 schedules replacement work rather than resuming the same run record.
 
-Momento has independent five-field cron schedules for OCR, image tagging, deduplication, and face
+Momento has independent five-field cron schedules for OCR, image tagging, deduplication, image aesthetics, and face
 detection. They are evaluated in the configured IANA timezone and create work through the same
 durable processor operations as manual triggers. The field remains `deduplicate_cron`, not
 `image_clustering_cron`, because it starts the complete deduplication pipeline; image clustering is
@@ -424,7 +428,7 @@ clamping.
 
 Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
 seed embedding that first created each group. A face joins the first seed whose cosine similarity
-reaches `llm.face_group_similarity_threshold`; the default is `0.5`, lower values are more
+reaches `llm.face_group_similarity_threshold`; the default is `0.41`, lower values are more
 tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use the
 thumbnail representative, compare every member pair, apply transitive closure, or run a second
 group-to-group merge pass. Manual groups remain excluded from automatic regrouping. Changing these
@@ -442,6 +446,21 @@ to that user's accessible members.
 The face-group list is sorted in the backend before `LIMIT`/`OFFSET`: distinct visible media count
 descending, then face-group ID ascending as the stable tie-breaker. Do not sort paginated face
 groups in the frontend, and do not use raw face count in place of distinct accessible media count.
+
+### Places and aesthetic covers
+
+Places are identified by the exact `location_city`, nullable `location_state`, and
+`location_country` tuple. Lists and galleries filter through active `media_access`; list ordering is
+visible media count descending, then city, state, and country ascending. Place identifiers are
+opaque encodings of the complete tuple. Manual GPS changes immediately recompute or clear the local
+reverse-geocoded fields so grouping cannot retain stale location names.
+
+Metadata generates a separate aspect-preserving place thumbnail and uses it as the prepared
+`image_aesthetics` input for photos and representative video frames. Cover ranking prefers completed
+aesthetic inference and combines aesthetic 40%, scenic 25%, simplicity 20%, landscape 10%, and
+technical quality 5%, then applies OCR-clutter and dominant-face penalties. Media without an
+aesthetic result use a deterministic landscape, capture-date, and media-ID fallback. A user's place
+cover is always selected only from media visible to that user.
 
 `schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
 breaking schema changes require a fresh database for development and playground data.

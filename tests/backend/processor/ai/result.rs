@@ -36,6 +36,16 @@ fn insert_submitted_job(pool: &DbPool, job_id: &str, media_id: i64, task: &str, 
         .expect("submitted job");
 }
 
+fn insert_job_input(pool: &DbPool, job_id: &str, sequence: u32, frame_timestamp_ms: Option<i64>) {
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, 'image', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash', ?)",
+            rusqlite::params![job_id, sequence, frame_timestamp_ms],
+        )
+        .expect("job input");
+}
+
 #[test]
 fn result_rejects_stale_attempts_and_non_terminal_statuses() {
     let pool = create_test_db();
@@ -113,6 +123,168 @@ fn result_persists_every_video_frame() {
         .expect("aggregate text");
     assert_eq!(frame_count, 2);
     assert_eq!(aggregate_text, "first\nsecond");
+}
+
+#[test]
+fn aesthetics_result_persists_aggregate_and_input_scores() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "result-aesthetics.jpg");
+    insert_submitted_job(&pool, "result-aesthetics", media_id, "image_aesthetics", 1);
+    insert_job_input(&pool, "result-aesthetics", 0, None);
+    let scores = serde_json::json!({
+        "aestheticScore": 0.81,
+        "scenicScore": 0.72,
+        "simplicityScore": 0.63,
+        "landscapeScore": 0.54,
+        "technicalQualityScore": 0.45
+    });
+    let result = JobResult {
+        job_id: "result-aesthetics".to_string(),
+        media_id,
+        task: "image_aesthetics".to_string(),
+        attempt: 1,
+        status: "completed".to_string(),
+        model_type: Some("image_aesthetics".to_string()),
+        model_version: Some("clip-vit-b-32-laion-v1".to_string()),
+        result: Some(scores.clone()),
+        input_results: Some(vec![JobInputResult {
+            sequence: 0,
+            frame_timestamp_ms: None,
+            result: scores,
+        }]),
+        error: None,
+    };
+
+    process_result(&pool, result).expect("aesthetics result");
+
+    let connection = pool.get().expect("connection");
+    let aggregate: (f64, f64) = connection
+        .query_row(
+            "SELECT aesthetic_score, scenic_score FROM media_aesthetics WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("aggregate aesthetics");
+    let input_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_aesthetic_inputs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("input aesthetics");
+    assert_eq!(aggregate, (0.81, 0.72));
+    assert_eq!(input_count, 1);
+}
+
+#[test]
+fn aesthetics_result_rejects_missing_or_out_of_range_scores() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "result-invalid-aesthetics.jpg");
+    insert_submitted_job(
+        &pool,
+        "result-invalid-aesthetics",
+        media_id,
+        "image_aesthetics",
+        1,
+    );
+    let scores = serde_json::json!({
+        "aestheticScore": 1.1,
+        "scenicScore": 0.7,
+        "simplicityScore": 0.6,
+        "landscapeScore": 0.5,
+        "technicalQualityScore": 0.4
+    });
+    let result = JobResult {
+        job_id: "result-invalid-aesthetics".to_string(),
+        media_id,
+        task: "image_aesthetics".to_string(),
+        attempt: 1,
+        status: "completed".to_string(),
+        model_type: Some("image_aesthetics".to_string()),
+        model_version: Some("test".to_string()),
+        result: Some(scores.clone()),
+        input_results: Some(vec![JobInputResult {
+            sequence: 0,
+            frame_timestamp_ms: None,
+            result: scores,
+        }]),
+        error: None,
+    };
+
+    let error = process_result(&pool, result).expect_err("invalid score must fail");
+    assert!(matches!(error, AppError::BadRequest(_)));
+}
+
+#[test]
+fn aesthetics_result_must_match_submitted_inputs_and_first_input_aggregate() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "result-correlated-aesthetics.jpg");
+    insert_submitted_job(
+        &pool,
+        "result-correlated-aesthetics",
+        media_id,
+        "image_aesthetics",
+        1,
+    );
+    insert_job_input(&pool, "result-correlated-aesthetics", 0, Some(100));
+    let aggregate = serde_json::json!({
+        "aestheticScore": 0.8,
+        "scenicScore": 0.8,
+        "simplicityScore": 0.8,
+        "landscapeScore": 0.8,
+        "technicalQualityScore": 0.8
+    });
+    let input = serde_json::json!({
+        "aestheticScore": 0.7,
+        "scenicScore": 0.7,
+        "simplicityScore": 0.7,
+        "landscapeScore": 0.7,
+        "technicalQualityScore": 0.7
+    });
+    let result = JobResult {
+        job_id: "result-correlated-aesthetics".to_string(),
+        media_id,
+        task: "image_aesthetics".to_string(),
+        attempt: 1,
+        status: "completed".to_string(),
+        model_type: Some("image_aesthetics".to_string()),
+        model_version: Some("test".to_string()),
+        result: Some(aggregate),
+        input_results: Some(vec![JobInputResult {
+            sequence: 0,
+            frame_timestamp_ms: Some(100),
+            result: input,
+        }]),
+        error: None,
+    };
+
+    let mut wrong_correlation = result.clone();
+    wrong_correlation.result = wrong_correlation
+        .input_results
+        .as_ref()
+        .and_then(|results| results.first())
+        .map(|input| input.result.clone());
+    wrong_correlation
+        .input_results
+        .as_mut()
+        .expect("input results")[0]
+        .sequence = 1;
+    let error =
+        process_result(&pool, wrong_correlation).expect_err("input correlation mismatch must fail");
+    assert!(matches!(error, AppError::BadRequest(_)));
+
+    let error = process_result(&pool, result).expect_err("aggregate mismatch must fail");
+    assert!(matches!(error, AppError::BadRequest(_)));
+    let persisted: i64 = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT COUNT(*) FROM media_aesthetics WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("aesthetics count");
+    assert_eq!(persisted, 0);
 }
 
 #[test]

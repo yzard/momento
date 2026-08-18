@@ -48,6 +48,16 @@ pub struct InferenceResponse {
     pub perceptual_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aesthetic_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenic_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simplicity_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landscape_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub technical_quality_score: Option<f32>,
     #[serde(default)]
     pub faces: Vec<FaceDetection>,
 }
@@ -104,6 +114,7 @@ pub enum ServiceType {
     Ocr,
     ImageTagging,
     ImageClustering,
+    ImageAesthetics,
     FaceDetection,
 }
 
@@ -256,6 +267,35 @@ impl RuntimeCatalog {
                 model_version: "buffalo_l".to_string(),
                 embedding_dimensions: FACE_EMBEDDING_DIMENSIONS,
             },
+            RuntimeSpec {
+                service_type: ServiceType::ImageAesthetics,
+                executable: PathBuf::from("/opt/venvs/dinov2/bin/python"),
+                arguments: vec![
+                    "/app/runtimes/image_aesthetics_server.py",
+                    "--clip-model",
+                    "/opt/models/clip/ViT-B-32.pt",
+                    "--aesthetic-head",
+                    "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth",
+                    "--device",
+                    "cuda:0",
+                    "--host",
+                    RUNTIME_HOST,
+                    "--port",
+                    "8600",
+                    "--max-concurrent-jobs",
+                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--input-root",
+                    RUNTIME_INPUT_PLACEHOLDER,
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                environment: Vec::new(),
+                base_url: "http://127.0.0.1:8600".to_string(),
+                model: "ViT-B/32".to_string(),
+                model_version: "clip-vit-b-32-laion-aesthetic-v1".to_string(),
+                embedding_dimensions: 0,
+            },
         ])
     }
 
@@ -278,6 +318,7 @@ impl ServiceType {
             "ocr" => Ok(Self::Ocr),
             "image_tagging" => Ok(Self::ImageTagging),
             "image_clustering" => Ok(Self::ImageClustering),
+            "image_aesthetics" => Ok(Self::ImageAesthetics),
             "face_detection" => Ok(Self::FaceDetection),
             _ => Err(ServiceError::NotImplemented(format!(
                 "inference task `{task}` has no configured managed runtime"
@@ -290,6 +331,7 @@ impl ServiceType {
             Self::Ocr => "ocr",
             Self::ImageTagging => "image_tagging",
             Self::ImageClustering => "image_clustering",
+            Self::ImageAesthetics => "image_aesthetics",
             Self::FaceDetection => "face_detection",
         }
     }
@@ -299,6 +341,7 @@ impl ServiceType {
             Self::Ocr => "ocr",
             Self::ImageTagging => "image_tagging",
             Self::ImageClustering => "image_clustering",
+            Self::ImageAesthetics => "image_aesthetics",
             Self::FaceDetection => "face_detection",
         }
     }
@@ -309,6 +352,7 @@ enum ActiveService {
     Ocr(Arc<LocalProvider>),
     ImageTagging(Arc<RamProvider>),
     ImageClustering(Arc<ImageClusteringProvider>),
+    ImageAesthetics(Arc<ImageAestheticsProvider>),
     FaceDetection(Arc<FaceDetectionProvider>),
 }
 
@@ -318,6 +362,7 @@ impl ActiveService {
             Self::Ocr(_) => ServiceType::Ocr,
             Self::ImageTagging(_) => ServiceType::ImageTagging,
             Self::ImageClustering(_) => ServiceType::ImageClustering,
+            Self::ImageAesthetics(_) => ServiceType::ImageAesthetics,
             Self::FaceDetection(_) => ServiceType::FaceDetection,
         }
     }
@@ -327,6 +372,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.name(),
             Self::ImageTagging(_) => "ram++",
             Self::ImageClustering(_) => "dinov2",
+            Self::ImageAesthetics(_) => "clip-aesthetic",
             Self::FaceDetection(_) => "insightface",
         }
     }
@@ -335,6 +381,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.shutdown().await,
             Self::ImageTagging(provider) => provider.shutdown().await,
             Self::ImageClustering(provider) => provider.shutdown().await,
+            Self::ImageAesthetics(provider) => provider.shutdown().await,
             Self::FaceDetection(provider) => provider.shutdown().await,
         }
     }
@@ -344,6 +391,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.is_alive().await,
             Self::ImageTagging(provider) => provider.runtime.is_alive().await,
             Self::ImageClustering(provider) => provider.runtime.is_alive().await,
+            Self::ImageAesthetics(provider) => provider.runtime.is_alive().await,
             Self::FaceDetection(provider) => provider.runtime.is_alive().await,
         }
     }
@@ -356,6 +404,7 @@ impl ActiveService {
             Self::Ocr(provider) => provider.infer_inputs(inputs).await,
             Self::ImageTagging(provider) => provider.infer_inputs(inputs).await,
             Self::ImageClustering(provider) => provider.infer_inputs(inputs).await,
+            Self::ImageAesthetics(provider) => provider.infer_inputs(inputs).await,
             Self::FaceDetection(provider) => provider.infer_inputs(inputs).await,
         }
     }
@@ -448,6 +497,9 @@ impl ServiceManager {
             )),
             ServiceType::ImageClustering => ActiveService::ImageClustering(Arc::new(
                 ImageClusteringProvider::new(&service, &runtime, &self.config.server).await?,
+            )),
+            ServiceType::ImageAesthetics => ActiveService::ImageAesthetics(Arc::new(
+                ImageAestheticsProvider::new(&service, &runtime, &self.config.server).await?,
             )),
             ServiceType::FaceDetection => ActiveService::FaceDetection(Arc::new(
                 FaceDetectionProvider::new(&service, &runtime, &self.config.server).await?,
@@ -674,6 +726,11 @@ impl LocalProvider {
             embedding_dimensions: None,
             perceptual_hash: None,
             quality_score: None,
+            aesthetic_score: None,
+            scenic_score: None,
+            simplicity_score: None,
+            landscape_score: None,
+            technical_quality_score: None,
             faces: Vec::new(),
         })
     }
@@ -862,6 +919,11 @@ impl RamProvider {
             embedding_dimensions: None,
             perceptual_hash: None,
             quality_score: None,
+            aesthetic_score: None,
+            scenic_score: None,
+            simplicity_score: None,
+            landscape_score: None,
+            technical_quality_score: None,
             faces: Vec::new(),
         })
     }
@@ -953,6 +1015,11 @@ impl ImageClusteringProvider {
             embedding_dimensions: Some(clustering_response.embedding_dimensions),
             perceptual_hash: Some(clustering_response.perceptual_hash),
             quality_score: Some(clustering_response.quality_score),
+            aesthetic_score: None,
+            scenic_score: None,
+            simplicity_score: None,
+            landscape_score: None,
+            technical_quality_score: None,
             faces: Vec::new(),
         })
     }
@@ -1007,6 +1074,120 @@ impl ImageClusteringProvider {
             return Err(ServiceError::Upstream(
                 "DINOv2 returned an invalid quality score".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), ServiceError> {
+        self.runtime.shutdown().await
+    }
+}
+
+pub struct ImageAestheticsProvider {
+    runtime: ManagedRuntime,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImageAestheticsRuntimeResponse {
+    aesthetic_score: f32,
+    scenic_score: f32,
+    simplicity_score: f32,
+    landscape_score: f32,
+    technical_quality_score: f32,
+}
+
+impl ImageAestheticsProvider {
+    pub async fn new(
+        config: &ServiceConfig,
+        runtime: &RuntimeSpec,
+        server: &ServerConfig,
+    ) -> Result<Self, ServiceError> {
+        Ok(Self {
+            runtime: ManagedRuntime::new(config, runtime, server, "CLIP aesthetics").await?,
+        })
+    }
+
+    pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
+        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
+        let response = self
+            .runtime
+            .client
+            .post(url)
+            .json(&runtime_input_descriptor(input))
+            .send()
+            .await
+            .map_err(|error| {
+                ServiceError::RuntimeUnavailable(format!("CLIP aesthetics request failed: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            ServiceError::Upstream(format!("failed to read CLIP aesthetics response: {error}"))
+        })?;
+        if !status.is_success() {
+            let message = format!("CLIP aesthetics runtime returned {status}: {body}");
+            return if status.is_client_error() {
+                Err(ServiceError::BadRequest(message))
+            } else {
+                Err(ServiceError::Upstream(message))
+            };
+        }
+
+        let runtime_response: ImageAestheticsRuntimeResponse = serde_json::from_str(&body)
+            .map_err(|error| {
+                ServiceError::Upstream(format!("invalid CLIP aesthetics response: {error}"))
+            })?;
+        self.validate_response(&runtime_response)?;
+
+        Ok(InferenceResponse {
+            task: "image_aesthetics".to_string(),
+            text: String::new(),
+            markdown: String::new(),
+            provider: "clip-aesthetic".to_string(),
+            model_type: "image_aesthetics".to_string(),
+            model_version: self.runtime.spec.model_version.clone(),
+            tags: Vec::new(),
+            embedding: None,
+            embedding_encoding: None,
+            embedding_dimensions: None,
+            perceptual_hash: None,
+            quality_score: None,
+            aesthetic_score: Some(runtime_response.aesthetic_score),
+            scenic_score: Some(runtime_response.scenic_score),
+            simplicity_score: Some(runtime_response.simplicity_score),
+            landscape_score: Some(runtime_response.landscape_score),
+            technical_quality_score: Some(runtime_response.technical_quality_score),
+            faces: Vec::new(),
+        })
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input).await?,
+            });
+        }
+        Ok(responses)
+    }
+
+    fn validate_response(
+        &self,
+        response: &ImageAestheticsRuntimeResponse,
+    ) -> Result<(), ServiceError> {
+        for (score, name) in [
+            (response.aesthetic_score, "aesthetic score"),
+            (response.scenic_score, "scenic score"),
+            (response.simplicity_score, "simplicity score"),
+            (response.landscape_score, "landscape score"),
+            (response.technical_quality_score, "technical quality score"),
+        ] {
+            validate_unit_score(score, name, "CLIP aesthetics")?;
         }
         Ok(())
     }
@@ -1133,6 +1314,11 @@ impl FaceDetectionProvider {
             embedding_dimensions: None,
             perceptual_hash: None,
             quality_score: None,
+            aesthetic_score: None,
+            scenic_score: None,
+            simplicity_score: None,
+            landscape_score: None,
+            technical_quality_score: None,
             faces,
         })
     }
@@ -1165,9 +1351,9 @@ impl FaceDetectionProvider {
             }
             validate_normalized_face_box(&face.bounding_box)?;
             validate_normalized_point(&face.eye_center, "eye center")?;
-            validate_unit_score(face.confidence, "confidence")?;
-            validate_unit_score(face.quality_score, "quality score")?;
-            validate_unit_score(face.frontality_score, "frontality score")?;
+            validate_unit_score(face.confidence, "confidence", "InsightFace")?;
+            validate_unit_score(face.quality_score, "quality score", "InsightFace")?;
+            validate_unit_score(face.frontality_score, "frontality score", "InsightFace")?;
             if face.embedding_encoding != "float32_le" {
                 return Err(ServiceError::Upstream(format!(
                     "InsightFace returned unsupported embedding encoding `{}`",
@@ -1234,10 +1420,10 @@ fn validate_normalized_point(
     Ok(())
 }
 
-fn validate_unit_score(score: f32, name: &str) -> Result<(), ServiceError> {
+fn validate_unit_score(score: f32, name: &str, provider_name: &str) -> Result<(), ServiceError> {
     if !score.is_finite() || !(0.0..=1.0).contains(&score) {
         return Err(ServiceError::Upstream(format!(
-            "InsightFace returned an invalid {name}"
+            "{provider_name} returned an invalid {name}"
         )));
     }
     Ok(())
@@ -1521,6 +1707,7 @@ fn redact_base64_token(output: &mut String, text: &str, start: Option<usize>, en
 #[cfg(test)]
 mod tests {
     use super::{RuntimeCatalog, ServiceManager, ServiceType};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     #[test]
@@ -1537,6 +1724,10 @@ mod tests {
     fn service_type_rejects_unknown_tasks() {
         assert!(ServiceType::from_task("object_detection").is_err());
         assert_eq!(ServiceType::from_task("ocr").unwrap(), ServiceType::Ocr);
+        assert_eq!(
+            ServiceType::from_task("image_aesthetics").unwrap(),
+            ServiceType::ImageAesthetics
+        );
     }
 
     #[test]
@@ -1547,6 +1738,7 @@ mod tests {
             ServiceType::Ocr,
             ServiceType::ImageTagging,
             ServiceType::ImageClustering,
+            ServiceType::ImageAesthetics,
             ServiceType::FaceDetection,
         ] {
             let runtime = runtimes.get(service_type).expect("production runtime");
@@ -1561,5 +1753,22 @@ mod tests {
             .environment
             .iter()
             .any(|(name, value)| { name == "VLLM_USE_FLASHINFER_SAMPLER" && value == "0" }));
+
+        let aesthetics = runtimes
+            .get(ServiceType::ImageAesthetics)
+            .expect("image aesthetics runtime");
+        assert_eq!(
+            aesthetics.executable,
+            PathBuf::from("/opt/venvs/dinov2/bin/python")
+        );
+        assert_eq!(aesthetics.base_url, "http://127.0.0.1:8600");
+        assert!(aesthetics
+            .arguments
+            .iter()
+            .any(|argument| argument == "/opt/models/clip/ViT-B-32.pt"));
+        assert!(aesthetics
+            .arguments
+            .iter()
+            .any(|argument| { argument == "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" }));
     }
 }

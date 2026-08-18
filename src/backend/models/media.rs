@@ -158,6 +158,7 @@ pub enum ThumbnailSize {
     #[default]
     Normal,
     Tiny,
+    Place,
 }
 
 #[derive(Debug, Deserialize)]

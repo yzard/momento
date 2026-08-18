@@ -58,6 +58,7 @@ api_key = "{{LLM_API_KEY}}"
 image_tagging_enabled = {{IMAGE_TAGGING_ENABLED}}
 deduplicate_enabled = {{DEDUPLICATE_ENABLED}}
 face_detection_enabled = {{FACE_DETECTION_ENABLED}}
+image_aesthetics_enabled = {{IMAGE_AESTHETICS_ENABLED}}
 # Lower values group less-similar faces; higher values require closer matches.
 face_group_similarity_threshold = {{FACE_GROUP_SIMILARITY_THRESHOLD}}
 
@@ -71,3 +72,5 @@ image_tagging_cron = "{{IMAGE_TAGGING_CRON}}"
 deduplicate_cron = "{{DEDUPLICATE_CRON}}"
 # Face detection inference is followed by automatic face grouping.
 face_detection_cron = "{{FACE_DETECTION_CRON}}"
+# Image aesthetics selects representative covers for Places.
+image_aesthetics_cron = "{{IMAGE_AESTHETICS_CRON}}"

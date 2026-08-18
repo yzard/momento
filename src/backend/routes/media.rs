@@ -25,6 +25,7 @@ use crate::models::{
     TimelineMarkersResponse,
 };
 use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
+use crate::processor::metadata::reverse_geocoding::reverse_geocode;
 use crate::processor::thumbnails::generate_image_preview;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -562,7 +563,7 @@ async fn update_media(
         )?;
     }
 
-    let media = fetch_one(
+    let mut media = fetch_one(
         &conn,
         queries::media::SELECT_BY_ID_AND_USER,
         &[&request.media_id, &current_user.id],
@@ -575,12 +576,24 @@ async fn update_media(
             (Some(lat), Some(lon)) => calculate_geohash(lat, lon),
             _ => None,
         };
+        let location = match (media.gps_latitude, media.gps_longitude) {
+            (Some(latitude), Some(longitude)) => {
+                reverse_geocode(latitude, longitude).map_err(AppError::Internal)?
+            }
+            _ => None,
+        };
+        let (city, location_state, country) = location
+            .map(|location| (Some(location.city), location.state, Some(location.country)))
+            .unwrap_or((None, None, None));
 
         execute_query(
             &conn,
-            queries::media::UPSERT_GEOHASH,
-            &[&media.id, &geohash],
+            queries::media::UPDATE_LOCATION,
+            &[&geohash, &city, &location_state, &country, &media.id],
         )?;
+        media.location_city = city;
+        media.location_state = location_state;
+        media.location_country = country;
 
         delete_from_rtree(&conn, media.id).map_err(AppError::from)?;
 
@@ -985,6 +998,7 @@ async fn get_media_thumbnail_batch(
     let thumbnail_base_dir = match request.size {
         ThumbnailSize::Normal => &paths().thumbnails,
         ThumbnailSize::Tiny => &paths().thumbnails_tiny,
+        ThumbnailSize::Place => &paths().thumbnails_places,
     };
 
     let rows: Vec<(i64, Option<String>, String, String, i64)> = fetch_all(

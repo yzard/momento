@@ -96,6 +96,28 @@ pub async fn generate_image_preview(
     run_command(&cmd, 60).await && output_path.exists()
 }
 
+pub async fn generate_video_preview(
+    source_path: &Path,
+    output_path: &Path,
+    max_size: u32,
+    quality: u8,
+    video_frame_quality: u8,
+) -> bool {
+    if let Some(parent) = output_path.parent() {
+        if tokio::fs::create_dir_all(parent).await.is_err() {
+            return false;
+        }
+    }
+
+    let temporary_frame = output_path.with_extension("temp.jpg");
+    if !extract_video_frame(source_path, &temporary_frame, video_frame_quality).await {
+        return false;
+    }
+    let generated = generate_image_preview(&temporary_frame, output_path, max_size, quality).await;
+    let _ = tokio::fs::remove_file(&temporary_frame).await;
+    generated
+}
+
 async fn generate_montage_thumbnail(
     source_path: &Path,
     output_path: &Path,

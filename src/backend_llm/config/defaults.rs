@@ -33,6 +33,9 @@ mod template {
     pub(super) const IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
     pub(super) const IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
     pub(super) const IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS: usize = 32;
+    pub(super) const IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS: u64 = 900;
+    pub(super) const IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+    pub(super) const IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS: usize = 16;
     pub(super) const FACE_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 900;
     pub(super) const FACE_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
     pub(super) const FACE_DETECTION_MAX_CONCURRENT_JOBS: usize = 16;
@@ -179,6 +182,18 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS}}",
             template::IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS.to_string(),
+        ),
+        (
+            "{{IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS}}",
+            template::IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS}}",
+            template::IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS}}",
+            template::IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS.to_string(),
         ),
         (
             "{{FACE_DETECTION_STARTUP_TIMEOUT_SECONDS}}",

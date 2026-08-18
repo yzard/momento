@@ -47,11 +47,22 @@ fn schedules_dispatch_through_the_correct_run_abstractions() {
     config.llm.image_tagging_enabled = true;
     config.llm.deduplicate_enabled = true;
     config.llm.face_detection_enabled = true;
+    config.llm.image_aesthetics_enabled = true;
     let scheduled_for = "2026-08-17T03:00:00Z";
 
     let text_pool = create_test_db();
     assert_eq!(
         run_scheduled_occurrence(&config, &text_pool, ScheduledTask::Ocr, scheduled_for).unwrap(),
+        0
+    );
+    assert_eq!(
+        run_scheduled_occurrence(
+            &config,
+            &text_pool,
+            ScheduledTask::ImageAesthetics,
+            scheduled_for,
+        )
+        .unwrap(),
         0
     );
     assert_eq!(
@@ -118,6 +129,7 @@ fn disabled_global_llm_prevents_every_scheduled_task() {
     for task in [
         ScheduledTask::Ocr,
         ScheduledTask::ImageTagging,
+        ScheduledTask::ImageAesthetics,
         ScheduledTask::Deduplicate,
         ScheduledTask::FaceDetection,
     ] {

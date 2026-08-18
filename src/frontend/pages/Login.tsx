@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import ChangePassword from '../components/auth/ChangePassword'
 import { cn } from '../lib/utils'
+import { MOMENTO_VERSION } from '../lib/version'
 import { ArrowRight, Loader2, Aperture } from 'lucide-react'
 
 export default function Login() {
@@ -122,7 +123,7 @@ export default function Login() {
           
           <div className="pt-8 text-center">
             <p className="text-xs font-medium text-muted-foreground/60 uppercase tracking-widest">
-              Momento v0.1
+              v{MOMENTO_VERSION}
             </p>
           </div>
         </div>
@@ -138,7 +139,6 @@ export default function Login() {
             <ChangePassword
               onComplete={() => {
                 setShowChangePassword(false)
-                navigate('/')
               }}
             />
           </div>
@@ -147,4 +147,3 @@ export default function Login() {
     </div>
   )
 }
-

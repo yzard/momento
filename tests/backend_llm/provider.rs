@@ -78,6 +78,14 @@ active_requests = 0
 maximum_active_requests = 0
 request_lock = threading.Lock()
 
+def wait_for_concurrent_requests(expected):
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        with request_lock:
+            if active_requests >= expected:
+                return
+        time.sleep(0.01)
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/ready':
@@ -92,6 +100,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        global active_requests, maximum_active_requests
         if arguments.mode == 'ocr' and self.path == '/v1/chat/completions':
             content_length = int(self.headers.get('Content-Length', '0'))
             request = json.loads(self.rfile.read(content_length))
@@ -116,16 +125,35 @@ class Handler(BaseHTTPRequestHandler):
         if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType'}:
             self.send_json(400, {'detail': 'invalid input descriptor'})
             return
+        if 'image_aesthetics' in arguments.mode:
+            with request_lock:
+                active_requests += 1
+                maximum_active_requests = max(maximum_active_requests, active_requests)
+            if arguments.mode == 'slow_image_aesthetics':
+                wait_for_concurrent_requests(8)
+            scores = {
+                'aestheticScore': 0.81,
+                'scenicScore': 0.72,
+                'simplicityScore': 0.63,
+                'landscapeScore': 0.54,
+                'technicalQualityScore': 0.45,
+            }
+            malformed_prefix = 'malformed_image_aesthetics_'
+            if arguments.mode.startswith(malformed_prefix):
+                scores[arguments.mode[len(malformed_prefix):]] = 1.1
+            self.send_json(200, scores)
+            with request_lock:
+                active_requests -= 1
+            return
         if arguments.mode in ('image_tagging', 'process_tree_image_tagging', 'runtime_path_image_tagging'):
             self.send_json(200, {'tags': ['person', 'bicycle']})
             return
         if arguments.mode in ('face_detection', 'slow_face_detection', 'rolling_face_detection'):
-            global active_requests, maximum_active_requests
             with request_lock:
                 active_requests += 1
                 maximum_active_requests = max(maximum_active_requests, active_requests)
             if arguments.mode == 'slow_face_detection':
-                time.sleep(0.25)
+                wait_for_concurrent_requests(8)
             if arguments.mode == 'rolling_face_detection':
                 with open(arguments.start_log, 'a', encoding='utf-8') as output:
                     output.write('start:' + descriptor['jobId'] + '\n')
@@ -244,6 +272,8 @@ pub(super) fn service(
         "unlimited_ocr".to_string()
     } else if model_type == "image_clustering" {
         "dinov2-small".to_string()
+    } else if model_type == "image_aesthetics" {
+        "clip-vit-b-32-laion-aesthetic-v1".to_string()
     } else if model_type == "face_detection" {
         "buffalo_l".to_string()
     } else {
@@ -275,6 +305,8 @@ pub(super) fn service(
                 "baidu/Unlimited-OCR".to_string()
             } else if model_type == "image_clustering" {
                 "facebook/dinov2-small".to_string()
+            } else if model_type == "image_aesthetics" {
+                "ViT-B/32".to_string()
             } else if model_type == "face_detection" {
                 "buffalo_l".to_string()
             } else {
@@ -290,6 +322,15 @@ pub(super) fn service(
             },
         },
     )
+}
+
+#[test]
+fn image_aesthetics_is_a_registered_service_type() {
+    assert_eq!(
+        ServiceType::from_task("image_aesthetics").expect("registered aesthetics task"),
+        ServiceType::ImageAesthetics
+    );
+    assert_eq!(ServiceType::ImageAesthetics.as_str(), "image_aesthetics");
 }
 
 pub(super) fn manager(services: Vec<(ServiceConfig, RuntimeSpec)>) -> ServiceManager {
@@ -625,6 +666,139 @@ async fn manager_rejects_invalid_clustering_embedding_length() {
         .shutdown()
         .await
         .expect("Runtime should stop cleanly");
+}
+
+#[tokio::test]
+async fn manager_serializes_valid_image_aesthetics_scores() {
+    let (_directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let aesthetics = service(
+        "image_aesthetics",
+        "image_aesthetics",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![aesthetics]);
+
+    let response = infer_one(&mut manager, "image_aesthetics", b"image", "image.jpg")
+        .await
+        .expect("Image aesthetics should succeed");
+
+    assert_eq!(response.task, "image_aesthetics");
+    assert_eq!(response.model_type, "image_aesthetics");
+    assert_eq!(response.model_version, "clip-vit-b-32-laion-aesthetic-v1");
+    assert_eq!(response.aesthetic_score, Some(0.81));
+    assert_eq!(response.scenic_score, Some(0.72));
+    assert_eq!(response.simplicity_score, Some(0.63));
+    assert_eq!(response.landscape_score, Some(0.54));
+    assert_eq!(response.technical_quality_score, Some(0.45));
+    assert_eq!(manager.active_name(), "clip-aesthetic");
+    let serialized = serde_json::to_value(response).expect("Aesthetics response should serialize");
+    assert!(
+        (serialized["aestheticScore"]
+            .as_f64()
+            .expect("serialized aesthetic score")
+            - 0.81)
+            .abs()
+            < 0.000_001
+    );
+    assert!(
+        (serialized["technicalQualityScore"]
+            .as_f64()
+            .expect("serialized technical quality score")
+            - 0.45)
+            .abs()
+            < 0.000_001
+    );
+    assert_eq!(
+        fs::read_to_string(&start_log).expect("runtime starts"),
+        "image_aesthetics:2\n"
+    );
+    manager.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn manager_rejects_each_invalid_image_aesthetics_score() {
+    for (field, expected_name) in [
+        ("aestheticScore", "aesthetic score"),
+        ("scenicScore", "scenic score"),
+        ("simplicityScore", "simplicity score"),
+        ("landscapeScore", "landscape score"),
+        ("technicalQualityScore", "technical quality score"),
+    ] {
+        let (_directory, script_path, start_log) = fixture();
+        let port = available_port();
+        let aesthetics = service(
+            "image_aesthetics",
+            &format!("malformed_image_aesthetics_{field}"),
+            port,
+            &script_path,
+            &start_log,
+        );
+        let mut manager = manager(vec![aesthetics]);
+
+        let error = infer_one(&mut manager, "image_aesthetics", b"image", "image.jpg")
+            .await
+            .expect_err("Out-of-range aesthetics score must be rejected");
+
+        assert!(error.to_string().contains(expected_name), "{error}");
+        manager.shutdown().await.expect("runtime shutdown");
+    }
+}
+
+#[tokio::test]
+async fn manager_dispatches_all_aesthetics_jobs_without_a_provider_concurrency_limit() {
+    let (directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let aesthetics = service(
+        "image_aesthetics",
+        "slow_image_aesthetics",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![aesthetics]);
+    let inputs = (0..8)
+        .map(|sequence| {
+            let path = directory.path().join(format!("aesthetic-{sequence}.jpg"));
+            fs::write(&path, b"image").expect("queued aesthetics input");
+            InferenceInput {
+                job_id: format!("abcd12{sequence:02x}"),
+                sequence,
+                frame_timestamp_ms: None,
+                path,
+                byte_size: 5,
+                content_hash: format!("{:x}", Sha256::digest(b"image")),
+                mime_type: "image/jpeg".to_string(),
+                filename: format!("aesthetic-{sequence}.jpg"),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let dispatcher = manager
+        .dispatcher("image_aesthetics")
+        .await
+        .expect("aesthetics dispatcher");
+    let mut in_flight = inputs
+        .into_iter()
+        .map(|input| dispatcher.infer_inputs(vec![input]))
+        .collect::<FuturesUnordered<_>>();
+    let mut results = Vec::new();
+    while let Some(result) = in_flight.next().await {
+        results.push(result);
+    }
+    let metrics: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
+        .await
+        .expect("metrics response")
+        .json()
+        .await
+        .expect("metrics body");
+
+    assert_eq!(results.len(), 8);
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(metrics["maximumActiveRequests"], 8);
+    manager.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]

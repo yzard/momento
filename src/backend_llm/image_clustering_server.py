@@ -6,25 +6,23 @@ import base64
 import json
 import math
 import sys
-import threading
 from array import array
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from image_runtime import (
+    InvalidImageError,
+    ModelHTTPServer,
+    create_inference_slots,
+    decode_image,
+    select_cuda_device,
+    serve_until_stopped,
+)
 from runtime_input import read_runtime_input
 
 
 EMBEDDING_DIMENSIONS = 384
 EMBEDDING_ENCODING = "float32_le"
-class InvalidImageError(ValueError):
-    """The request body is not a readable image."""
-
-
-def create_inference_slots(max_concurrent_jobs):
-    if max_concurrent_jobs <= 0:
-        raise ValueError("max_concurrent_jobs must be positive")
-    return threading.BoundedSemaphore(max_concurrent_jobs)
 
 
 def encode_float32_le(values):
@@ -63,23 +61,7 @@ def calculate_quality_score(image):
 
 
 def select_device(requested_device, torch_module):
-    if not requested_device.startswith("cuda"):
-        raise RuntimeError("image clustering requires a CUDA device")
-    if not torch_module.cuda.is_available():
-        raise RuntimeError("image clustering requires an available NVIDIA CUDA GPU")
-    return torch_module.device(requested_device)
-
-
-def decode_image(image_bytes):
-    from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
-
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-    try:
-        with Image.open(BytesIO(image_bytes)) as source:
-            source.load()
-            return ImageOps.exif_transpose(source).convert("RGB")
-    except (OSError, UnidentifiedImageError, ValueError) as error:
-        raise InvalidImageError(f"could not decode image: {error}") from error
+    return select_cuda_device(requested_device, torch_module, "image clustering")
 
 
 class ImageClusteringRuntime:
@@ -177,11 +159,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class ModelHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-    request_queue_size = 1024
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -202,16 +179,6 @@ def main():
     Handler.input_root = Path(arguments.input_root)
     server = ModelHTTPServer((arguments.host, arguments.port), Handler)
     serve_until_stopped(server)
-
-
-def serve_until_stopped(server):
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-
 
 if __name__ == "__main__":
     main()

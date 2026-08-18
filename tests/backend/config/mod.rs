@@ -159,6 +159,7 @@ fn test_existing_cronjob_section_receives_new_schedule_defaults() {
     assert_eq!(config.cronjob.image_tagging_cron, "0 2 * * *");
     assert_eq!(config.cronjob.deduplicate_cron, "30 3 * * *");
     assert_eq!(config.cronjob.face_detection_cron, "0 4 * * *");
+    assert_eq!(config.cronjob.image_aesthetics_cron, "0 5 * * *");
 }
 
 #[test]
@@ -384,7 +385,8 @@ fn test_load_config_uses_disabled_deduplicate_llm_default_when_section_is_missin
     let config = load_config(&path).expect("Missing deduplicate config should use safe defaults");
 
     assert!(!config.llm.deduplicate_enabled);
-    assert_eq!(config.llm.face_group_similarity_threshold, 0.5);
+    assert!(!config.llm.image_aesthetics_enabled);
+    assert_eq!(config.llm.face_group_similarity_threshold, 0.41);
 }
 
 #[test]

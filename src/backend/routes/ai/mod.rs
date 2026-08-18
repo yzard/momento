@@ -26,6 +26,14 @@ pub fn router() -> Router<AppState> {
         .route("/ai/image_tagging/status", post(image_tagging_status))
         .route("/ai/image_tagging/reset", post(reset_image_tagging))
         .route(
+            "/ai/image_aesthetics/trigger",
+            post(trigger_image_aesthetics),
+        )
+        .route("/ai/image_aesthetics/cancel", post(cancel_image_aesthetics))
+        .route("/ai/image_aesthetics/clean", post(clean_image_aesthetics))
+        .route("/ai/image_aesthetics/status", post(image_aesthetics_status))
+        .route("/ai/image_aesthetics/reset", post(reset_image_aesthetics))
+        .route(
             "/ai/image_clustering/trigger",
             post(trigger_image_clustering),
         )
@@ -64,6 +72,20 @@ async fn clean_image_tagging(
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
     clean_task(&state.pool, "image_tagging")
+}
+async fn cancel_image_aesthetics(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    cancel_task(&state, "image_aesthetics").await
+}
+async fn clean_image_aesthetics(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    clean_task(&state.pool, "image_aesthetics")
 }
 async fn cancel_image_clustering(
     State(state): State<AppState>,
@@ -158,14 +180,24 @@ fn clean_task(
 ) -> AppResult<Json<MetadataActionResponse>> {
     let connection = pool.get()?;
     let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
-    transaction.execute(queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
+    clean_task_results(&transaction, task)?;
     transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
     transaction.commit()?;
     Ok(Json(MetadataActionResponse {
         message: format!("{task} data cleaned"),
         queued_jobs: 0,
     }))
+}
+
+fn clean_task_results(transaction: &rusqlite::Transaction<'_>, task: &str) -> AppResult<()> {
+    if task == "image_aesthetics" {
+        transaction.execute(queries::ai_jobs::DELETE_AESTHETICS, [])?;
+        transaction.execute(queries::ai_jobs::DELETE_AESTHETIC_INPUTS, [])?;
+        return Ok(());
+    }
+    transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
+    transaction.execute(queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
+    Ok(())
 }
 
 async fn clean_all(
@@ -175,6 +207,7 @@ async fn clean_all(
 ) -> AppResult<Json<MetadataActionResponse>> {
     let _ = clean_task(&state.pool, "ocr")?;
     let _ = clean_task(&state.pool, "image_tagging")?;
+    let _ = clean_task(&state.pool, "image_aesthetics")?;
     face_detection::clean(&state.pool)?;
     clean(&state.pool)?;
     Ok(Json(MetadataActionResponse {
@@ -199,12 +232,20 @@ async fn image_tagging_status(
     task_status(&state.pool, "image_tagging")
 }
 
+async fn image_aesthetics_status(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataStatusResponse>> {
+    task_status(&state.pool, "image_aesthetics")
+}
+
 async fn reset_ocr(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(&state, "ocr").await
+    reset_task(&state, "ocr", true).await
 }
 
 async fn reset_image_tagging(
@@ -212,7 +253,25 @@ async fn reset_image_tagging(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(&state, "image_tagging").await
+    reset_task(
+        &state,
+        "image_tagging",
+        state.config.llm.image_tagging_enabled,
+    )
+    .await
+}
+
+async fn reset_image_aesthetics(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    reset_task(
+        &state,
+        "image_aesthetics",
+        state.config.llm.image_aesthetics_enabled,
+    )
+    .await
 }
 
 fn task_status(
@@ -260,14 +319,18 @@ fn task_status(
     }))
 }
 
-async fn reset_task(state: &AppState, task: &str) -> AppResult<Json<MetadataActionResponse>> {
+async fn reset_task(
+    state: &AppState,
+    task: &str,
+    task_enabled: bool,
+) -> AppResult<Json<MetadataActionResponse>> {
     ai::cancel_active_jobs(&state.pool, Some(task))?;
     deliver_cancellations(state).await;
     let connection = state.pool.get()?;
     let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
+    clean_task_results(&transaction, task)?;
     transaction.commit()?;
-    let queued_jobs = ai::queue_task(&state.pool, task, true)? as i64;
+    let queued_jobs = ai::queue_task(&state.pool, task, task_enabled)? as i64;
     Ok(Json(MetadataActionResponse {
         message: format!("{task} processing reset"),
         queued_jobs,
@@ -279,7 +342,11 @@ async fn trigger(
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_all(&state.pool, state.config.llm.image_tagging_enabled)? as i64;
+    let queued_jobs = ai::queue_all(
+        &state.pool,
+        state.config.llm.image_tagging_enabled,
+        state.config.llm.image_aesthetics_enabled,
+    )? as i64;
     let face_jobs = if state.config.llm.face_detection_enabled {
         face_detection::start(&state.pool, true)? as i64
     } else {
@@ -340,6 +407,22 @@ async fn trigger_image_tagging(
     )? as i64;
     Ok(Json(MetadataActionResponse {
         message: "Image tagging processing queued".to_string(),
+        queued_jobs,
+    }))
+}
+
+async fn trigger_image_aesthetics(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    let queued_jobs = ai::queue_task(
+        &state.pool,
+        "image_aesthetics",
+        state.config.llm.image_aesthetics_enabled,
+    )? as i64;
+    Ok(Json(MetadataActionResponse {
+        message: "Image aesthetics processing queued".to_string(),
         queued_jobs,
     }))
 }

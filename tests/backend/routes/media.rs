@@ -71,6 +71,59 @@ fn access_token(user_id: i64) -> String {
 }
 
 #[tokio::test]
+async fn manual_gps_update_recomputes_or_clears_place_fields() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "gps-update", "gps-update@example.com");
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "gps-update.jpg",
+        44.5325,
+        -72.7865,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    pool.get()
+        .expect("connection")
+        .execute(
+            "UPDATE media_metadata SET location_city = 'Stale', location_state = 'Stale', location_country = 'Stale' WHERE media_id = ?",
+            [media_id],
+        )
+        .expect("stale location");
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    let updated = server
+        .post("/api/v1/media/update")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({
+            "mediaId": media_id,
+            "gpsLatitude": 40.759,
+            "gpsLongitude": -73.9859
+        }))
+        .await;
+    updated.assert_status_ok();
+    let updated = updated.json::<Value>();
+    assert_eq!(updated["locationCity"], "Times Square");
+    assert_eq!(updated["locationState"], "New York");
+    assert_eq!(updated["locationCountry"], "United States");
+
+    let cleared = server
+        .post("/api/v1/media/update")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({
+            "mediaId": media_id,
+            "gpsLatitude": 0.0,
+            "gpsLongitude": 1.0
+        }))
+        .await;
+    cleared.assert_status_ok();
+    let cleared = cleared.json::<Value>();
+    assert!(cleared["locationCity"].is_null());
+    assert!(cleared["locationState"].is_null());
+    assert!(cleared["locationCountry"].is_null());
+}
+
+#[tokio::test]
 async fn test_search_returns_accessible_image_and_model_names() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "testuser", "test@example.com");

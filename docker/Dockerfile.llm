@@ -26,8 +26,11 @@ ARG DINOV2_REVISION=ed25f3a31f01632728cabb09d1542f84ab7b0056
 ARG RAM_CHECKPOINT_REVISION=84d4aee3a0265c4e0df1f714f0572011d1bf2ec3
 ARG BERT_TOKENIZER_REVISION=86b5e0934494bd15c9632b12f734a8a67f723594
 ARG BUFFALO_L_RELEASE=v0.7
+ARG AESTHETIC_PREDICTOR_REVISION=6d122adad522ab246644d9dc1c6d7a3810ee255f
 ARG RAM_CHECKPOINT_SHA256=497c178836ba66698ca226c7895317e6e800034be986452dbd2593298d50e87d
 ARG BUFFALO_L_SHA256=80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f
+ARG CLIP_VIT_B_32_SHA256=40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+ARG AESTHETIC_HEAD_SHA256=c7b14cead230694acc7b9447974d3cad78003c72da032e402a303b6c2429e85f
 
 FROM ${RUST_IMAGE} AS rust-builder
 
@@ -160,7 +163,13 @@ RUN uv pip install --python /opt/venvs/ram/bin/python \
 
 RUN uv pip install --python /opt/venvs/dinov2/bin/python \
     "transformers==${TRANSFORMERS_DINOV2_VERSION}" \
-    "Pillow==${PILLOW_VERSION}"
+    "Pillow==${PILLOW_VERSION}" \
+    ftfy \
+    packaging \
+    regex \
+    tqdm \
+    && uv pip install --python /opt/venvs/dinov2/bin/python --no-deps \
+    "git+https://github.com/openai/CLIP.git@${CLIP_COMMIT}"
 
 RUN uv pip install --python /opt/venvs/insightface/bin/python \
     "numpy==${NUMPY_VERSION}" \
@@ -172,7 +181,7 @@ RUN uv pip install --python /opt/venvs/insightface/bin/python \
 RUN uv pip check --system --python /usr/bin/python3 \
     && uv pip check --python /opt/venvs/insightface/bin/python \
     && /opt/venvs/ram/bin/python -c "import clip, fairscale, ram, timm, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
-    && /opt/venvs/dinov2/bin/python -c "import torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
+    && /opt/venvs/dinov2/bin/python -c "import clip, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert 'ViT-B/32' in clip.available_models()" \
     && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime"
 
 FROM ocr-builder AS unlimited-ocr-model
@@ -224,6 +233,22 @@ RUN mkdir -p /opt/models/insightface/models/buffalo_l \
     && unzip /tmp/buffalo_l.zip -d /opt/models/insightface/models/buffalo_l \
     && rm /tmp/buffalo_l.zip
 
+FROM build-tools AS image-aesthetics-model
+
+ARG AESTHETIC_PREDICTOR_REVISION
+ARG CLIP_VIT_B_32_SHA256
+ARG AESTHETIC_HEAD_SHA256
+
+RUN mkdir -p /opt/models/clip /opt/models/aesthetic \
+    && curl --fail --location --retry 3 \
+    "https://openaipublic.azureedge.net/clip/models/${CLIP_VIT_B_32_SHA256}/ViT-B-32.pt" \
+    --output /opt/models/clip/ViT-B-32.pt \
+    && echo "${CLIP_VIT_B_32_SHA256}  /opt/models/clip/ViT-B-32.pt" | sha256sum --check - \
+    && curl --fail --location --retry 3 \
+    "https://raw.githubusercontent.com/LAION-AI/aesthetic-predictor/${AESTHETIC_PREDICTOR_REVISION}/sa_0_4_vit_b_32_linear.pth" \
+    --output /opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth \
+    && echo "${AESTHETIC_HEAD_SHA256}  /opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" | sha256sum --check -
+
 FROM runtime-base
 
 ARG SOURCE_REPOSITORY=https://github.com/yzard/momento
@@ -251,6 +276,8 @@ COPY --from=dinov2-model /opt/models/dinov2-small /opt/models/dinov2-small
 COPY --from=bert-tokenizer-model /opt/models/huggingface /opt/models/huggingface
 COPY --from=ram-model /opt/models/ram /opt/models/ram
 COPY --from=insightface-model /opt/models/insightface /opt/models/insightface
+COPY --from=image-aesthetics-model /opt/models/clip /opt/models/clip
+COPY --from=image-aesthetics-model /opt/models/aesthetic /opt/models/aesthetic
 
 RUN set -eux; \
     ! command -v cc; \
@@ -258,7 +285,7 @@ RUN set -eux; \
     export XDG_CACHE_HOME=/tmp/verification-cache; \
     /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()"; \
     /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
-    /opt/venvs/dinov2/bin/python -c "import torch, transformers; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True).hidden_size == 384"; \
+    /opt/venvs/dinov2/bin/python -c "import clip, torch, transformers; from pathlib import Path; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True).hidden_size == 384; assert 'ViT-B/32' in clip.available_models(); state = torch.load('/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth', map_location='cpu', weights_only=True); assert state['weight'].shape == (1, 512); assert state['bias'].shape == (1,); assert Path('/opt/models/clip/ViT-B-32.pt').is_file()"; \
     /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"; \
     rm -rf /tmp/verification-cache
 

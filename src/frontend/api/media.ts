@@ -24,7 +24,7 @@ interface MediaBatchRequest {
 type GroupBy = 'year' | 'month' | 'week' | 'day'
 type MediaTypeFilter = 'image' | 'video'
 type TimelineDirection = 'older' | 'newer'
-type ThumbnailSize = 'normal' | 'tiny'
+type ThumbnailSize = 'normal' | 'tiny' | 'place'
 
 export type { MediaTypeFilter, ThumbnailSize }
 

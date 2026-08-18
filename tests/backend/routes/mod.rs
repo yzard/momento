@@ -5,3 +5,4 @@ mod faces;
 mod map;
 mod media;
 mod metadata;
+mod places;

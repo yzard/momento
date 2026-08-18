@@ -1,5 +1,6 @@
 use momento_common::llm::{JobInputResult, JobResult};
 use rusqlite::{Transaction, TransactionBehavior};
+use std::collections::HashSet;
 
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
@@ -45,6 +46,20 @@ pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
             .ok_or_else(|| AppError::BadRequest("result is required".to_string()))?;
         if request.task == "image_clustering" {
             persist_clustering_result(&transaction, request.media_id, &model_version, &result)?;
+        } else if request.task == "image_aesthetics" {
+            if model_type != "image_aesthetics" {
+                return Err(AppError::BadRequest(
+                    "aesthetics result modelType must be image_aesthetics".to_string(),
+                ));
+            }
+            persist_aesthetics_results(
+                &transaction,
+                request.media_id,
+                &request.job_id,
+                &model_version,
+                &result,
+                request.input_results.as_deref(),
+            )?;
         } else if matches!(request.task.as_str(), "ocr" | "image_tagging") {
             persist_text_results(
                 &transaction,
@@ -97,6 +112,111 @@ pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
         changes.commit();
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct AestheticScores {
+    aesthetic: f64,
+    scenic: f64,
+    simplicity: f64,
+    landscape: f64,
+    technical_quality: f64,
+}
+
+fn persist_aesthetics_results(
+    transaction: &rusqlite::Transaction<'_>,
+    media_id: i64,
+    job_id: &str,
+    model_version: &str,
+    result: &serde_json::Value,
+    input_results: Option<&[JobInputResult]>,
+) -> AppResult<()> {
+    let aggregate = parse_aesthetic_scores(result)?;
+    let input_results = input_results
+        .filter(|results| !results.is_empty())
+        .ok_or_else(|| AppError::BadRequest("aesthetics inputResults are required".to_string()))?;
+    let submitted_inputs = transaction
+        .prepare(queries::llm_callback::SELECT_JOB_INPUT_CORRELATION)?
+        .query_map([job_id], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if submitted_inputs.len() != input_results.len() {
+        return Err(AppError::BadRequest(
+            "aesthetics inputResults do not match submitted inputs".to_string(),
+        ));
+    }
+    let mut sequences = HashSet::with_capacity(input_results.len());
+    let mut first_input_scores = None;
+    for (input_result, submitted_input) in input_results.iter().zip(&submitted_inputs) {
+        if !sequences.insert(input_result.sequence) {
+            return Err(AppError::BadRequest(
+                "aesthetics inputResults contain duplicate sequences".to_string(),
+            ));
+        }
+        if (input_result.sequence, input_result.frame_timestamp_ms) != *submitted_input {
+            return Err(AppError::BadRequest(
+                "aesthetics inputResults do not match submitted inputs".to_string(),
+            ));
+        }
+        let scores = parse_aesthetic_scores(&input_result.result)?;
+        first_input_scores.get_or_insert(scores);
+        transaction.execute(
+            queries::llm_callback::UPSERT_AESTHETIC_INPUT,
+            rusqlite::params![
+                media_id,
+                input_result.sequence,
+                input_result.frame_timestamp_ms,
+                model_version,
+                scores.aesthetic,
+                scores.scenic,
+                scores.simplicity,
+                scores.landscape,
+                scores.technical_quality
+            ],
+        )?;
+    }
+    if first_input_scores != Some(aggregate) {
+        return Err(AppError::BadRequest(
+            "aesthetics aggregate must match the first input result".to_string(),
+        ));
+    }
+    transaction.execute(
+        queries::llm_callback::UPSERT_AESTHETICS,
+        rusqlite::params![
+            media_id,
+            model_version,
+            aggregate.aesthetic,
+            aggregate.scenic,
+            aggregate.simplicity,
+            aggregate.landscape,
+            aggregate.technical_quality
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_aesthetic_scores(result: &serde_json::Value) -> AppResult<AestheticScores> {
+    Ok(AestheticScores {
+        aesthetic: parse_bounded_score(result, "aestheticScore")?,
+        scenic: parse_bounded_score(result, "scenicScore")?,
+        simplicity: parse_bounded_score(result, "simplicityScore")?,
+        landscape: parse_bounded_score(result, "landscapeScore")?,
+        technical_quality: parse_bounded_score(result, "technicalQualityScore")?,
+    })
+}
+
+fn parse_bounded_score(result: &serde_json::Value, field: &str) -> AppResult<f64> {
+    let score = result
+        .get(field)
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| AppError::BadRequest(format!("aesthetics {field} is required")))?;
+    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+        return Err(AppError::BadRequest(format!(
+            "aesthetics {field} must be within [0, 1]"
+        )));
+    }
+    Ok(score)
 }
 
 fn persist_text_results(

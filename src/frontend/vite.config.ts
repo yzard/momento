@@ -1,8 +1,14 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 
+const version = readFileSync(fileURLToPath(new URL('../backend/version.txt', import.meta.url)), 'utf8').trim()
+
 export default defineConfig({
+  define: {
+    __MOMENTO_VERSION__: JSON.stringify(version),
+  },
   plugins: [react()],
   resolve: {
     alias: {

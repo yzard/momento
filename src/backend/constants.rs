@@ -12,6 +12,7 @@ pub struct Paths {
     pub originals: PathBuf,
     pub thumbnails: PathBuf,
     pub thumbnails_tiny: PathBuf,
+    pub thumbnails_places: PathBuf,
     pub previews: PathBuf,
     pub imports: PathBuf,
     pub albums: PathBuf,
@@ -27,6 +28,7 @@ impl Paths {
             originals: data_dir.join("originals"),
             thumbnails: data_dir.join("thumbnails"),
             thumbnails_tiny: data_dir.join("thumbnails_tiny"),
+            thumbnails_places: data_dir.join("thumbnails_places"),
             previews: data_dir.join("previews"),
             imports: data_dir.join("imports"),
             albums: data_dir.join("albums"),
@@ -59,6 +61,7 @@ pub const TRASH_RETENTION_DAYS: i64 = 30;
 
 pub const OCR_MODEL_TYPE: &str = "ocr";
 pub const IMAGE_TAGGING_MODEL_TYPE: &str = "image_tagging";
+pub const IMAGE_AESTHETICS_MODEL_TYPE: &str = "image_aesthetics";
 pub const FACE_DETECTION_MODEL_TYPE: &str = "face_detection";
 
 pub fn media_text_model_name(model_type: &str) -> Option<&'static str> {

@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 use crate::config::Config;
-use crate::constants::{paths, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
+use crate::constants::{
+    paths, IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE,
+};
 use crate::database::{queries, DbPool};
 
 pub mod result;
@@ -206,30 +208,35 @@ pub async fn deliver_pending_cancellations(
     }
 }
 
-pub fn queue_task(
-    pool: &DbPool,
-    task: &str,
-    image_tagging_enabled: bool,
-) -> Result<usize, rusqlite::Error> {
-    if task == IMAGE_TAGGING_MODEL_TYPE && !image_tagging_enabled {
+pub fn queue_task(pool: &DbPool, task: &str, task_enabled: bool) -> Result<usize, rusqlite::Error> {
+    if !task_enabled {
         return Ok(0);
     }
     let connection = pool
         .get()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let transaction = connection.unchecked_transaction()?;
-    let queued = transaction.execute(
-        queries::ai_jobs::INSERT_ELIGIBLE,
-        rusqlite::params![task, task, task, task],
-    )?;
+    let queued = if task == IMAGE_AESTHETICS_MODEL_TYPE {
+        transaction.execute(queries::ai_jobs::INSERT_AESTHETICS_ELIGIBLE, [])?
+    } else {
+        transaction.execute(
+            queries::ai_jobs::INSERT_ELIGIBLE,
+            rusqlite::params![task, task, task, task],
+        )?
+    };
     transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     transaction.commit()?;
     Ok(queued)
 }
 
-pub fn queue_all(pool: &DbPool, image_tagging_enabled: bool) -> Result<usize, rusqlite::Error> {
+pub fn queue_all(
+    pool: &DbPool,
+    image_tagging_enabled: bool,
+    image_aesthetics_enabled: bool,
+) -> Result<usize, rusqlite::Error> {
     Ok(queue_task(pool, OCR_MODEL_TYPE, true)?
-        + queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, image_tagging_enabled)?)
+        + queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, image_tagging_enabled)?
+        + queue_task(pool, IMAGE_AESTHETICS_MODEL_TYPE, image_aesthetics_enabled)?)
 }
 
 async fn submit_cycle(

@@ -25,6 +25,7 @@ fn init_directories() -> std::io::Result<()> {
         &paths.originals,
         &paths.thumbnails,
         &paths.thumbnails_tiny,
+        &paths.thumbnails_places,
         &paths.previews,
         &paths.imports,
         &paths.albums,

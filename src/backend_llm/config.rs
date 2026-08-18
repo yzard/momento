@@ -230,6 +230,7 @@ impl Config {
             "ocr" => self.validate_ocr_service(service),
             "image_tagging" => self.validate_image_tagging_service(service),
             "image_clustering" => self.validate_image_clustering_service(service),
+            "image_aesthetics" => self.validate_image_aesthetics_service(service),
             "face_detection" => self.validate_face_detection_service(service),
             model_type => Err(ServiceError::Configuration(format!(
                 "unsupported service model_type: {model_type}"
@@ -250,22 +251,32 @@ impl Config {
     }
 
     fn validate_image_tagging_service(&self, service: &ServiceConfig) -> Result<(), ServiceError> {
-        if service.startup_timeout_seconds == 0 || service.request_timeout_seconds == 0 {
-            return Err(ServiceError::Configuration(
-                "image tagging timeouts must be positive".to_string(),
-            ));
-        }
-        Ok(())
+        self.validate_image_service_timeouts(service, "image tagging")
     }
 
     fn validate_image_clustering_service(
         &self,
         service: &ServiceConfig,
     ) -> Result<(), ServiceError> {
+        self.validate_image_service_timeouts(service, "image clustering")
+    }
+
+    fn validate_image_aesthetics_service(
+        &self,
+        service: &ServiceConfig,
+    ) -> Result<(), ServiceError> {
+        self.validate_image_service_timeouts(service, "image aesthetics")
+    }
+
+    fn validate_image_service_timeouts(
+        &self,
+        service: &ServiceConfig,
+        service_name: &str,
+    ) -> Result<(), ServiceError> {
         if service.startup_timeout_seconds == 0 || service.request_timeout_seconds == 0 {
-            return Err(ServiceError::Configuration(
-                "image clustering timeouts must be positive".to_string(),
-            ));
+            return Err(ServiceError::Configuration(format!(
+                "{service_name} timeouts must be positive"
+            )));
         }
         Ok(())
     }
@@ -350,6 +361,7 @@ mod tests {
         let mut config = local_config();
         config.service.push(service("image_tagging"));
         config.service.push(service("image_clustering"));
+        config.service.push(service("image_aesthetics"));
         config.service.push(service("face_detection"));
 
         assert!(config.validate().is_ok());

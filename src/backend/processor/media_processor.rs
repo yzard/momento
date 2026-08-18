@@ -570,6 +570,10 @@ pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option
         if tiny_thumbnail_file.exists() {
             let _ = fs::remove_file(&tiny_thumbnail_file);
         }
+        let place_thumbnail_file = paths().thumbnails_places.join(thumb_path);
+        if place_thumbnail_file.exists() {
+            let _ = fs::remove_file(&place_thumbnail_file);
+        }
     }
 
     let original_stem = Path::new(file_path)
@@ -599,6 +603,7 @@ pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option
     }
 
     let _ = fs::remove_dir_all(paths().previews.join("faces").join(media_id.to_string()));
+    let _ = fs::remove_dir_all(paths().previews.join("ai").join(media_id.to_string()));
 }
 
 pub fn calculate_geohash(lat: f64, lon: f64) -> Option<String> {

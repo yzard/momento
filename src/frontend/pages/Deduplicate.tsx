@@ -18,6 +18,10 @@ import { cn } from '../lib/utils'
 import { batchLoader } from '../utils/batcher'
 
 const GROUP_PAGE_SIZE = 20
+const originalFilenameCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+})
 
 function formatFileSize(fileSize: number | null): string {
   if (fileSize === null) return 'Unknown size'
@@ -29,6 +33,11 @@ function formatFileSize(fileSize: number | null): string {
 function formatDimensions(media: Media): string {
   if (media.width === null || media.height === null) return 'Unknown dimensions'
   return `${media.width} x ${media.height}`
+}
+
+function sortByOriginalFilename(mediaItems: Media[]): Media[] {
+  return [...mediaItems].sort((left, right) =>
+    originalFilenameCollator.compare(left.originalFilename, right.originalFilename) || left.id - right.id)
 }
 
 export default function Deduplicate() {
@@ -246,7 +255,8 @@ interface DuplicateGroupSectionProps {
 }
 
 function DuplicateGroupSection({ group, selectedIds, onToggle, onInspect }: DuplicateGroupSectionProps) {
-  const selectedCount = group.items.filter((media) => selectedIds.has(media.id)).length
+  const sortedItems = sortByOriginalFilename(group.items)
+  const selectedCount = sortedItems.filter((media) => selectedIds.has(media.id)).length
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm" aria-labelledby={`duplicate-group-${group.clusterId}`}>
@@ -256,7 +266,7 @@ function DuplicateGroupSection({ group, selectedIds, onToggle, onInspect }: Dupl
             Similar group {group.clusterId}
           </h2>
           <p className="mt-0.5 text-xs font-medium text-muted-foreground">
-            {group.items.length} items to compare
+            {sortedItems.length} items to compare
           </p>
         </div>
         {selectedCount > 0 && (
@@ -266,13 +276,13 @@ function DuplicateGroupSection({ group, selectedIds, onToggle, onInspect }: Dupl
         )}
       </div>
       <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 sm:p-4 md:grid-cols-4 xl:grid-cols-6">
-        {group.items.map((media) => (
+        {sortedItems.map((media) => (
           <DuplicateMediaCard
             key={media.id}
             media={media}
             selected={selectedIds.has(media.id)}
             onToggle={() => onToggle(media.id)}
-            onInspect={() => onInspect(media, group.items)}
+            onInspect={() => onInspect(media, sortedItems)}
           />
         ))}
       </div>

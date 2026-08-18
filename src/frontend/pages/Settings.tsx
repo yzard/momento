@@ -1,22 +1,19 @@
 import { useState, type FormEvent } from 'react'
-import { authApi } from '../api/auth'
 import { useAuth } from '../hooks/useAuth'
 import { cn } from '../lib/utils'
-import { AlertTriangle, CheckCircle, Loader2, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, Loader2, ShieldCheck } from 'lucide-react'
 
 export default function Settings() {
-  const { user, refreshUser } = useAuth()
+  const { user, changePassword } = useAuth()
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
-    setSuccess('')
 
     if (newPassword !== confirmPassword) {
       setError('New passwords do not match')
@@ -31,12 +28,7 @@ export default function Settings() {
     setIsLoading(true)
 
     try {
-      await authApi.changePassword(currentPassword, newPassword)
-      await refreshUser()
-      setSuccess('Password changed successfully')
-      setCurrentPassword('')
-      setNewPassword('')
-      setConfirmPassword('')
+      await changePassword(currentPassword, newPassword)
     } catch {
       setError('Failed to change password. Please verify your current password.')
     } finally {
@@ -84,13 +76,6 @@ export default function Settings() {
               </div>
             )}
             
-            {success && (
-              <div className="bg-green-500/10 text-green-600 p-4 border border-green-500/20 rounded-lg font-medium text-sm flex items-center gap-3">
-                <CheckCircle className="w-5 h-5" strokeWidth={2} />
-                {success}
-              </div>
-            )}
-
             <div className="space-y-6">
               <div className="space-y-2 group">
                 <label htmlFor="currentPassword" className="text-xs font-bold uppercase tracking-widest text-muted-foreground group-focus-within:text-foreground transition-colors flex items-center gap-2">

@@ -26,6 +26,7 @@ pub(crate) const OCR_CRON: &str = "0 1 * * *";
 pub(crate) const IMAGE_TAGGING_CRON: &str = "0 2 * * *";
 pub(crate) const DEDUPLICATE_CRON: &str = "0 3 * * *";
 pub(crate) const FACE_DETECTION_CRON: &str = "0 4 * * *";
+pub(crate) const IMAGE_AESTHETICS_CRON: &str = "0 5 * * *";
 
 pub(crate) mod fallback {
     pub(crate) const SECURITY_SECRET_KEY: &str = "change-me-in-production-use-openssl-rand-hex-32";
@@ -40,6 +41,7 @@ pub(crate) mod fallback {
     pub(crate) const IMAGE_TAGGING_ENABLED: bool = false;
     pub(crate) const DEDUPLICATE_ENABLED: bool = false;
     pub(crate) const FACE_DETECTION_ENABLED: bool = false;
+    pub(crate) const IMAGE_AESTHETICS_ENABLED: bool = false;
 
     pub(crate) fn metadata_worker_concurrency() -> usize {
         num_cpus::get()
@@ -65,6 +67,7 @@ mod template {
     pub(super) const IMAGE_TAGGING_ENABLED: bool = true;
     pub(super) const DEDUPLICATE_ENABLED: bool = true;
     pub(super) const FACE_DETECTION_ENABLED: bool = true;
+    pub(super) const IMAGE_AESTHETICS_ENABLED: bool = true;
 }
 
 pub(crate) fn server_host() -> String {
@@ -179,6 +182,10 @@ pub(crate) fn face_detection_cron() -> String {
     FACE_DETECTION_CRON.to_string()
 }
 
+pub(crate) fn image_aesthetics_cron() -> String {
+    IMAGE_AESTHETICS_CRON.to_string()
+}
+
 pub(crate) fn llm_service_url() -> String {
     fallback::LLM_SERVICE_URL.to_string()
 }
@@ -205,6 +212,10 @@ pub(crate) fn deduplicate_enabled() -> bool {
 
 pub(crate) fn face_detection_enabled() -> bool {
     fallback::FACE_DETECTION_ENABLED
+}
+
+pub(crate) fn image_aesthetics_enabled() -> bool {
+    fallback::IMAGE_AESTHETICS_ENABLED
 }
 
 pub(crate) fn face_group_similarity_threshold() -> f32 {
@@ -321,6 +332,10 @@ pub(crate) fn render_template(source: &str) -> String {
             template::FACE_DETECTION_ENABLED.to_string(),
         ),
         (
+            "{{IMAGE_AESTHETICS_ENABLED}}",
+            template::IMAGE_AESTHETICS_ENABLED.to_string(),
+        ),
+        (
             "{{FACE_GROUP_SIMILARITY_THRESHOLD}}",
             FACE_GROUP_SIMILARITY_THRESHOLD.to_string(),
         ),
@@ -329,6 +344,10 @@ pub(crate) fn render_template(source: &str) -> String {
         ("{{IMAGE_TAGGING_CRON}}", IMAGE_TAGGING_CRON.to_string()),
         ("{{DEDUPLICATE_CRON}}", DEDUPLICATE_CRON.to_string()),
         ("{{FACE_DETECTION_CRON}}", FACE_DETECTION_CRON.to_string()),
+        (
+            "{{IMAGE_AESTHETICS_CRON}}",
+            IMAGE_AESTHETICS_CRON.to_string(),
+        ),
     ];
 
     replacements

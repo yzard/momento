@@ -7,11 +7,13 @@ const mocks = vi.hoisted(() => ({
   clearMediaCache: vi.fn(),
   clearQueryCache: vi.fn(),
   getMe: vi.fn(),
+  changePassword: vi.fn(),
 }))
 
 vi.mock('../../../src/frontend/api/auth', () => ({
   authApi: {
     getMe: mocks.getMe,
+    changePassword: mocks.changePassword,
   },
 }))
 
@@ -40,13 +42,16 @@ const testLocalStorage = {
 }
 
 function SessionState() {
-  const { isAuthenticated, isLoading } = useAuth()
+  const { changePassword, isAuthenticated, isLoading } = useAuth()
   const location = useLocation()
 
   return (
     <div>
       <span>{isLoading ? 'loading' : isAuthenticated ? 'authenticated' : 'logged-out'}</span>
       <span>{location.pathname}</span>
+      <button type="button" onClick={() => void changePassword('old-password', 'new-password')}>
+        Change password
+      </button>
     </div>
   )
 }
@@ -105,6 +110,32 @@ describe('AuthProvider', () => {
       expect(screen.getByText('logged-out')).toBeTruthy()
       expect(screen.getByText('/login')).toBeTruthy()
     })
+    expect(localStorage.getItem('momento_access_token')).toBeNull()
+    expect(localStorage.getItem('momento_refresh_token')).toBeNull()
+    expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
+    expect(mocks.clearMediaCache).toHaveBeenCalledOnce()
+  })
+
+  it('ends the current session immediately after a password change', async () => {
+    mocks.changePassword.mockResolvedValue(undefined)
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <AuthProvider>
+          <SessionState />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+
+    await screen.findByText('authenticated')
+    await act(async () => {
+      screen.getByRole('button', { name: 'Change password' }).click()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('logged-out')).toBeTruthy()
+      expect(screen.getByText('/login')).toBeTruthy()
+    })
+    expect(mocks.changePassword).toHaveBeenCalledWith('old-password', 'new-password')
     expect(localStorage.getItem('momento_access_token')).toBeNull()
     expect(localStorage.getItem('momento_refresh_token')).toBeNull()
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()

@@ -32,6 +32,7 @@ interface AuthContextType {
   isLoading: boolean
   login: (username: string, password: string) => Promise<User>
   logout: () => Promise<void>
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
   refreshToken: () => Promise<boolean>
   refreshUser: () => Promise<void>
 }
@@ -128,6 +129,12 @@ function AuthProvider({ children }: { children: ReactNode }) {
     clearSession()
   }
 
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    await authApi.changePassword(currentPassword, newPassword)
+    clearSession()
+    navigate('/login', { replace: true })
+  }
+
   return (
     <AuthContext.Provider
       value={{
@@ -136,6 +143,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         login,
         logout,
+        changePassword,
         refreshToken,
         refreshUser,
       }}

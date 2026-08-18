@@ -10,6 +10,7 @@ import {
   UsersRound,
   Image as ImageIcon,
   Map as MapIcon,
+  MapPinned,
   ScanSearch,
   Settings,
   Trash2,
@@ -19,6 +20,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
+import { MOMENTO_VERSION } from '../../lib/version'
 
 interface NavItem {
   to: string
@@ -39,6 +41,7 @@ const navItems: NavItem[] = [
   },
   { to: '/albums', label: 'Albums', icon: Folder },
   { to: '/map', label: 'Map', icon: MapIcon },
+  { to: '/places', label: 'Places', icon: MapPinned },
   { to: '/faces', label: 'Faces', icon: UsersRound },
   {
     to: '/utility',
@@ -220,7 +223,7 @@ export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onN
         {!isCollapsed ? (
           <div className="px-4 py-2 bg-primary/5 rounded-xl border border-primary/10 animate-fade-in">
             <p className="text-xs text-primary/80 font-medium text-center">
-              Momento v0.1.0
+              v{MOMENTO_VERSION}
             </p>
           </div>
         ) : null}

@@ -48,6 +48,14 @@ request_timeout_seconds = {{IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS}}
 max_concurrent_jobs = {{IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS}}
 
 [[service]]
+# OpenAI CLIP ViT-B/32 with the LAION aesthetic linear head.
+enabled = {{SERVICE_ENABLED}}
+model_type = "image_aesthetics"
+startup_timeout_seconds = {{IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS}}
+max_concurrent_jobs = {{IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS}}
+
+[[service]]
 # InsightFace detection and embeddings. Resolution is measured on each face box.
 enabled = {{SERVICE_ENABLED}}
 model_type = "face_detection"

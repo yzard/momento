@@ -11,6 +11,7 @@ import Admin from './pages/Admin'
 import Trash from './pages/Trash'
 import Deduplicate from './pages/Deduplicate'
 import Faces from './pages/Faces'
+import Places from './pages/Places'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
@@ -58,6 +59,8 @@ function AppRoutes() {
         <Route path="timeline/videos" element={<Timeline mediaType="video" />} />
         <Route path="albums" element={<Albums />} />
         <Route path="map" element={<Map />} />
+        <Route path="places" element={<Places />} />
+        <Route path="places/:placeId" element={<Places />} />
         <Route path="faces" element={<Faces />} />
         <Route path="faces/:faceGroupId" element={<Faces />} />
         <Route path="utility" element={<Navigate to="/utility/deduplicate" replace />} />

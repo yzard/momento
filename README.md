@@ -28,6 +28,7 @@ Model concurrency is enforced only by the active model subservice. Momento and t
 Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement. The scheduler keeps bounded job metadata in memory and sends only validated job/input descriptors to the active same-container model process. The model opens inputs from `queue/processing`; image bytes are never retransmitted over the local HTTP boundary. Queue job count is not configured, so operators must monitor disk capacity.
 
 AI cancellation is durable across machines. Momento records an all-task or task-specific scope plus exact job IDs in an outbox and retries the authenticated cancellation message until llm-service acknowledges it. llm-service removes matching staged, queued, result-pending, and failed copies; matching inference already running finishes locally and is then discarded without result delivery.
+Replacement jobs for a pending cancellation scope remain queued until llm-service acknowledges the cancellation, preventing reset work from being cancelled by its own delayed request.
 
 ## Features
 
@@ -50,7 +51,11 @@ Search currently supports:
 
 ### Faces
 
-Momento detects faces and groups images containing similar people. Administrators can manually combine face groups when separate groups belong to the same person. The face runtime filters detections using the face service's `minimum_face_likelihood` and `minimum_face_resolution_pixels`; resolution is the minimum detected face-box width and height in the prepared input. Persisted 256x256 portrait crops retain their existing dimensions but are centered on the midpoint between the detected eyes. Momento groups embeddings when their cosine similarity reaches `[llm].face_group_similarity_threshold`; the default is `0.5`, lower values merge less-similar faces, and higher values require a closer match. After automatic grouping or a manual merge, the group thumbnail representative combines normalized face-box center proximity at 20% with the five-landmark frontality score at 80%, then uses quality, confidence, and stable face ID as tie-breakers.
+Momento detects faces and groups images containing similar people. Administrators can manually combine face groups when separate groups belong to the same person. The face runtime filters detections using the face service's `minimum_face_likelihood` and `minimum_face_resolution_pixels`; resolution is the minimum detected face-box width and height in the prepared input. Persisted 256x256 portrait crops retain their existing dimensions but are centered on the midpoint between the detected eyes. Momento groups embeddings when their cosine similarity reaches `[llm].face_group_similarity_threshold`; the default is `0.41`, lower values merge less-similar faces, and higher values require a closer match. After automatic grouping or a manual merge, the group thumbnail representative combines normalized face-box center proximity at 20% with the five-landmark frontality score at 80%, then uses quality, confidence, and stable face ID as tie-breakers.
+
+### Places
+
+Places groups accessible media by the exact reverse-geocoded city, state or province, and country tuple. A missing state remains distinct from a named state. Place covers use aspect-preserving prepared images and prefer completed `image_aesthetics` results: 40% LAION aesthetic score, 25% CLIP scenic suitability, 20% visual simplicity, 10% landscape composition, and 5% technical quality, with OCR-clutter and dominant-face penalties. When aesthetics have not run, Momento uses a deterministic landscape/date/media-ID fallback. Place counts, covers, and gallery media are always filtered through the requesting user's media access.
 
 ### Utility
 
@@ -133,7 +138,7 @@ username and password work again.
 The llm-service image requires an NVIDIA GPU, a compatible host driver, and NVIDIA Container
 Toolkit. It is large because all model runtimes and weights are included for offline activation.
 The generated `[cronjob]` section contains independent schedules for OCR, image tagging,
-deduplication, and face detection. `deduplicate_cron` intentionally keeps its feature name because
+deduplication, face detection, and image aesthetics. `deduplicate_cron` intentionally keeps its feature name because
 it starts the complete deduplication pipeline; `image_clustering` is only that pipeline's inference
 stage.
 
@@ -148,7 +153,7 @@ data is provided under CC BY 4.0; attribution and source checksums are recorded 
 The playground builds and starts exactly two containers: `momento-api` and `llm-service`.
 Model runtimes are processes inside `llm-service`; the deployment does not mount the Docker socket
 or create model containers. The CUDA 12.9 llm-service image contains isolated environments and
-baked model weights for Unlimited-OCR, RAM++, DINOv2-small, and InsightFace `buffalo_l`, so task
+baked model weights for Unlimited-OCR, RAM++, DINOv2-small, CLIP ViT-B/32 with the LAION aesthetic head, and InsightFace `buffalo_l`, so task
 activation performs no package installation or model download.
 
 Requirements:

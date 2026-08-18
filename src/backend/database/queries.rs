@@ -97,6 +97,8 @@ pub mod metadata_jobs {
     pub const DELETE_FACE_GROUPS: &str = "DELETE FROM face_groups";
     pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces";
     pub const DELETE_FACE_DETECTION_RESULTS: &str = "DELETE FROM media_face_detection_results";
+    pub const DELETE_AESTHETICS: &str = "DELETE FROM media_aesthetics";
+    pub const DELETE_AESTHETIC_INPUTS: &str = "DELETE FROM media_aesthetic_inputs";
     pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
     pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
     pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
@@ -113,7 +115,8 @@ pub mod metadata_jobs {
 pub mod ai_jobs {
     pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY created_at LIMIT ?";
+    pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') AND NOT EXISTS (SELECT 1 FROM llm_cancellation_scopes WHERE llm_cancellation_scopes.scope = 'all' OR (llm_cancellation_scopes.scope = 'task' AND llm_cancellation_scopes.task = llm_jobs.task)) ORDER BY created_at LIMIT ?";
     pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued'";
     pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
     pub const REQUEUE_AMBIGUOUS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
@@ -128,6 +131,8 @@ pub mod ai_jobs {
     pub const DELETE_TEXT_FOR_TASK: &str = "DELETE FROM media_text WHERE model_type = ?";
     pub const DELETE_TEXT_INPUTS_FOR_TASK: &str =
         "DELETE FROM media_text_inputs WHERE model_type = ?";
+    pub const DELETE_AESTHETICS: &str = "DELETE FROM media_aesthetics";
+    pub const DELETE_AESTHETIC_INPUTS: &str = "DELETE FROM media_aesthetic_inputs";
     pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
     pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted', 'failed')";
     pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted', 'failed')";
@@ -260,10 +265,14 @@ pub mod faces {
 pub mod llm_callback {
     pub const SELECT_JOB: &str =
         "SELECT media_id, task, attempts, status FROM llm_jobs WHERE id = ?";
+    pub const SELECT_JOB_INPUT_CORRELATION: &str =
+        "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
     pub const MARK_COMPLETED: &str = "UPDATE llm_jobs SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
     pub const UPSERT_TEXT: &str = "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, ?, ?) ON CONFLICT(media_id, model_type) DO UPDATE SET model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_INPUT_TEXT: &str = "INSERT INTO media_text_inputs (media_id, model_type, sequence, frame_timestamp_ms, model_version, string) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, model_type, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
+    pub const UPSERT_AESTHETICS: &str = "INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', ?, ?, ?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET model_version = excluded.model_version, aesthetic_score = excluded.aesthetic_score, scenic_score = excluded.scenic_score, simplicity_score = excluded.simplicity_score, landscape_score = excluded.landscape_score, technical_quality_score = excluded.technical_quality_score, completed_at = datetime('now')";
+    pub const UPSERT_AESTHETIC_INPUT: &str = "INSERT INTO media_aesthetic_inputs (media_id, sequence, frame_timestamp_ms, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, ?, ?, 'image_aesthetics', ?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, aesthetic_score = excluded.aesthetic_score, scenic_score = excluded.scenic_score, simplicity_score = excluded.simplicity_score, landscape_score = excluded.landscape_score, technical_quality_score = excluded.technical_quality_score, completed_at = datetime('now')";
     pub const SELECT_CLUSTER_MEDIA: &str = "SELECT media.content_hash, CAST(strftime('%s', media_metadata.date_taken) AS INTEGER) FROM media LEFT JOIN media_metadata ON media_metadata.media_id = media.id WHERE media.id = ?";
     pub const UPSERT_SIMILARITY_INDEX: &str = "INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, capture_time_seconds, processing_status, processing_error) VALUES (?, ?, ?, 'prepared-input-v1', ?, ?, ?, 1, NULL) ON CONFLICT(media_id) DO UPDATE SET content_hash = excluded.content_hash, model_version = excluded.model_version, preprocessing_version = excluded.preprocessing_version, embedding = excluded.embedding, perceptual_hash = excluded.perceptual_hash, capture_time_seconds = excluded.capture_time_seconds, indexed_at = datetime('now'), processing_status = 1, processing_error = NULL";
     pub const DELETE_HASH_BANDS: &str =
@@ -272,12 +281,162 @@ pub mod llm_callback {
     pub const UPSERT_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) VALUES (?, datetime('now')) ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at";
 }
 
+pub mod places {
+    const SELECT_CANDIDATES: &str = r#"
+    SELECT m.id
+         , mm.location_city AS city
+         , mm.location_state AS state
+         , mm.location_country AS country
+         , mm.date_taken
+         , CASE WHEN aesthetics.media_id IS NULL THEN 0 ELSE 1 END AS has_aesthetics
+         , CASE
+               WHEN aesthetics.media_id IS NOT NULL THEN
+                   0.40 * aesthetics.aesthetic_score
+                 + 0.25 * aesthetics.scenic_score
+                 + 0.20 * aesthetics.simplicity_score
+                 + 0.10 * aesthetics.landscape_score
+                 + 0.05 * aesthetics.technical_quality_score
+                 - 0.15 * MIN(CAST(LENGTH(TRIM(COALESCE(ocr.string, ''))) AS REAL) / 200.0, 1.0)
+                 - CASE
+                       WHEN COALESCE(faces.maximum_area, 0.0) >= 0.18 THEN 0.20
+                       WHEN COALESCE(faces.maximum_area, 0.0) >= 0.08 THEN 0.10
+                       ELSE 0.0
+                   END
+               ELSE CASE
+                   WHEN mm.width IS NULL OR mm.height IS NULL OR mm.height <= 0 THEN 0.0
+                   ELSE MIN(MAX(CAST(mm.width AS REAL) / mm.height - 1.0, 0.0) / 0.5, 1.0)
+               END
+           END AS cover_score
+      FROM media AS m
+      JOIN media_access AS access ON access.media_id = m.id
+      JOIN media_metadata AS mm ON mm.media_id = m.id
+      LEFT JOIN media_aesthetics AS aesthetics ON aesthetics.media_id = m.id
+      LEFT JOIN media_text AS ocr
+        ON ocr.media_id = m.id
+       AND ocr.model_type = 'ocr'
+      LEFT JOIN (
+          SELECT media_id
+               , MAX(width * height) AS maximum_area
+            FROM media_faces
+        GROUP BY media_id
+      ) AS faces ON faces.media_id = m.id
+     WHERE access.user_id = ?
+       AND access.deleted_at IS NULL
+    "#;
+
+    const SELECT_PAGE: &str = r#"
+    , ranked AS (
+        SELECT id
+             , city
+             , state
+             , country
+             , COUNT(*) OVER (PARTITION BY city, state, country) AS media_count
+             , ROW_NUMBER() OVER (
+                   PARTITION BY city, state, country
+                   ORDER BY has_aesthetics DESC
+                          , cover_score DESC
+                          , COALESCE(date_taken, '') DESC
+                          , id ASC
+               ) AS cover_rank
+          FROM candidates
+    )
+    SELECT city
+         , state
+         , country
+         , media_count
+         , id AS representative_media_id
+      FROM ranked
+     WHERE cover_rank = 1
+     ORDER BY media_count DESC
+            , city ASC
+            , CASE WHEN state IS NULL THEN 0 ELSE 1 END ASC
+            , state ASC
+            , country ASC
+     LIMIT ?
+    OFFSET ?
+    "#;
+
+    const SELECT_SUMMARY: &str = r#"
+    SELECT city
+         , state
+         , country
+         , COUNT(*) AS media_count
+         , (
+               SELECT ranked.id
+                 FROM candidates AS ranked
+                ORDER BY ranked.has_aesthetics DESC
+                       , ranked.cover_score DESC
+                       , COALESCE(ranked.date_taken, '') DESC
+                       , ranked.id ASC
+                LIMIT 1
+           ) AS representative_media_id
+      FROM candidates
+    HAVING COUNT(*) > 0
+    "#;
+
+    pub fn select_page_query() -> String {
+        format!(
+            "WITH candidates AS ({SELECT_CANDIDATES} AND mm.location_city IS NOT NULL AND TRIM(mm.location_city) != '' AND mm.location_country IS NOT NULL AND TRIM(mm.location_country) != '') {SELECT_PAGE}"
+        )
+    }
+
+    pub fn select_summary_query() -> String {
+        format!(
+            "WITH candidates AS ({SELECT_CANDIDATES} AND mm.location_city = ? AND mm.location_state IS ? AND mm.location_country = ?) {SELECT_SUMMARY}"
+        )
+    }
+
+    pub const SELECT_MEDIA_PAGE: &str = r#"
+    SELECT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , mm.width
+         , mm.height
+         , m.file_size
+         , mm.duration_seconds
+         , mm.date_taken
+         , mm.gps_latitude
+         , mm.gps_longitude
+         , mm.camera_make
+         , mm.camera_model
+         , mm.lens_make
+         , mm.lens_model
+         , mm.iso
+         , mm.exposure_time
+         , mm.f_number
+         , mm.focal_length
+         , mm.focal_length_35mm
+         , mm.gps_altitude
+         , mm.location_city
+         , mm.location_state
+         , mm.location_country
+         , mm.video_codec
+         , mm.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_access AS access ON access.media_id = m.id
+      JOIN media_metadata AS mm ON mm.media_id = m.id
+     WHERE access.user_id = ?
+       AND access.deleted_at IS NULL
+       AND mm.location_city = ?
+       AND mm.location_state IS ?
+       AND mm.location_country = ?
+     ORDER BY COALESCE(mm.date_taken, '') DESC
+            , m.id DESC
+     LIMIT ?
+    OFFSET ?
+    "#;
+}
+
 pub mod media {
     pub const INSERT_RTREE: &str =
         "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)";
     pub const DELETE_RTREE: &str = "DELETE FROM media_rtree WHERE media_id = ?";
     pub const UPSERT_EDITABLE_METADATA: &str = "INSERT INTO media_metadata (media_id, date_taken, gps_latitude, gps_longitude) VALUES (?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET date_taken = COALESCE(excluded.date_taken, media_metadata.date_taken), gps_latitude = COALESCE(excluded.gps_latitude, media_metadata.gps_latitude), gps_longitude = COALESCE(excluded.gps_longitude, media_metadata.gps_longitude)";
     pub const UPSERT_GEOHASH: &str = "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash";
+    pub const UPDATE_LOCATION: &str = "UPDATE media_metadata SET geohash = ?, location_city = ?, location_state = ?, location_country = ? WHERE media_id = ?";
     pub const INSERT: &str = r#"
     INSERT INTO media (
         user_id

@@ -56,6 +56,8 @@ pub fn reset_all(pool: &DbPool) -> Result<i64, rusqlite::Error> {
     transaction.execute(queries::metadata_jobs::DELETE_FACE_GROUPS, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_MEDIA_FACES, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_FACE_DETECTION_RESULTS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_AESTHETICS, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_AESTHETIC_INPUTS, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_RTREE, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_METADATA, [])?;
     transaction.execute(queries::metadata_jobs::RESET_IMPORTED, [])?;
@@ -75,6 +77,11 @@ pub fn reset_all(pool: &DbPool) -> Result<i64, rusqlite::Error> {
         let _ = std::fs::remove_dir_all(
             crate::constants::paths()
                 .thumbnails_tiny
+                .join(media_id.to_string()),
+        );
+        let _ = std::fs::remove_dir_all(
+            crate::constants::paths()
+                .thumbnails_places
                 .join(media_id.to_string()),
         );
         let _ = std::fs::remove_dir_all(
@@ -128,6 +135,9 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
     }
     if config.llm.face_detection_enabled {
         tasks.push("face_detection");
+    }
+    if config.llm.image_aesthetics_enabled {
+        tasks.push("image_aesthetics");
     }
     let connection = pool.get().map_err(|error| error.to_string())?;
     for task in tasks {

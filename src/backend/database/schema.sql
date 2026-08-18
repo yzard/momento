@@ -155,6 +155,35 @@ CREATE TABLE IF NOT EXISTS media_text_inputs (
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS media_aesthetics (
+    media_id INTEGER PRIMARY KEY,
+    model_type TEXT NOT NULL CHECK(model_type = 'image_aesthetics'),
+    model_version TEXT NOT NULL,
+    aesthetic_score REAL NOT NULL CHECK(aesthetic_score >= 0.0 AND aesthetic_score <= 1.0),
+    scenic_score REAL NOT NULL CHECK(scenic_score >= 0.0 AND scenic_score <= 1.0),
+    simplicity_score REAL NOT NULL CHECK(simplicity_score >= 0.0 AND simplicity_score <= 1.0),
+    landscape_score REAL NOT NULL CHECK(landscape_score >= 0.0 AND landscape_score <= 1.0),
+    technical_quality_score REAL NOT NULL CHECK(technical_quality_score >= 0.0 AND technical_quality_score <= 1.0),
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_aesthetic_inputs (
+    media_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    frame_timestamp_ms INTEGER,
+    model_type TEXT NOT NULL CHECK(model_type = 'image_aesthetics'),
+    model_version TEXT NOT NULL,
+    aesthetic_score REAL NOT NULL CHECK(aesthetic_score >= 0.0 AND aesthetic_score <= 1.0),
+    scenic_score REAL NOT NULL CHECK(scenic_score >= 0.0 AND scenic_score <= 1.0),
+    simplicity_score REAL NOT NULL CHECK(simplicity_score >= 0.0 AND simplicity_score <= 1.0),
+    landscape_score REAL NOT NULL CHECK(landscape_score >= 0.0 AND landscape_score <= 1.0),
+    technical_quality_score REAL NOT NULL CHECK(technical_quality_score >= 0.0 AND technical_quality_score <= 1.0),
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (media_id, sequence),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS media_metadata_jobs (
     media_id INTEGER PRIMARY KEY,
     status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')),
@@ -184,7 +213,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 CREATE TABLE IF NOT EXISTS media_ai_inputs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL,
-    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'face_detection')),
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'image_aesthetics', 'face_detection')),
     sequence INTEGER NOT NULL,
     input_kind TEXT NOT NULL CHECK(input_kind IN ('image', 'video_frame')),
     file_path TEXT NOT NULL,
@@ -254,7 +283,7 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
     media_id INTEGER NOT NULL,
     deduplicate_run_id INTEGER,
     face_grouping_run_id INTEGER,
-    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'face_detection')),
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'image_aesthetics', 'face_detection')),
     status TEXT NOT NULL CHECK(status IN ('queued', 'submitting', 'submitted', 'completed', 'failed', 'cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
     available_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -268,7 +297,7 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
     FOREIGN KEY (deduplicate_run_id) REFERENCES media_similarity_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (face_grouping_run_id) REFERENCES face_grouping_runs(id) ON DELETE CASCADE,
     CHECK(
-        (task IN ('ocr', 'image_tagging') AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NULL)
+        (task IN ('ocr', 'image_tagging', 'image_aesthetics') AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NULL)
         OR (task = 'image_clustering' AND deduplicate_run_id IS NOT NULL AND face_grouping_run_id IS NULL)
         OR (task = 'face_detection' AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NOT NULL)
     )
@@ -466,7 +495,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_job_inputs_job
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_media_task
     ON llm_jobs (media_id, task)
-    WHERE task IN ('ocr', 'image_tagging', 'face_detection')
+    WHERE task IN ('ocr', 'image_tagging', 'image_aesthetics', 'face_detection')
       AND status IN ('queued', 'submitting', 'submitted');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_clustering
@@ -502,6 +531,9 @@ CREATE INDEX IF NOT EXISTS idx_album_access_user
 
 CREATE INDEX IF NOT EXISTS idx_media_geohash
     ON media_metadata (geohash);
+
+CREATE INDEX IF NOT EXISTS idx_media_metadata_places
+    ON media_metadata (location_city, location_state, location_country, media_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_media_similarity_single_running
     ON media_similarity_runs ((1))

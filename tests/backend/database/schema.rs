@@ -66,11 +66,27 @@ fn creates_durable_metadata_and_ai_job_tables() {
             |row| row.get(0),
         )
         .expect("Failed to find LLM cancellation scope table");
+    let aesthetics_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["media_aesthetics"],
+            |row| row.get(0),
+        )
+        .expect("Failed to find media aesthetics table");
+    let aesthetic_inputs_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["media_aesthetic_inputs"],
+            |row| row.get(0),
+        )
+        .expect("Failed to find media aesthetic inputs table");
 
     assert_eq!(table_name, "llm_jobs");
     assert_eq!(metadata_table, "media_metadata_jobs");
     assert_eq!(cancellation_table, "llm_job_cancellations");
     assert_eq!(cancellation_scope_table, "llm_cancellation_scopes");
+    assert_eq!(aesthetics_table, "media_aesthetics");
+    assert_eq!(aesthetic_inputs_table, "media_aesthetic_inputs");
 }
 
 #[test]

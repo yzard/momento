@@ -215,6 +215,8 @@ pub struct LlmConfig {
     pub deduplicate_enabled: bool,
     #[serde(default = "defaults::face_detection_enabled")]
     pub face_detection_enabled: bool,
+    #[serde(default = "defaults::image_aesthetics_enabled")]
+    pub image_aesthetics_enabled: bool,
     #[serde(default = "defaults::face_group_similarity_threshold")]
     pub face_group_similarity_threshold: f32,
 }
@@ -232,6 +234,8 @@ pub struct CronjobConfig {
     pub deduplicate_cron: String,
     #[serde(default = "defaults::face_detection_cron")]
     pub face_detection_cron: String,
+    #[serde(default = "defaults::image_aesthetics_cron")]
+    pub image_aesthetics_cron: String,
 }
 
 impl Default for CronjobConfig {
@@ -242,6 +246,7 @@ impl Default for CronjobConfig {
             image_tagging_cron: defaults::image_tagging_cron(),
             deduplicate_cron: defaults::deduplicate_cron(),
             face_detection_cron: defaults::face_detection_cron(),
+            image_aesthetics_cron: defaults::image_aesthetics_cron(),
         }
     }
 }
@@ -256,6 +261,7 @@ impl CronjobConfig {
             ("image_tagging", &self.image_tagging_cron),
             ("deduplicate", &self.deduplicate_cron),
             ("face_detection", &self.face_detection_cron),
+            ("image_aesthetics", &self.image_aesthetics_cron),
         ] {
             let normalized_cron = format!("0 {expression} *");
             normalized_cron.parse::<cron::Schedule>().map_err(|error| {
@@ -276,6 +282,7 @@ impl Default for LlmConfig {
             image_tagging_enabled: defaults::fallback::IMAGE_TAGGING_ENABLED,
             deduplicate_enabled: defaults::fallback::DEDUPLICATE_ENABLED,
             face_detection_enabled: defaults::fallback::FACE_DETECTION_ENABLED,
+            image_aesthetics_enabled: defaults::fallback::IMAGE_AESTHETICS_ENABLED,
             face_group_similarity_threshold: defaults::FACE_GROUP_SIMILARITY_THRESHOLD,
         }
     }

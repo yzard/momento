@@ -7,7 +7,10 @@ use crate::constants::paths;
 use crate::database::{queries, DbPool};
 use crate::processor::media_processor::{calculate_geohash, generate_complete_metadata};
 use crate::processor::metadata::delete_supplemental_metadata;
-use crate::processor::thumbnails::{generate_image_thumbnail, generate_video_thumbnail};
+use crate::processor::thumbnails::{
+    generate_image_preview, generate_image_thumbnail, generate_video_preview,
+    generate_video_thumbnail,
+};
 use crate::utils::hash::calculate_file_hash;
 
 pub async fn generate_media_metadata(
@@ -39,14 +42,19 @@ pub async fn generate_media_metadata(
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
     let tiny_thumbnail_path = paths().thumbnails_tiny.join(&thumbnail_relative);
+    let place_thumbnail_path = paths().thumbnails_places.join(&thumbnail_relative);
     let thumbnail_parent = thumbnail_path
         .parent()
         .ok_or_else(|| "thumbnail path has no parent".to_string())?;
     let tiny_thumbnail_parent = tiny_thumbnail_path
         .parent()
         .ok_or_else(|| "tiny thumbnail path has no parent".to_string())?;
+    let place_thumbnail_parent = place_thumbnail_path
+        .parent()
+        .ok_or_else(|| "place thumbnail path has no parent".to_string())?;
     std::fs::create_dir_all(thumbnail_parent).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(tiny_thumbnail_parent).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(place_thumbnail_parent).map_err(|error| error.to_string())?;
     let thumbnail_generated = generate_thumbnail(
         &media_type,
         &original_path,
@@ -68,6 +76,27 @@ pub async fn generate_media_metadata(
     .await;
     if !tiny_thumbnail_generated {
         return Err("tiny thumbnail generation failed".to_string());
+    }
+    let place_thumbnail_generated = if media_type == "image" {
+        generate_image_preview(
+            &original_path,
+            &place_thumbnail_path,
+            config.metadata.thumbnails_max_size,
+            config.metadata.thumbnails_quality,
+        )
+        .await
+    } else {
+        generate_video_preview(
+            &original_path,
+            &place_thumbnail_path,
+            config.metadata.thumbnails_max_size,
+            config.metadata.thumbnails_quality,
+            config.metadata.thumbnails_video_frame_quality,
+        )
+        .await
+    };
+    if !place_thumbnail_generated {
+        return Err("place thumbnail generation failed".to_string());
     }
     let geohash = metadata
         .gps_latitude
@@ -142,6 +171,7 @@ pub async fn generate_media_metadata(
         media_id,
         &original_path,
         &thumbnail_path,
+        &place_thumbnail_path,
         &media_type,
         metadata.duration_seconds,
     )
@@ -178,6 +208,7 @@ fn prepare_ai_inputs(
     media_id: i64,
     original_path: &std::path::Path,
     thumbnail_path: &std::path::Path,
+    place_thumbnail_path: &std::path::Path,
     media_type: &str,
     _duration_seconds: Option<f64>,
 ) -> Result<(), String> {
@@ -187,7 +218,13 @@ fn prepare_ai_inputs(
     } else {
         vec![(0, None, thumbnail_path.to_path_buf())]
     };
-    for task in ["ocr", "image_tagging", "image_clustering", "face_detection"] {
+    for task in [
+        "ocr",
+        "image_tagging",
+        "image_clustering",
+        "image_aesthetics",
+        "face_detection",
+    ] {
         let task_directory = output_directory.join(task);
         std::fs::create_dir_all(&task_directory).map_err(|error| error.to_string())?;
         pool.get()
@@ -197,7 +234,17 @@ fn prepare_ai_inputs(
                 rusqlite::params![media_id, task],
             )
             .map_err(|error| error.to_string())?;
-        for (sequence, frame_timestamp_ms, source_path) in &frames {
+        let image_aesthetics_frame = [(
+            0,
+            (media_type == "video").then_some(0),
+            place_thumbnail_path.to_path_buf(),
+        )];
+        let task_frames = if task == "image_aesthetics" {
+            image_aesthetics_frame.as_slice()
+        } else {
+            frames.as_slice()
+        };
+        for (sequence, frame_timestamp_ms, source_path) in task_frames {
             let filename = format!("{sequence:03}.jpg");
             let output_path = task_directory.join(&filename);
             std::fs::copy(source_path, &output_path).map_err(|error| error.to_string())?;
