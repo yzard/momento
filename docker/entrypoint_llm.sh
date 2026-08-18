@@ -11,15 +11,15 @@ if [ -n "${TZ:-}" ]; then
 fi
 
 umask "$UMASK"
-mkdir -p /config /data/llm/cache/triton /data/llm/queue /data/logs
+mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
 cp -a /opt/triton-cache/. /data/llm/cache/triton/
-chown -R "$PUID:$PGID" /config
+chown "$PUID:$PGID" /data
 chown -R "$PUID:$PGID" /data/llm /data/logs
 
-if [ ! -f /config/config_llm.toml ]; then
+if [ ! -f /data/config_llm.toml ]; then
     gosu "$PUID:$PGID" env HOME=/data /app/llm-service \
-        -c /config/config_llm.toml --init-config
+        -c /data/config_llm.toml --init-config
 fi
-chmod 600 /config/config_llm.toml
+chmod 600 /data/config_llm.toml
 
 exec gosu "$PUID:$PGID" env HOME=/data "$@"

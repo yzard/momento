@@ -61,7 +61,7 @@ mod template {
     pub(super) const THUMBNAILS_VIDEO_FRAME_QUALITY: u8 = 85;
     pub(super) const METADATA_WORKER_CONCURRENCY: usize = 16;
     pub(super) const LLM_ENABLED: bool = true;
-    pub(super) const LLM_SERVICE_URL: &str = "ws://llm-service:8100/api/v1/llm/connect";
+    pub(super) const LLM_SERVICE_URL: &str = "ws://${LLM_SERVICE_ADDRESS}/api/v1/llm/connect";
     pub(super) const LLM_CLIENT_ID: &str = "playground";
     pub(super) const LLM_API_KEY: &str = "change-me-llm-service-key";
     pub(super) const IMAGE_TAGGING_ENABLED: bool = true;

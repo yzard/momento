@@ -51,6 +51,7 @@ max_in_flight = {{LLM_SUBMISSION_MAX_IN_FLIGHT}}
 [llm]
 # The API initiates one authenticated WebSocket to llm-service.
 enabled = {{LLM_ENABLED}}
+# Docker Compose supplies this private service address.
 service_url = "{{LLM_SERVICE_URL}}"
 client_id = "{{LLM_CLIENT_ID}}"
 # This must exactly match server.api_key in config_llm.toml.

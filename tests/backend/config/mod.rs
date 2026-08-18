@@ -4,7 +4,8 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use momento_api::config::{
-    consume_admin_password_reset, default_config_template, load_config, save_default_config, Config,
+    consume_admin_password_reset, default_config_template, load_config, resolve_config_environment,
+    save_default_config, Config,
 };
 use tempfile::TempDir;
 
@@ -31,6 +32,42 @@ fn test_load_config_reads_server_paths() {
     assert_eq!(
         config.server.static_dir,
         PathBuf::from("/srv/momento/static")
+    );
+}
+
+#[test]
+fn config_environment_resolves_the_llm_service_address() {
+    let resolved = resolve_config_environment(
+        "service_url = \"ws://${LLM_SERVICE_ADDRESS}/api/v1/llm/connect\"",
+        Some("momento-llm-service:8100"),
+    )
+    .expect("resolved config");
+
+    assert_eq!(
+        resolved,
+        "service_url = \"ws://momento-llm-service:8100/api/v1/llm/connect\""
+    );
+}
+
+#[test]
+fn config_environment_requires_a_non_empty_llm_service_address() {
+    for address in [None, Some(""), Some("   ")] {
+        let error = resolve_config_environment(
+            "service_url = \"ws://${LLM_SERVICE_ADDRESS}/api/v1/llm/connect\"",
+            address,
+        )
+        .expect_err("missing address must fail");
+        assert!(error.to_string().contains("LLM_SERVICE_ADDRESS"));
+    }
+}
+
+#[test]
+fn config_environment_leaves_literal_service_urls_unchanged() {
+    let content = "service_url = \"wss://llm.example.com/api/v1/llm/connect\"";
+
+    assert_eq!(
+        resolve_config_environment(content, None).expect("literal URL"),
+        content
     );
 }
 
@@ -320,6 +357,10 @@ fn test_save_default_config_round_trips() {
     let path = dir.path().join("generated").join("config.toml");
 
     save_default_config(&path).expect("Failed to save default config");
+    let generated = std::fs::read_to_string(&path).expect("Failed to read generated config");
+    let resolved = resolve_config_environment(&generated, Some("llm-service:8100"))
+        .expect("Failed to resolve generated config");
+    std::fs::write(&path, resolved).expect("Failed to write resolved config");
     let config = load_config(&path).expect("Failed to reload saved config");
 
     assert_eq!(config.server.data_dir, PathBuf::from("/data"));
@@ -329,7 +370,6 @@ fn test_save_default_config_round_trips() {
     assert!(config.llm.enabled);
     assert_eq!(config.metadata.thumbnails_max_size, 1200);
 
-    let generated = std::fs::read_to_string(path).expect("Failed to read generated config");
     assert_eq!(generated, default_config_template());
     assert!(generated.contains("# Five-field cron expressions"));
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");

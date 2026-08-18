@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR=$(dirname "$(realpath "$0")")
-COMPOSE_FILE="$ROOT_DIR/docker/docker-compose.yml"
+COMPOSE_FILE="$ROOT_DIR/docker-compose.yaml"
 PLAYGROUND_DIR="$ROOT_DIR/playground"
+
+mkdir -p "$PLAYGROUND_DIR/llm"
 
 for config_file in "$PLAYGROUND_DIR/config.toml" "$PLAYGROUND_DIR/config_llm.toml"; do
     if [[ ! -f "$config_file" ]]; then
@@ -12,24 +14,19 @@ for config_file in "$PLAYGROUND_DIR/config.toml" "$PLAYGROUND_DIR/config_llm.tom
     fi
 done
 
-mkdir -p "$PLAYGROUND_DIR/llm" "$PLAYGROUND_DIR/logs" "$PLAYGROUND_DIR/imports" "$PLAYGROUND_DIR/webdav"
-
 export COMPOSE_PROJECT_NAME=momento-playground
 export MOMENTO_DATA_DIR="$PLAYGROUND_DIR"
-export LLM_DATA_DIR="$PLAYGROUND_DIR/llm"
-export LOG_DIR="$PLAYGROUND_DIR/logs"
-export LLM_CONFIG_FILE="$PLAYGROUND_DIR/config_llm.toml"
 export PUID="$(id -u)"
 export PGID="$(id -g)"
 export UMASK="${UMASK:-022}"
 export TZ="${TZ:-UTC}"
 
 cleanup() {
-    docker compose -f "$COMPOSE_FILE" down --remove-orphans
+    docker compose -f "$COMPOSE_FILE" down --remove-orphans || true
 }
 
 trap cleanup EXIT INT TERM
 
 docker compose -f "$COMPOSE_FILE" down --remove-orphans
-docker compose -f "$COMPOSE_FILE" build
-docker compose -f "$COMPOSE_FILE" up --no-build --remove-orphans --abort-on-container-exit
+"$ROOT_DIR/build_docker.sh"
+docker compose -f "$COMPOSE_FILE" up --remove-orphans --abort-on-container-exit

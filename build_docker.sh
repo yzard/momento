@@ -3,27 +3,41 @@ set -euo pipefail
 
 ROOT_DIR=$(dirname "$(realpath "$0")")
 VERSION=$(<"$ROOT_DIR/src/backend/version.txt")
+LOCAL_NAMESPACE=zhuoyin
 
-if [[ $# -ne 2 ]]; then
-    printf 'Usage: %s <github|docker> <namespace>\n' "$(basename "$0")" >&2
+usage() {
+    printf 'Usage: %s\n' "$(basename "$0")" >&2
+    printf '       %s publish <github|docker> <namespace>\n' "$(basename "$0")" >&2
+}
+
+PUBLISH=false
+REGISTRY=
+NAMESPACE=$LOCAL_NAMESPACE
+
+if [[ $# -eq 0 ]]; then
+    OUTPUT_MODE=--load
+elif [[ $# -eq 3 && $1 == publish ]]; then
+    PUBLISH=true
+    OUTPUT_MODE=--push
+    case "$2" in
+        github)
+            REGISTRY=ghcr.io
+            ;;
+        docker)
+            REGISTRY=docker.io
+            ;;
+        *)
+            printf 'Unsupported registry: %s\n' "$2" >&2
+            usage
+            exit 2
+            ;;
+    esac
+    NAMESPACE=$3
+else
+    usage
     exit 2
 fi
 
-case "$1" in
-    github)
-        REGISTRY=ghcr.io
-        ;;
-    docker)
-        REGISTRY=docker.io
-        ;;
-    *)
-        printf 'Unsupported registry: %s\n' "$1" >&2
-        printf 'Usage: %s <github|docker> <namespace>\n' "$(basename "$0")" >&2
-        exit 2
-        ;;
-esac
-
-NAMESPACE=$2
 if [[ ! "$NAMESPACE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
     printf 'Invalid registry namespace: %s\n' "$NAMESPACE" >&2
     exit 2
@@ -36,20 +50,29 @@ fi
 
 TAG=${TAG:-$VERSION}
 SOURCE_REPOSITORY=${SOURCE_REPOSITORY:-https://github.com/yzard/momento}
-MOMENTO_IMAGE="${REGISTRY}/${NAMESPACE}/momento"
-LLM_IMAGE="${REGISTRY}/${NAMESPACE}/momento-llm-service"
+if [[ -n "$REGISTRY" ]]; then
+    IMAGE_PREFIX="${REGISTRY}/${NAMESPACE}"
+else
+    IMAGE_PREFIX=$NAMESPACE
+fi
 
-cd "$ROOT_DIR/docker"
+build_image() {
+    local dockerfile=$1
+    local image=$2
 
-docker buildx build --push \
-    --build-arg "SOURCE_REPOSITORY=${SOURCE_REPOSITORY}" \
-    -f Dockerfile \
-    -t "${MOMENTO_IMAGE}:${TAG}" \
-    -t "${MOMENTO_IMAGE}:latest" \
-    ..
-docker buildx build --push \
-    --build-arg "SOURCE_REPOSITORY=${SOURCE_REPOSITORY}" \
-    -f Dockerfile.llm \
-    -t "${LLM_IMAGE}:${TAG}" \
-    -t "${LLM_IMAGE}:latest" \
-    ..
+    docker buildx build "$OUTPUT_MODE" \
+        --build-arg "SOURCE_REPOSITORY=${SOURCE_REPOSITORY}" \
+        -f "$ROOT_DIR/docker/$dockerfile" \
+        -t "${image}:${TAG}" \
+        -t "${image}:latest" \
+        "$ROOT_DIR"
+}
+
+build_image Dockerfile "${IMAGE_PREFIX}/momento"
+build_image Dockerfile.llm "${IMAGE_PREFIX}/momento-llm-service"
+
+if [[ "$PUBLISH" == true ]]; then
+    printf 'Published Momento %s images to %s\n' "$TAG" "$IMAGE_PREFIX"
+else
+    printf 'Built Momento %s images locally under %s\n' "$TAG" "$IMAGE_PREFIX"
+fi

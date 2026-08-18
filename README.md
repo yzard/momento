@@ -15,20 +15,114 @@ Momento stores its application data in SQLite and keeps original media, thumbnai
 - `llm-service` may run on the same machine as Momento or on another machine reachable over the network.
 - All model runtimes run locally beside `llm-service`; remote model providers are not supported.
 
-## AI Architecture
+## Docker Compose
 
-Momento prepares every AI input itself. For a photo it sends a prepared image; for a video it currently sends a prepared representative frame. Each request contains the raw input bytes and its descriptor, while the transport preserves multiple ordered inputs for future preparation strategies. `llm-service` does not need access to Momento's filesystem.
+The canonical deployment definition is [`docker-compose.yaml`](docker-compose.yaml).
+It runs `momento-api` and `momento-llm-service` on one private bridge network. Only Momento publishes
+port 8000; the LLM service is reachable only from Momento at `momento-llm-service:8100`.
 
-`llm-service` is designed to keep only one AI model loaded at a time. This allows systems with about 16 GB of GPU memory to use several different AI features without loading every model together.
+Published images are available from Docker Hub:
 
-Jobs are grouped by type. The scheduler keeps a bounded rolling window for one task and replaces each completed job immediately until that task's queue is exhausted. It then unloads that model, loads the model required by the next task, and continues processing.
+- [`zhuoyin/momento`](https://hub.docker.com/r/zhuoyin/momento)
+- [`zhuoyin/momento-llm-service`](https://hub.docker.com/r/zhuoyin/momento-llm-service)
 
-Model concurrency is enforced only by the active model subservice. Momento and the llm-service scheduler do not apply model-specific concurrency limits.
+The following is the complete content of the root `docker-compose.yaml`:
 
-Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement. The scheduler keeps bounded job metadata in memory and sends only validated job/input descriptors to the active same-container model process. The model opens inputs from `queue/processing`; image bytes are never retransmitted over the local HTTP boundary. Queue job count is not configured, so operators must monitor disk capacity.
+```yaml
+services:
+  momento-api:
+    container_name: momento-api
+    image: zhuoyin/momento:latest
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
+      LLM_SERVICE_ADDRESS: "momento-llm-service:8100"
+    volumes:
+      - "${MOMENTO_DATA_DIR:-./data}:/data"
+    ports:
+      - "8000:8000"
+    networks:
+      - momento
+    depends_on:
+      momento-llm-service:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 30s
+    restart: unless-stopped
 
-AI cancellation is durable across machines. Momento records an all-task or task-specific scope plus exact job IDs in an outbox and retries the authenticated cancellation message until llm-service acknowledges it. llm-service removes matching staged, queued, result-pending, and failed copies; matching inference already running finishes locally and is then discarded without result delivery.
-Replacement jobs for a pending cancellation scope remain queued until llm-service acknowledges the cancellation, preventing reset work from being cancelled by its own delayed request.
+  momento-llm-service:
+    container_name: momento-llm-service
+    image: zhuoyin/momento-llm-service:latest
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - "${MOMENTO_DATA_DIR:-./data}:/data"
+    networks:
+      - momento
+    gpus: all
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+networks:
+  momento:
+    driver: bridge
+```
+
+Each container has one `/data` mount backed by the same host directory, which defaults to `./data`
+relative to the repository root. Their entrypoints create
+`/data/config.toml` and `/data/config_llm.toml` on first startup. Momento resolves
+`${LLM_SERVICE_ADDRESS}` in its config from the container environment; Compose sets it to the
+private LLM service address by default.
+
+Start the stack and open `http://localhost:8000`:
+
+```bash
+docker compose up -d
+```
+
+Build both images locally with the tags used by Compose, or explicitly publish them:
+
+```bash
+./build_docker.sh
+./build_docker.sh publish docker zhuoyin
+```
+
+The generated `[llm].api_key` and `[server].api_key` match. Replace that shared key and the Momento
+security secret before exposing the service. A new database creates `admin` / `admin` and requires
+an immediate password change.
+
+To recover administrator access, set `reset_admin_password = true` under `[server]` in
+`data/config.toml` and restart Momento. Startup atomically changes the flag back to `false` and,
+for that server process only, accepts `admin` / `admin` for the existing administrator account.
+The stored password is not replaced until the forced password-change form succeeds.
+
+The LLM image requires an NVIDIA GPU, a compatible host driver, and NVIDIA Container Toolkit. It
+is large because all model runtimes and weights are included for offline activation.
+
+## PhotoSync WebDAV
+
+WebDAV is always available at `/webdav`. Configure PhotoSync with the complete server URL, such
+as `https://photos.example.com/webdav/`, and use an active Momento user's username and password
+with WebDAV/Basic authentication. Use HTTPS whenever the service is reachable outside a trusted
+local network.
+
+PhotoSync may create directories, upload to a hidden temporary filename, and rename the completed
+file into place. Momento supports that OPTIONS, PROPFIND, MKCOL, PUT, and MOVE sequence. Completed
+files are staged below `/data/webdav/<username>/`, imported for that user after the configured
+stability interval, and removed from the staging directory after a successful import. PUT and
+PATCH requests must declare their byte size and cannot exceed `webdav.max_upload_bytes`.
 
 ## Features
 
@@ -63,95 +157,11 @@ Places groups accessible media by the exact reverse-geocoded city, state or prov
 
 **Spend Audit:** Planned functionality will use receipt OCR and analysis to help review spending from receipt photos.
 
-## Docker Compose
-
-Published images are available from Docker Hub:
-
-- [`zhuoyin/momento`](https://hub.docker.com/r/zhuoyin/momento)
-- [`zhuoyin/momento-llm-service`](https://hub.docker.com/r/zhuoyin/momento-llm-service)
-
-No data subdirectories or configuration files need to be created manually. Docker and the two
-container entrypoints create them on first startup, including `data/config.toml` and
-`data/llm-config/config_llm.toml`. The generated `[llm].api_key` and `[server].api_key` match.
-Replace that shared key and the security secret before exposing the service. A new database creates
-the administrator as `admin` / `admin` and requires an immediate password change through the
-application.
-
-```yaml
-services:
-  llm-service:
-    image: zhuoyin/momento-llm-service:latest
-    environment:
-      PUID: "${PUID:-1000}"
-      PGID: "${PGID:-1000}"
-      UMASK: "${UMASK:-022}"
-      TZ: "${TZ:-UTC}"
-    volumes:
-      - ./data/llm:/data/llm
-      - ./data/logs:/data/logs
-      - ./data/llm-config:/config
-    expose:
-      - "8100"
-    gpus: all
-    shm_size: "8gb"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8100/ready"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 10s
-    stop_grace_period: 45s
-    restart: unless-stopped
-
-  momento-api:
-    image: zhuoyin/momento:latest
-    environment:
-      PUID: "${PUID:-1000}"
-      PGID: "${PGID:-1000}"
-      UMASK: "${UMASK:-022}"
-      TZ: "${TZ:-UTC}"
-    volumes:
-      - ./data:/data
-    ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      llm-service:
-        condition: service_healthy
-    init: true
-    stop_grace_period: 30s
-    restart: unless-stopped
-```
-
-Start the stack and open `http://localhost:8000`:
-
-```bash
-docker compose up -d
-```
-
-To recover administrator access, set `reset_admin_password = true` under `[server]` in
-`data/config.toml` and restart Momento. Startup atomically changes the flag back to `false` and,
-for that server process only, accepts `admin` / `admin` for the existing administrator account.
-The stored password is not replaced until the forced password-change form succeeds. If Momento is
-restarted before that change, the temporary credentials stop working and the previous stored
-username and password work again.
-
-The llm-service image requires an NVIDIA GPU, a compatible host driver, and NVIDIA Container
-Toolkit. It is large because all model runtimes and weights are included for offline activation.
-The generated `[cronjob]` section contains independent schedules for OCR, image tagging,
-deduplication, face detection, and image aesthetics. `deduplicate_cron` intentionally keeps its feature name because
-it starts the complete deduplication pipeline; `image_clustering` is only that pipeline's inference
-stage.
-
-GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
-snapshot embedded in the Momento API binary. No external geocoding service or runtime network
-request is used. Location fields are generated with the rest of a media item's metadata. GeoNames
-data is provided under CC BY 4.0; attribution and source checksums are recorded in
-`src/backend/assets/geonames/SOURCE.md`.
-
 ## Docker Playground
 
-The playground builds and starts exactly two containers: `momento-api` and `llm-service`.
-Model runtimes are processes inside `llm-service`; the deployment does not mount the Docker socket
+The playground uses the same [`docker-compose.yaml`](docker-compose.yaml) as normal
+deployments and builds exactly two containers: `momento-api` and `momento-llm-service`.
+Model runtimes are processes inside `momento-llm-service`; the deployment does not mount the Docker socket
 or create model containers. The CUDA 12.9 llm-service image contains isolated environments and
 baked model weights for Unlimited-OCR, RAM++, DINOv2-small, CLIP ViT-B/32 with the LAION aesthetic head, and InsightFace `buffalo_l`, so task
 activation performs no package installation or model download.
@@ -169,36 +179,26 @@ Run from any working directory:
 ./run_playground.sh
 ```
 
-The script builds both images, passes the invoking UID/GID, starts the stack on a private Compose
-network, and removes the containers on exit. Open `http://localhost:8000`.
+The script builds both images, mounts `playground/` as `/data` in both containers, passes the
+invoking UID/GID, starts the stack on the private Compose network, and removes the containers on
+exit. Open `http://localhost:8000`.
 
-Momento maintains an authenticated WebSocket to
-`ws://llm-service:8100/api/v1/llm/connect`. Submissions, cancellations, acknowledgements, and
+Momento resolves `LLM_SERVICE_ADDRESS=momento-llm-service:8100` in its checked-in playground
+configuration and maintains an authenticated WebSocket to that address. Submissions,
+cancellations, acknowledgements, and
 results share that connection, so llm-service does not need a Momento address. The checked-in
 playground configs share one API key and identify the Momento connection as `playground`.
-Production deployments must replace that key and persist Momento data and the llm-service queue
-independently.
-
-## PhotoSync WebDAV
-
-WebDAV is always available at `/webdav`. Configure PhotoSync with the complete server URL, such
-as `https://photos.example.com/webdav/`, and use an active Momento user's username and password
-with WebDAV/Basic authentication. Use HTTPS whenever the service is reachable outside a trusted
-local network.
-
-PhotoSync may create directories, upload to a hidden temporary filename, and rename the completed
-file into place. Momento supports that OPTIONS, PROPFIND, MKCOL, PUT, and MOVE sequence. Completed
-files are staged below `/data/webdav/<username>/`, imported for that user after the configured
-stability interval, and removed from the staging directory after a successful import. PUT and
-PATCH requests must declare their byte size and cannot exceed `webdav.max_upload_bytes`.
+Production deployments must replace that key and persist the complete data directory.
 
 ## Data
 
-The Momento data directory contains the SQLite database and media files:
+Momento and llm-service share one data root. llm-service writes logs beside Momento under
+`/data/logs`, while its queue and runtime cache remain under `/data/llm`:
 
 ```text
 /data/
 ├── config.toml
+├── config_llm.toml
 ├── database.sqlite
 ├── albums/
 ├── originals/
@@ -209,8 +209,6 @@ The Momento data directory contains the SQLite database and media files:
 ├── webdav/
 ├── trash/
 ├── logs/
-├── llm-config/
-│   └── config_llm.toml
 └── llm/
     ├── cache/
     └── queue/
@@ -222,3 +220,40 @@ Log locations are fixed: both services write plain daily files named
 `<service>.YYYY-MM-DD.log` under `<data_dir>/logs/`. Their event lines omit the service name and
 process ID, while console output remains colorized by level. llm-service keeps its durable queue
 and runtime cache under `<data_dir>/llm/`; deployments may persist that subtree independently.
+
+The generated `[cronjob]` section contains independent schedules for OCR, image tagging,
+deduplication, face detection, and image aesthetics. `deduplicate_cron` intentionally keeps its
+feature name because it starts the complete deduplication pipeline; `image_clustering` is only that
+pipeline's inference stage.
+
+GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
+snapshot embedded in the Momento API binary. No external geocoding service or runtime network
+request is used. GeoNames data is provided under CC BY 4.0; attribution and source checksums are
+recorded in `src/backend/assets/geonames/SOURCE.md`.
+
+## AI Architecture
+
+Momento prepares every AI input itself. For a photo it sends a prepared image; for a video it
+currently sends a prepared representative frame. Each request contains the raw input bytes and its
+descriptor, while the transport preserves multiple ordered inputs for future preparation
+strategies. `llm-service` does not need access to Momento's filesystem.
+
+`llm-service` keeps only one AI model loaded at a time. Jobs are grouped by type, and the scheduler
+keeps a bounded rolling window for one task until its queue is exhausted. It then unloads that
+model, loads the model required by the next task, and continues processing. This allows systems
+with about 16 GB of GPU memory to use several AI features without loading every model together.
+
+Model concurrency is enforced only by the active model subservice. Momento and the llm-service
+scheduler do not apply model-specific concurrency limits.
+
+Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement.
+The scheduler keeps bounded job metadata in memory and sends only validated descriptors to the
+active same-container model process. The model opens inputs from `queue/processing`; image bytes
+are never retransmitted over the local HTTP boundary. Queue job count is not configured, so
+operators must monitor disk capacity.
+
+AI cancellation is durable across machines. Momento records an all-task or task-specific scope
+plus exact job IDs in an outbox and retries until llm-service acknowledges it. Matching inference
+already running finishes locally and is discarded without result delivery. Replacement jobs for a
+pending cancellation scope remain queued until acknowledgement, preventing reset work from being
+cancelled by its own delayed request.

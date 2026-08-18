@@ -2,6 +2,7 @@ mod defaults;
 mod settings;
 
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -11,6 +12,7 @@ use toml_edit::{value, DocumentMut};
 
 static DEFAULT_CONFIG_TEMPLATE: LazyLock<String> =
     LazyLock::new(|| defaults::render_template(include_str!("default.toml")));
+const LLM_SERVICE_ADDRESS_PLACEHOLDER: &str = "${LLM_SERVICE_ADDRESS}";
 
 pub fn default_config_template() -> &'static str {
     DEFAULT_CONFIG_TEMPLATE.as_str()
@@ -387,6 +389,16 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     }
 
     let content = fs::read_to_string(config_path)?;
+    let llm_service_address = if content.contains(LLM_SERVICE_ADDRESS_PLACEHOLDER) {
+        Some(env::var("LLM_SERVICE_ADDRESS").map_err(|_| {
+            std::io::Error::other(
+                "config references ${LLM_SERVICE_ADDRESS}, but LLM_SERVICE_ADDRESS is not set",
+            )
+        })?)
+    } else {
+        None
+    };
+    let content = resolve_config_environment(&content, llm_service_address.as_deref())?;
 
     let config: Config = toml::from_str(&content).map_err(|e| {
         std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
@@ -396,6 +408,19 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     config.llm_submission_worker.validate()?;
     config.cronjob.validate()?;
     Ok(config)
+}
+
+pub fn resolve_config_environment(
+    content: &str,
+    llm_service_address: Option<&str>,
+) -> std::io::Result<String> {
+    if !content.contains(LLM_SERVICE_ADDRESS_PLACEHOLDER) {
+        return Ok(content.to_string());
+    }
+    let llm_service_address = llm_service_address
+        .filter(|address| !address.trim().is_empty())
+        .ok_or_else(|| std::io::Error::other("LLM_SERVICE_ADDRESS must not be empty"))?;
+    Ok(content.replace(LLM_SERVICE_ADDRESS_PLACEHOLDER, llm_service_address))
 }
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {

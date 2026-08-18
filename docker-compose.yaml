@@ -1,0 +1,49 @@
+services:
+  momento-api:
+    container_name: momento-api
+    image: zhuoyin/momento:latest
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
+      LLM_SERVICE_ADDRESS: "momento-llm-service:8100"
+    volumes:
+      - "${MOMENTO_DATA_DIR:-./data}:/data"
+    ports:
+      - "8000:8000"
+    networks:
+      - momento
+    depends_on:
+      momento-llm-service:
+        condition: service_healthy
+    init: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  momento-llm-service:
+    container_name: momento-llm-service
+    image: zhuoyin/momento-llm-service:latest
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      UMASK: "${UMASK:-022}"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - "${MOMENTO_DATA_DIR:-./data}:/data"
+    networks:
+      - momento
+    gpus: all
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8100/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+networks:
+  momento:
+    driver: bridge

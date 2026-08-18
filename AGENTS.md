@@ -350,18 +350,20 @@ Metadata generation lives in `processor/metadata/`; `processor/regenerator.rs` d
 
 ## Configuration
 
-Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH` and read **no**
-environment variables. A missing or malformed config is a hard startup failure — it never
-falls back to defaults, because that would silently start the server against the wrong
-data directory.
+Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH`. A missing or malformed
+config is a hard startup failure — it never falls back to defaults, because that would silently
+start the server against the wrong data directory. Momento resolves the exact
+`${LLM_SERVICE_ADDRESS}` placeholder when it appears in `llm.service_url`; the environment value is
+required and must be non-empty in that case. No other config interpolation or application
+environment variable is supported.
 
 Both binaries also support `--init-config`, which writes their source-owned commented operational
 template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
-`/data/config.toml` for Momento and `/config/config_llm.toml` for llm-service. Each service owns all
+`/data/config.toml` for Momento and `/data/config_llm.toml` for llm-service. Each service owns all
 of its fallback and operational-template values in its `config/defaults.rs`; its commented TOML
 source contains named placeholders rather than duplicated values. The rendered templates exactly
-match `playground/config.toml` and `playground/config_llm.toml`, including their shared example API
-key. Normal startup never generates or replaces a configuration file except when atomically
+match `playground/config.toml` and `playground/config_llm.toml`, including their shared example
+API key. Normal startup never generates or replaces a configuration file except when atomically
 consuming the one-shot administrator password-reset request described below.
 
 Momento has no `[admin]` configuration section. An empty database creates `admin` / `admin` with a
@@ -382,7 +384,9 @@ static_dir = "/app/static"  # built frontend served as a fallback
 
 `main` calls `constants::init_paths(&config.server.data_dir)` once after parsing the
 config; everything else reads `constants::paths()`. Never hardcode a path under the data
-directory and never add a new `std::env::var` call — add a config field instead.
+directory and never add a new `std::env::var` call. The config loader's exact
+`LLM_SERVICE_ADDRESS` interpolation is the only application-level environment exception; add a
+config field for every other setting.
 
 Log paths are not configurable. Each service writes plain daily rotated files below
 `server.data_dir/logs/` (`momento-api.YYYY-MM-DD.log` or `llm-service.YYYY-MM-DD.log`). Log events
@@ -393,9 +397,8 @@ WARN yellow, and ERROR/fatal paths red.
 
 llm-service configures only `server.data_dir`; its durable queue and runtime cache are fixed at
 `server.data_dir/llm/queue/` and `server.data_dir/llm/cache/`, while its logs remain in
-`server.data_dir/logs/`. The `llm/` subtree must be durable and must not expose Momento originals,
-previews, or thumbnails to llm-service. Queue jobs are accepted only with a non-empty hexadecimal
-Momento job ID and a manifest sent before its binary input frames.
+`server.data_dir/logs/`. The `llm/` subtree must be durable. Queue jobs are accepted only with a
+non-empty hexadecimal Momento job ID and a manifest sent before its binary input frames.
 
 Runtime executables, scripts, model paths, model versions, loopback URLs, CUDA device selection,
 and embedding dimensions are owned by `RuntimeCatalog` and the llm-service image, not TOML.
@@ -406,9 +409,9 @@ never media bytes or caller-supplied paths.
 `llm.service_url` is a complete `ws://` or `wss://` URL resolved by Momento; `0.0.0.0` is only a
 server bind address and is never a client destination. llm-service has no Momento address. Its
 top-level `[scheduler]` section owns inference settings and every result-delivery setting, with
-result-delivery fields prefixed by `result_delivery_`. Deployments persist Momento data and the
-llm-service queue independently and never share Momento originals, previews, or thumbnails with
-llm-service.
+result-delivery fields prefixed by `result_delivery_`. The Compose deployment mounts one shared
+data root into both containers; llm-service only uses its config, `logs/`, and `llm/` subtree and
+does not read Momento originals, previews, or thumbnails.
 
 ### Face detection and grouping
 
@@ -472,9 +475,9 @@ does not backfill existing metadata rows. Existing non-empty location fields are
 Updating the dataset requires recording its snapshot date, source checksums, output checksum, and
 CC BY 4.0 attribution in the source manifest.
 
-The Dockerfiles and entrypoints are the one place environment variables belong
-(`PUID`/`PGID`/`UMASK`/`TZ`); they prepare filesystem ownership and invoke each binary with its
-generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read
+The Dockerfiles and entrypoints use `PUID`/`PGID`/`UMASK`/`TZ`; Compose additionally supplies
+`LLM_SERVICE_ADDRESS` to Momento for the explicit config placeholder. They prepare filesystem
+ownership and invoke each binary with its generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read
 by `tracing-subscriber`, not application config.
 
 ---
@@ -489,8 +492,9 @@ pnpm dev                  # Dev servers (backend + frontend)
 pnpm lint                 # Lint all packages
 pnpm test                 # Run all tests
 
-./run_playground.sh       # Build and run the two-container playground stack
-./build_docker.sh github yzard  # Build and push both Docker images to GHCR
+./run_playground.sh                         # Build and run the playground stack
+./build_docker.sh                           # Build both images locally
+./build_docker.sh publish github yzard      # Build and publish both images to GHCR
 ```
 
 `run_playground.sh` and `build_docker.sh` are the only scripts at the git root. Both
@@ -498,20 +502,20 @@ resolve paths from their own location, so they work from any working directory.
 
 ### Playground containers
 
-`run_playground.sh` uses `docker/docker-compose.yml` to build and start exactly two containers:
-`momento-api` and `llm-service`. It does not compile or run host binaries. The Momento image embeds
+`run_playground.sh` uses `build_docker.sh` and the root `docker-compose.yaml` to build and start exactly two containers:
+`momento-api` and `momento-llm-service`. It does not compile or run host binaries. The Momento image embeds
 the built frontend, while the llm-service image embeds four isolated Python environments and all
 model weights. Docker layer caching avoids repeating package/model downloads when their inputs do
 not change.
 
-The script passes the invoking UID/GID, mounts `playground/` as Momento data, mounts
-`playground/llm/` at the llm-service's `/data/llm/` state directory, and mounts
-`playground/logs/` at its `/data/logs/` directory. It tears down both containers on exit and never
+The script passes the invoking UID/GID and mounts `playground/` as `/data` in both containers. Each
+service therefore has one volume mount. It tears down both containers on exit and never
 mounts the Docker socket. Runtime model processes are spawned inside the llm-service container, so
 inference never creates additional containers.
 
-`playground/logs/` holds both services' daily runtime logs. llm-service queue and runtime cache
-data remain below `playground/llm/`. Build artifacts do not belong in either directory.
+`playground/logs/` holds both services' logs. llm-service queue and runtime cache remain below
+`playground/llm/`, while its config remains at `playground/config_llm.toml`. Build artifacts do not
+belong in either directory.
 
 ### Backend (src/backend)
 ```bash
@@ -545,13 +549,14 @@ pnpm preview              # Preview production build
 
 ### Docker
 
-All Docker files live in `docker/`; `build_docker.sh` at the git root drives the build
-with the git root as the build context.
+Docker build files live in `docker/`; the canonical `docker-compose.yaml` and
+`build_docker.sh` live at the git root. Builds use the git root as their context.
 
 ```bash
-./build_docker.sh github yzard                           # Build and push both images to GHCR
-./build_docker.sh docker yzard                           # Build and push both images to Docker Hub
-docker compose -f docker/docker-compose.yml up --build   # Full stack
+./build_docker.sh                                      # Build both images locally
+./build_docker.sh publish github yzard                 # Build and publish to GHCR
+./build_docker.sh publish docker zhuoyin               # Build and publish to Docker Hub
+docker compose up                                      # Full stack
 ```
 
 The ignore files are `docker/Dockerfile.dockerignore` and
@@ -696,26 +701,30 @@ docker/
 ├── Dockerfile.dockerignore # NOT .dockerignore — context is the git root
 ├── Dockerfile.llm
 ├── Dockerfile.llm.dockerignore
-├── docker-compose.yml
 ├── entrypoint.sh
 └── entrypoint_llm.sh
 
 playground/                 # End-to-end config and data
 ├── config.toml             # The one config run_playground.sh starts the stack with
-├── config_llm.toml         # Config for the LLM service
+├── config_llm.toml         # Checked-in llm-service config
+├── llm/
+│   ├── logs/               # llm-service daily logs
+│   ├── cache/              # Local model runtime cache
+│   └── queue/              # Durable inference queue
 ├── database.sqlite         # SQLite database
 ├── originals/              # Original media files
 ├── previews/               # Generated previews
 ├── thumbnails/             # Generated thumbnails
 ├── imports/                # Import staging area
 ├── webdav/                 # WebDAV processing area
-└── logs/                   # Daily runtime logs from both services
+└── logs/                   # Momento API daily logs
 
 build/                      # Optional local intermediate build artifacts
 dist/                       # Optional local final build artifacts
 
-build_docker.sh             # Builds and pushes both images
+build_docker.sh             # Builds locally or explicitly publishes both images
 run_playground.sh           # Builds and starts the two-container playground stack
+docker-compose.yaml         # Canonical two-container deployment
 ```
 
 ### The `tests/` mirror
