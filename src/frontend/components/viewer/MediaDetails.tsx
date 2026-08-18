@@ -33,6 +33,11 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
       .filter((value): value is string => value !== null)
       .join(', ')
     : null
+  const locationValue = combineValues(
+    media.locationCity,
+    media.locationState,
+    media.locationCountry,
+  )
 
   const details = [
     { icon: Calendar, label: 'Date Taken', value: rawValue(media.dateTaken) },
@@ -53,8 +58,8 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     { icon: FileType, label: 'Video Codec', value: rawValue(media.videoCodec) },
     { icon: FileType, label: 'Original Filename', value: rawValue(media.originalFilename) },
     { icon: FileType, label: 'Stored Filename', value: rawValue(media.filename) },
+    { icon: MapPin, label: 'Location', value: locationValue },
     { icon: MapPin, label: 'GPS (Lat, Long, Alt)', value: gpsValue },
-    { icon: MapPin, label: 'Location', value: combineValues(media.locationCity, media.locationState, media.locationCountry) },
     { icon: KeyRound, label: 'Keywords', value: rawValue(media.keywords) },
     { icon: KeyRound, label: 'Content Hash', value: rawValue(media.contentHash) },
     { icon: Calendar, label: 'Created At', value: rawValue(media.createdAt) },

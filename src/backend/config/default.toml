@@ -34,12 +34,7 @@ thumbnails_max_size = 1200
 thumbnails_tiny_size = 300
 thumbnails_quality = 85
 thumbnails_video_frame_quality = 85
-# Reverse geocoding resolves GPS coordinates through the configured HTTP service.
-reverse_geocoding_enabled = true
-reverse_geocoding_base_url = "https://nominatim.openstreetmap.org/reverse"
-reverse_geocoding_user_agent = "Momento/1.0 (self-hosted)"
-reverse_geocoding_timeout_seconds = 10
-reverse_geocoding_rate_limit_seconds = 1.0
+# GPS coordinates are reverse geocoded locally with the GeoNames data embedded in Momento.
 
 [metadata_worker]
 # Metadata jobs are leased durably so interrupted workers can recover them.

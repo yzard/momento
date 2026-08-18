@@ -1447,6 +1447,7 @@ fn spawn_service_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .envs(runtime.environment.iter().cloned())
+        .env("HOME", cache_dir.as_ref())
         .env("XDG_CACHE_HOME", cache_dir.as_ref())
         .env("HF_HUB_OFFLINE", "1")
         .env("TRANSFORMERS_OFFLINE", "1")

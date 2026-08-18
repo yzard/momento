@@ -200,16 +200,6 @@ pub struct MetadataConfig {
     pub thumbnails_quality: u8,
     #[serde(default = "default_thumbnails_video_frame_quality")]
     pub thumbnails_video_frame_quality: u8,
-    #[serde(default = "default_reverse_geocoding_enabled")]
-    pub reverse_geocoding_enabled: bool,
-    #[serde(default = "default_reverse_geocoding_base_url")]
-    pub reverse_geocoding_base_url: String,
-    #[serde(default = "default_reverse_geocoding_user_agent")]
-    pub reverse_geocoding_user_agent: String,
-    #[serde(default = "default_reverse_geocoding_timeout_seconds")]
-    pub reverse_geocoding_timeout_seconds: u64,
-    #[serde(default = "default_reverse_geocoding_rate_limit_seconds")]
-    pub reverse_geocoding_rate_limit_seconds: f64,
 }
 
 fn default_thumbnails_max_size() -> u32 {
@@ -235,33 +225,8 @@ impl Default for MetadataConfig {
             thumbnails_tiny_size: default_thumbnails_tiny_size(),
             thumbnails_quality: default_thumbnails_quality(),
             thumbnails_video_frame_quality: default_thumbnails_video_frame_quality(),
-            reverse_geocoding_enabled: default_reverse_geocoding_enabled(),
-            reverse_geocoding_base_url: default_reverse_geocoding_base_url(),
-            reverse_geocoding_user_agent: default_reverse_geocoding_user_agent(),
-            reverse_geocoding_timeout_seconds: default_reverse_geocoding_timeout_seconds(),
-            reverse_geocoding_rate_limit_seconds: default_reverse_geocoding_rate_limit_seconds(),
         }
     }
-}
-
-fn default_reverse_geocoding_enabled() -> bool {
-    true
-}
-
-fn default_reverse_geocoding_base_url() -> String {
-    "https://nominatim.openstreetmap.org/reverse".to_string()
-}
-
-fn default_reverse_geocoding_user_agent() -> String {
-    "Momento/1.0 (self-hosted)".to_string()
-}
-
-fn default_reverse_geocoding_timeout_seconds() -> u64 {
-    10
-}
-
-fn default_reverse_geocoding_rate_limit_seconds() -> f64 {
-    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

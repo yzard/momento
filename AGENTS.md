@@ -443,6 +443,13 @@ groups in the frontend, and do not use raw face count in place of distinct acces
 `schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
 breaking schema changes require a fresh database for development and playground data.
 
+Reverse geocoding is always local and uses the pinned GeoNames `cities500` asset embedded in the
+Momento API binary. It has no enablement, URL, user-agent, timeout, or rate-limit configuration.
+Normal metadata generation fills missing location fields immediately; each metadata-worker cycle
+does not backfill existing metadata rows. Existing non-empty location fields are preserved.
+Updating the dataset requires recording its snapshot date, source checksums, output checksum, and
+CC BY 4.0 attribution in the source manifest.
+
 The Dockerfiles and entrypoints are the one place environment variables belong
 (`PUID`/`PGID`/`UMASK`/`TZ`); they prepare filesystem ownership and invoke each binary with its
 generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read

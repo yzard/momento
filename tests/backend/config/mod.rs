@@ -251,11 +251,11 @@ fn test_load_config_rejects_nested_webdav_settings() {
 }
 
 #[test]
-fn test_load_config_reads_combined_metadata_settings() {
+fn test_load_config_reads_thumbnail_metadata_settings() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[metadata]\nthumbnails_max_size = 1600\nthumbnails_tiny_size = 400\nthumbnails_quality = 90\nthumbnails_video_frame_quality = 80\nreverse_geocoding_enabled = false\nreverse_geocoding_base_url = \"https://example.com/reverse\"\nreverse_geocoding_user_agent = \"Momento test\"\nreverse_geocoding_timeout_seconds = 12\nreverse_geocoding_rate_limit_seconds = 2.5\n",
+        "[metadata]\nthumbnails_max_size = 1600\nthumbnails_tiny_size = 400\nthumbnails_quality = 90\nthumbnails_video_frame_quality = 80\n",
     );
 
     let config = load_config(&path).expect("Failed to load combined metadata config");
@@ -264,14 +264,27 @@ fn test_load_config_reads_combined_metadata_settings() {
     assert_eq!(config.metadata.thumbnails_tiny_size, 400);
     assert_eq!(config.metadata.thumbnails_quality, 90);
     assert_eq!(config.metadata.thumbnails_video_frame_quality, 80);
-    assert!(!config.metadata.reverse_geocoding_enabled);
-    assert_eq!(
-        config.metadata.reverse_geocoding_base_url,
-        "https://example.com/reverse"
-    );
-    assert_eq!(config.metadata.reverse_geocoding_user_agent, "Momento test");
-    assert_eq!(config.metadata.reverse_geocoding_timeout_seconds, 12);
-    assert_eq!(config.metadata.reverse_geocoding_rate_limit_seconds, 2.5);
+}
+
+#[test]
+fn test_load_config_rejects_removed_reverse_geocoding_settings() {
+    for (setting, value) in [
+        ("reverse_geocoding_enabled", "false"),
+        (
+            "reverse_geocoding_base_url",
+            "\"https://example.com/reverse\"",
+        ),
+        ("reverse_geocoding_user_agent", "\"Momento test\""),
+        ("reverse_geocoding_timeout_seconds", "12"),
+        ("reverse_geocoding_rate_limit_seconds", "2.5"),
+    ] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(&dir, &format!("[metadata]\n{setting} = {value}\n"));
+
+        let error = load_config(&path).expect_err("Removed setting must be rejected");
+
+        assert!(error.to_string().contains(setting), "{error}");
+    }
 }
 
 #[test]
@@ -333,6 +346,9 @@ fn test_save_default_config_round_trips() {
     );
     assert!(generated.get("thumbnails").is_none());
     assert!(generated.get("reverse_geocoding").is_none());
+    assert!(generated["metadata"]
+        .get("reverse_geocoding_enabled")
+        .is_none());
 }
 
 #[test]

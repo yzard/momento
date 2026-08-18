@@ -38,6 +38,8 @@ if arguments.cache_dir != expected_cache_dir:
     raise RuntimeError('invalid runtime cache directory')
 if os.environ.get('XDG_CACHE_HOME') != expected_cache_dir:
     raise RuntimeError('invalid runtime cache environment')
+if os.environ.get('HOME') != expected_cache_dir:
+    raise RuntimeError('invalid runtime home directory')
 if 'face_detection' in arguments.mode:
     if arguments.minimum_face_likelihood != 0.8:
         raise RuntimeError('invalid minimum face likelihood')

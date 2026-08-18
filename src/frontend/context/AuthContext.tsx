@@ -1,10 +1,22 @@
 import { createContext, useState, useEffect, useCallback, type ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { authApi, type TokenResponse } from '../api/auth'
+import { setForbiddenResponseHandler } from '../api/client'
 import { mediaApi } from '../api/media'
 import { queryClient } from '../lib/queryClient'
 
 const ACCESS_TOKEN_KEY = 'momento_access_token'
 const REFRESH_TOKEN_KEY = 'momento_refresh_token'
+
+function saveTokens(tokens: TokenResponse) {
+  localStorage.setItem(ACCESS_TOKEN_KEY, tokens.accessToken)
+  localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken)
+}
+
+function clearTokens() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY)
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
 
 interface User {
   id: number
@@ -27,18 +39,25 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | null>(null)
 
 function AuthProvider({ children }: { children: ReactNode }) {
+  const navigate = useNavigate()
   const [user, setUser] = useState<User | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
-  const saveTokens = (tokens: TokenResponse) => {
-    localStorage.setItem(ACCESS_TOKEN_KEY, tokens.accessToken)
-    localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken)
-  }
+  const clearSession = useCallback(() => {
+    clearTokens()
+    setUser(null)
+    queryClient.clear()
+    mediaApi.clearCache()
+  }, [])
 
-  const clearTokens = () => {
-    localStorage.removeItem(ACCESS_TOKEN_KEY)
-    localStorage.removeItem(REFRESH_TOKEN_KEY)
-  }
+  useEffect(() => {
+    setForbiddenResponseHandler(() => {
+      clearSession()
+      navigate('/login', { replace: true })
+    })
+
+    return () => setForbiddenResponseHandler(null)
+  }, [clearSession, navigate])
 
   const refreshToken = useCallback(async (): Promise<boolean> => {
     const storedRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
@@ -106,12 +125,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
         // Ignore logout errors
       }
     }
-    clearTokens()
-    setUser(null)
-    
-    // Clear all cached data to prevent data leakage between users
-    queryClient.clear()
-    mediaApi.clearCache()
+    clearSession()
   }
 
   return (

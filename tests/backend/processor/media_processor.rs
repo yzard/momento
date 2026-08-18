@@ -1,6 +1,5 @@
 use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
 use filetime::{set_file_times, FileTime};
-use momento_api::config::MetadataConfig;
 use momento_api::constants::paths;
 use momento_api::database::{queries, DbConn};
 use momento_api::processor::import::{
@@ -13,7 +12,7 @@ use momento_api::processor::media_processor::{
 use std::fs;
 
 #[tokio::test]
-async fn complete_metadata_uses_combined_metadata_config() {
+async fn complete_metadata_uses_local_reverse_geocoding() {
     let directory = tempfile::tempdir().expect("Failed to create temporary directory");
     let media_path = directory.path().join("photo.jpg");
     let sidecar_path = directory
@@ -27,18 +26,13 @@ async fn complete_metadata_uses_combined_metadata_config() {
         r#"{"geoData":{"latitude":40.759,"longitude":-73.9859}}"#,
     )
     .expect("Failed to save supplemental metadata fixture");
-    let config = MetadataConfig {
-        reverse_geocoding_enabled: false,
-        ..MetadataConfig::default()
-    };
-
-    let metadata = generate_complete_metadata(&media_path, "image", &config).await;
+    let metadata = generate_complete_metadata(&media_path, "image").await;
 
     assert_eq!(metadata.gps_latitude, Some(40.759));
     assert_eq!(metadata.gps_longitude, Some(-73.9859));
-    assert_eq!(metadata.location_city, None);
-    assert_eq!(metadata.location_state, None);
-    assert_eq!(metadata.location_country, None);
+    assert_eq!(metadata.location_city.as_deref(), Some("Times Square"));
+    assert_eq!(metadata.location_state.as_deref(), Some("New York"));
+    assert_eq!(metadata.location_country.as_deref(), Some("United States"));
 }
 
 #[test]

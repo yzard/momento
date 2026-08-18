@@ -35,7 +35,7 @@ pub async fn generate_media_metadata(
     let content_hash = calculate_file_hash(&original_path)
         .await
         .map_err(|error| error.to_string())?;
-    let metadata = generate_complete_metadata(&original_path, &media_type, &config.metadata).await;
+    let metadata = generate_complete_metadata(&original_path, &media_type).await;
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
     let tiny_thumbnail_path = paths().thumbnails_tiny.join(&thumbnail_relative);

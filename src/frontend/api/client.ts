@@ -3,6 +3,14 @@ import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
 const ACCESS_TOKEN_KEY = 'momento_access_token'
 const REFRESH_TOKEN_KEY = 'momento_refresh_token'
 
+type ForbiddenResponseHandler = () => void
+
+let forbiddenResponseHandler: ForbiddenResponseHandler | null = null
+
+export function setForbiddenResponseHandler(handler: ForbiddenResponseHandler | null) {
+  forbiddenResponseHandler = handler
+}
+
 export const apiClient = axios.create({
   baseURL: '/api/v1',
   headers: {
@@ -39,6 +47,11 @@ apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
+
+    if (error.response?.status === 403) {
+      forbiddenResponseHandler?.()
+      return Promise.reject(error)
+    }
 
     if (error.response?.status === 401 && !originalRequest._retry) {
       if (isRefreshing) {

@@ -221,11 +221,7 @@ pub async fn generate_thumbnails(
     (normal_relative, tiny_relative)
 }
 
-pub async fn generate_complete_metadata(
-    source_path: &Path,
-    media_type: &str,
-    metadata_config: &MetadataConfig,
-) -> MediaMetadata {
+pub async fn generate_complete_metadata(source_path: &Path, media_type: &str) -> MediaMetadata {
     let mut metadata = if media_type == "image" {
         extract_image_metadata(source_path).await
     } else {
@@ -248,8 +244,9 @@ pub async fn generate_complete_metadata(
         }
     }
 
-    if !metadata_config.reverse_geocoding_enabled
-        || (metadata.location_state.is_some() && metadata.location_country.is_some())
+    if metadata.location_city.is_some()
+        && metadata.location_state.is_some()
+        && metadata.location_country.is_some()
     {
         return metadata;
     }
@@ -257,21 +254,17 @@ pub async fn generate_complete_metadata(
     let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude) else {
         return metadata;
     };
-    let (city, state, country) = reverse_geocode(metadata_config, latitude, longitude).await;
-    if city.is_some() {
-        metadata.location_city = city;
+    if let Ok(Some(location)) = reverse_geocode(latitude, longitude) {
+        if metadata.location_city.is_none() {
+            metadata.location_city = Some(location.city);
+        }
+        if metadata.location_state.is_none() {
+            metadata.location_state = location.state;
+        }
+        if metadata.location_country.is_none() {
+            metadata.location_country = Some(location.country);
+        }
     }
-    if state.is_some() {
-        metadata.location_state = state;
-    }
-    if country.is_some() {
-        metadata.location_country = country;
-    }
-
-    tokio::time::sleep(std::time::Duration::from_secs_f64(
-        metadata_config.reverse_geocoding_rate_limit_seconds,
-    ))
-    .await;
 
     metadata
 }
@@ -343,7 +336,7 @@ pub async fn process_media_file(
         }
     }
 
-    let metadata = generate_complete_metadata(source_path, media_type, &context.metadata).await;
+    let metadata = generate_complete_metadata(source_path, media_type).await;
     let (temporary_path, temporary_relative_path, temporary_filename) =
         match save_original_file(source_path) {
             Ok(res) => res,

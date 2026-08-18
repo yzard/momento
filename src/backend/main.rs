@@ -154,6 +154,8 @@ async fn main() {
 
     // Initialize directories
     init_directories().expect("Failed to initialize data directories");
+    momento_api::processor::metadata::reverse_geocoding::initialize()
+        .expect("Failed to initialize local reverse geocoder");
     recover_webdav_claims(&paths().webdav).expect("Failed to recover interrupted WebDAV imports");
 
     // Create database pool

@@ -49,9 +49,6 @@ pub enum AppError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-
-    #[error("Request error: {0}")]
-    Request(#[from] reqwest::Error),
 }
 
 impl IntoResponse for AppError {
@@ -123,17 +120,6 @@ impl IntoResponse for AppError {
             AppError::Json(e) => {
                 tracing::error!("JSON error: {}", e);
                 (StatusCode::BAD_REQUEST, "JSON parsing error".to_string())
-            }
-            AppError::Request(e) => {
-                tracing::error!(
-                    "Request error: {}\nBacktrace: {:?}",
-                    e,
-                    std::backtrace::Backtrace::capture()
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "External request failed".to_string(),
-                )
             }
         };
 

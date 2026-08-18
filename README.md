@@ -137,6 +137,12 @@ deduplication, and face detection. `deduplicate_cron` intentionally keeps its fe
 it starts the complete deduplication pipeline; `image_clustering` is only that pipeline's inference
 stage.
 
+GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
+snapshot embedded in the Momento API binary. No external geocoding service or runtime network
+request is used. Location fields are generated with the rest of a media item's metadata. GeoNames
+data is provided under CC BY 4.0; attribution and source checksums are recorded in
+`src/backend/assets/geonames/SOURCE.md`.
+
 ## Docker Playground
 
 The playground builds and starts exactly two containers: `momento-api` and `llm-service`.

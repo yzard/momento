@@ -1,88 +1,55 @@
-use momento_api::config::MetadataConfig;
-use momento_api::processor::metadata::reverse_geocoding::reverse_geocode;
-use serde_json::json;
-use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use momento_api::processor::metadata::reverse_geocoding::{
+    initialize, record_count, reverse_geocode,
+};
+use sha2::{Digest, Sha256};
 
-fn configuration(server: &MockServer) -> MetadataConfig {
-    MetadataConfig {
-        reverse_geocoding_enabled: true,
-        reverse_geocoding_base_url: format!("{}/reverse", server.uri()),
-        reverse_geocoding_user_agent: "Momento reverse geocoding test".to_string(),
-        reverse_geocoding_timeout_seconds: 2,
-        reverse_geocoding_rate_limit_seconds: 0.0,
-        ..MetadataConfig::default()
-    }
+const COMPRESSED_GEONAMES_DATA: &[u8] =
+    include_bytes!("../../../../src/backend/assets/geonames/geonames-cities500.tsv.gz");
+
+#[test]
+fn local_reverse_geocoder_finds_city_state_and_country() {
+    initialize().expect("local reverse geocoder");
+
+    let location = reverse_geocode(40.759, -73.9859)
+        .expect("lookup")
+        .expect("location");
+
+    assert_eq!(location.city, "Times Square");
+    assert_eq!(location.state.as_deref(), Some("New York"));
+    assert_eq!(location.country, "United States");
 }
 
-#[tokio::test]
-async fn reverse_geocode_sends_coordinates_and_parses_location() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/reverse"))
-        .and(query_param("format", "json"))
-        .and(query_param("lat", "40.759"))
-        .and(query_param("lon", "-73.9859"))
-        .and(query_param("zoom", "10"))
-        .and(query_param("addressdetails", "1"))
-        .and(header("user-agent", "Momento reverse geocoding test"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "address": {
-                "city": "New York",
-                "state": "New York",
-                "country": "United States"
-            }
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let location = reverse_geocode(&configuration(&server), 40.759, -73.9859).await;
+#[test]
+fn embedded_geonames_snapshot_matches_manifest() {
+    let checksum = format!("{:x}", Sha256::digest(COMPRESSED_GEONAMES_DATA));
 
     assert_eq!(
-        location,
-        (
-            Some("New York".to_string()),
-            Some("New York".to_string()),
-            Some("United States".to_string())
-        )
+        checksum,
+        "9d43c79540f5dd7b706132972a1d92845189148d5914ef2ce14a179870ffcb69"
     );
+    assert_eq!(record_count().expect("record count"), 235_408);
 }
 
-#[tokio::test]
-async fn reverse_geocode_uses_locality_and_region_fallbacks() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/reverse"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "address": {
-                "village": "Keswick",
-                "province": "Cumbria",
-                "country": "United Kingdom"
-            }
-        })))
-        .mount(&server)
-        .await;
+#[test]
+fn local_reverse_geocoder_handles_global_coordinates() {
+    let vermont = reverse_geocode(44.5325, -72.7865)
+        .expect("Vermont lookup")
+        .expect("Vermont location");
+    let tokyo = reverse_geocode(35.6762, 139.6503)
+        .expect("Tokyo lookup")
+        .expect("Tokyo location");
 
-    let location = reverse_geocode(&configuration(&server), 54.6013, -3.1347).await;
-
-    assert_eq!(location.0.as_deref(), Some("Keswick"));
-    assert_eq!(location.1.as_deref(), Some("Cumbria"));
-    assert_eq!(location.2.as_deref(), Some("United Kingdom"));
+    assert_eq!(vermont.city, "Stowe");
+    assert_eq!(vermont.state.as_deref(), Some("Vermont"));
+    assert_eq!(vermont.country, "United States");
+    assert_eq!(tokyo.country, "Japan");
 }
 
-#[tokio::test]
-async fn disabled_reverse_geocoding_does_not_send_a_request() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&server)
-        .await;
-    let mut config = configuration(&server);
-    config.reverse_geocoding_enabled = false;
-
-    let location = reverse_geocode(&config, 40.759, -73.9859).await;
-
-    assert_eq!(location, (None, None, None));
+#[test]
+fn local_reverse_geocoder_rejects_invalid_coordinates() {
+    assert_eq!(reverse_geocode(91.0, 0.0).expect("lookup"), None);
+    assert_eq!(reverse_geocode(0.0, -181.0).expect("lookup"), None);
+    assert_eq!(reverse_geocode(0.0, 1.0).expect("lookup"), None);
+    assert_eq!(reverse_geocode(1.0, 0.0).expect("lookup"), None);
+    assert_eq!(reverse_geocode(f64::NAN, 0.0).expect("lookup"), None);
 }

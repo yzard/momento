@@ -157,8 +157,27 @@ export default function Settings() {
           </form>
         </div>
       </div>
+      <p className="mt-6 text-center text-xs text-muted-foreground">
+        Location data adapted from{' '}
+        <a
+          href="https://www.geonames.org/"
+          target="_blank"
+          rel="noreferrer"
+          className="font-semibold text-foreground underline-offset-4 hover:underline"
+        >
+          GeoNames
+        </a>{' '}
+        under{' '}
+        <a
+          href="https://creativecommons.org/licenses/by/4.0/"
+          target="_blank"
+          rel="noreferrer"
+          className="font-semibold text-foreground underline-offset-4 hover:underline"
+        >
+          CC BY 4.0
+        </a>.
+      </p>
     </div>
     </div>
   )
 }
-
