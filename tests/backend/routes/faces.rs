@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::test_utils::{create_test_app, create_test_media, create_test_user, grant_media_access};
 
 fn token(user_id: i64, role: &str) -> String {
-    create_access_token(user_id, "faces", role, &Config::default()).expect("token")
+    create_access_token(user_id, "faces", role, &Config::default(), None).expect("token")
 }
 
 #[tokio::test]

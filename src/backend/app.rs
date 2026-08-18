@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::auth::AppState;
+use crate::auth::{password_change_guard, AdminPasswordReset, AppState};
 use crate::config::Config;
 use crate::database::DbPool;
 use crate::logging::request_logger;
@@ -38,12 +38,14 @@ pub fn create_app(
     pool: DbPool,
     llm_transport: crate::processor::ai::transport::TransportHandle,
     webdav_request_gate: crate::webdav::WebDAVRequestGate,
+    admin_password_reset_user_id: Option<i64>,
 ) -> Router {
     let state = AppState {
         config: config.clone(),
         pool,
         llm_transport,
         webdav_request_gate,
+        admin_password_reset: AdminPasswordReset::new(admin_password_reset_user_id),
     };
 
     let cors = CorsLayer::new()
@@ -54,6 +56,10 @@ pub fn create_app(
     let api_routes = Router::new()
         .route("/healthcheck", get(healthcheck))
         .merge(api_router())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            password_change_guard,
+        ))
         .layer(cors);
 
     let mut app = Router::new()

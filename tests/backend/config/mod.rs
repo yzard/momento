@@ -1,7 +1,9 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use momento_api::config::{load_config, save_default_config, Config, DEFAULT_CONFIG_TEMPLATE};
+use momento_api::config::{
+    consume_admin_password_reset, load_config, save_default_config, Config, DEFAULT_CONFIG_TEMPLATE,
+};
 use tempfile::TempDir;
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
@@ -93,8 +95,50 @@ fn test_load_config_omitted_sections_use_defaults() {
     let defaults = Config::default();
 
     assert_eq!(config.server.port, 9001);
+    assert!(!config.server.reset_admin_password);
     assert_eq!(config.server.data_dir, defaults.server.data_dir);
     assert_eq!(config.server.static_dir, defaults.server.static_dir);
+}
+
+#[test]
+fn test_consume_admin_password_reset_persists_false_and_preserves_comments() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "# keep this comment\n[server]\nreset_admin_password = true # one-shot\n",
+    )
+    .expect("Failed to write config");
+    let mut config = load_config(&path).expect("Failed to load config");
+
+    assert!(consume_admin_password_reset(&path, &mut config).expect("Failed to consume reset"));
+
+    assert!(!config.server.reset_admin_password);
+    let saved = std::fs::read_to_string(&path).expect("Failed to read saved config");
+    assert!(saved.contains("# keep this comment"));
+    assert!(saved.contains("reset_admin_password = false"));
+    assert!(
+        !load_config(&path)
+            .expect("Failed to reload config")
+            .server
+            .reset_admin_password
+    );
+}
+
+#[test]
+fn test_consume_admin_password_reset_does_not_rewrite_false_config() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[server]\nreset_admin_password = false\n")
+        .expect("Failed to write config");
+    let original = std::fs::read_to_string(&path).expect("Failed to read config");
+    let mut config = load_config(&path).expect("Failed to load config");
+
+    assert!(!consume_admin_password_reset(&path, &mut config).expect("Failed to check reset"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("Failed to reread config"),
+        original
+    );
 }
 
 #[test]
@@ -131,6 +175,19 @@ fn test_load_config_rejects_removed_storage_section() {
     let error = load_config(&path).expect_err("Storage section must be rejected");
 
     assert!(error.to_string().contains("storage"));
+}
+
+#[test]
+fn test_load_config_rejects_removed_admin_section() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[admin]\nusername = \"admin\"\npassword = \"admin\"\n",
+    );
+
+    let error = load_config(&path).expect_err("Admin section must be rejected");
+
+    assert!(error.to_string().contains("admin"));
 }
 
 #[test]
@@ -252,6 +309,7 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.server.data_dir, PathBuf::from("/data"));
     assert_eq!(config.server.static_dir, PathBuf::from("/app/static"));
     assert_eq!(config.server.port, 8000);
+    assert!(!config.server.reset_admin_password);
     assert!(config.llm.enabled);
     assert_eq!(config.metadata.thumbnails_max_size, 1200);
 
@@ -260,6 +318,7 @@ fn test_save_default_config_round_trips() {
     assert!(generated.contains("# Five-field cron expressions"));
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
     assert!(generated["metadata_worker"].get("batch_size").is_none());
+    assert!(generated.get("admin").is_none());
     assert!(generated.get("storage").is_none());
     assert_eq!(generated["server"]["data_dir"].as_str(), Some("/data"));
     assert_eq!(

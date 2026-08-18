@@ -1,10 +1,13 @@
-use crate::auth::jwt::decode_access_token;
+use crate::auth::{jwt::decode_access_token, AdminPasswordReset};
 use crate::config::Config;
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::AppError;
 use axum::{
-    extract::FromRequestParts,
+    body::Body,
+    extract::{FromRequestParts, Request, State},
     http::{header::AUTHORIZATION, request::Parts},
+    middleware::Next,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -24,6 +27,7 @@ pub struct AppState {
     pub pool: DbPool,
     pub llm_transport: crate::processor::ai::transport::TransportHandle,
     pub webdav_request_gate: crate::webdav::WebDAVRequestGate,
+    pub admin_password_reset: AdminPasswordReset,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +45,9 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
+        if let Some(current_user) = parts.extensions.get::<CurrentUser>() {
+            return Ok(current_user.clone());
+        }
 
         // Try to get token from Authorization header
         let mut token_str: Option<String> = None;
@@ -72,6 +79,16 @@ where
             .sub
             .parse()
             .map_err(|_| AppError::Authentication("Invalid token".to_string()))?;
+        if let Some(reset_id) = claims.admin_reset_id {
+            if !app_state
+                .admin_password_reset
+                .accepts_temporary_token(user_id, &reset_id)
+            {
+                return Err(AppError::Authentication(
+                    "Administrator reset token is no longer valid".to_string(),
+                ));
+            }
+        }
 
         let conn = app_state.pool.get().map_err(AppError::Pool)?;
 
@@ -101,9 +118,49 @@ where
             username: user.username,
             email: user.email,
             role: user.role,
-            must_change_password: user.must_change_password != 0,
+            must_change_password: user.must_change_password != 0
+                || app_state
+                    .admin_password_reset
+                    .requires_password_change(user.id),
         })
     }
+}
+
+pub async fn password_change_guard(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if is_password_change_route(request.uri().path()) {
+        return next.run(request).await;
+    }
+
+    let (mut parts, body) = request.into_parts();
+    if let Ok(current_user) = CurrentUser::from_request_parts(&mut parts, &state).await {
+        if current_user.must_change_password {
+            return AppError::Forbidden("Password change required".to_string()).into_response();
+        }
+        parts.extensions.insert(current_user);
+    }
+    next.run(Request::from_parts(parts, body)).await
+}
+
+fn is_password_change_route(path: &str) -> bool {
+    [
+        "/healthcheck",
+        "/user/authenticate",
+        "/user/refresh",
+        "/user/logout",
+        "/user/get",
+        "/user/change-password",
+        "/api/v1/healthcheck",
+        "/api/v1/user/authenticate",
+        "/api/v1/user/refresh",
+        "/api/v1/user/logout",
+        "/api/v1/user/get",
+        "/api/v1/user/change-password",
+    ]
+    .contains(&path)
 }
 
 struct UserRow {

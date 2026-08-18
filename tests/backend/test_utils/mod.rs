@@ -55,6 +55,7 @@ pub fn create_test_app() -> (Router, DbPool) {
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
     );
     (app, pool)
 }

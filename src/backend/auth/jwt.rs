@@ -14,6 +14,8 @@ pub struct Claims {
     pub exp: i64,
     #[serde(rename = "type")]
     pub token_type: String,
+    #[serde(default)]
+    pub admin_reset_id: Option<String>,
 }
 
 pub fn create_access_token(
@@ -21,6 +23,7 @@ pub fn create_access_token(
     username: &str,
     role: &str,
     config: &Config,
+    admin_reset_id: Option<&str>,
 ) -> AppResult<String> {
     let expiration = Utc::now() + Duration::minutes(config.security.access_token_expire_minutes);
 
@@ -30,6 +33,7 @@ pub fn create_access_token(
         role: role.to_string(),
         exp: expiration.timestamp(),
         token_type: "access".to_string(),
+        admin_reset_id: admin_reset_id.map(str::to_string),
     };
 
     let token = encode(

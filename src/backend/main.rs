@@ -5,11 +5,11 @@ use momento_common::config_cli::{parse_config_command, ConfigCommand};
 use momento_common::logging::init_logging;
 
 use momento_api::app::create_app;
-use momento_api::auth::hash_password;
-use momento_api::config::{load_config, save_default_config};
+use momento_api::auth::{ensure_default_admin, prepare_admin_password_reset};
+use momento_api::config::{consume_admin_password_reset, load_config, save_default_config};
 use momento_api::constants::{init_paths, paths};
 use momento_api::cronjob::run_cronjobs;
-use momento_api::database::{create_pool, init_database, queries};
+use momento_api::database::{create_pool, init_database};
 use momento_api::logging::install_panic_hook;
 use momento_api::processor::ai;
 use momento_api::processor::import::{
@@ -34,37 +34,6 @@ fn init_directories() -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     Ok(())
-}
-
-fn create_default_admin(
-    pool: &momento_api::database::DbPool,
-    config: &momento_api::config::Config,
-) {
-    let conn = match pool.get() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    // Check if admin exists
-    let existing: Option<i64> = conn
-        .query_row(queries::users::CHECK_ADMIN, [], |row| row.get(0))
-        .ok();
-
-    if existing.is_some() {
-        return;
-    }
-
-    // Create default admin
-    let hashed = match hash_password(&config.admin.password) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-
-    let email = format!("{}@localhost", config.admin.username);
-    let _ = conn.execute(
-        queries::users::INSERT_ADMIN,
-        (&config.admin.username, &email, &hashed),
-    );
 }
 
 fn start_background_tasks(
@@ -160,14 +129,13 @@ async fn main() {
     };
 
     // Load configuration
-    let config = match load_config(&config_path) {
-        Ok(config) => Arc::new(config),
+    let mut config = match load_config(&config_path) {
+        Ok(config) => config,
         Err(e) => {
             eprintln!("Failed to load configuration: {}", e);
             std::process::exit(1);
         }
     };
-
     // Derive every filesystem location from the configured data directory
     init_paths(&config.server.data_dir);
 
@@ -203,8 +171,24 @@ async fn main() {
         .expect("Failed to recover interrupted face grouping scans");
     recover_interrupted_imports(&pool).expect("Failed to recover interrupted imports");
 
-    // Create default admin if needed
-    create_default_admin(&pool, &config);
+    let admin_id = ensure_default_admin(&pool).expect("Failed to initialize administrator");
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind");
+    let admin_password_reset_user_id = if config.server.reset_admin_password {
+        prepare_admin_password_reset(&pool, admin_id)
+            .expect("Failed to prepare administrator password reset");
+        consume_admin_password_reset(&config_path, &mut config)
+            .expect("Failed to consume administrator password reset");
+        tracing::warn!(
+            "Temporary administrator password reset active for this server process; sign in as admin/admin and change the password"
+        );
+        Some(admin_id)
+    } else {
+        None
+    };
+    let config = Arc::new(config);
 
     let llm_transport = momento_api::processor::ai::transport::TransportHandle::default();
     let webdav_request_gate = Arc::new(tokio::sync::Semaphore::new(
@@ -220,16 +204,15 @@ async fn main() {
     );
 
     // Create the application
-    let app = create_app(config.clone(), pool, llm_transport, webdav_request_gate);
+    let app = create_app(
+        config.clone(),
+        pool,
+        llm_transport,
+        webdav_request_gate,
+        admin_password_reset_user_id,
+    );
 
-    // Bind to address
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
     tracing::info!("Starting Momento API on {}", addr);
-
-    // Start server
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind");
 
     axum::serve(listener, app).await.expect("Server failed");
 }

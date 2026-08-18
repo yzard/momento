@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 fn admin_token(user_id: i64) -> String {
-    create_access_token(user_id, "admin", "admin", &Config::default())
+    create_access_token(user_id, "admin", "admin", &Config::default(), None)
         .expect("Failed to create token")
 }
 
@@ -153,6 +153,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
     );
     let user_id = create_test_user(&pool, "face-ai-admin", "face-ai-admin@example.com");
     let media_id = create_test_media(&pool, "face-ai.jpg");

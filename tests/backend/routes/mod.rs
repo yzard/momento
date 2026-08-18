@@ -1,4 +1,5 @@
 mod ai;
+mod auth;
 mod deduplicate;
 mod faces;
 mod map;

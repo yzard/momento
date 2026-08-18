@@ -5,12 +5,13 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use crate::auth::{
     create_access_token, create_refresh_token, hash_password, hash_refresh_token, verify_password,
-    AppState, CurrentUser,
+    AppState, CurrentUser, TEMPORARY_ADMIN_PASSWORD, TEMPORARY_ADMIN_USERNAME,
 };
-use crate::database::{execute_query, fetch_one, insert_returning_id, queries};
+use crate::database::{execute_query, fetch_one, insert_returning_id, queries, DbConn};
 use crate::error::{AppError, AppResult};
 use crate::models::{ChangePasswordRequest, LogoutRequest, RefreshTokenRequest, TokenResponse};
 
@@ -49,23 +50,22 @@ async fn login(
 
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let user = fetch_one(
-        &conn,
-        queries::auth::SELECT_USER_BY_USERNAME,
-        &[&username],
-        |row| {
-            Ok(UserAuthRow {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                role: row.get(3)?,
-                hashed_password: row.get(4)?,
-                is_active: row.get(5)?,
-            })
-        },
-    )?
+    let temporary_admin_reset = (username == TEMPORARY_ADMIN_USERNAME
+        && password == TEMPORARY_ADMIN_PASSWORD)
+        .then(|| state.admin_password_reset.login())
+        .flatten();
+    let temporary_admin_login = temporary_admin_reset.is_some();
+    let user = if let Some((admin_id, _)) = &temporary_admin_reset {
+        load_user_for_auth(&conn, queries::auth::SELECT_USER_BY_ID, admin_id)?
+    } else {
+        load_user_for_auth(&conn, queries::auth::SELECT_USER_BY_USERNAME, &username)?
+    }
     .ok_or_else(|| AppError::Authentication("Invalid credentials".to_string()))?;
 
-    if !verify_password(password, &user.hashed_password) {
+    if temporary_admin_login && user.role != "admin" {
+        return Err(AppError::Authentication("Invalid credentials".to_string()));
+    }
+    if !temporary_admin_login && !verify_password(password, &user.hashed_password) {
         return Err(AppError::Authentication("Invalid credentials".to_string()));
     }
 
@@ -73,16 +73,42 @@ async fn login(
         return Err(AppError::Authentication("User is inactive".to_string()));
     }
 
-    let access_token = create_access_token(user.id, &user.username, &user.role, &state.config)?;
+    let access_token = create_access_token(
+        user.id,
+        &user.username,
+        &user.role,
+        &state.config,
+        temporary_admin_reset
+            .as_ref()
+            .map(|(_, reset_id)| reset_id.as_str()),
+    )?;
     let (raw_refresh, token_hash, expires_at) = create_refresh_token(user.id, &state.config);
 
-    insert_returning_id(
-        &conn,
-        queries::auth::INSERT_REFRESH_TOKEN,
-        &[&token_hash, &user.id, &expires_at.to_rfc3339()],
-    )?;
+    if !temporary_admin_login {
+        insert_returning_id(
+            &conn,
+            queries::auth::INSERT_REFRESH_TOKEN,
+            &[&token_hash, &user.id, &expires_at.to_rfc3339()],
+        )?;
+    }
 
     Ok(Json(TokenResponse::new(access_token, raw_refresh)))
+}
+
+fn load_user_for_auth(
+    connection: &DbConn,
+    query: &str,
+    identifier: &dyn rusqlite::ToSql,
+) -> AppResult<Option<UserAuthRow>> {
+    fetch_one(connection, query, &[identifier], |row| {
+        Ok(UserAuthRow {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            role: row.get(3)?,
+            hashed_password: row.get(4)?,
+            is_active: row.get(5)?,
+        })
+    })
 }
 
 struct UserAuthRow {
@@ -137,6 +163,7 @@ async fn refresh(
         &token_row.username,
         &token_row.role,
         &state.config,
+        None,
     )?;
     let (raw_refresh, new_token_hash, expires_at) =
         create_refresh_token(token_row.user_id, &state.config);
@@ -186,42 +213,46 @@ async fn change_password(
     current_user: CurrentUser,
     Json(request): Json<ChangePasswordRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let user = fetch_one(
-        &conn,
-        queries::auth::SELECT_PASSWORD_HASH,
-        &[&current_user.id],
-        |row| row.get::<_, String>(0),
-    )?
-    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    if !verify_password(&request.current_password, &user) {
-        return Err(AppError::BadRequest(
-            "Current password is incorrect".to_string(),
-        ));
-    }
-
     if request.new_password.len() < 8 {
         return Err(AppError::BadRequest(
             "Password must be at least 8 characters".to_string(),
         ));
     }
 
+    let mut conn = state.pool.get().map_err(AppError::Pool)?;
+    let user = conn
+        .query_row(
+            queries::auth::SELECT_PASSWORD_HASH,
+            [current_user.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    let temporary_admin_password = state
+        .admin_password_reset
+        .requires_password_change(current_user.id)
+        && current_user.must_change_password
+        && request.current_password == TEMPORARY_ADMIN_PASSWORD;
+    if !temporary_admin_password && !verify_password(&request.current_password, &user) {
+        return Err(AppError::BadRequest(
+            "Current password is incorrect".to_string(),
+        ));
+    }
     let new_hash = hash_password(&request.new_password)
         .map_err(|e| AppError::Internal(format!("Failed to hash password: {}", e)))?;
-
-    execute_query(
-        &conn,
-        queries::auth::UPDATE_PASSWORD_AND_RESET_FLAG,
-        &[&new_hash, &current_user.id],
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = transaction.execute(
+        queries::auth::UPDATE_PASSWORD_AND_RESET_FLAG_IF_UNCHANGED,
+        rusqlite::params![new_hash, current_user.id, user],
     )?;
-
-    execute_query(
-        &conn,
-        queries::auth::REVOKE_ALL_USER_TOKENS,
-        &[&current_user.id],
-    )?;
+    if changed != 1 {
+        return Err(AppError::Conflict(
+            "Password changed concurrently; retry with the current password".to_string(),
+        ));
+    }
+    transaction.execute(queries::auth::REVOKE_ALL_USER_TOKENS, [current_user.id])?;
+    transaction.commit()?;
+    state.admin_password_reset.complete(current_user.id);
 
     Ok(Json(
         serde_json::json!({"message": "Password changed successfully"}),

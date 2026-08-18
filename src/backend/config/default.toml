@@ -1,11 +1,13 @@
 # Momento API configuration generated on first container startup.
-# Replace the example secrets and administrator password before exposing the service.
+# Replace the example secrets and change the initial admin/admin password before exposing the service.
 
 [server]
 # Listen on every container interface and serve the bundled frontend on port 8000.
 host = "0.0.0.0"
 port = 8000
 debug = false
+# Set true for one startup to temporarily accept admin/admin without replacing the stored password.
+reset_admin_password = false
 # All database, media, preview, import, and log paths derive from this directory.
 data_dir = "/data"
 static_dir = "/app/static"
@@ -15,11 +17,6 @@ static_dir = "/app/static"
 secret_key = "playground-only-change-this-secret-before-exposing-the-server"
 access_token_expire_minutes = 30
 refresh_token_expire_days = 7
-
-[admin]
-# The initial administrator is created from these credentials when the database is empty.
-username = "admin"
-password = "admin"
 
 [webdav]
 # WebDAV is always available; uploads are staged below data_dir/webdav and imported automatically.

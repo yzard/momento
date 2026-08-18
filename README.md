@@ -68,8 +68,9 @@ Published images are available from Docker Hub:
 No data subdirectories or configuration files need to be created manually. Docker and the two
 container entrypoints create them on first startup, including `data/config.toml` and
 `data/llm-config/config_llm.toml`. The generated `[llm].api_key` and `[server].api_key` match.
-Replace that shared key, the security secret, and the administrator password in both generated
-files before exposing the service, then restart the containers.
+Replace that shared key and the security secret before exposing the service. A new database creates
+the administrator as `admin` / `admin` and requires an immediate password change through the
+application.
 
 ```yaml
 services:
@@ -121,6 +122,13 @@ Start the stack and open `http://localhost:8000`:
 ```bash
 docker compose up -d
 ```
+
+To recover administrator access, set `reset_admin_password = true` under `[server]` in
+`data/config.toml` and restart Momento. Startup atomically changes the flag back to `false` and,
+for that server process only, accepts `admin` / `admin` for the existing administrator account.
+The stored password is not replaced until the forced password-change form succeeds. If Momento is
+restarted before that change, the temporary credentials stop working and the previous stored
+username and password work again.
 
 The llm-service image requires an NVIDIA GPU, a compatible host driver, and NVIDIA Container
 Toolkit. It is large because all model runtimes and weights are included for offline activation.

@@ -36,6 +36,7 @@ async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload()
         pool,
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(1)),
+        None,
     );
     let server =
         TestServer::new_with_config(app, TestServerConfig::builder().http_transport().build())

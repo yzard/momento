@@ -9,8 +9,8 @@ use momento_api::processor::ai;
 async fn metadata_generate_requires_administrator() {
     let (application, pool) = create_test_app();
     let user_id = create_test_user(&pool, "metadata-user", "metadata-user@example.com");
-    let token =
-        create_access_token(user_id, "metadata-user", "user", &Config::default()).expect("token");
+    let token = create_access_token(user_id, "metadata-user", "user", &Config::default(), None)
+        .expect("token");
     let server = TestServer::new(application).expect("server");
     server
         .post("/api/v1/metadata/generate")

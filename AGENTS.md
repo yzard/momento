@@ -355,7 +355,16 @@ Both binaries also support `--init-config`, which writes their source-owned comm
 template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
 `/data/config.toml` for Momento and `/config/config_llm.toml` for llm-service. The templates exactly
 match `playground/config.toml` and `playground/config_llm.toml`, including their shared example API
-key. Normal startup never generates or replaces a configuration file.
+key. Normal startup never generates or replaces a configuration file except when atomically
+consuming the one-shot administrator password-reset request described below.
+
+Momento has no `[admin]` configuration section. An empty database creates `admin` / `admin` with a
+required password change. Setting `[server].reset_admin_password = true` is a one-start recovery
+request: startup atomically writes it back to `false`, keeps the stored password unchanged, and
+accepts temporary `admin` / `admin` API authentication only in that process for the existing
+administrator. A successful forced password change replaces the stored hash; a restart before the
+change removes the temporary override and restores normal authentication with the unchanged stored
+username and password.
 
 Momento filesystem locations derive from `server.data_dir`:
 

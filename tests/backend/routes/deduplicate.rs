@@ -6,7 +6,7 @@ use momento_api::config::Config;
 use serde_json::{json, Value};
 
 fn token(user_id: i64, role: &str) -> String {
-    create_access_token(user_id, "testuser", role, &Config::default())
+    create_access_token(user_id, "testuser", role, &Config::default(), None)
         .expect("Failed to create token")
 }
 

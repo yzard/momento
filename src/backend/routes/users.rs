@@ -120,7 +120,7 @@ async fn get_user(
 ) -> AppResult<Json<UserResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let user = fetch_one(
+    let mut user = fetch_one(
         &conn,
         queries::users::SELECT_BY_ID,
         &[&current_user.id],
@@ -137,6 +137,7 @@ async fn get_user(
         },
     )?
     .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    user.must_change_password = current_user.must_change_password;
 
     Ok(Json(user))
 }

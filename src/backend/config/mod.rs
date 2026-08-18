@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use momento_common::config_file::write_new_config;
+use momento_common::config_file::{replace_config, write_new_config};
+use toml_edit::{value, DocumentMut};
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("default.toml");
 
@@ -21,6 +22,8 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default)]
     pub debug: bool,
+    #[serde(default)]
+    pub reset_admin_password: bool,
     /// Root for the database and every generated media directory.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -43,6 +46,7 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             debug: false,
+            reset_admin_password: false,
             data_dir: default_data_dir(),
             static_dir: default_static_dir(),
         }
@@ -86,31 +90,6 @@ impl Default for SecurityConfig {
             secret_key: default_secret_key(),
             access_token_expire_minutes: default_access_token_expire_minutes(),
             refresh_token_expire_days: default_refresh_token_expire_days(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdminConfig {
-    #[serde(default = "default_admin_username")]
-    pub username: String,
-    #[serde(default = "default_admin_password")]
-    pub password: String,
-}
-
-fn default_admin_username() -> String {
-    "admin".to_string()
-}
-
-fn default_admin_password() -> String {
-    "admin".to_string()
-}
-
-impl Default for AdminConfig {
-    fn default() -> Self {
-        Self {
-            username: default_admin_username(),
-            password: default_admin_password(),
         }
     }
 }
@@ -531,8 +510,6 @@ pub struct Config {
     #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
-    pub admin: AdminConfig,
-    #[serde(default)]
     pub webdav: WebDAVConfig,
     #[serde(default)]
     pub metadata: MetadataConfig,
@@ -572,4 +549,29 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
     write_new_config(config_path, DEFAULT_CONFIG_TEMPLATE)
+}
+
+pub fn consume_admin_password_reset(
+    config_path: &Path,
+    config: &mut Config,
+) -> std::io::Result<bool> {
+    if !config.server.reset_admin_password {
+        return Ok(false);
+    }
+
+    let contents = fs::read_to_string(config_path)?;
+    let mut document = contents.parse::<DocumentMut>().map_err(|error| {
+        std::io::Error::other(format!(
+            "invalid config at {}: {error}",
+            config_path.display()
+        ))
+    })?;
+    let server = document
+        .get_mut("server")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| std::io::Error::other("config server section is missing"))?;
+    server["reset_admin_password"] = value(false);
+    replace_config(config_path, &document.to_string())?;
+    config.server.reset_admin_password = false;
+    Ok(true)
 }

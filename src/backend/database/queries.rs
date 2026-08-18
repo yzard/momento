@@ -1249,6 +1249,13 @@ pub mod users {
      LIMIT 1
     "#;
 
+    pub const CHECK_ADMIN_BY_ID: &str = r#"
+    SELECT id
+      FROM users
+     WHERE id = ?
+       AND role = 'admin'
+    "#;
+
     pub const INSERT_ADMIN: &str = r#"
     INSERT INTO users (
         username
@@ -1272,17 +1279,29 @@ pub mod auth {
      WHERE username = ?
     "#;
 
+    pub const SELECT_USER_BY_ID: &str = r#"
+    SELECT id
+         , username
+         , email
+         , role
+         , hashed_password
+         , is_active
+      FROM users
+     WHERE id = ?
+    "#;
+
     pub const UPDATE_PASSWORD: &str = r#"
     UPDATE users
        SET hashed_password = ?
      WHERE id = ?
     "#;
 
-    pub const UPDATE_PASSWORD_AND_RESET_FLAG: &str = r#"
+    pub const UPDATE_PASSWORD_AND_RESET_FLAG_IF_UNCHANGED: &str = r#"
     UPDATE users
        SET hashed_password = ?
          , must_change_password = 0
      WHERE id = ?
+       AND hashed_password = ?
     "#;
 
     pub const INSERT_REFRESH_TOKEN: &str = r#"

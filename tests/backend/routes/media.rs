@@ -66,7 +66,7 @@ async fn media_delete_accepts_media_ids_batch() {
 }
 
 fn access_token(user_id: i64) -> String {
-    create_access_token(user_id, "testuser", "user", &Config::default())
+    create_access_token(user_id, "testuser", "user", &Config::default(), None)
         .expect("Failed to create test access token")
 }
 
