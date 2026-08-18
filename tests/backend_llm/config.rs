@@ -1,4 +1,6 @@
-use llm_service::config::{Config, DEFAULT_CONFIG_TEMPLATE};
+mod defaults;
+
+use llm_service::config::{default_config_template, Config};
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
 
@@ -184,7 +186,7 @@ fn loads_playground_toml_configuration() {
     assert!(face_detection
         .minimum_face_resolution_pixels
         .is_some_and(|resolution| resolution > 0));
-    assert_eq!(playground, DEFAULT_CONFIG_TEMPLATE);
+    assert_eq!(playground, default_config_template());
 }
 
 #[test]
@@ -196,7 +198,7 @@ fn saves_commented_operational_default_configuration() {
     let generated = std::fs::read_to_string(&path).expect("Generated config must be readable");
     let config = Config::load(&path).expect("Generated config must load");
 
-    assert_eq!(generated, DEFAULT_CONFIG_TEMPLATE);
+    assert_eq!(generated, default_config_template());
     assert!(generated.contains("# Durable results are retried"));
     assert_eq!(config.service.len(), 4);
     assert_eq!(config.server.api_key, "change-me-llm-service-key");

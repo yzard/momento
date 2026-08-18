@@ -353,7 +353,9 @@ data directory.
 
 Both binaries also support `--init-config`, which writes their source-owned commented operational
 template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
-`/data/config.toml` for Momento and `/config/config_llm.toml` for llm-service. The templates exactly
+`/data/config.toml` for Momento and `/config/config_llm.toml` for llm-service. Each service owns all
+of its fallback and operational-template values in its `config/defaults.rs`; its commented TOML
+source contains named placeholders rather than duplicated values. The rendered templates exactly
 match `playground/config.toml` and `playground/config_llm.toml`, including their shared example API
 key. Normal startup never generates or replaces a configuration file except when atomically
 consuming the one-shot administrator password-reset request described below.
@@ -422,7 +424,7 @@ clamping.
 
 Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
 seed embedding that first created each group. A face joins the first seed whose cosine similarity
-reaches `llm.face_group_similarity_threshold`; the default is `0.55`, lower values are more
+reaches `llm.face_group_similarity_threshold`; the default is `0.5`, lower values are more
 tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use the
 thumbnail representative, compare every member pair, apply transitive closure, or run a second
 group-to-group merge pass. Manual groups remain excluded from automatic regrouping. Changing these
@@ -430,11 +432,12 @@ semantics requires explicit false-merge analysis and grouping tests, not just ch
 thumbnail representative.
 
 `face_groups.representative_face_id` is a thumbnail choice, not the grouping seed. Select it only
-after automatic membership is complete and select it again after a manual merge. The ordering is
-lexicographic: normalized squared face-box-center distance to media center ascending, then
-frontality descending, quality descending, confidence descending, and face ID ascending. If the
-global representative is not visible to a requesting user, thumbnail lookup applies the same
-ordering to that user's accessible members.
+after automatic membership is complete and select it again after a manual merge. Rank each face by
+`0.2 * center_proximity + 0.8 * frontality`, where center proximity normalizes squared
+face-box-center distance from the media center to `[0, 1]`. Higher scores win, followed by quality
+descending, confidence descending, and face ID ascending as deterministic tie-breakers. If the
+global representative is not visible to a requesting user, thumbnail lookup applies the same score
+to that user's accessible members.
 
 The face-group list is sorted in the backend before `LIMIT`/`OFFSET`: distinct visible media count
 descending, then face-group ID ascending as the stable tie-breaker. Do not sort paginated face

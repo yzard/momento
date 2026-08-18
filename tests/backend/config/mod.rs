@@ -1,8 +1,10 @@
+mod defaults;
+
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use momento_api::config::{
-    consume_admin_password_reset, load_config, save_default_config, Config, DEFAULT_CONFIG_TEMPLATE,
+    consume_admin_password_reset, default_config_template, load_config, save_default_config, Config,
 };
 use tempfile::TempDir;
 
@@ -327,7 +329,7 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.metadata.thumbnails_max_size, 1200);
 
     let generated = std::fs::read_to_string(path).expect("Failed to read generated config");
-    assert_eq!(generated, DEFAULT_CONFIG_TEMPLATE);
+    assert_eq!(generated, default_config_template());
     assert!(generated.contains("# Five-field cron expressions"));
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
     assert!(generated["metadata_worker"].get("batch_size").is_none());
@@ -382,7 +384,7 @@ fn test_load_config_uses_disabled_deduplicate_llm_default_when_section_is_missin
     let config = load_config(&path).expect("Missing deduplicate config should use safe defaults");
 
     assert!(!config.llm.deduplicate_enabled);
-    assert_eq!(config.llm.face_group_similarity_threshold, 0.55);
+    assert_eq!(config.llm.face_group_similarity_threshold, 0.5);
 }
 
 #[test]
@@ -425,7 +427,7 @@ fn playground_config_matches_the_generated_template() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../playground/config.toml");
     let playground = std::fs::read_to_string(path).expect("Playground config must exist");
 
-    assert_eq!(playground, DEFAULT_CONFIG_TEMPLATE);
+    assert_eq!(playground, default_config_template());
 }
 
 #[test]

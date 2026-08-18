@@ -1,11 +1,19 @@
+mod defaults;
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use momento_common::config_file::write_new_config;
 
 use crate::error::ServiceError;
 
-pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("default.toml");
+static DEFAULT_CONFIG_TEMPLATE: LazyLock<String> =
+    LazyLock::new(|| defaults::render_template(include_str!("default.toml")));
+
+pub fn default_config_template() -> &'static str {
+    DEFAULT_CONFIG_TEMPLATE.as_str()
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -21,105 +29,61 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    #[serde(default = "default_host")]
+    #[serde(default = "defaults::server_host")]
     pub host: String,
-    #[serde(default = "default_port")]
+    #[serde(default = "defaults::server_port")]
     pub port: u16,
-    #[serde(default)]
+    #[serde(default = "defaults::server_api_key")]
     pub api_key: String,
-    #[serde(default = "default_data_dir")]
+    #[serde(default = "defaults::server_data_dir")]
     pub data_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
-    #[serde(default = "default_poll_interval_seconds")]
+    #[serde(default = "defaults::scheduler_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_idle_shutdown_seconds")]
+    #[serde(default = "defaults::scheduler_idle_shutdown_seconds")]
     pub idle_shutdown_seconds: u64,
-    #[serde(default = "default_max_in_flight_jobs")]
+    #[serde(default = "defaults::scheduler_max_in_flight_jobs")]
     pub max_in_flight_jobs: usize,
-    #[serde(default = "default_runtime_max_attempts")]
+    #[serde(default = "defaults::scheduler_runtime_max_attempts")]
     pub runtime_max_attempts: usize,
-    #[serde(default = "default_result_delivery_acknowledgement_timeout_seconds")]
+    #[serde(default = "defaults::result_delivery_acknowledgement_timeout_seconds")]
     pub result_delivery_acknowledgement_timeout_seconds: u64,
-    #[serde(default = "default_result_delivery_retry_delay_seconds")]
+    #[serde(default = "defaults::result_delivery_retry_delay_seconds")]
     pub result_delivery_retry_delay_seconds: u64,
-    #[serde(default = "default_result_delivery_max_attempts")]
+    #[serde(default = "defaults::result_delivery_max_attempts")]
     pub result_delivery_max_attempts: usize,
-    #[serde(default = "default_result_delivery_max_concurrent_deliveries")]
+    #[serde(default = "defaults::result_delivery_max_concurrent_deliveries")]
     pub result_delivery_max_concurrent_deliveries: usize,
-}
-
-fn default_poll_interval_seconds() -> u64 {
-    5
-}
-
-fn default_idle_shutdown_seconds() -> u64 {
-    60
-}
-
-fn default_max_in_flight_jobs() -> usize {
-    128
-}
-
-fn default_runtime_max_attempts() -> usize {
-    3
-}
-
-fn default_result_delivery_acknowledgement_timeout_seconds() -> u64 {
-    30
-}
-
-fn default_result_delivery_retry_delay_seconds() -> u64 {
-    30
-}
-
-fn default_result_delivery_max_attempts() -> usize {
-    10
-}
-
-fn default_result_delivery_max_concurrent_deliveries() -> usize {
-    16
 }
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            poll_interval_seconds: default_poll_interval_seconds(),
-            idle_shutdown_seconds: default_idle_shutdown_seconds(),
-            max_in_flight_jobs: default_max_in_flight_jobs(),
-            runtime_max_attempts: default_runtime_max_attempts(),
+            poll_interval_seconds: defaults::SCHEDULER_POLL_INTERVAL_SECONDS,
+            idle_shutdown_seconds: defaults::SCHEDULER_IDLE_SHUTDOWN_SECONDS,
+            max_in_flight_jobs: defaults::SCHEDULER_MAX_IN_FLIGHT_JOBS,
+            runtime_max_attempts: defaults::SCHEDULER_RUNTIME_MAX_ATTEMPTS,
             result_delivery_acknowledgement_timeout_seconds:
-                default_result_delivery_acknowledgement_timeout_seconds(),
-            result_delivery_retry_delay_seconds: default_result_delivery_retry_delay_seconds(),
-            result_delivery_max_attempts: default_result_delivery_max_attempts(),
+                defaults::RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS,
+            result_delivery_retry_delay_seconds: defaults::RESULT_DELIVERY_RETRY_DELAY_SECONDS,
+            result_delivery_max_attempts: defaults::RESULT_DELIVERY_MAX_ATTEMPTS,
             result_delivery_max_concurrent_deliveries:
-                default_result_delivery_max_concurrent_deliveries(),
+                defaults::RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES,
         }
     }
-}
-
-fn default_data_dir() -> PathBuf {
-    PathBuf::from("/data")
-}
-
-fn default_host() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_port() -> u16 {
-    8100
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: default_host(),
-            port: default_port(),
-            api_key: String::new(),
-            data_dir: default_data_dir(),
+            host: defaults::server_host(),
+            port: defaults::SERVER_PORT,
+            api_key: defaults::fallback::SERVER_API_KEY.to_string(),
+            data_dir: defaults::server_data_dir(),
         }
     }
 }
@@ -145,35 +109,23 @@ impl ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
-    #[serde(default)]
+    #[serde(default = "defaults::service_enabled")]
     pub enabled: bool,
     pub model_type: String,
-    #[serde(default = "default_startup_timeout_seconds")]
+    #[serde(default = "defaults::service_startup_timeout_seconds")]
     pub startup_timeout_seconds: u64,
-    #[serde(default = "default_request_timeout_seconds")]
+    #[serde(default = "defaults::service_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
-    #[serde(default = "default_max_tokens")]
+    #[serde(default = "defaults::service_max_tokens")]
     pub max_tokens: u32,
     pub minimum_face_likelihood: Option<f64>,
     pub minimum_face_resolution_pixels: Option<u32>,
     pub max_concurrent_jobs: usize,
 }
 
-fn default_startup_timeout_seconds() -> u64 {
-    300
-}
-
-fn default_request_timeout_seconds() -> u64 {
-    180
-}
-
-fn default_max_tokens() -> u32 {
-    8192
-}
-
 impl Config {
     pub fn save_default(path: &Path) -> Result<(), ServiceError> {
-        write_new_config(path, DEFAULT_CONFIG_TEMPLATE).map_err(|error| {
+        write_new_config(path, default_config_template()).map_err(|error| {
             ServiceError::Configuration(format!("failed to write {}: {error}", path.display()))
         })
     }

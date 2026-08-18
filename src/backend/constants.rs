@@ -90,8 +90,3 @@ pub static SUPPORTED_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         .copied()
         .collect()
 });
-
-pub const DEFAULT_THUMBNAIL_SIZE: u32 = 400;
-pub const DEFAULT_TINY_THUMBNAIL_SIZE: u32 = 48;
-pub const DEFAULT_THUMBNAIL_QUALITY: u8 = 85;
-pub const DEFAULT_VIDEO_FRAME_QUALITY: u8 = 2;

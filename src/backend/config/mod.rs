@@ -1,95 +1,70 @@
+mod defaults;
 mod settings;
 
-use crate::constants::{
-    DEFAULT_THUMBNAIL_QUALITY, DEFAULT_THUMBNAIL_SIZE, DEFAULT_TINY_THUMBNAIL_SIZE,
-    DEFAULT_VIDEO_FRAME_QUALITY,
-};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use momento_common::config_file::{replace_config, write_new_config};
 use toml_edit::{value, DocumentMut};
 
-pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("default.toml");
+static DEFAULT_CONFIG_TEMPLATE: LazyLock<String> =
+    LazyLock::new(|| defaults::render_template(include_str!("default.toml")));
+
+pub fn default_config_template() -> &'static str {
+    DEFAULT_CONFIG_TEMPLATE.as_str()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    #[serde(default = "default_host")]
+    #[serde(default = "defaults::server_host")]
     pub host: String,
-    #[serde(default = "default_port")]
+    #[serde(default = "defaults::server_port")]
     pub port: u16,
-    #[serde(default)]
+    #[serde(default = "defaults::server_debug")]
     pub debug: bool,
-    #[serde(default)]
+    #[serde(default = "defaults::server_reset_admin_password")]
     pub reset_admin_password: bool,
     /// Root for the database and every generated media directory.
-    #[serde(default = "default_data_dir")]
+    #[serde(default = "defaults::server_data_dir")]
     pub data_dir: PathBuf,
     /// Built frontend served as the HTTP fallback.
-    #[serde(default = "default_static_dir")]
+    #[serde(default = "defaults::server_static_dir")]
     pub static_dir: PathBuf,
-}
-
-fn default_host() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_port() -> u16 {
-    8000
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: default_host(),
-            port: default_port(),
-            debug: false,
-            reset_admin_password: false,
-            data_dir: default_data_dir(),
-            static_dir: default_static_dir(),
+            host: defaults::server_host(),
+            port: defaults::SERVER_PORT,
+            debug: defaults::SERVER_DEBUG,
+            reset_admin_password: defaults::SERVER_RESET_ADMIN_PASSWORD,
+            data_dir: defaults::server_data_dir(),
+            static_dir: defaults::server_static_dir(),
         }
     }
-}
-
-fn default_data_dir() -> PathBuf {
-    PathBuf::from("/data")
-}
-
-fn default_static_dir() -> PathBuf {
-    PathBuf::from("/app/static")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
-    #[serde(default = "default_secret_key")]
+    #[serde(default = "defaults::security_secret_key")]
     pub secret_key: String,
-    #[serde(default = "default_access_token_expire_minutes")]
+    #[serde(default = "defaults::access_token_expire_minutes")]
     pub access_token_expire_minutes: i64,
-    #[serde(default = "default_refresh_token_expire_days")]
+    #[serde(default = "defaults::refresh_token_expire_days")]
     pub refresh_token_expire_days: i64,
-}
-
-fn default_secret_key() -> String {
-    "change-me-in-production-use-openssl-rand-hex-32".to_string()
-}
-
-fn default_access_token_expire_minutes() -> i64 {
-    30
-}
-
-fn default_refresh_token_expire_days() -> i64 {
-    7
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            secret_key: default_secret_key(),
-            access_token_expire_minutes: default_access_token_expire_minutes(),
-            refresh_token_expire_days: default_refresh_token_expire_days(),
+            secret_key: defaults::security_secret_key(),
+            access_token_expire_minutes: defaults::ACCESS_TOKEN_EXPIRE_MINUTES,
+            refresh_token_expire_days: defaults::REFRESH_TOKEN_EXPIRE_DAYS,
         }
     }
 }
@@ -97,62 +72,34 @@ impl Default for SecurityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebDAVConfig {
-    #[serde(default = "default_webdav_mount_path")]
+    #[serde(default = "defaults::webdav_mount_path")]
     pub mount_path: String,
-    #[serde(default = "default_webdav_realm")]
+    #[serde(default = "defaults::webdav_realm")]
     pub realm: String,
-    #[serde(default = "default_max_upload_bytes")]
+    #[serde(default = "defaults::webdav_max_upload_bytes")]
     pub max_upload_bytes: u64,
-    #[serde(default = "default_max_concurrent_requests")]
+    #[serde(default = "defaults::webdav_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
-    #[serde(default = "default_poll_interval")]
+    #[serde(default = "defaults::webdav_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_stable_file_age")]
+    #[serde(default = "defaults::webdav_stable_file_age_seconds")]
     pub stable_file_age_seconds: u64,
-    #[serde(default = "default_max_concurrent_processing")]
+    #[serde(default = "defaults::webdav_max_concurrent_processing")]
     pub max_concurrent_processing: usize,
-}
-
-fn default_webdav_mount_path() -> String {
-    "/webdav".to_string()
-}
-
-fn default_webdav_realm() -> String {
-    "Momento WebDAV".to_string()
 }
 
 impl Default for WebDAVConfig {
     fn default() -> Self {
         Self {
-            mount_path: default_webdav_mount_path(),
-            realm: default_webdav_realm(),
-            max_upload_bytes: default_max_upload_bytes(),
-            max_concurrent_requests: default_max_concurrent_requests(),
-            poll_interval_seconds: default_poll_interval(),
-            stable_file_age_seconds: default_stable_file_age(),
-            max_concurrent_processing: default_max_concurrent_processing(),
+            mount_path: defaults::webdav_mount_path(),
+            realm: defaults::webdav_realm(),
+            max_upload_bytes: defaults::WEBDAV_MAX_UPLOAD_BYTES,
+            max_concurrent_requests: defaults::WEBDAV_MAX_CONCURRENT_REQUESTS,
+            poll_interval_seconds: defaults::WEBDAV_POLL_INTERVAL_SECONDS,
+            stable_file_age_seconds: defaults::WEBDAV_STABLE_FILE_AGE_SECONDS,
+            max_concurrent_processing: defaults::WEBDAV_MAX_CONCURRENT_PROCESSING,
         }
     }
-}
-
-fn default_max_upload_bytes() -> u64 {
-    10 * 1024 * 1024 * 1024
-}
-
-fn default_max_concurrent_requests() -> usize {
-    16
-}
-
-fn default_poll_interval() -> u64 {
-    5
-}
-
-fn default_stable_file_age() -> u64 {
-    10
-}
-
-fn default_max_concurrent_processing() -> usize {
-    2
 }
 
 impl WebDAVConfig {
@@ -192,95 +139,61 @@ impl WebDAVConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataConfig {
-    #[serde(default = "default_thumbnails_max_size")]
+    #[serde(default = "defaults::thumbnails_max_size")]
     pub thumbnails_max_size: u32,
-    #[serde(default = "default_thumbnails_tiny_size")]
+    #[serde(default = "defaults::thumbnails_tiny_size")]
     pub thumbnails_tiny_size: u32,
-    #[serde(default = "default_thumbnails_quality")]
+    #[serde(default = "defaults::thumbnails_quality")]
     pub thumbnails_quality: u8,
-    #[serde(default = "default_thumbnails_video_frame_quality")]
+    #[serde(default = "defaults::thumbnails_video_frame_quality")]
     pub thumbnails_video_frame_quality: u8,
-}
-
-fn default_thumbnails_max_size() -> u32 {
-    DEFAULT_THUMBNAIL_SIZE
-}
-
-fn default_thumbnails_tiny_size() -> u32 {
-    DEFAULT_TINY_THUMBNAIL_SIZE
-}
-
-fn default_thumbnails_quality() -> u8 {
-    DEFAULT_THUMBNAIL_QUALITY
-}
-
-fn default_thumbnails_video_frame_quality() -> u8 {
-    DEFAULT_VIDEO_FRAME_QUALITY
 }
 
 impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
-            thumbnails_max_size: default_thumbnails_max_size(),
-            thumbnails_tiny_size: default_thumbnails_tiny_size(),
-            thumbnails_quality: default_thumbnails_quality(),
-            thumbnails_video_frame_quality: default_thumbnails_video_frame_quality(),
+            thumbnails_max_size: defaults::fallback::THUMBNAILS_MAX_SIZE,
+            thumbnails_tiny_size: defaults::fallback::THUMBNAILS_TINY_SIZE,
+            thumbnails_quality: defaults::fallback::THUMBNAILS_QUALITY,
+            thumbnails_video_frame_quality: defaults::fallback::THUMBNAILS_VIDEO_FRAME_QUALITY,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegenerateConfig {
-    #[serde(default = "default_regenerate_num_cpus")]
+    #[serde(default = "defaults::fallback::regenerate_num_cpus")]
     pub num_cpus: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataWorkerConfig {
-    #[serde(default = "default_metadata_poll_interval_seconds")]
+    #[serde(default = "defaults::metadata_worker_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_metadata_concurrency")]
+    #[serde(default = "defaults::fallback::metadata_worker_concurrency")]
     pub concurrency: usize,
-    #[serde(default = "default_metadata_lease_seconds")]
+    #[serde(default = "defaults::metadata_worker_lease_seconds")]
     pub lease_seconds: u64,
-    #[serde(default = "default_metadata_max_attempts")]
+    #[serde(default = "defaults::metadata_worker_max_attempts")]
     pub max_attempts: u32,
-}
-
-fn default_metadata_poll_interval_seconds() -> u64 {
-    10
-}
-
-fn default_metadata_concurrency() -> usize {
-    num_cpus::get()
-}
-fn default_metadata_lease_seconds() -> u64 {
-    300
-}
-fn default_metadata_max_attempts() -> u32 {
-    5
 }
 
 impl Default for MetadataWorkerConfig {
     fn default() -> Self {
         Self {
-            poll_interval_seconds: default_metadata_poll_interval_seconds(),
-            concurrency: default_metadata_concurrency(),
-            lease_seconds: default_metadata_lease_seconds(),
-            max_attempts: default_metadata_max_attempts(),
+            poll_interval_seconds: defaults::METADATA_WORKER_POLL_INTERVAL_SECONDS,
+            concurrency: defaults::fallback::metadata_worker_concurrency(),
+            lease_seconds: defaults::METADATA_WORKER_LEASE_SECONDS,
+            max_attempts: defaults::METADATA_WORKER_MAX_ATTEMPTS,
         }
     }
-}
-
-fn default_regenerate_num_cpus() -> usize {
-    num_cpus::get()
 }
 
 impl Default for RegenerateConfig {
     fn default() -> Self {
         Self {
-            num_cpus: default_regenerate_num_cpus(),
+            num_cpus: defaults::fallback::regenerate_num_cpus(),
         }
     }
 }
@@ -288,67 +201,47 @@ impl Default for RegenerateConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmConfig {
-    #[serde(default)]
+    #[serde(default = "defaults::llm_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_llm_service_url")]
+    #[serde(default = "defaults::llm_service_url")]
     pub service_url: String,
-    #[serde(default)]
+    #[serde(default = "defaults::llm_client_id")]
     pub client_id: String,
-    #[serde(default)]
+    #[serde(default = "defaults::llm_api_key")]
     pub api_key: String,
-    #[serde(default)]
+    #[serde(default = "defaults::image_tagging_enabled")]
     pub image_tagging_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "defaults::deduplicate_enabled")]
     pub deduplicate_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "defaults::face_detection_enabled")]
     pub face_detection_enabled: bool,
-    #[serde(default = "default_face_group_similarity_threshold")]
+    #[serde(default = "defaults::face_group_similarity_threshold")]
     pub face_group_similarity_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CronjobConfig {
-    #[serde(default = "default_cronjob_timezone")]
+    #[serde(default = "defaults::cronjob_timezone")]
     pub timezone: String,
-    #[serde(default = "default_ocr_cron")]
+    #[serde(default = "defaults::ocr_cron")]
     pub ocr_cron: String,
-    #[serde(default = "default_image_tagging_cron")]
+    #[serde(default = "defaults::image_tagging_cron")]
     pub image_tagging_cron: String,
-    #[serde(default = "default_deduplicate_cron")]
+    #[serde(default = "defaults::deduplicate_cron")]
     pub deduplicate_cron: String,
-    #[serde(default = "default_face_detection_cron")]
+    #[serde(default = "defaults::face_detection_cron")]
     pub face_detection_cron: String,
-}
-
-fn default_cronjob_timezone() -> String {
-    "Etc/UTC".to_string()
-}
-
-fn default_ocr_cron() -> String {
-    "0 1 * * *".to_string()
-}
-
-fn default_image_tagging_cron() -> String {
-    "0 2 * * *".to_string()
-}
-
-fn default_deduplicate_cron() -> String {
-    "0 3 * * *".to_string()
-}
-
-fn default_face_detection_cron() -> String {
-    "0 4 * * *".to_string()
 }
 
 impl Default for CronjobConfig {
     fn default() -> Self {
         Self {
-            timezone: default_cronjob_timezone(),
-            ocr_cron: default_ocr_cron(),
-            image_tagging_cron: default_image_tagging_cron(),
-            deduplicate_cron: default_deduplicate_cron(),
-            face_detection_cron: default_face_detection_cron(),
+            timezone: defaults::cronjob_timezone(),
+            ocr_cron: defaults::ocr_cron(),
+            image_tagging_cron: defaults::image_tagging_cron(),
+            deduplicate_cron: defaults::deduplicate_cron(),
+            face_detection_cron: defaults::face_detection_cron(),
         }
     }
 }
@@ -373,25 +266,17 @@ impl CronjobConfig {
     }
 }
 
-fn default_llm_service_url() -> String {
-    "ws://127.0.0.1:8100/api/v1/llm/connect".to_string()
-}
-
-fn default_face_group_similarity_threshold() -> f32 {
-    0.55
-}
-
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            service_url: default_llm_service_url(),
-            client_id: String::new(),
-            api_key: String::new(),
-            image_tagging_enabled: false,
-            deduplicate_enabled: false,
-            face_detection_enabled: false,
-            face_group_similarity_threshold: default_face_group_similarity_threshold(),
+            enabled: defaults::fallback::LLM_ENABLED,
+            service_url: defaults::llm_service_url(),
+            client_id: defaults::fallback::LLM_CLIENT_ID.to_string(),
+            api_key: defaults::fallback::LLM_API_KEY.to_string(),
+            image_tagging_enabled: defaults::fallback::IMAGE_TAGGING_ENABLED,
+            deduplicate_enabled: defaults::fallback::DEDUPLICATE_ENABLED,
+            face_detection_enabled: defaults::fallback::FACE_DETECTION_ENABLED,
+            face_group_similarity_threshold: defaults::FACE_GROUP_SIMILARITY_THRESHOLD,
         }
     }
 }
@@ -399,23 +284,17 @@ impl Default for LlmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSubmissionWorkerConfig {
-    #[serde(default = "default_llm_submission_poll_interval_seconds")]
+    #[serde(default = "defaults::llm_submission_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "default_llm_submission_max_in_flight")]
+    #[serde(default = "defaults::llm_submission_max_in_flight")]
     pub max_in_flight: usize,
 }
 
-fn default_llm_submission_poll_interval_seconds() -> u64 {
-    5
-}
-fn default_llm_submission_max_in_flight() -> usize {
-    128
-}
 impl Default for LlmSubmissionWorkerConfig {
     fn default() -> Self {
         Self {
-            poll_interval_seconds: default_llm_submission_poll_interval_seconds(),
-            max_in_flight: default_llm_submission_max_in_flight(),
+            poll_interval_seconds: defaults::LLM_SUBMISSION_POLL_INTERVAL_SECONDS,
+            max_in_flight: defaults::LLM_SUBMISSION_MAX_IN_FLIGHT,
         }
     }
 }
@@ -513,7 +392,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
 }
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
-    write_new_config(config_path, DEFAULT_CONFIG_TEMPLATE)
+    write_new_config(config_path, default_config_template())
 }
 
 pub fn consume_admin_password_reset(

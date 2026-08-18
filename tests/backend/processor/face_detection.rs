@@ -236,11 +236,16 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
 }
 
 #[test]
-fn face_group_representative_prioritizes_media_center_then_frontality() {
+fn face_group_representative_weights_frontality_over_center_proximity() {
     init_test_paths();
     let pool = create_test_db();
-    let media_ids = ["center.jpg", "frontal.jpg", "tie-low.jpg", "tie-high.jpg"]
-        .map(|filename| create_test_media(&pool, filename));
+    let media_ids = [
+        "center-low-frontality.jpg",
+        "near-center-frontal.jpg",
+        "center-frontal.jpg",
+        "edge-more-frontal.jpg",
+    ]
+    .map(|filename| create_test_media(&pool, filename));
     let first_embedding = [1.0_f32]
         .into_iter()
         .chain(std::iter::repeat_n(0.0_f32, 511))
@@ -252,31 +257,31 @@ fn face_group_representative_prioritizes_media_center_then_frontality() {
         .flat_map(f32::to_le_bytes)
         .collect::<Vec<_>>();
     let connection = pool.get().expect("connection");
-    let center_face_id = insert_face(
+    insert_face(
         &connection,
         media_ids[0],
         (0.4, 0.4, 0.2, 0.2),
         0.1,
         &first_embedding,
     );
-    insert_face(
+    let near_center_frontal_face_id = insert_face(
         &connection,
         media_ids[1],
         (0.41, 0.4, 0.2, 0.2),
         1.0,
         &first_embedding,
     );
-    insert_face(
+    let center_frontal_face_id = insert_face(
         &connection,
         media_ids[2],
-        (0.3, 0.4, 0.2, 0.2),
-        0.1,
+        (0.4, 0.4, 0.2, 0.2),
+        0.8,
         &second_embedding,
     );
-    let frontal_face_id = insert_face(
+    insert_face(
         &connection,
         media_ids[3],
-        (0.3, 0.4, 0.2, 0.2),
+        (0.0, 0.0, 0.2, 0.2),
         0.9,
         &second_embedding,
     );
@@ -287,23 +292,26 @@ fn face_group_representative_prioritizes_media_center_then_frontality() {
 
     face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize grouping");
     let connection = pool.get().expect("connection");
-    let center_group_representative: i64 = connection
+    let frontality_dominant_representative: i64 = connection
         .query_row(
             "SELECT face_groups.representative_face_id FROM face_groups JOIN face_group_members ON face_group_members.face_group_id = face_groups.id WHERE face_group_members.face_id = ?",
-            [center_face_id],
+            [near_center_frontal_face_id],
             |row| row.get(0),
         )
-        .expect("center group representative");
-    let tie_group_representative: i64 = connection
+        .expect("frontality-dominant group representative");
+    let center_weighted_representative: i64 = connection
         .query_row(
             "SELECT face_groups.representative_face_id FROM face_groups JOIN face_group_members ON face_group_members.face_group_id = face_groups.id WHERE face_group_members.face_id = ?",
-            [frontal_face_id],
+            [center_frontal_face_id],
             |row| row.get(0),
         )
-        .expect("tie group representative");
+        .expect("center-weighted group representative");
 
-    assert_eq!(center_group_representative, center_face_id);
-    assert_eq!(tie_group_representative, frontal_face_id);
+    assert_eq!(
+        frontality_dominant_representative,
+        near_center_frontal_face_id
+    );
+    assert_eq!(center_weighted_representative, center_frontal_face_id);
 }
 
 #[test]

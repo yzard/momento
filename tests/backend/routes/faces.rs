@@ -11,6 +11,52 @@ fn token(user_id: i64, role: &str) -> String {
     create_access_token(user_id, "faces", role, &Config::default(), None).expect("token")
 }
 
+#[test]
+fn inaccessible_representative_uses_weighted_visible_face_score() {
+    let (_, pool) = create_test_app();
+    let viewer_id = create_test_user(&pool, "thumbnail-viewer", "thumbnail@example.com");
+    let hidden_media_id = create_test_media(&pool, "hidden-representative.jpg");
+    let center_media_id = create_test_media(&pool, "center-low-frontality.jpg");
+    let frontal_media_id = create_test_media(&pool, "near-center-frontal.jpg");
+    grant_media_access(&pool, center_media_id, viewer_id);
+    grant_media_access(&pool, frontal_media_id, viewer_id);
+    let connection = pool.get().expect("connection");
+    let mut face_ids = Vec::new();
+    for (media_id, face_x, frontality, crop_path) in [
+        (hidden_media_id, 0.4, 1.0, "faces/hidden.jpg"),
+        (center_media_id, 0.4, 0.1, "faces/center.jpg"),
+        (frontal_media_id, 0.41, 1.0, "faces/frontal.jpg"),
+    ] {
+        connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, ?, 0.4, 0.2, 0.2, 1, 1, ?, X'00000000', ?)", rusqlite::params![media_id, face_x, frontality, crop_path]).expect("face");
+        face_ids.push(connection.last_insert_rowid());
+    }
+    connection
+        .execute(
+            "INSERT INTO face_groups (representative_face_id) VALUES (?)",
+            [face_ids[0]],
+        )
+        .expect("group");
+    let group_id = connection.last_insert_rowid();
+    for face_id in face_ids {
+        connection
+            .execute(
+                "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+                [group_id, face_id],
+            )
+            .expect("group member");
+    }
+
+    let crop_path: String = connection
+        .query_row(
+            momento_api::database::queries::faces::SELECT_CROP,
+            rusqlite::params![group_id, viewer_id],
+            |row| row.get(0),
+        )
+        .expect("visible representative crop");
+
+    assert_eq!(crop_path, "faces/frontal.jpg");
+}
+
 #[tokio::test]
 async fn face_groups_are_paginated_by_descending_media_count() {
     let (app, pool) = create_test_app();

@@ -3,56 +3,56 @@
 
 [server]
 # llm-service is reached by Momento over the private container network.
-host = "0.0.0.0"
-port = 8100
+host = "{{SERVER_HOST}}"
+port = {{SERVER_PORT}}
 # This must exactly match llm.api_key in the Momento config.toml.
-api_key = "change-me-llm-service-key"
+api_key = "{{SERVER_API_KEY}}"
 # Queue and runtime cache data live below data_dir/llm; logs live below data_dir/logs.
-data_dir = "/data"
+data_dir = "{{SERVER_DATA_DIR}}"
 
 [scheduler]
 # The scheduler drains one task type at a time to keep its model runtime warm.
-poll_interval_seconds = 5
-idle_shutdown_seconds = 60
-max_in_flight_jobs = 128
-runtime_max_attempts = 3
+poll_interval_seconds = {{SCHEDULER_POLL_INTERVAL_SECONDS}}
+idle_shutdown_seconds = {{SCHEDULER_IDLE_SHUTDOWN_SECONDS}}
+max_in_flight_jobs = {{SCHEDULER_MAX_IN_FLIGHT_JOBS}}
+runtime_max_attempts = {{SCHEDULER_RUNTIME_MAX_ATTEMPTS}}
 # Durable results are retried until Momento acknowledges persistence.
-result_delivery_acknowledgement_timeout_seconds = 30
-result_delivery_retry_delay_seconds = 30
-result_delivery_max_attempts = 10
-result_delivery_max_concurrent_deliveries = 16
+result_delivery_acknowledgement_timeout_seconds = {{RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS}}
+result_delivery_retry_delay_seconds = {{RESULT_DELIVERY_RETRY_DELAY_SECONDS}}
+result_delivery_max_attempts = {{RESULT_DELIVERY_MAX_ATTEMPTS}}
+result_delivery_max_concurrent_deliveries = {{RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES}}
 
 [[service]]
 # Unlimited-OCR through the image-owned vLLM runtime.
-enabled = true
+enabled = {{SERVICE_ENABLED}}
 model_type = "ocr"
-startup_timeout_seconds = 1800
-request_timeout_seconds = 1800
-max_tokens = 8192
-max_concurrent_jobs = 100
+startup_timeout_seconds = {{OCR_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{OCR_REQUEST_TIMEOUT_SECONDS}}
+max_tokens = {{OCR_MAX_TOKENS}}
+max_concurrent_jobs = {{OCR_MAX_CONCURRENT_JOBS}}
 
 [[service]]
 # RAM++ image tagging.
-enabled = true
+enabled = {{SERVICE_ENABLED}}
 model_type = "image_tagging"
-startup_timeout_seconds = 900
-request_timeout_seconds = 180
-max_concurrent_jobs = 16
+startup_timeout_seconds = {{IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS}}
+max_concurrent_jobs = {{IMAGE_TAGGING_MAX_CONCURRENT_JOBS}}
 
 [[service]]
 # DINOv2 embeddings and perceptual hashes used by deduplication.
-enabled = true
+enabled = {{SERVICE_ENABLED}}
 model_type = "image_clustering"
-startup_timeout_seconds = 900
-request_timeout_seconds = 180
-max_concurrent_jobs = 32
+startup_timeout_seconds = {{IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS}}
+max_concurrent_jobs = {{IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS}}
 
 [[service]]
 # InsightFace detection and embeddings. Resolution is measured on each face box.
-enabled = true
+enabled = {{SERVICE_ENABLED}}
 model_type = "face_detection"
-startup_timeout_seconds = 900
-request_timeout_seconds = 180
-max_concurrent_jobs = 16
-minimum_face_likelihood = 0.60
-minimum_face_resolution_pixels = 100
+startup_timeout_seconds = {{FACE_DETECTION_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{FACE_DETECTION_REQUEST_TIMEOUT_SECONDS}}
+max_concurrent_jobs = {{FACE_DETECTION_MAX_CONCURRENT_JOBS}}
+minimum_face_likelihood = {{MINIMUM_FACE_LIKELIHOOD}}
+minimum_face_resolution_pixels = {{MINIMUM_FACE_RESOLUTION_PIXELS}}
