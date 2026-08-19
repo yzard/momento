@@ -2,6 +2,7 @@ services:
   momento-api:
     container_name: momento-api
     image: zhuoyin/momento:latest
+    restart: unless-stopped
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
@@ -11,22 +12,20 @@ services:
       SECRET_KEY: "${SECRET_KEY:-playground-only-change-this-secret-before-exposing-the-server}"
       LLM_SERVICE_API_KEY: "${LLM_SERVICE_API_KEY:-change-me-llm-service-key}"
       LLM_SERVICE_ADDRESS: "momento-llm-service:8100"
-    volumes:
-      - "${MOMENTO_DATA_DIR:-./data}:/data"
     ports:
       - "8000:8000"
+    volumes:
+      - "${MOMENTO_DATA_DIR:-./data}:/data"
     networks:
       - momento
     depends_on:
       momento-llm-service:
-        condition: service_healthy
-    init: true
-    stop_grace_period: 30s
-    restart: unless-stopped
+        condition: service_started
 
   momento-llm-service:
     container_name: momento-llm-service
     image: zhuoyin/momento-llm-service:latest
+    restart: unless-stopped
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
@@ -39,14 +38,6 @@ services:
       - momento
     gpus: all
     shm_size: "8gb"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8100/ready"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 10s
-    stop_grace_period: 45s
-    restart: unless-stopped
 
 networks:
   momento:

@@ -35,6 +35,7 @@ RUN apk add --no-cache \
     imagemagick \
     exiftool \
     su-exec \
+    tini \
     tzdata \
     libheif
 
@@ -56,5 +57,5 @@ EXPOSE 8000
 
 # The server reads no environment variables: server.data_dir (/data) and
 # server.static_dir (/app/static) come from the config file the entrypoint generates.
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
 CMD ["/app/momento-api", "-c", "/data/config.toml"]
