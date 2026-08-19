@@ -8,9 +8,9 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../../../src/frontend/api/media', () => ({ mediaApi: mocks }))
 
-import { placeBatchLoader } from '../../../src/frontend/utils/batcher'
+import { batchLoader } from '../../../src/frontend/utils/batcher'
 
-describe('placeBatchLoader', () => {
+describe('batchLoader', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     mocks.getCachedThumbnailUrl.mockReset().mockReturnValue(undefined)
@@ -20,12 +20,12 @@ describe('placeBatchLoader', () => {
 
   afterEach(() => vi.useRealTimers())
 
-  it('batches representative thumbnails using the place size', async () => {
-    const thumbnailPromise = placeBatchLoader.load(42)
+  it('batches normal media thumbnails', async () => {
+    const thumbnailPromise = batchLoader.load(42)
     await vi.runAllTimersAsync()
 
     await expect(thumbnailPromise).resolves.toBe('place-thumbnail')
-    expect(mocks.getCachedThumbnailUrl).toHaveBeenCalledWith(42, 'place')
-    expect(mocks.getThumbnailBatch).toHaveBeenCalledWith([42], 'place')
+    expect(mocks.getCachedThumbnailUrl).toHaveBeenCalledWith(42, 'normal')
+    expect(mocks.getThumbnailBatch).toHaveBeenCalledWith([42], 'normal')
   })
 })

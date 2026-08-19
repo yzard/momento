@@ -1043,7 +1043,6 @@ async fn get_media_thumbnail_batch(
     let thumbnail_base_dir = match request.size {
         ThumbnailSize::Normal => &paths().thumbnails,
         ThumbnailSize::Tiny => &paths().thumbnails_tiny,
-        ThumbnailSize::Place => &paths().thumbnails_places,
     };
 
     let rows: Vec<(i64, Option<String>, String, String, i64)> = fetch_all(
@@ -1070,21 +1069,7 @@ async fn get_media_thumbnail_batch(
     let mut thumbnails: HashMap<i64, Option<String>> = HashMap::new();
 
     for (media_id, thumbnail_path, file_path, _media_type, _user_id) in rows {
-        let stem = PathBuf::from(&file_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("thumb")
-            .to_string();
-
-        let thumbnail_relative = thumbnail_path.clone().unwrap_or_else(|| {
-            let parent = PathBuf::from(&file_path)
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            format!("{}/{}.jpg", parent, stem)
-        });
+        let thumbnail_relative = thumbnail_relative_path(thumbnail_path.as_deref(), &file_path);
 
         let full_path = thumbnail_base_dir.join(&thumbnail_relative);
 
@@ -1103,6 +1088,23 @@ async fn get_media_thumbnail_batch(
     }
 
     Ok(Json(ThumbnailBatchResponse { thumbnails }))
+}
+
+pub(super) fn thumbnail_relative_path(thumbnail_path: Option<&str>, file_path: &str) -> PathBuf {
+    if let Some(thumbnail_path) = thumbnail_path {
+        return PathBuf::from(thumbnail_path);
+    }
+    let source_path = PathBuf::from(file_path);
+    let parent = source_path
+        .parent()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let stem = source_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("thumb");
+    PathBuf::from(parent).join(format!("{stem}.jpg"))
 }
 
 async fn get_media_preview_batch(

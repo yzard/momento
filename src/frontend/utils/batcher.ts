@@ -122,5 +122,4 @@ class PreviewBatcher {
 
 export const batchLoader = new ThumbnailBatcher('normal')
 export const tinyBatchLoader = new ThumbnailBatcher('tiny')
-export const placeBatchLoader = new ThumbnailBatcher('place')
 export const previewBatchLoader = new PreviewBatcher()

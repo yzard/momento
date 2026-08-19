@@ -1,12 +1,17 @@
 use axum::{extract::State, routing::post, Json, Router};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AppState, CurrentUser};
+use crate::constants::paths;
 use crate::database::{fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    PlaceGetRequest, PlaceGetResponse, PlaceSummary, PlacesListRequest, PlacesListResponse,
+    PlaceGetRequest, PlaceGetResponse, PlaceSummary, PlaceThumbnailRequest, PlaceThumbnailResponse,
+    PlacesListRequest, PlacesListResponse,
 };
 
 use super::media::map_media_row;
@@ -26,13 +31,44 @@ struct PlaceRow {
     state: Option<String>,
     country: String,
     media_count: i64,
-    representative_media_id: i64,
 }
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/places/list", post(list_places))
         .route("/places/get", post(get_place))
+        .route("/places/thumbnail", post(get_place_thumbnail))
+}
+
+async fn get_place_thumbnail(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<PlaceThumbnailRequest>,
+) -> AppResult<Json<PlaceThumbnailResponse>> {
+    let identity = decode_place_id(&request.place_id)?;
+    let connection = state.pool.get()?;
+    let cover_query = queries::places::select_cover_query();
+    let cover = fetch_one(
+        &connection,
+        &cover_query,
+        &[
+            &current_user.id,
+            &identity.city,
+            &identity.state,
+            &identity.country,
+        ],
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+    )?
+    .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
+    drop(connection);
+    let thumbnail_relative = super::media::thumbnail_relative_path(cover.0.as_deref(), &cover.1);
+    let thumbnail_path = paths().thumbnails_places.join(thumbnail_relative);
+    let thumbnail = match tokio::fs::read(thumbnail_path).await {
+        Ok(bytes) => Some(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Json(PlaceThumbnailResponse { thumbnail }))
 }
 
 async fn list_places(
@@ -126,7 +162,6 @@ fn map_place_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaceRow> {
         state: row.get(1)?,
         country: row.get(2)?,
         media_count: row.get(3)?,
-        representative_media_id: row.get(4)?,
     })
 }
 
@@ -143,7 +178,6 @@ fn place_summary(row: PlaceRow) -> AppResult<PlaceSummary> {
         state: identity.state,
         country: identity.country,
         media_count: row.media_count,
-        representative_media_id: row.representative_media_id,
     })
 }
 

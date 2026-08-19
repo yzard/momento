@@ -5,6 +5,8 @@ import AiPanel from '../components/admin/AiPanel'
 import { Database, Users, ShieldCheck, FileText } from 'lucide-react'
 
 export default function Admin() {
+  const webdavUrl = new URL('/webdav/', window.location.origin).toString()
+
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
     <div className="max-w-7xl mx-auto animate-fade-in px-6 md:px-10 py-6 md:py-10">
@@ -20,35 +22,40 @@ export default function Admin() {
       </div>
 
         <div className="space-y-12">
-         <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
-            <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">
+          <div className="grid gap-6 md:grid-cols-[minmax(15rem,0.72fr)_minmax(0,1.5fr)] md:items-start">
+           <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden">
+            <div className="px-6 py-5 border-b border-border bg-muted/30 flex items-center gap-3">
                 <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
                     <Database className="w-5 h-5" />
                 </div>
                 <div>
-                    <h2 className="text-xl font-display font-semibold text-foreground">Import Media</h2>
-                    <p className="text-sm text-muted-foreground">Import photos and videos from external sources.</p>
+                    <h2 className="text-lg font-display font-semibold text-foreground">Local Import</h2>
                 </div>
             </div>
-            <div className="p-8">
-                 <ImportPanel />
+            <div className="p-6">
+                  <div className="mb-5 space-y-2 text-sm text-muted-foreground">
+                    <p>Place media in <code className="font-mono text-xs text-foreground">/data/imports/</code>.</p>
+                    <p>For WebDAV uploads, connect to <code className="break-all font-mono text-xs text-foreground">{webdavUrl}</code> with your Momento username and password.</p>
+                  </div>
+                  <ImportPanel />
             </div>
-        </section>
+           </section>
 
-        <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
-            <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">
+           <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden">
+            <div className="px-6 py-5 border-b border-border bg-muted/30 flex items-center gap-3">
                 <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
                     <FileText className="w-5 h-5" />
                 </div>
                 <div>
-                    <h2 className="text-xl font-display font-semibold text-foreground">Metadata</h2>
-                    <p className="text-sm text-muted-foreground">Manage photo and video metadata and thumbnails.</p>
+                    <h2 className="text-lg font-display font-semibold text-foreground">Metadata</h2>
+                    <p className="text-sm text-muted-foreground">Generate metadata.</p>
                 </div>
             </div>
-             <div className="p-8">
-                  <MetadataPanel />
+             <div className="p-6">
+                   <MetadataPanel />
              </div>
-        </section>
+           </section>
+          </div>
 
         <AiPanel />
 

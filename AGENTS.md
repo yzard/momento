@@ -475,7 +475,10 @@ Metadata generates a separate aspect-preserving place thumbnail and uses it as t
 aesthetic inference and combines aesthetic 40%, scenic 25%, simplicity 20%, landscape 10%, and
 technical quality 5%, then applies OCR-clutter and dominant-face penalties. Media without an
 aesthetic result use a deterministic landscape, capture-date, and media-ID fallback. A user's place
-cover is always selected only from media visible to that user.
+cover is always selected only from media visible to that user. Place cover selection is never
+stored or cached as a representative media ID. Every place-thumbnail request reruns the ranking
+against current metadata, aesthetic results, and active `media_access`, so changed membership is
+visible on the next request.
 
 `schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
 breaking schema changes require a fresh database for development and playground data.

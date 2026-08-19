@@ -26,7 +26,7 @@ type GroupBy = 'year' | 'month' | 'week' | 'day'
 type MediaTypeFilter = 'image' | 'video'
 type TimelineClassification = 'screenshot' | 'document'
 type TimelineDirection = 'older' | 'newer'
-type ThumbnailSize = 'normal' | 'tiny' | 'place'
+type ThumbnailSize = 'normal' | 'tiny'
 
 export type { MediaTypeFilter, ThumbnailSize, TimelineClassification }
 

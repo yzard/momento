@@ -12,8 +12,7 @@ const mocks = vi.hoisted(() => ({
   lightbox: vi.fn(),
 }))
 
-vi.mock('../../../src/frontend/api/places', () => ({ placesApi: { list: mocks.list, get: mocks.get } }))
-vi.mock('../../../src/frontend/utils/batcher', () => ({ placeBatchLoader: { load: mocks.loadThumbnail } }))
+vi.mock('../../../src/frontend/api/places', () => ({ placesApi: { list: mocks.list, get: mocks.get, getThumbnail: mocks.loadThumbnail } }))
 vi.mock('../../../src/frontend/components/timeline/PhotoGrid', () => ({
   default: ({ media, onPhotoClick }: { media: Array<{ id: number }>; onPhotoClick: (media: { id: number }) => void }) => {
     mocks.photoGrid(media)
@@ -82,8 +81,8 @@ describe('Places page', () => {
   it('shows responsive place cards with lazy representative thumbnails and accessible labels', async () => {
     mocks.list.mockResolvedValue({
       places: [
-        { placeId: 'paris-france', city: 'Paris', state: 'Ile-de-France', country: 'France', mediaCount: 8, representativeMediaId: 41 },
-        { placeId: 'tokyo-japan', city: 'Tokyo', state: null, country: 'Japan', mediaCount: 3, representativeMediaId: 52 },
+        { placeId: 'paris-france', city: 'Paris', state: 'Ile-de-France', country: 'France', mediaCount: 8 },
+        { placeId: 'tokyo-japan', city: 'Tokyo', state: null, country: 'Japan', mediaCount: 3 },
       ],
       nextCursor: null,
       hasMore: false,
@@ -103,14 +102,14 @@ describe('Places page', () => {
       cardObserver?.callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver)
     })
 
-    await waitFor(() => expect(mocks.loadThumbnail).toHaveBeenCalledWith(41))
+    await waitFor(() => expect(mocks.loadThumbnail).toHaveBeenCalledWith('paris-france'))
     await waitFor(() => expect(parisCard.querySelector('img')?.getAttribute('loading')).toBe('lazy'))
   })
 
   it('loads subsequent place pages when the sentinel approaches', async () => {
     mocks.list
-      .mockResolvedValueOnce({ places: [{ placeId: 'paris-france', city: 'Paris', state: null, country: 'France', mediaCount: 8, representativeMediaId: 41 }], nextCursor: 'place-100', hasMore: true })
-      .mockResolvedValueOnce({ places: [{ placeId: 'tokyo-japan', city: 'Tokyo', state: null, country: 'Japan', mediaCount: 3, representativeMediaId: 52 }], nextCursor: null, hasMore: false })
+      .mockResolvedValueOnce({ places: [{ placeId: 'paris-france', city: 'Paris', state: null, country: 'France', mediaCount: 8 }], nextCursor: 'place-100', hasMore: true })
+      .mockResolvedValueOnce({ places: [{ placeId: 'tokyo-japan', city: 'Tokyo', state: null, country: 'Japan', mediaCount: 3 }], nextCursor: null, hasMore: false })
     renderPlaces()
     await screen.findByRole('link', { name: 'Paris, France, 8 media' })
     await waitFor(() => expect(observedElements.some(({ target }) => target.tagName === 'DIV')).toBe(true))
@@ -125,7 +124,7 @@ describe('Places page', () => {
   })
 
   it('accumulates detail media in API order and opens the existing lightbox at the selected index', async () => {
-    const place = { placeId: 'paris-france', city: 'Paris', state: null, country: 'France', mediaCount: 3, representativeMediaId: 41 }
+    const place = { placeId: 'paris-france', city: 'Paris', state: null, country: 'France', mediaCount: 3 }
     mocks.get
       .mockResolvedValueOnce({ place, media: [{ id: 10 }, { id: 11 }], nextCursor: 'media-11', hasMore: true })
       .mockResolvedValueOnce({ place, media: [{ id: 12 }], nextCursor: null, hasMore: false })

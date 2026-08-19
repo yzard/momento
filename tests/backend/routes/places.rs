@@ -2,6 +2,7 @@ use axum::http::header::AUTHORIZATION;
 use axum_test::TestServer;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
+use momento_api::constants::paths;
 use serde_json::{json, Value};
 
 use crate::test_utils::{create_test_app, create_test_media, create_test_user, grant_media_access};
@@ -34,6 +35,21 @@ fn insert_aesthetics(pool: &momento_api::database::DbPool, media_id: i64, score:
             rusqlite::params![media_id, score, score, score, score, score],
         )
         .expect("aesthetics");
+}
+
+fn set_place_thumbnail(pool: &momento_api::database::DbPool, media_id: i64, bytes: &[u8]) {
+    let relative_path = format!("{media_id}/thumbnail.jpg");
+    pool.get()
+        .expect("connection")
+        .execute(
+            "UPDATE media_metadata SET thumbnail_path = ? WHERE media_id = ?",
+            rusqlite::params![relative_path, media_id],
+        )
+        .expect("thumbnail path");
+    let thumbnail_path = paths().thumbnails_places.join(&relative_path);
+    std::fs::create_dir_all(thumbnail_path.parent().expect("thumbnail parent"))
+        .expect("thumbnail directory");
+    std::fs::write(thumbnail_path, bytes).expect("place thumbnail");
 }
 
 #[tokio::test]
@@ -116,6 +132,8 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
     }
     insert_aesthetics(&pool, iconic_media, 0.8);
     insert_aesthetics(&pool, cluttered_media, 0.9);
+    set_place_thumbnail(&pool, iconic_media, &[1, 2, 3]);
+    set_place_thumbnail(&pool, cluttered_media, &[4, 5, 6]);
     let connection = pool.get().expect("connection");
     connection
         .execute(
@@ -135,9 +153,54 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
         .await;
     list.assert_status_ok();
     let list = list.json::<Value>();
-    assert_eq!(list["places"][0]["representativeMediaId"], iconic_media);
+    assert!(list["places"][0].get("representativeMediaId").is_none());
     assert_eq!(list["places"][0]["mediaCount"], 2);
     let place_id = list["places"][0]["placeId"].as_str().expect("place ID");
+
+    let initial_thumbnail = server
+        .post("/api/v1/places/thumbnail")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({"placeId": place_id}))
+        .await;
+    initial_thumbnail.assert_status_ok();
+    assert_eq!(
+        initial_thumbnail.json::<Value>()["thumbnail"],
+        "data:image/jpeg;base64,AQID"
+    );
+
+    let new_best_media = create_test_media(&pool, "new-best.jpg");
+    set_place(&pool, new_best_media, "Paris", None, "France");
+    grant_media_access(&pool, new_best_media, user_id);
+    insert_aesthetics(&pool, new_best_media, 1.0);
+    set_place_thumbnail(&pool, new_best_media, &[7, 8, 9]);
+    let updated_thumbnail = server
+        .post("/api/v1/places/thumbnail")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({"placeId": place_id}))
+        .await;
+    updated_thumbnail.assert_status_ok();
+    assert_eq!(
+        updated_thumbnail.json::<Value>()["thumbnail"],
+        "data:image/jpeg;base64,BwgJ"
+    );
+
+    pool.get()
+        .expect("connection")
+        .execute(
+            "UPDATE media_access SET deleted_at = CURRENT_TIMESTAMP WHERE media_id = ? AND user_id = ?",
+            rusqlite::params![new_best_media, user_id],
+        )
+        .expect("remove access");
+    let thumbnail_after_delete = server
+        .post("/api/v1/places/thumbnail")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({"placeId": place_id}))
+        .await;
+    thumbnail_after_delete.assert_status_ok();
+    assert_eq!(
+        thumbnail_after_delete.json::<Value>()["thumbnail"],
+        "data:image/jpeg;base64,AQID"
+    );
 
     let first_page = server
         .post("/api/v1/places/get")

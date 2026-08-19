@@ -7,7 +7,6 @@ export interface PlaceSummary {
   state: string | null
   country: string
   mediaCount: number
-  representativeMediaId: number
 }
 
 export interface PlacesListRequest {
@@ -43,5 +42,12 @@ export const placesApi = {
   get: async (request: PlaceGetRequest): Promise<PlaceGetResponse> => {
     const response = await apiClient.post<PlaceGetResponse>('/places/get', request)
     return response.data
+  },
+
+  getThumbnail: async (placeId: string): Promise<string | null> => {
+    const response = await apiClient.post<{ thumbnail: string | null }>('/places/thumbnail', {
+      placeId,
+    })
+    return response.data.thumbnail
   },
 }

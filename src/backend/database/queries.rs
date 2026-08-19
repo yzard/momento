@@ -308,6 +308,8 @@ pub mod places {
          , mm.location_state AS state
          , mm.location_country AS country
          , mm.date_taken
+         , mm.thumbnail_path
+         , m.file_path
          , CASE WHEN aesthetics.media_id IS NULL THEN 0 ELSE 1 END AS has_aesthetics
          , CASE
                WHEN aesthetics.media_id IS NOT NULL THEN
@@ -345,28 +347,14 @@ pub mod places {
     "#;
 
     const SELECT_PAGE: &str = r#"
-    , ranked AS (
-        SELECT id
-             , city
-             , state
-             , country
-             , COUNT(*) OVER (PARTITION BY city, state, country) AS media_count
-             , ROW_NUMBER() OVER (
-                   PARTITION BY city, state, country
-                   ORDER BY has_aesthetics DESC
-                          , cover_score DESC
-                          , COALESCE(date_taken, '') DESC
-                          , id ASC
-               ) AS cover_rank
-          FROM candidates
-    )
     SELECT city
          , state
          , country
-         , media_count
-         , id AS representative_media_id
-      FROM ranked
-     WHERE cover_rank = 1
+         , COUNT(*) AS media_count
+      FROM candidates
+  GROUP BY city
+         , state
+         , country
      ORDER BY media_count DESC
             , city ASC
             , CASE WHEN state IS NULL THEN 0 ELSE 1 END ASC
@@ -381,17 +369,19 @@ pub mod places {
          , state
          , country
          , COUNT(*) AS media_count
-         , (
-               SELECT ranked.id
-                 FROM candidates AS ranked
-                ORDER BY ranked.has_aesthetics DESC
-                       , ranked.cover_score DESC
-                       , COALESCE(ranked.date_taken, '') DESC
-                       , ranked.id ASC
-                LIMIT 1
-           ) AS representative_media_id
       FROM candidates
     HAVING COUNT(*) > 0
+    "#;
+
+    const SELECT_COVER: &str = r#"
+    SELECT thumbnail_path
+         , file_path
+      FROM candidates
+     ORDER BY has_aesthetics DESC
+            , cover_score DESC
+            , COALESCE(date_taken, '') DESC
+            , id ASC
+     LIMIT 1
     "#;
 
     pub fn select_page_query() -> String {
@@ -403,6 +393,12 @@ pub mod places {
     pub fn select_summary_query() -> String {
         format!(
             "WITH candidates AS ({SELECT_CANDIDATES} AND mm.location_city = ? AND mm.location_state IS ? AND mm.location_country = ?) {SELECT_SUMMARY}"
+        )
+    }
+
+    pub fn select_cover_query() -> String {
+        format!(
+            "WITH candidates AS ({SELECT_CANDIDATES} AND mm.location_city = ? AND mm.location_state IS ? AND mm.location_country = ?) {SELECT_COVER}"
         )
     }
 

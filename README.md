@@ -147,7 +147,7 @@ Momento detects faces and groups images containing similar people. Administrator
 
 ### Places
 
-Places groups accessible media by the exact reverse-geocoded city, state or province, and country tuple. A missing state remains distinct from a named state. Place covers use aspect-preserving prepared images and prefer completed `image_aesthetics` results: 40% LAION aesthetic score, 25% CLIP scenic suitability, 20% visual simplicity, 10% landscape composition, and 5% technical quality, with OCR-clutter and dominant-face penalties. When aesthetics have not run, Momento uses a deterministic landscape/date/media-ID fallback. Place counts, covers, and gallery media are always filtered through the requesting user's media access.
+Places groups accessible media by the exact reverse-geocoded city, state or province, and country tuple. A missing state remains distinct from a named state. Place covers use aspect-preserving prepared images and prefer completed `image_aesthetics` results: 40% LAION aesthetic score, 25% CLIP scenic suitability, 20% visual simplicity, 10% landscape composition, and 5% technical quality, with OCR-clutter and dominant-face penalties. When aesthetics have not run, Momento uses a deterministic landscape/date/media-ID fallback. Momento does not persist a selected place cover: every thumbnail request ranks the requesting user's currently accessible place media from live database state, so additions, deletions, access changes, and new aesthetic results take effect on the next request.
 
 ### Utility
 

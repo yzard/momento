@@ -51,26 +51,18 @@ export default function ImportPanel() {
     : 0
 
   return (
-    <div className="bg-card/30 rounded-xl border border-border/50 p-6 backdrop-blur-sm">
-      <h3 className="text-lg font-medium mb-4 text-foreground">Import Photos</h3>
-
-      <p className="text-muted-foreground mb-6 font-light">
-        Place photos in the <code className="bg-muted px-1.5 py-0.5 rounded text-foreground font-mono text-sm">/data/imports/</code> directory for local import. Import stores originals quickly; metadata and AI processing run afterward.
-      </p>
-
-      <div className="flex flex-wrap gap-3">
-        <button
-          onClick={handleTriggerImport}
-          type="button"
-          disabled={isTriggering || isRunning}
-          className="bg-primary text-primary-foreground px-6 py-2 rounded-lg hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg shadow-primary/20 transition-all"
-        >
-          {isRunning ? 'Importing...' : isTriggering ? 'Starting...' : 'Start Local Import'}
-        </button>
-      </div>
+    <div>
+      <button
+        onClick={handleTriggerImport}
+        type="button"
+        disabled={isTriggering || isRunning}
+        className="w-full bg-primary text-primary-foreground px-5 py-2.5 rounded-lg hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-50 disabled:cursor-not-allowed font-semibold transition-colors"
+      >
+        {isRunning ? 'Importing...' : isTriggering ? 'Starting...' : 'Import Media'}
+      </button>
 
       {status && status.status !== 'idle' && (
-        <div className="mt-8 border-t border-border/50 pt-6">
+        <div className="mt-6 border-t border-border/50 pt-5" aria-live="polite">
           <div className="flex justify-between text-sm mb-3">
             <span className="text-muted-foreground">Status: <span className="font-medium text-foreground uppercase tracking-wide">{status.status}</span></span>
             {status.totalFiles > 0 && (
@@ -92,15 +84,9 @@ export default function ImportPanel() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
-              <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Successful</span>
-              <span className="font-bold text-lg text-green-500">{status.successfulImports}</span>
-            </div>
-            <div className="bg-muted/10 p-3 rounded-lg border border-border/30">
-              <span className="text-muted-foreground block text-xs uppercase tracking-wider mb-1">Failed</span>
-              <span className="font-bold text-lg text-destructive">{status.failedImports}</span>
-            </div>
+          <div className="flex items-center gap-4 text-xs font-medium text-muted-foreground">
+            <span>Imported <strong className="text-foreground">{status.successfulImports}</strong></span>
+            <span>Failed <strong className={status.failedImports > 0 ? 'text-destructive' : 'text-foreground'}>{status.failedImports}</strong></span>
           </div>
 
           {status.errors.length > 0 && (

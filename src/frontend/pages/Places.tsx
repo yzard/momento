@@ -7,7 +7,6 @@ import { placesApi, type PlaceSummary } from '../api/places'
 import type { Media } from '../api/types'
 import PhotoGrid from '../components/timeline/PhotoGrid'
 import Lightbox from '../components/viewer/Lightbox'
-import { placeBatchLoader } from '../utils/batcher'
 
 const PAGE_LIMIT = 100
 
@@ -115,7 +114,7 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
     const observer = new IntersectionObserver((entries) => {
       if (!entries[0]?.isIntersecting) return
       observer.disconnect()
-      placeBatchLoader.load(place.representativeMediaId)
+      placesApi.getThumbnail(place.placeId)
         .then((url) => {
           if (!cancelled) setThumbnailUrl(url)
         })
@@ -127,7 +126,7 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
       cancelled = true
       observer.disconnect()
     }
-  }, [place.representativeMediaId, thumbnailUrl])
+  }, [place.placeId, thumbnailUrl])
 
   return (
     <Link
