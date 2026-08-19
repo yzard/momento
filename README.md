@@ -38,6 +38,9 @@ services:
       PGID: "${PGID:-1000}"
       UMASK: "${UMASK:-022}"
       TZ: "${TZ:-UTC}"
+      RESET_ADMIN_PASSWORD: "${RESET_ADMIN_PASSWORD:-false}"
+      SECRET_KEY: "${SECRET_KEY:-playground-only-change-this-secret-before-exposing-the-server}"
+      LLM_SERVICE_API_KEY: "${LLM_SERVICE_API_KEY:-change-me-llm-service-key}"
       LLM_SERVICE_ADDRESS: "momento-llm-service:8100"
     volumes:
       - "${MOMENTO_DATA_DIR:-./data}:/data"
@@ -60,6 +63,7 @@ services:
       PGID: "${PGID:-1000}"
       UMASK: "${UMASK:-022}"
       TZ: "${TZ:-UTC}"
+      LLM_SERVICE_API_KEY: "${LLM_SERVICE_API_KEY:-change-me-llm-service-key}"
     volumes:
       - "${MOMENTO_DATA_DIR:-./data}:/data"
     networks:
@@ -77,14 +81,13 @@ services:
 
 networks:
   momento:
-    driver: bridge
 ```
 
 Each container has one `/data` mount backed by the same host directory, which defaults to `./data`
 relative to the repository root. Their entrypoints create
 `/data/config.toml` and `/data/config_llm.toml` on first startup. Momento resolves
-`${LLM_SERVICE_ADDRESS}` in its config from the container environment; Compose sets it to the
-private LLM service address by default.
+`${LLM_SERVICE_ADDRESS}` into `[llm].server_address`; the value contains only the private service
+host and port. Momento owns the WebSocket scheme and path.
 
 Start the stack and open `http://localhost:8000`:
 
@@ -99,14 +102,15 @@ Build both images locally with the tags used by Compose, or explicitly publish t
 ./build_docker.sh publish docker zhuoyin
 ```
 
-The generated `[llm].api_key` and `[server].api_key` match. Replace that shared key and the Momento
-security secret before exposing the service. A new database creates `admin` / `admin` and requires
-an immediate password change.
+Compose supplies one `LLM_SERVICE_API_KEY` to both services, `SECRET_KEY` to Momento, and
+`RESET_ADMIN_PASSWORD=false` by default. Set strong `LLM_SERVICE_API_KEY` and `SECRET_KEY` environment values
+before exposing the service. A new database creates `admin` / `admin` and requires an immediate
+password change.
 
-To recover administrator access, set `reset_admin_password = true` under `[server]` in
-`data/config.toml` and restart Momento. Startup atomically changes the flag back to `false` and,
-for that server process only, accepts `admin` / `admin` for the existing administrator account.
-The stored password is not replaced until the forced password-change form succeeds.
+To recover administrator access, set `RESET_ADMIN_PASSWORD=true` for one Momento startup. For that
+server process only, Momento accepts `admin` / `admin` for the existing administrator account. The
+stored password is not replaced until the forced password-change form succeeds. Remove the
+environment override after startup so a later restart does not request recovery again.
 
 The LLM image requires an NVIDIA GPU, a compatible host driver, and NVIDIA Container Toolkit. It
 is large because all model runtimes and weights are included for offline activation.
@@ -128,13 +132,10 @@ PATCH requests must declare their byte size and cannot exceed `webdav.max_upload
 
 ### Category
 
-Momento supports photos and videos.
-
-Planned category detection will identify special media such as:
-
-- Screenshots
-- Document photos
-- Receipt photos
+Momento supports photos and videos. Optional local classifiers identify screenshots and document
+photos. Classification is photo-only, and the two categories are independent, so one photo may
+appear in both the Screenshots and Documents Timeline views. Each result stores the classifier's
+boolean decision and confidence. Receipt-specific detection remains planned.
 
 ### Search
 
@@ -163,8 +164,9 @@ The playground uses the same [`docker-compose.yaml`](docker-compose.yaml) as nor
 deployments and builds exactly two containers: `momento-api` and `momento-llm-service`.
 Model runtimes are processes inside `momento-llm-service`; the deployment does not mount the Docker socket
 or create model containers. The CUDA 12.9 llm-service image contains isolated environments and
-baked model weights for Unlimited-OCR, RAM++, DINOv2-small, CLIP ViT-B/32 with the LAION aesthetic head, and InsightFace `buffalo_l`, so task
-activation performs no package installation or model download.
+baked model weights for Unlimited-OCR, RAM++, DINOv2-small, CLIP ViT-B/32 with the LAION aesthetic
+head, and InsightFace `buffalo_l`. It also includes the CPU screenshot/document classifier runtime
+and Tesseract. Task activation performs no package installation or model download.
 
 Requirements:
 
@@ -187,8 +189,9 @@ Momento resolves `LLM_SERVICE_ADDRESS=momento-llm-service:8100` in its checked-i
 configuration and maintains an authenticated WebSocket to that address. Submissions,
 cancellations, acknowledgements, and
 results share that connection, so llm-service does not need a Momento address. The checked-in
-playground configs share one API key and identify the Momento connection as `playground`.
-Production deployments must replace that key and persist the complete data directory.
+playground configs resolve `RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and the shared `LLM_SERVICE_API_KEY` from
+Compose and identify the Momento connection as `playground`. Production deployments must replace
+the default secrets and persist the complete data directory.
 
 ## Data
 
@@ -222,9 +225,9 @@ process ID, while console output remains colorized by level. llm-service keeps i
 and runtime cache under `<data_dir>/llm/`; deployments may persist that subtree independently.
 
 The generated `[cronjob]` section contains independent schedules for OCR, image tagging,
-deduplication, face detection, and image aesthetics. `deduplicate_cron` intentionally keeps its
-feature name because it starts the complete deduplication pipeline; `image_clustering` is only that
-pipeline's inference stage.
+deduplication, face detection, image aesthetics, screenshot detection, and document detection.
+`deduplicate_cron` intentionally keeps its feature name because it starts the complete
+deduplication pipeline; `image_clustering` is only that pipeline's inference stage.
 
 GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
 snapshot embedded in the Momento API binary. No external geocoding service or runtime network
@@ -233,10 +236,42 @@ recorded in `src/backend/assets/geonames/SOURCE.md`.
 
 ## AI Architecture
 
+Momento's AI features run locally inside `llm-service`. The name covers several kinds of machine
+learning runtime, not only large language models. Model packages and weights are baked into the
+container image, and normal activation does not install packages, download weights, or call a
+hosted inference API.
+
+### Models and tasks
+
+| Task | Model or method | Compute | Output | Why this approach |
+| --- | --- | --- | --- | --- |
+| `ocr` | Baidu Unlimited-OCR served by vLLM | GPU | Recognized text and Markdown | Unlimited-OCR is Momento's full OCR model for photos and representative video frames. It is used when the recognized content itself is required. |
+| `image_tagging` | RAM++ with the Swin-Large checkpoint | GPU | Searchable semantic tags | RAM++ is a large-vocabulary image-tagging model. It recognizes visual concepts directly and does not use Unlimited-OCR. |
+| `image_clustering` | Meta DINOv2-small | GPU | Normalized 384-dimensional embedding, perceptual hash, and image-quality score | Self-supervised visual features provide robust similarity matching without depending on filenames, metadata, or predefined tags. |
+| `image_aesthetics` | OpenAI CLIP ViT-B/32 with a LAION aesthetic linear head | GPU | Aesthetic, scenic, simplicity, landscape, and technical-quality scores | The learned aesthetic head ranks visual appeal, while CLIP prompt similarity and image measurements provide the additional cover-selection signals. |
+| `face_detection` | InsightFace `buffalo_l` | GPU | Face boxes, landmarks, normalized 512-dimensional identity embeddings, quality, and frontality | Detection and recognition embeddings support local face grouping; quality and frontality select better representatives. |
+| `screenshot_detection` | Tesseract TSV plus visual heuristics | CPU | Boolean decision and confidence | The detector needs inexpensive word boxes and confidence for status-region layout, not polished OCR text. CPU execution avoids loading another GPU model and combines text position with mobile aspect ratio, compact UI components, edge geometry, and flat-color structure. |
+| `document_detection` | Tesseract TSV plus visual heuristics | CPU | Boolean decision and confidence | Tesseract directly supplies spatial word regions for text coverage, line spacing, and alignment. The detector combines them with paper-like color and photographic-content penalties while leaving the GPU available for higher-cost models. |
+
+| OCR choice | Best use | Layout data | Hardware | Role in Momento |
+| --- | --- | --- | --- | --- |
+| Unlimited-OCR | High-quality text recognition | Returns text/Markdown rather than the normalized word regions required by the classifiers | GPU | Primary `ocr` task |
+| Tesseract | Fast spatial text hints | Returns TSV word boxes and confidence directly | CPU | Internal signal for screenshot and document classification; not a replacement for primary OCR |
+
+| Classifier behavior | Screenshot detection | Document detection |
+| --- | --- | --- |
+| Eligible media | Photos only | Photos only |
+| Video inputs | Never created | Never created |
+| Can overlap | Yes; a photo may also be a document | Yes; a photo may also be a screenshot |
+
+### Input preparation and scheduling
+
 Momento prepares every AI input itself. For a photo it sends a prepared image; for a video it
-currently sends a prepared representative frame. Each request contains the raw input bytes and its
-descriptor, while the transport preserves multiple ordered inputs for future preparation
-strategies. `llm-service` does not need access to Momento's filesystem.
+currently sends a prepared representative frame. Screenshot and document detection use a separate
+orientation-correct, aspect-preserving photo preview with a maximum 2048-pixel edge and never
+accept videos. Each request contains the raw input bytes and its descriptor, while the transport
+preserves multiple ordered inputs for future preparation strategies. `llm-service` does not need
+access to Momento's filesystem.
 
 `llm-service` keeps only one AI model loaded at a time. Jobs are grouped by type, and the scheduler
 keeps a bounded rolling window for one task until its queue is exhausted. It then unloads that
@@ -245,6 +280,8 @@ with about 16 GB of GPU memory to use several AI features without loading every 
 
 Model concurrency is enforced only by the active model subservice. Momento and the llm-service
 scheduler do not apply model-specific concurrency limits.
+
+### Durable execution
 
 Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement.
 The scheduler keeps bounded job metadata in memory and sends only validated descriptors to the

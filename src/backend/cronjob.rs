@@ -6,7 +6,10 @@ use cron::Schedule;
 use tracing::{info, warn};
 
 use crate::config::{Config, CronjobConfig};
-use crate::constants::{IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
+use crate::constants::{
+    DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE,
+    OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
+};
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::processor::deduplicator::{
@@ -19,6 +22,8 @@ pub enum ScheduledTask {
     Ocr,
     ImageTagging,
     ImageAesthetics,
+    ScreenshotDetection,
+    DocumentDetection,
     Deduplicate,
     FaceDetection,
 }
@@ -29,6 +34,8 @@ impl ScheduledTask {
             Self::Ocr => "ocr",
             Self::ImageTagging => "image_tagging",
             Self::ImageAesthetics => "image_aesthetics",
+            Self::ScreenshotDetection => "screenshot_detection",
+            Self::DocumentDetection => "document_detection",
             Self::Deduplicate => "deduplicate",
             Self::FaceDetection => "face_detection",
         }
@@ -39,6 +46,8 @@ impl ScheduledTask {
             Self::Ocr => &config.ocr_cron,
             Self::ImageTagging => &config.image_tagging_cron,
             Self::ImageAesthetics => &config.image_aesthetics_cron,
+            Self::ScreenshotDetection => &config.screenshot_detection_cron,
+            Self::DocumentDetection => &config.document_detection_cron,
             Self::Deduplicate => &config.deduplicate_cron,
             Self::FaceDetection => &config.face_detection_cron,
         }
@@ -52,6 +61,8 @@ impl ScheduledTask {
             Self::Ocr => true,
             Self::ImageTagging => config.llm.image_tagging_enabled,
             Self::ImageAesthetics => config.llm.image_aesthetics_enabled,
+            Self::ScreenshotDetection => config.llm.screenshot_detection_enabled,
+            Self::DocumentDetection => config.llm.document_detection_enabled,
             Self::Deduplicate => config.llm.deduplicate_enabled,
             Self::FaceDetection => config.llm.face_detection_enabled,
         }
@@ -83,6 +94,8 @@ pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool) {
         ScheduledTask::Ocr,
         ScheduledTask::ImageTagging,
         ScheduledTask::ImageAesthetics,
+        ScheduledTask::ScreenshotDetection,
+        ScheduledTask::DocumentDetection,
         ScheduledTask::Deduplicate,
         ScheduledTask::FaceDetection,
     ] {
@@ -152,6 +165,12 @@ pub fn run_scheduled_occurrence(
         }
         ScheduledTask::ImageAesthetics => {
             ai::queue_task(pool, IMAGE_AESTHETICS_MODEL_TYPE, true).map_err(AppError::Database)
+        }
+        ScheduledTask::ScreenshotDetection => {
+            ai::queue_task(pool, SCREENSHOT_DETECTION_MODEL_TYPE, true).map_err(AppError::Database)
+        }
+        ScheduledTask::DocumentDetection => {
+            ai::queue_task(pool, DOCUMENT_DETECTION_MODEL_TYPE, true).map_err(AppError::Database)
         }
         ScheduledTask::Deduplicate => match create_run(pool, "scheduled", Some(scheduled_for)) {
             Ok(run_id) => queue_clustering_jobs(pool, run_id),

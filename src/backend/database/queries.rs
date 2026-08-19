@@ -99,6 +99,13 @@ pub mod metadata_jobs {
     pub const DELETE_FACE_DETECTION_RESULTS: &str = "DELETE FROM media_face_detection_results";
     pub const DELETE_AESTHETICS: &str = "DELETE FROM media_aesthetics";
     pub const DELETE_AESTHETIC_INPUTS: &str = "DELETE FROM media_aesthetic_inputs";
+    pub const DELETE_SCREENSHOT_CLASSIFICATIONS: &str =
+        "DELETE FROM media_screenshot_classifications";
+    pub const DELETE_SCREENSHOT_CLASSIFICATION_INPUTS: &str =
+        "DELETE FROM media_screenshot_classification_inputs";
+    pub const DELETE_DOCUMENT_CLASSIFICATIONS: &str = "DELETE FROM media_document_classifications";
+    pub const DELETE_DOCUMENT_CLASSIFICATION_INPUTS: &str =
+        "DELETE FROM media_document_classification_inputs";
     pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
     pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
     pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
@@ -116,6 +123,8 @@ pub mod ai_jobs {
     pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_SCREENSHOT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'screenshot_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'screenshot_detection') AND NOT EXISTS (SELECT 1 FROM media_screenshot_classifications WHERE media_screenshot_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'screenshot_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_DOCUMENT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'document_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'document_detection') AND NOT EXISTS (SELECT 1 FROM media_document_classifications WHERE media_document_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'document_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') AND NOT EXISTS (SELECT 1 FROM llm_cancellation_scopes WHERE llm_cancellation_scopes.scope = 'all' OR (llm_cancellation_scopes.scope = 'task' AND llm_cancellation_scopes.task = llm_jobs.task)) ORDER BY created_at LIMIT ?";
     pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued'";
     pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
@@ -133,6 +142,13 @@ pub mod ai_jobs {
         "DELETE FROM media_text_inputs WHERE model_type = ?";
     pub const DELETE_AESTHETICS: &str = "DELETE FROM media_aesthetics";
     pub const DELETE_AESTHETIC_INPUTS: &str = "DELETE FROM media_aesthetic_inputs";
+    pub const DELETE_SCREENSHOT_CLASSIFICATIONS: &str =
+        "DELETE FROM media_screenshot_classifications";
+    pub const DELETE_SCREENSHOT_CLASSIFICATION_INPUTS: &str =
+        "DELETE FROM media_screenshot_classification_inputs";
+    pub const DELETE_DOCUMENT_CLASSIFICATIONS: &str = "DELETE FROM media_document_classifications";
+    pub const DELETE_DOCUMENT_CLASSIFICATION_INPUTS: &str =
+        "DELETE FROM media_document_classification_inputs";
     pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
     pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted', 'failed')";
     pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted', 'failed')";
@@ -273,6 +289,10 @@ pub mod llm_callback {
     pub const UPSERT_INPUT_TEXT: &str = "INSERT INTO media_text_inputs (media_id, model_type, sequence, frame_timestamp_ms, model_version, string) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, model_type, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_AESTHETICS: &str = "INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', ?, ?, ?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET model_version = excluded.model_version, aesthetic_score = excluded.aesthetic_score, scenic_score = excluded.scenic_score, simplicity_score = excluded.simplicity_score, landscape_score = excluded.landscape_score, technical_quality_score = excluded.technical_quality_score, completed_at = datetime('now')";
     pub const UPSERT_AESTHETIC_INPUT: &str = "INSERT INTO media_aesthetic_inputs (media_id, sequence, frame_timestamp_ms, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, ?, ?, 'image_aesthetics', ?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, aesthetic_score = excluded.aesthetic_score, scenic_score = excluded.scenic_score, simplicity_score = excluded.simplicity_score, landscape_score = excluded.landscape_score, technical_quality_score = excluded.technical_quality_score, completed_at = datetime('now')";
+    pub const UPSERT_SCREENSHOT_CLASSIFICATION: &str = "INSERT INTO media_screenshot_classifications (media_id, model_type, model_version, is_screenshot, confidence) VALUES (?, 'screenshot_detection', ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET model_version = excluded.model_version, is_screenshot = excluded.is_screenshot, confidence = excluded.confidence, completed_at = datetime('now')";
+    pub const UPSERT_SCREENSHOT_CLASSIFICATION_INPUT: &str = "INSERT INTO media_screenshot_classification_inputs (media_id, sequence, frame_timestamp_ms, model_type, model_version, is_screenshot, confidence) VALUES (?, ?, ?, 'screenshot_detection', ?, ?, ?) ON CONFLICT(media_id, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, is_screenshot = excluded.is_screenshot, confidence = excluded.confidence, completed_at = datetime('now')";
+    pub const UPSERT_DOCUMENT_CLASSIFICATION: &str = "INSERT INTO media_document_classifications (media_id, model_type, model_version, is_document, confidence) VALUES (?, 'document_detection', ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET model_version = excluded.model_version, is_document = excluded.is_document, confidence = excluded.confidence, completed_at = datetime('now')";
+    pub const UPSERT_DOCUMENT_CLASSIFICATION_INPUT: &str = "INSERT INTO media_document_classification_inputs (media_id, sequence, frame_timestamp_ms, model_type, model_version, is_document, confidence) VALUES (?, ?, ?, 'document_detection', ?, ?, ?) ON CONFLICT(media_id, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, is_document = excluded.is_document, confidence = excluded.confidence, completed_at = datetime('now')";
     pub const SELECT_CLUSTER_MEDIA: &str = "SELECT media.content_hash, CAST(strftime('%s', media_metadata.date_taken) AS INTEGER) FROM media LEFT JOIN media_metadata ON media_metadata.media_id = media.id WHERE media.id = ?";
     pub const UPSERT_SIMILARITY_INDEX: &str = "INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, capture_time_seconds, processing_status, processing_error) VALUES (?, ?, ?, 'prepared-input-v1', ?, ?, ?, 1, NULL) ON CONFLICT(media_id) DO UPDATE SET content_hash = excluded.content_hash, model_version = excluded.model_version, preprocessing_version = excluded.preprocessing_version, embedding = excluded.embedding, perceptual_hash = excluded.perceptual_hash, capture_time_seconds = excluded.capture_time_seconds, indexed_at = datetime('now'), processing_status = 1, processing_error = NULL";
     pub const DELETE_HASH_BANDS: &str =
@@ -822,6 +842,19 @@ pub mod timeline {
              )
         )
         AND (? = '' OR m.media_type = ?)
+        AND (
+             ? = ''
+          OR (? = 'screenshot' AND EXISTS (
+                 SELECT 1 FROM media_screenshot_classifications
+                  WHERE media_screenshot_classifications.media_id = m.id
+                    AND media_screenshot_classifications.is_screenshot = 1
+             ))
+          OR (? = 'document' AND EXISTS (
+                 SELECT 1 FROM media_document_classifications
+                  WHERE media_document_classifications.media_id = m.id
+                    AND media_document_classifications.is_document = 1
+             ))
+        )
      GROUP BY substr(mm.date_taken, 1, 7)
      ORDER BY substr(mm.date_taken, 1, 7) DESC
      "#;
@@ -869,8 +902,21 @@ pub mod timeline {
                   FROM media_text
                   WHERE media_text.string LIKE ? ESCAPE '\'
             )
-       )
-        AND (? = '' OR m.media_type = ?)
+        )
+         AND (? = '' OR m.media_type = ?)
+         AND (
+              ? = ''
+           OR (? = 'screenshot' AND EXISTS (
+                  SELECT 1 FROM media_screenshot_classifications
+                   WHERE media_screenshot_classifications.media_id = m.id
+                     AND media_screenshot_classifications.is_screenshot = 1
+              ))
+           OR (? = 'document' AND EXISTS (
+                  SELECT 1 FROM media_document_classifications
+                   WHERE media_document_classifications.media_id = m.id
+                     AND media_document_classifications.is_document = 1
+              ))
+         )
          AND mm.date_taken <= ?
       ORDER BY mm.date_taken DESC, m.id DESC
      LIMIT ?
@@ -921,6 +967,19 @@ pub mod timeline {
             )
        )
        AND (? = '' OR m.media_type = ?)
+       AND (
+            ? = ''
+         OR (? = 'screenshot' AND EXISTS (
+                SELECT 1 FROM media_screenshot_classifications
+                 WHERE media_screenshot_classifications.media_id = m.id
+                   AND media_screenshot_classifications.is_screenshot = 1
+            ))
+         OR (? = 'document' AND EXISTS (
+                SELECT 1 FROM media_document_classifications
+                 WHERE media_document_classifications.media_id = m.id
+                   AND media_document_classifications.is_document = 1
+            ))
+       )
        AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
      ORDER BY mm.date_taken DESC, m.id DESC
      LIMIT ?
@@ -971,6 +1030,19 @@ pub mod timeline {
            )
        )
        AND (? = '' OR m.media_type = ?)
+       AND (
+            ? = ''
+         OR (? = 'screenshot' AND EXISTS (
+                SELECT 1 FROM media_screenshot_classifications
+                 WHERE media_screenshot_classifications.media_id = m.id
+                   AND media_screenshot_classifications.is_screenshot = 1
+            ))
+         OR (? = 'document' AND EXISTS (
+                SELECT 1 FROM media_document_classifications
+                 WHERE media_document_classifications.media_id = m.id
+                   AND media_document_classifications.is_document = 1
+            ))
+       )
        AND (mm.date_taken > ? OR (mm.date_taken = ? AND m.id > ?))
      ORDER BY mm.date_taken ASC, m.id ASC
      LIMIT ?

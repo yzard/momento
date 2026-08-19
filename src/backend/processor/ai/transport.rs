@@ -16,6 +16,7 @@ use crate::database::DbPool;
 const OUTBOUND_MESSAGE_CAPACITY: usize = 256;
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const WEBSOCKET_PATH: &str = "/api/v1/llm/connect";
 
 type CancellationWaiters =
     Arc<Mutex<HashMap<String, oneshot::Sender<Result<CancelJobsResponse, String>>>>>;
@@ -71,12 +72,13 @@ pub struct LlmConnection {
 
 impl LlmConnection {
     pub async fn connect(
-        service_url: &str,
+        server_address: &str,
         client_id: &str,
         api_key: &str,
         pool: DbPool,
     ) -> Result<Self, String> {
-        let mut request = service_url
+        let websocket_url = format!("ws://{server_address}{WEBSOCKET_PATH}");
+        let mut request = websocket_url
             .into_client_request()
             .map_err(|error| error.to_string())?;
         request.headers_mut().insert(

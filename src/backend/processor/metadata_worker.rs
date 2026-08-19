@@ -58,6 +58,19 @@ pub fn reset_all(pool: &DbPool) -> Result<i64, rusqlite::Error> {
     transaction.execute(queries::metadata_jobs::DELETE_FACE_DETECTION_RESULTS, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_AESTHETICS, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_AESTHETIC_INPUTS, [])?;
+    transaction.execute(
+        queries::metadata_jobs::DELETE_SCREENSHOT_CLASSIFICATIONS,
+        [],
+    )?;
+    transaction.execute(
+        queries::metadata_jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
+        [],
+    )?;
+    transaction.execute(queries::metadata_jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
+    transaction.execute(
+        queries::metadata_jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS,
+        [],
+    )?;
     transaction.execute(queries::metadata_jobs::DELETE_RTREE, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_METADATA, [])?;
     transaction.execute(queries::metadata_jobs::RESET_IMPORTED, [])?;
@@ -126,6 +139,14 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
     if !config.llm.enabled {
         return Ok(());
     }
+    let connection = pool.get().map_err(|error| error.to_string())?;
+    let media_type = connection
+        .query_row(
+            queries::metadata::SELECT_IMPORTED_MEDIA,
+            [media_id],
+            |row| row.get::<_, String>(1),
+        )
+        .map_err(|error| error.to_string())?;
     let mut tasks = vec!["ocr"];
     if config.llm.image_tagging_enabled {
         tasks.push("image_tagging");
@@ -139,7 +160,12 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
     if config.llm.image_aesthetics_enabled {
         tasks.push("image_aesthetics");
     }
-    let connection = pool.get().map_err(|error| error.to_string())?;
+    if media_type == "image" && config.llm.screenshot_detection_enabled {
+        tasks.push("screenshot_detection");
+    }
+    if media_type == "image" && config.llm.document_detection_enabled {
+        tasks.push("document_detection");
+    }
     for task in tasks {
         let inputs = connection
             .prepare(queries::metadata_jobs::SELECT_INPUT_PATHS)

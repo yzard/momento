@@ -1,9 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::Digest;
 
 use crate::config::Config;
-use crate::constants::paths;
+use crate::constants::{
+    paths, DOCUMENT_DETECTION_MODEL_TYPE, FACE_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
+    IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
+};
 use crate::database::{queries, DbPool};
 use crate::processor::media_processor::{calculate_geohash, generate_complete_metadata};
 use crate::processor::metadata::delete_supplemental_metadata;
@@ -12,6 +15,9 @@ use crate::processor::thumbnails::{
     generate_video_thumbnail,
 };
 use crate::utils::hash::calculate_file_hash;
+
+const CLASSIFICATION_PREVIEW_MAXIMUM_SIZE: u32 = 2048;
+const CLASSIFICATION_PREVIEW_QUALITY: u8 = 95;
 
 pub async fn generate_media_metadata(
     pool: &DbPool,
@@ -98,6 +104,22 @@ pub async fn generate_media_metadata(
     if !place_thumbnail_generated {
         return Err("place thumbnail generation failed".to_string());
     }
+    let classification_preview_path = paths()
+        .previews
+        .join("ai")
+        .join(media_id.to_string())
+        .join("classification-source.jpg");
+    if media_type == "image"
+        && !generate_image_preview(
+            &original_path,
+            &classification_preview_path,
+            CLASSIFICATION_PREVIEW_MAXIMUM_SIZE,
+            CLASSIFICATION_PREVIEW_QUALITY,
+        )
+        .await
+    {
+        return Err("classification preview generation failed".to_string());
+    }
     let geohash = metadata
         .gps_latitude
         .zip(metadata.gps_longitude)
@@ -172,8 +194,8 @@ pub async fn generate_media_metadata(
         &original_path,
         &thumbnail_path,
         &place_thumbnail_path,
+        (media_type == "image").then_some(classification_preview_path.as_path()),
         &media_type,
-        metadata.duration_seconds,
     )
 }
 
@@ -209,8 +231,8 @@ fn prepare_ai_inputs(
     original_path: &std::path::Path,
     thumbnail_path: &std::path::Path,
     place_thumbnail_path: &std::path::Path,
+    classification_preview_path: Option<&Path>,
     media_type: &str,
-    _duration_seconds: Option<f64>,
 ) -> Result<(), String> {
     let output_directory = paths().previews.join("ai").join(media_id.to_string());
     let frames = if media_type == "video" {
@@ -218,13 +240,20 @@ fn prepare_ai_inputs(
     } else {
         vec![(0, None, thumbnail_path.to_path_buf())]
     };
-    for task in [
-        "ocr",
-        "image_tagging",
+    let mut tasks = vec![
+        OCR_MODEL_TYPE,
+        IMAGE_TAGGING_MODEL_TYPE,
         "image_clustering",
-        "image_aesthetics",
-        "face_detection",
-    ] {
+        IMAGE_AESTHETICS_MODEL_TYPE,
+        FACE_DETECTION_MODEL_TYPE,
+    ];
+    if media_type == "image" {
+        tasks.extend([
+            SCREENSHOT_DETECTION_MODEL_TYPE,
+            DOCUMENT_DETECTION_MODEL_TYPE,
+        ]);
+    }
+    for task in tasks {
         let task_directory = output_directory.join(task);
         std::fs::create_dir_all(&task_directory).map_err(|error| error.to_string())?;
         pool.get()
@@ -239,8 +268,14 @@ fn prepare_ai_inputs(
             (media_type == "video").then_some(0),
             place_thumbnail_path.to_path_buf(),
         )];
-        let task_frames = if task == "image_aesthetics" {
+        let classification_frames = match classification_preview_path {
+            Some(source_path) => vec![(0, None, source_path.to_path_buf())],
+            None => Vec::new(),
+        };
+        let task_frames = if task == IMAGE_AESTHETICS_MODEL_TYPE {
             image_aesthetics_frame.as_slice()
+        } else if task == SCREENSHOT_DETECTION_MODEL_TYPE || task == DOCUMENT_DETECTION_MODEL_TYPE {
+            classification_frames.as_slice()
         } else {
             frames.as_slice()
         };

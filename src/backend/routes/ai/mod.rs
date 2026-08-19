@@ -1,6 +1,7 @@
 use axum::{extract::State, routing::post, Json, Router};
 
 use crate::auth::{AppState, RequireAdmin};
+use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
 use crate::database::queries;
 use crate::error::AppResult;
 use crate::models::{AiRequest, MetadataActionResponse, MetadataStatusResponse};
@@ -33,6 +34,46 @@ pub fn router() -> Router<AppState> {
         .route("/ai/image_aesthetics/clean", post(clean_image_aesthetics))
         .route("/ai/image_aesthetics/status", post(image_aesthetics_status))
         .route("/ai/image_aesthetics/reset", post(reset_image_aesthetics))
+        .route(
+            "/ai/screenshot_detection/trigger",
+            post(trigger_screenshot_detection),
+        )
+        .route(
+            "/ai/screenshot_detection/cancel",
+            post(cancel_screenshot_detection),
+        )
+        .route(
+            "/ai/screenshot_detection/clean",
+            post(clean_screenshot_detection),
+        )
+        .route(
+            "/ai/screenshot_detection/status",
+            post(screenshot_detection_status),
+        )
+        .route(
+            "/ai/screenshot_detection/reset",
+            post(reset_screenshot_detection),
+        )
+        .route(
+            "/ai/document_detection/trigger",
+            post(trigger_document_detection),
+        )
+        .route(
+            "/ai/document_detection/cancel",
+            post(cancel_document_detection),
+        )
+        .route(
+            "/ai/document_detection/clean",
+            post(clean_document_detection),
+        )
+        .route(
+            "/ai/document_detection/status",
+            post(document_detection_status),
+        )
+        .route(
+            "/ai/document_detection/reset",
+            post(reset_document_detection),
+        )
         .route(
             "/ai/image_clustering/trigger",
             post(trigger_image_clustering),
@@ -86,6 +127,38 @@ async fn clean_image_aesthetics(
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
     clean_task(&state.pool, "image_aesthetics")
+}
+
+async fn cancel_screenshot_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    cancel_task(&state, SCREENSHOT_DETECTION_MODEL_TYPE).await
+}
+
+async fn clean_screenshot_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    clean_task(&state.pool, SCREENSHOT_DETECTION_MODEL_TYPE)
+}
+
+async fn cancel_document_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    cancel_task(&state, DOCUMENT_DETECTION_MODEL_TYPE).await
+}
+
+async fn clean_document_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    clean_task(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)
 }
 async fn cancel_image_clustering(
     State(state): State<AppState>,
@@ -195,6 +268,19 @@ fn clean_task_results(transaction: &rusqlite::Transaction<'_>, task: &str) -> Ap
         transaction.execute(queries::ai_jobs::DELETE_AESTHETIC_INPUTS, [])?;
         return Ok(());
     }
+    if task == SCREENSHOT_DETECTION_MODEL_TYPE {
+        transaction.execute(queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATIONS, [])?;
+        transaction.execute(
+            queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
+            [],
+        )?;
+        return Ok(());
+    }
+    if task == DOCUMENT_DETECTION_MODEL_TYPE {
+        transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
+        transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS, [])?;
+        return Ok(());
+    }
     transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
     transaction.execute(queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
     Ok(())
@@ -208,6 +294,8 @@ async fn clean_all(
     let _ = clean_task(&state.pool, "ocr")?;
     let _ = clean_task(&state.pool, "image_tagging")?;
     let _ = clean_task(&state.pool, "image_aesthetics")?;
+    let _ = clean_task(&state.pool, SCREENSHOT_DETECTION_MODEL_TYPE)?;
+    let _ = clean_task(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)?;
     face_detection::clean(&state.pool)?;
     clean(&state.pool)?;
     Ok(Json(MetadataActionResponse {
@@ -240,6 +328,22 @@ async fn image_aesthetics_status(
     task_status(&state.pool, "image_aesthetics")
 }
 
+async fn screenshot_detection_status(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataStatusResponse>> {
+    task_status(&state.pool, SCREENSHOT_DETECTION_MODEL_TYPE)
+}
+
+async fn document_detection_status(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataStatusResponse>> {
+    task_status(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)
+}
+
 async fn reset_ocr(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
@@ -270,6 +374,32 @@ async fn reset_image_aesthetics(
         &state,
         "image_aesthetics",
         state.config.llm.image_aesthetics_enabled,
+    )
+    .await
+}
+
+async fn reset_screenshot_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    reset_task(
+        &state,
+        SCREENSHOT_DETECTION_MODEL_TYPE,
+        state.config.llm.screenshot_detection_enabled,
+    )
+    .await
+}
+
+async fn reset_document_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    reset_task(
+        &state,
+        DOCUMENT_DETECTION_MODEL_TYPE,
+        state.config.llm.document_detection_enabled,
     )
     .await
 }
@@ -346,6 +476,8 @@ async fn trigger(
         &state.pool,
         state.config.llm.image_tagging_enabled,
         state.config.llm.image_aesthetics_enabled,
+        state.config.llm.screenshot_detection_enabled,
+        state.config.llm.document_detection_enabled,
     )? as i64;
     let face_jobs = if state.config.llm.face_detection_enabled {
         face_detection::start(&state.pool, true)? as i64
@@ -423,6 +555,38 @@ async fn trigger_image_aesthetics(
     )? as i64;
     Ok(Json(MetadataActionResponse {
         message: "Image aesthetics processing queued".to_string(),
+        queued_jobs,
+    }))
+}
+
+async fn trigger_screenshot_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    let queued_jobs = ai::queue_task(
+        &state.pool,
+        SCREENSHOT_DETECTION_MODEL_TYPE,
+        state.config.llm.screenshot_detection_enabled,
+    )? as i64;
+    Ok(Json(MetadataActionResponse {
+        message: "Screenshot detection processing queued".to_string(),
+        queued_jobs,
+    }))
+}
+
+async fn trigger_document_detection(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Json(_request): Json<AiRequest>,
+) -> AppResult<Json<MetadataActionResponse>> {
+    let queued_jobs = ai::queue_task(
+        &state.pool,
+        DOCUMENT_DETECTION_MODEL_TYPE,
+        state.config.llm.document_detection_enabled,
+    )? as i64;
+    Ok(Json(MetadataActionResponse {
+        message: "Document detection processing queued".to_string(),
         queued_jobs,
     }))
 }

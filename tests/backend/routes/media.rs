@@ -25,6 +25,17 @@ fn insert_media_text(
     .expect("Failed to insert image text");
 }
 
+fn insert_classifications(
+    pool: &momento_api::database::DbPool,
+    media_id: i64,
+    is_screenshot: bool,
+    is_document: bool,
+) {
+    let connection = pool.get().expect("database connection");
+    connection.execute("INSERT INTO media_screenshot_classifications (media_id, model_type, model_version, is_screenshot, confidence) VALUES (?, 'screenshot_detection', 'test', ?, 0.9)", rusqlite::params![media_id, is_screenshot]).expect("screenshot classification");
+    connection.execute("INSERT INTO media_document_classifications (media_id, model_type, model_version, is_document, confidence) VALUES (?, 'document_detection', 'test', ?, 0.9)", rusqlite::params![media_id, is_document]).expect("document classification");
+}
+
 #[tokio::test]
 async fn media_delete_accepts_media_ids_batch() {
     let (app, pool) = create_test_app();
@@ -350,6 +361,101 @@ async fn test_timeline_media_type_filter() {
         1
     );
     assert_eq!(videos_body["groups"][0]["media"][0]["id"], json!(video_id));
+}
+
+#[tokio::test]
+async fn timeline_classification_filters_allow_overlap_and_enforce_access() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "classifier-user", "classifier-user@example.com");
+    let screenshot_id = create_test_media_with_gps_and_date(
+        &pool,
+        "screenshot.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    let document_id = create_test_media_with_gps_and_date(
+        &pool,
+        "document.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:31:00",
+    );
+    let overlap_id = create_test_media_with_gps_and_date(
+        &pool,
+        "overlap.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:32:00",
+    );
+    let hidden_id = create_test_media_with_gps_and_date(
+        &pool,
+        "hidden-classification.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:33:00",
+    );
+    insert_classifications(&pool, screenshot_id, true, false);
+    insert_classifications(&pool, document_id, false, true);
+    insert_classifications(&pool, overlap_id, true, true);
+    insert_classifications(&pool, hidden_id, true, true);
+    for media_id in [screenshot_id, document_id, overlap_id] {
+        grant_media_access(&pool, media_id, user_id);
+    }
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    for (classification, expected_ids) in [
+        ("screenshot", vec![screenshot_id, overlap_id]),
+        ("document", vec![document_id, overlap_id]),
+    ] {
+        let response = server
+            .post("/api/v1/timeline/list")
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({
+                "groupBy": "day",
+                "search": "",
+                "classification": classification,
+                "anchorDate": "9999-12-31T23:59:59",
+                "direction": "older"
+            }))
+            .await;
+        response.assert_status_ok();
+        let body: Value = response.json();
+        let mut media_ids = body["groups"][0]["media"]
+            .as_array()
+            .expect("classified media")
+            .iter()
+            .map(|media| media["id"].as_i64().expect("media id"))
+            .collect::<Vec<_>>();
+        media_ids.sort_unstable();
+        let mut expected_ids = expected_ids;
+        expected_ids.sort_unstable();
+        assert_eq!(media_ids, expected_ids);
+
+        let markers = server
+            .post("/api/v1/timeline/markers")
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({ "classification": classification, "search": "" }))
+            .await;
+        markers.assert_status_ok();
+        assert_eq!(
+            markers.json::<Value>()["markers"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "classification": "receipt",
+            "direction": "older"
+        }))
+        .await
+        .assert_status_bad_request();
 }
 
 #[tokio::test]

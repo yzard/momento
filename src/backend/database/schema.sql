@@ -184,6 +184,52 @@ CREATE TABLE IF NOT EXISTS media_aesthetic_inputs (
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS media_screenshot_classifications (
+    media_id INTEGER PRIMARY KEY,
+    model_type TEXT NOT NULL CHECK(model_type = 'screenshot_detection'),
+    model_version TEXT NOT NULL,
+    is_screenshot INTEGER NOT NULL CHECK(is_screenshot IN (0, 1)),
+    confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_screenshot_classification_inputs (
+    media_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    frame_timestamp_ms INTEGER,
+    model_type TEXT NOT NULL CHECK(model_type = 'screenshot_detection'),
+    model_version TEXT NOT NULL,
+    is_screenshot INTEGER NOT NULL CHECK(is_screenshot IN (0, 1)),
+    confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (media_id, sequence),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_document_classifications (
+    media_id INTEGER PRIMARY KEY,
+    model_type TEXT NOT NULL CHECK(model_type = 'document_detection'),
+    model_version TEXT NOT NULL,
+    is_document INTEGER NOT NULL CHECK(is_document IN (0, 1)),
+    confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS media_document_classification_inputs (
+    media_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    frame_timestamp_ms INTEGER,
+    model_type TEXT NOT NULL CHECK(model_type = 'document_detection'),
+    model_version TEXT NOT NULL,
+    is_document INTEGER NOT NULL CHECK(is_document IN (0, 1)),
+    confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (media_id, sequence),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS media_metadata_jobs (
     media_id INTEGER PRIMARY KEY,
     status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')),
@@ -213,7 +259,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 CREATE TABLE IF NOT EXISTS media_ai_inputs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL,
-    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'image_aesthetics', 'face_detection')),
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'image_aesthetics', 'screenshot_detection', 'document_detection', 'face_detection')),
     sequence INTEGER NOT NULL,
     input_kind TEXT NOT NULL CHECK(input_kind IN ('image', 'video_frame')),
     file_path TEXT NOT NULL,
@@ -283,7 +329,7 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
     media_id INTEGER NOT NULL,
     deduplicate_run_id INTEGER,
     face_grouping_run_id INTEGER,
-    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'image_aesthetics', 'face_detection')),
+    task TEXT NOT NULL CHECK(task IN ('ocr', 'image_tagging', 'image_clustering', 'image_aesthetics', 'screenshot_detection', 'document_detection', 'face_detection')),
     status TEXT NOT NULL CHECK(status IN ('queued', 'submitting', 'submitted', 'completed', 'failed', 'cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
     available_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -297,7 +343,7 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
     FOREIGN KEY (deduplicate_run_id) REFERENCES media_similarity_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (face_grouping_run_id) REFERENCES face_grouping_runs(id) ON DELETE CASCADE,
     CHECK(
-        (task IN ('ocr', 'image_tagging', 'image_aesthetics') AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NULL)
+        (task IN ('ocr', 'image_tagging', 'image_aesthetics', 'screenshot_detection', 'document_detection') AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NULL)
         OR (task = 'image_clustering' AND deduplicate_run_id IS NOT NULL AND face_grouping_run_id IS NULL)
         OR (task = 'face_detection' AND deduplicate_run_id IS NULL AND face_grouping_run_id IS NOT NULL)
     )
@@ -495,7 +541,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_job_inputs_job
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_media_task
     ON llm_jobs (media_id, task)
-    WHERE task IN ('ocr', 'image_tagging', 'image_aesthetics', 'face_detection')
+    WHERE task IN ('ocr', 'image_tagging', 'image_aesthetics', 'screenshot_detection', 'document_detection', 'face_detection')
       AND status IN ('queued', 'submitting', 'submitted');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_clustering

@@ -83,7 +83,10 @@ fn queue_all_keeps_ocr_independent_of_optional_tasks() {
         .expect("metadata job");
     connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
     drop(connection);
-    assert_eq!(ai::queue_all(&pool, false, false).expect("queue ocr"), 1);
+    assert_eq!(
+        ai::queue_all(&pool, false, false, false, false).expect("queue ocr"),
+        1
+    );
 }
 
 #[test]

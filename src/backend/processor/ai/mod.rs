@@ -10,7 +10,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::config::Config;
 use crate::constants::{
-    paths, IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE,
+    paths, DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE,
+    OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
 };
 use crate::database::{queries, DbPool};
 
@@ -30,7 +31,7 @@ pub async fn run(config: Arc<Config>, pool: DbPool, handle: TransportHandle) {
             continue;
         }
         let connection = match LlmConnection::connect(
-            &config.llm.service_url,
+            &config.llm.server_address,
             &config.llm.client_id,
             &config.llm.api_key,
             pool.clone(),
@@ -218,6 +219,10 @@ pub fn queue_task(pool: &DbPool, task: &str, task_enabled: bool) -> Result<usize
     let transaction = connection.unchecked_transaction()?;
     let queued = if task == IMAGE_AESTHETICS_MODEL_TYPE {
         transaction.execute(queries::ai_jobs::INSERT_AESTHETICS_ELIGIBLE, [])?
+    } else if task == SCREENSHOT_DETECTION_MODEL_TYPE {
+        transaction.execute(queries::ai_jobs::INSERT_SCREENSHOT_ELIGIBLE, [])?
+    } else if task == DOCUMENT_DETECTION_MODEL_TYPE {
+        transaction.execute(queries::ai_jobs::INSERT_DOCUMENT_ELIGIBLE, [])?
     } else {
         transaction.execute(
             queries::ai_jobs::INSERT_ELIGIBLE,
@@ -233,10 +238,22 @@ pub fn queue_all(
     pool: &DbPool,
     image_tagging_enabled: bool,
     image_aesthetics_enabled: bool,
+    screenshot_detection_enabled: bool,
+    document_detection_enabled: bool,
 ) -> Result<usize, rusqlite::Error> {
     Ok(queue_task(pool, OCR_MODEL_TYPE, true)?
         + queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, image_tagging_enabled)?
-        + queue_task(pool, IMAGE_AESTHETICS_MODEL_TYPE, image_aesthetics_enabled)?)
+        + queue_task(pool, IMAGE_AESTHETICS_MODEL_TYPE, image_aesthetics_enabled)?
+        + queue_task(
+            pool,
+            SCREENSHOT_DETECTION_MODEL_TYPE,
+            screenshot_detection_enabled,
+        )?
+        + queue_task(
+            pool,
+            DOCUMENT_DETECTION_MODEL_TYPE,
+            document_detection_enabled,
+        )?)
 }
 
 async fn submit_cycle(

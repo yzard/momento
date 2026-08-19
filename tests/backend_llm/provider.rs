@@ -125,6 +125,28 @@ class Handler(BaseHTTPRequestHandler):
         if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType'}:
             self.send_json(400, {'detail': 'invalid input descriptor'})
             return
+        if 'screenshot_detection' in arguments.mode or 'document_detection' in arguments.mode or 'classifier' in arguments.mode:
+            with request_lock:
+                active_requests += 1
+                maximum_active_requests = max(maximum_active_requests, active_requests)
+            if arguments.mode == 'slow_screenshot_detection':
+                wait_for_concurrent_requests(8)
+            response = {'detected': True, 'confidence': 0.87}
+            if arguments.mode == 'ordered_classifier':
+                response = {
+                    'detected': descriptor['sequence'] != 0,
+                    'confidence': 0.2 if descriptor['sequence'] == 0 else 0.9,
+                }
+            if arguments.mode == 'malformed_classifier_confidence':
+                response['confidence'] = 1.1
+            if arguments.mode == 'malformed_classifier_extra':
+                response['extra'] = True
+            if arguments.mode == 'malformed_classifier_detected':
+                response['detected'] = 'true'
+            self.send_json(200, response)
+            with request_lock:
+                active_requests -= 1
+            return
         if 'image_aesthetics' in arguments.mode:
             with request_lock:
                 active_requests += 1
@@ -276,6 +298,10 @@ pub(super) fn service(
         "clip-vit-b-32-laion-aesthetic-v1".to_string()
     } else if model_type == "face_detection" {
         "buffalo_l".to_string()
+    } else if model_type == "screenshot_detection" {
+        "screenshot-heuristics-v1".to_string()
+    } else if model_type == "document_detection" {
+        "document-heuristics-v1".to_string()
     } else {
         "ram++".to_string()
     };
@@ -331,6 +357,26 @@ fn image_aesthetics_is_a_registered_service_type() {
         ServiceType::ImageAesthetics
     );
     assert_eq!(ServiceType::ImageAesthetics.as_str(), "image_aesthetics");
+}
+
+#[test]
+fn classifier_tasks_are_registered_service_types() {
+    assert_eq!(
+        ServiceType::from_task("screenshot_detection").expect("screenshot task"),
+        ServiceType::ScreenshotDetection
+    );
+    assert_eq!(
+        ServiceType::from_task("document_detection").expect("document task"),
+        ServiceType::DocumentDetection
+    );
+    assert_eq!(
+        ServiceType::ScreenshotDetection.as_str(),
+        "screenshot_detection"
+    );
+    assert_eq!(
+        ServiceType::DocumentDetection.as_str(),
+        "document_detection"
+    );
 }
 
 pub(super) fn manager(services: Vec<(ServiceConfig, RuntimeSpec)>) -> ServiceManager {
@@ -467,6 +513,208 @@ async fn manager_reuses_a_runtime_and_switches_for_a_different_task() {
         .await
         .expect("Runtime should stop cleanly");
     assert_eq!(manager.active_name(), "on-demand");
+}
+
+#[tokio::test]
+async fn manager_reuses_classifier_runtime_and_switches_classifier_tasks() {
+    let (_directory, script_path, start_log) = fixture();
+    let screenshot_port = available_port();
+    let document_port = available_port();
+    let screenshot = service(
+        "screenshot_detection",
+        "screenshot_detection",
+        screenshot_port,
+        &script_path,
+        &start_log,
+    );
+    let document = service(
+        "document_detection",
+        "document_detection",
+        document_port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![screenshot, document]);
+
+    let first = infer_one(
+        &mut manager,
+        "screenshot_detection",
+        b"first image",
+        "first.jpg",
+    )
+    .await
+    .expect("first screenshot classification");
+    let second = infer_one(
+        &mut manager,
+        "screenshot_detection",
+        b"second image",
+        "second.jpg",
+    )
+    .await
+    .expect("reused screenshot classifier");
+
+    assert_eq!(first.detected, Some(true));
+    assert_eq!(first.confidence, Some(0.87));
+    assert_eq!(second.model_version, "screenshot-heuristics-v1");
+    assert_eq!(manager.active_task(), Some("screenshot_detection"));
+    assert_eq!(
+        fs::read_to_string(&start_log).expect("runtime starts"),
+        "screenshot_detection:2\n"
+    );
+
+    let document_response = infer_one(
+        &mut manager,
+        "document_detection",
+        b"document image",
+        "document.jpg",
+    )
+    .await
+    .expect("document classifier switch");
+
+    assert_eq!(document_response.task, "document_detection");
+    assert_eq!(document_response.model_type, "document_detection");
+    assert_eq!(document_response.model_version, "document-heuristics-v1");
+    assert_eq!(manager.active_task(), Some("document_detection"));
+    assert_eq!(
+        fs::read_to_string(&start_log).expect("runtime starts"),
+        "screenshot_detection:2\ndocument_detection:2\n"
+    );
+    manager.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn manager_rejects_malformed_classifier_contracts() {
+    for mode in [
+        "malformed_classifier_confidence",
+        "malformed_classifier_extra",
+        "malformed_classifier_detected",
+    ] {
+        let (_directory, script_path, start_log) = fixture();
+        let classifier = service(
+            "screenshot_detection",
+            mode,
+            available_port(),
+            &script_path,
+            &start_log,
+        );
+        let mut manager = manager(vec![classifier]);
+
+        let error = infer_one(&mut manager, "screenshot_detection", b"image", "image.jpg")
+            .await
+            .expect_err("malformed classifier response must fail");
+
+        assert!(
+            error.to_string().contains("screenshot_detection"),
+            "{error}"
+        );
+        manager.shutdown().await.expect("runtime shutdown");
+    }
+}
+
+#[tokio::test]
+async fn manager_preserves_classifier_results_for_every_ordered_input() {
+    let (directory, script_path, start_log) = fixture();
+    let classifier = service(
+        "document_detection",
+        "ordered_classifier",
+        available_port(),
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![classifier]);
+    let paths = [
+        directory.path().join("document-0.jpg"),
+        directory.path().join("document-1.jpg"),
+    ];
+    for path in &paths {
+        fs::write(path, b"image").expect("classifier input");
+    }
+    let dispatcher = manager
+        .dispatcher("document_detection")
+        .await
+        .expect("document dispatcher");
+
+    let responses = dispatcher
+        .infer_inputs(
+            paths
+                .into_iter()
+                .enumerate()
+                .map(|(sequence, path)| InferenceInput {
+                    job_id: "abcdef12".to_string(),
+                    sequence: sequence as u32,
+                    frame_timestamp_ms: Some(sequence as i64 * 1000),
+                    path,
+                    byte_size: 5,
+                    content_hash: format!("{:x}", Sha256::digest(b"image")),
+                    mime_type: "image/jpeg".to_string(),
+                    filename: format!("document-{sequence}.jpg"),
+                })
+                .collect(),
+        )
+        .await
+        .expect("ordered classifier responses");
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].sequence, 0);
+    assert_eq!(responses[0].response.detected, Some(false));
+    assert_eq!(responses[0].response.confidence, Some(0.2));
+    assert_eq!(responses[1].sequence, 1);
+    assert_eq!(responses[1].response.detected, Some(true));
+    assert_eq!(responses[1].response.confidence, Some(0.9));
+    manager.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn manager_dispatches_classifier_jobs_without_a_provider_concurrency_limit() {
+    let (directory, script_path, start_log) = fixture();
+    let port = available_port();
+    let classifier = service(
+        "screenshot_detection",
+        "slow_screenshot_detection",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let mut manager = manager(vec![classifier]);
+    let inputs = (0..8)
+        .map(|sequence| {
+            let path = directory.path().join(format!("screenshot-{sequence}.jpg"));
+            fs::write(&path, b"image").expect("classifier input");
+            InferenceInput {
+                job_id: format!("abcd34{sequence:02x}"),
+                sequence,
+                frame_timestamp_ms: None,
+                path,
+                byte_size: 5,
+                content_hash: format!("{:x}", Sha256::digest(b"image")),
+                mime_type: "image/jpeg".to_string(),
+                filename: format!("screenshot-{sequence}.jpg"),
+            }
+        })
+        .collect::<Vec<_>>();
+    let dispatcher = manager
+        .dispatcher("screenshot_detection")
+        .await
+        .expect("screenshot dispatcher");
+    let mut in_flight = inputs
+        .into_iter()
+        .map(|input| dispatcher.infer_inputs(vec![input]))
+        .collect::<FuturesUnordered<_>>();
+    let mut responses = Vec::new();
+    while let Some(response) = in_flight.next().await {
+        responses.push(response);
+    }
+    let metrics: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
+        .await
+        .expect("metrics response")
+        .json()
+        .await
+        .expect("metrics body");
+
+    assert_eq!(responses.len(), 8);
+    assert!(responses.iter().all(Result::is_ok));
+    assert_eq!(metrics["maximumActiveRequests"], 8);
+    manager.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]

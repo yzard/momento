@@ -8,16 +8,20 @@ import { cn } from '../../lib/utils'
 export default function AiPanel() {
   const ocrQuery = useQuery({ queryKey: ['ai', 'ocr', 'status'], queryFn: aiApi.getOcrStatus, refetchInterval: 2000 })
   const taggingQuery = useQuery({ queryKey: ['ai', 'image-tagging', 'status'], queryFn: aiApi.getImageTaggingStatus, refetchInterval: 2000 })
+  const screenshotDetectionQuery = useQuery({ queryKey: ['ai', 'screenshot-detection', 'status'], queryFn: aiApi.getScreenshotDetectionStatus, refetchInterval: 2000 })
+  const documentDetectionQuery = useQuery({ queryKey: ['ai', 'document-detection', 'status'], queryFn: aiApi.getDocumentDetectionStatus, refetchInterval: 2000 })
   const aestheticsQuery = useQuery({ queryKey: ['ai', 'image-aesthetics', 'status'], queryFn: aiApi.getImageAestheticsStatus, refetchInterval: 2000 })
   const deduplicationQuery = useQuery({ queryKey: ['deduplicate', 'status'], queryFn: deduplicateApi.status, refetchInterval: 2000 })
   const facesQuery = useQuery({ queryKey: ['ai', 'faces', 'status'], queryFn: aiApi.getFacesStatus, refetchInterval: 2000 })
-  const isRefreshing = ocrQuery.isFetching || taggingQuery.isFetching || aestheticsQuery.isFetching || deduplicationQuery.isFetching || facesQuery.isFetching
+  const isRefreshing = ocrQuery.isFetching || taggingQuery.isFetching || screenshotDetectionQuery.isFetching || documentDetectionQuery.isFetching || aestheticsQuery.isFetching || deduplicationQuery.isFetching || facesQuery.isFetching
   const ocrRunning = isActive(ocrQuery.data?.status)
   const taggingRunning = isActive(taggingQuery.data?.status)
+  const screenshotDetectionRunning = isActive(screenshotDetectionQuery.data?.status)
+  const documentDetectionRunning = isActive(documentDetectionQuery.data?.status)
   const aestheticsRunning = isActive(aestheticsQuery.data?.status)
   const clusteringRunning = isActive(deduplicationQuery.data?.status)
   const facesRunning = isActive(facesQuery.data?.status)
-  const allRunning = ocrRunning || taggingRunning || aestheticsRunning || clusteringRunning || facesRunning
+  const allRunning = ocrRunning || taggingRunning || screenshotDetectionRunning || documentDetectionRunning || aestheticsRunning || clusteringRunning || facesRunning
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-white shadow-sm">
       <div className="flex flex-col gap-4 border-b border-border bg-muted/30 px-8 py-6 sm:flex-row sm:items-center sm:justify-between">
@@ -30,14 +34,16 @@ export default function AiPanel() {
             <p className="text-sm text-muted-foreground">Library processing and similarity-index coverage.</p>
           </div>
         </div>
-        <button type="button" onClick={() => void Promise.all([ocrQuery.refetch(), taggingQuery.refetch(), aestheticsQuery.refetch(), deduplicationQuery.refetch(), facesQuery.refetch()])} disabled={isRefreshing} className="flex min-h-10 items-center justify-center gap-2 self-start rounded-lg border border-border bg-background px-4 text-sm font-bold text-foreground transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto">
+        <button type="button" onClick={() => void Promise.all([ocrQuery.refetch(), taggingQuery.refetch(), screenshotDetectionQuery.refetch(), documentDetectionQuery.refetch(), aestheticsQuery.refetch(), deduplicationQuery.refetch(), facesQuery.refetch()])} disabled={isRefreshing} className="flex min-h-10 items-center justify-center gap-2 self-start rounded-lg border border-border bg-background px-4 text-sm font-bold text-foreground transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto">
           <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
           Refresh metrics
         </button>
       </div>
-      <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4 xl:grid-cols-8">
+      <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-5 xl:grid-cols-10">
         <Metric label="Processed OCR" value={ocrQuery.data?.completedJobs} loading={ocrQuery.isLoading} />
         <Metric label="Processed image tagging" value={taggingQuery.data?.completedJobs} loading={taggingQuery.isLoading} />
+        <Metric label="Processed screenshot detection" value={screenshotDetectionQuery.data?.completedJobs} loading={screenshotDetectionQuery.isLoading} />
+        <Metric label="Processed document detection" value={documentDetectionQuery.data?.completedJobs} loading={documentDetectionQuery.isLoading} />
         <Metric label="Scored image aesthetics" value={aestheticsQuery.data?.completedJobs} loading={aestheticsQuery.isLoading} />
         <Metric label="Image clustering embeddings" value={deduplicationQuery.data?.ensembledMedia} loading={deduplicationQuery.isLoading} />
         <Metric label="Deduplication comparisons" value={deduplicationQuery.data?.candidateComparisons} loading={deduplicationQuery.isLoading} />
@@ -51,6 +57,8 @@ export default function AiPanel() {
           <ControlRow label="All AI Jobs" running={allRunning} start={() => aiApi.trigger()} cancel={() => aiApi.cancel()} clean={() => aiApi.clean()} />
           <ControlRow label="OCR" running={ocrRunning} start={() => aiApi.triggerOcr()} cancel={() => aiApi.cancelOcr()} clean={() => aiApi.cleanOcr()} />
           <ControlRow label="Image Tagging" running={taggingRunning} start={() => aiApi.triggerImageTagging()} cancel={() => aiApi.cancelImageTagging()} clean={() => aiApi.cleanImageTagging()} />
+          <ControlRow label="Screenshot Detection" running={screenshotDetectionRunning} start={() => aiApi.triggerScreenshotDetection()} cancel={() => aiApi.cancelScreenshotDetection()} clean={() => aiApi.cleanScreenshotDetection()} />
+          <ControlRow label="Document Detection" running={documentDetectionRunning} start={() => aiApi.triggerDocumentDetection()} cancel={() => aiApi.cancelDocumentDetection()} clean={() => aiApi.cleanDocumentDetection()} />
           <ControlRow label="Image Aesthetics" running={aestheticsRunning} start={() => aiApi.triggerImageAesthetics()} cancel={() => aiApi.cancelImageAesthetics()} clean={() => aiApi.cleanImageAesthetics()} />
           <ControlRow label="Image Clustering (Duplicate)" running={clusteringRunning} start={() => aiApi.triggerImageClustering()} cancel={() => aiApi.cancelImageClustering()} clean={() => aiApi.cleanImageClustering()} />
           <ControlRow label="Face Detection" running={facesRunning} start={() => aiApi.startFaces()} cancel={() => aiApi.cancelFaces()} clean={() => aiApi.cleanFaces()} />

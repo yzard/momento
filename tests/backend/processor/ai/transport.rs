@@ -39,6 +39,7 @@ where
         let socket = tokio_tungstenite::accept_hdr_async(
             stream,
             move |request: &Request, mut response: Response| {
+                assert_eq!(request.uri().path(), "/api/v1/llm/connect");
                 assert_eq!(
                     request
                         .headers()
@@ -70,7 +71,7 @@ where
         .expect("WebSocket handshake");
         handler(socket).await;
     });
-    (format!("ws://{address}/api/v1/llm/connect"), server)
+    (address.to_string(), server)
 }
 
 async fn receive_client_control(socket: &mut ServerSocket) -> ClientControlMessage {
@@ -115,11 +116,11 @@ fn pending_count(pool: &momento_api::database::DbPool, table: &str) -> i64 {
 #[tokio::test]
 async fn connection_sends_authentication_headers_and_requires_selected_subprotocol() {
     let pool = create_test_db();
-    let (url, server) = start_server(true, |mut socket| async move {
+    let (server_address, server) = start_server(true, |mut socket| async move {
         socket.close(None).await.expect("close socket");
     })
     .await;
-    let connection = LlmConnection::connect(&url, CLIENT_ID, API_KEY, pool.clone())
+    let connection = LlmConnection::connect(&server_address, CLIENT_ID, API_KEY, pool.clone())
         .await
         .expect("WebSocket connection");
     tokio::time::timeout(std::time::Duration::from_secs(1), connection.closed())
@@ -127,8 +128,8 @@ async fn connection_sends_authentication_headers_and_requires_selected_subprotoc
         .expect("connection close");
     server.await.expect("server task");
 
-    let (url, server) = start_server(false, |_socket| async {}).await;
-    let error = match LlmConnection::connect(&url, CLIENT_ID, API_KEY, pool).await {
+    let (server_address, server) = start_server(false, |_socket| async {}).await;
+    let error = match LlmConnection::connect(&server_address, CLIENT_ID, API_KEY, pool).await {
         Ok(_) => panic!("missing selected subprotocol must fail"),
         Err(error) => error,
     };
@@ -156,7 +157,7 @@ async fn cancellation_outbox_is_retained_until_websocket_acknowledgement() {
         1
     );
     let expected_job_id = job_id.to_string();
-    let (url, server) = start_server(true, move |mut socket| async move {
+    let (server_address, server) = start_server(true, move |mut socket| async move {
         let first_request_id = match receive_client_control(&mut socket).await {
             ClientControlMessage::CancelJobs {
                 request_id,
@@ -203,7 +204,7 @@ async fn cancellation_outbox_is_retained_until_websocket_acknowledgement() {
         .await;
     })
     .await;
-    let connection = LlmConnection::connect(&url, CLIENT_ID, API_KEY, pool.clone())
+    let connection = LlmConnection::connect(&server_address, CLIENT_ID, API_KEY, pool.clone())
         .await
         .expect("WebSocket connection");
 
@@ -233,7 +234,7 @@ async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
     connection.execute("INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('transport-result-ok', ?, 'ocr', 'submitted', 1)", [media_id]).expect("valid job");
     connection.execute("INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('transport-result-bad', ?, 'ocr', 'submitted', 1)", [rejected_media_id]).expect("invalid job");
     drop(connection);
-    let (url, server) = start_server(true, move |mut socket| async move {
+    let (server_address, server) = start_server(true, move |mut socket| async move {
         send_service_control(
             &mut socket,
             ServiceControlMessage::Result {
@@ -291,7 +292,7 @@ async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
         }
     })
     .await;
-    let _connection = LlmConnection::connect(&url, CLIENT_ID, API_KEY, pool.clone())
+    let _connection = LlmConnection::connect(&server_address, CLIENT_ID, API_KEY, pool.clone())
         .await
         .expect("WebSocket connection");
     server.await.expect("server task");
@@ -325,7 +326,7 @@ async fn submission_streams_prepared_input_in_bounded_binary_chunks() {
     let expected_bytes = input_bytes.clone();
     let job_id = "abcdef0123456789abcdef0123456789";
     let expected_job_id = job_id.to_string();
-    let (url, server) = start_server(true, move |mut socket| async move {
+    let (server_address, server) = start_server(true, move |mut socket| async move {
         let manifest = match receive_client_control(&mut socket).await {
             ClientControlMessage::SubmissionStart { manifest } => manifest,
             other => panic!("expected submission start, received {other:?}"),
@@ -394,7 +395,7 @@ async fn submission_streams_prepared_input_in_bounded_binary_chunks() {
         .await;
     })
     .await;
-    let connection = LlmConnection::connect(&url, CLIENT_ID, API_KEY, pool)
+    let connection = LlmConnection::connect(&server_address, CLIENT_ID, API_KEY, pool)
         .await
         .expect("WebSocket connection");
     let manifest = JobManifest {

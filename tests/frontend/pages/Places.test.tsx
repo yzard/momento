@@ -90,12 +90,12 @@ describe('Places page', () => {
     })
     renderPlaces()
 
-    const parisCard = await screen.findByRole('link', { name: 'Paris, France, 8 media' })
+    const parisCard = await screen.findByRole('link', { name: 'Paris, Ile-de-France, France, 8 media' })
     expect(parisCard.className).toContain('aspect-[3/2]')
     expect(screen.getByText('Paris')).toBeTruthy()
-    expect(screen.getByText('France')).toBeTruthy()
+    expect(screen.getByText('Ile-de-France, France')).toBeTruthy()
     expect(screen.getByText('8 media')).toBeTruthy()
-    expect(screen.queryByText('Ile-de-France')).toBeNull()
+    expect(screen.getByText('Japan')).toBeTruthy()
 
     const cardObserver = observedElements.find(({ target }) => target === parisCard)
     expect(cardObserver).toBeDefined()

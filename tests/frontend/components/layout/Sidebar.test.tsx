@@ -1,12 +1,14 @@
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from '../../../../src/frontend/node_modules/react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../../../src/frontend/hooks/useAuth', () => ({ useAuth: () => ({ user: { role: 'user' } }) }))
 
 import Sidebar from '../../../../src/frontend/components/layout/Sidebar'
 
 describe('Sidebar', () => {
+  afterEach(cleanup)
+
   it('places Places between Map and Faces', () => {
     render(<MemoryRouter><Sidebar isCollapsed={false} isMobileOpen toggleCollapse={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>)
 
@@ -16,5 +18,13 @@ describe('Sidebar', () => {
     expect(labels.indexOf('Utility')).toBe(labels.indexOf('Faces') + 1)
     expect(screen.getByText('v1.0.0')).toBeTruthy()
     expect(screen.queryByText('Momento v1.0.0')).toBeNull()
+  })
+
+  it('shows screenshot and document timeline children', () => {
+    render(<MemoryRouter initialEntries={['/timeline/screenshots']}><Sidebar isCollapsed={false} isMobileOpen toggleCollapse={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>)
+
+    expect(screen.getByRole('link', { name: 'Screenshot' }).getAttribute('href')).toBe('/timeline/screenshots')
+    expect(screen.getByRole('link', { name: 'Document' }).getAttribute('href')).toBe('/timeline/documents')
+    expect(screen.getByRole('link', { name: 'Photos' }).getAttribute('href')).toBe('/timeline/photos')
   })
 })

@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Map as MapIcon,
   MapPinned,
+  ScanText,
   ScanSearch,
   Settings,
   Trash2,
@@ -37,6 +38,8 @@ const navItems: NavItem[] = [
     children: [
       { to: '/timeline/photos', label: 'Photos', icon: ImageIcon },
       { to: '/timeline/videos', label: 'Videos', icon: Video },
+      { to: '/timeline/screenshots', label: 'Screenshot', icon: ScanSearch },
+      { to: '/timeline/documents', label: 'Document', icon: ScanText },
     ],
   },
   { to: '/albums', label: 'Albums', icon: Folder },

@@ -4,6 +4,7 @@ import {
   mediaApi,
   type GroupBy,
   type MediaTypeFilter,
+  type TimelineClassification,
   type TimelineListRequest,
   type TimelineListResponse,
   type TimelineMarker,
@@ -14,6 +15,7 @@ interface TimelineWindowOptions {
   groupBy: GroupBy
   search: string
   mediaType: MediaTypeFilter | null
+  classification: TimelineClassification | null
   marker: TimelineMarker | null
   preloadKey: number
   refreshKey: number
@@ -49,12 +51,12 @@ function mergeTimelinePages(pages: TimelinePageEntry[]): TimelineGroup[] {
   })).sort((left, right) => right.date.localeCompare(left.date))
 }
 
-export function useTimelineMarkers(mediaType: MediaTypeFilter | null, search: string) {
+export function useTimelineMarkers(mediaType: MediaTypeFilter | null, classification: TimelineClassification | null, search: string) {
   const normalizedSearch = search.trim()
 
   return useQuery({
-    queryKey: ['timeline', 'markers', mediaType, normalizedSearch],
-    queryFn: () => mediaApi.getTimelineMarkers(mediaType, normalizedSearch),
+    queryKey: ['timeline', 'markers', mediaType, classification, normalizedSearch],
+    queryFn: () => mediaApi.getTimelineMarkers(mediaType, classification, normalizedSearch),
     staleTime: Infinity,
     gcTime: 1000 * 60 * 10,
     refetchOnMount: false,
@@ -68,6 +70,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     groupBy,
     search,
     mediaType,
+    classification,
     marker,
     preloadKey,
     refreshKey,
@@ -77,6 +80,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     groupBy,
     normalizedSearch,
     mediaType,
+    classification,
     refreshKey,
   ])
   const pageCacheRef = useRef<Map<string, CachedPage>>(new Map())
@@ -138,6 +142,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
           groupBy,
           search: normalizedSearch,
           mediaType: mediaType ?? undefined,
+          classification,
           direction,
           cursor,
         }
@@ -153,7 +158,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       loadingRef.current = false
       setLoading(false)
     }
-  }, [appendPage, fetchPage, groupBy, mediaType, normalizedSearch])
+  }, [appendPage, classification, fetchPage, groupBy, mediaType, normalizedSearch])
 
   useEffect(() => {
     pageCacheRef.current.clear()
@@ -176,6 +181,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       groupBy,
       search: normalizedSearch,
       mediaType: mediaType ?? undefined,
+      classification,
       direction: 'older',
       anchorDate: marker.anchorDate,
     }
@@ -193,7 +199,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       .finally(() => {
         if (generation === generationRef.current) setIsLoading(false)
       })
-  }, [appendPage, fetchPage, groupBy, marker, mediaType, normalizedSearch, preloadKey, preloadPeriods])
+  }, [appendPage, classification, fetchPage, groupBy, marker, mediaType, normalizedSearch, preloadKey, preloadPeriods])
 
   const loadOlder = useCallback(async () => {
     if (loadingOlderRef.current) return
@@ -206,6 +212,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       groupBy,
       search: normalizedSearch,
       mediaType: mediaType ?? undefined,
+      classification,
       direction: 'older',
       cursor: oldest.response.nextCursor,
     }
@@ -218,7 +225,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       loadingOlderRef.current = false
       setIsLoadingOlder(false)
     }
-  }, [appendPage, fetchPage, groupBy, mediaType, normalizedSearch])
+  }, [appendPage, classification, fetchPage, groupBy, mediaType, normalizedSearch])
 
   const loadNewer = useCallback(async () => {
     if (loadingNewerRef.current) return
@@ -231,6 +238,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       groupBy,
       search: normalizedSearch,
       mediaType: mediaType ?? undefined,
+      classification,
       direction: 'newer',
       cursor: newest.response.previousCursor,
     }
@@ -243,7 +251,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
       loadingNewerRef.current = false
       setIsLoadingNewer(false)
     }
-  }, [appendPage, fetchPage, groupBy, mediaType, normalizedSearch])
+  }, [appendPage, classification, fetchPage, groupBy, mediaType, normalizedSearch])
 
   const groups = mergeTimelinePages(entries)
   const hasNextPage = entries.at(-1)?.response.hasOlder ?? false

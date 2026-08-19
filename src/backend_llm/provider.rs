@@ -60,6 +60,10 @@ pub struct InferenceResponse {
     pub technical_quality_score: Option<f32>,
     #[serde(default)]
     pub faces: Vec<FaceDetection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -116,6 +120,8 @@ pub enum ServiceType {
     ImageClustering,
     ImageAesthetics,
     FaceDetection,
+    ScreenshotDetection,
+    DocumentDetection,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +302,16 @@ impl RuntimeCatalog {
                 model_version: "clip-vit-b-32-laion-aesthetic-v1".to_string(),
                 embedding_dimensions: 0,
             },
+            classifier_runtime_spec(
+                ServiceType::ScreenshotDetection,
+                "8700",
+                "screenshot-heuristics-v1",
+            ),
+            classifier_runtime_spec(
+                ServiceType::DocumentDetection,
+                "8800",
+                "document-heuristics-v1",
+            ),
         ])
     }
 
@@ -320,6 +336,8 @@ impl ServiceType {
             "image_clustering" => Ok(Self::ImageClustering),
             "image_aesthetics" => Ok(Self::ImageAesthetics),
             "face_detection" => Ok(Self::FaceDetection),
+            "screenshot_detection" => Ok(Self::ScreenshotDetection),
+            "document_detection" => Ok(Self::DocumentDetection),
             _ => Err(ServiceError::NotImplemented(format!(
                 "inference task `{task}` has no configured managed runtime"
             ))),
@@ -333,6 +351,8 @@ impl ServiceType {
             Self::ImageClustering => "image_clustering",
             Self::ImageAesthetics => "image_aesthetics",
             Self::FaceDetection => "face_detection",
+            Self::ScreenshotDetection => "screenshot_detection",
+            Self::DocumentDetection => "document_detection",
         }
     }
 
@@ -343,6 +363,8 @@ impl ServiceType {
             Self::ImageClustering => "image_clustering",
             Self::ImageAesthetics => "image_aesthetics",
             Self::FaceDetection => "face_detection",
+            Self::ScreenshotDetection => "screenshot_detection",
+            Self::DocumentDetection => "document_detection",
         }
     }
 }
@@ -354,6 +376,7 @@ enum ActiveService {
     ImageClustering(Arc<ImageClusteringProvider>),
     ImageAesthetics(Arc<ImageAestheticsProvider>),
     FaceDetection(Arc<FaceDetectionProvider>),
+    Classifier(Arc<ClassifierProvider>),
 }
 
 impl ActiveService {
@@ -364,6 +387,7 @@ impl ActiveService {
             Self::ImageClustering(_) => ServiceType::ImageClustering,
             Self::ImageAesthetics(_) => ServiceType::ImageAesthetics,
             Self::FaceDetection(_) => ServiceType::FaceDetection,
+            Self::Classifier(provider) => provider.service_type,
         }
     }
 
@@ -374,6 +398,7 @@ impl ActiveService {
             Self::ImageClustering(_) => "dinov2",
             Self::ImageAesthetics(_) => "clip-aesthetic",
             Self::FaceDetection(_) => "insightface",
+            Self::Classifier(_) => "image-classifier",
         }
     }
     async fn shutdown(&self) -> Result<(), ServiceError> {
@@ -383,6 +408,7 @@ impl ActiveService {
             Self::ImageClustering(provider) => provider.shutdown().await,
             Self::ImageAesthetics(provider) => provider.shutdown().await,
             Self::FaceDetection(provider) => provider.shutdown().await,
+            Self::Classifier(provider) => provider.shutdown().await,
         }
     }
 
@@ -393,6 +419,7 @@ impl ActiveService {
             Self::ImageClustering(provider) => provider.runtime.is_alive().await,
             Self::ImageAesthetics(provider) => provider.runtime.is_alive().await,
             Self::FaceDetection(provider) => provider.runtime.is_alive().await,
+            Self::Classifier(provider) => provider.runtime.is_alive().await,
         }
     }
 
@@ -406,6 +433,7 @@ impl ActiveService {
             Self::ImageClustering(provider) => provider.infer_inputs(inputs).await,
             Self::ImageAesthetics(provider) => provider.infer_inputs(inputs).await,
             Self::FaceDetection(provider) => provider.infer_inputs(inputs).await,
+            Self::Classifier(provider) => provider.infer_inputs(inputs).await,
         }
     }
 }
@@ -504,6 +532,12 @@ impl ServiceManager {
             ServiceType::FaceDetection => ActiveService::FaceDetection(Arc::new(
                 FaceDetectionProvider::new(&service, &runtime, &self.config.server).await?,
             )),
+            ServiceType::ScreenshotDetection | ServiceType::DocumentDetection => {
+                ActiveService::Classifier(Arc::new(
+                    ClassifierProvider::new(service_type, &service, &runtime, &self.config.server)
+                        .await?,
+                ))
+            }
         };
         self.active = Some(active);
         Ok(())
@@ -732,6 +766,8 @@ impl LocalProvider {
             landscape_score: None,
             technical_quality_score: None,
             faces: Vec::new(),
+            detected: None,
+            confidence: None,
         })
     }
 
@@ -925,6 +961,8 @@ impl RamProvider {
             landscape_score: None,
             technical_quality_score: None,
             faces: Vec::new(),
+            detected: None,
+            confidence: None,
         })
     }
 
@@ -1021,6 +1059,8 @@ impl ImageClusteringProvider {
             landscape_score: None,
             technical_quality_score: None,
             faces: Vec::new(),
+            detected: None,
+            confidence: None,
         })
     }
 
@@ -1158,6 +1198,8 @@ impl ImageAestheticsProvider {
             landscape_score: Some(runtime_response.landscape_score),
             technical_quality_score: Some(runtime_response.technical_quality_score),
             faces: Vec::new(),
+            detected: None,
+            confidence: None,
         })
     }
 
@@ -1320,6 +1362,8 @@ impl FaceDetectionProvider {
             landscape_score: None,
             technical_quality_score: None,
             faces,
+            detected: None,
+            confidence: None,
         })
     }
 
@@ -1377,6 +1421,163 @@ impl FaceDetectionProvider {
 
     async fn shutdown(&self) -> Result<(), ServiceError> {
         self.runtime.shutdown().await
+    }
+}
+
+pub struct ClassifierProvider {
+    runtime: ManagedRuntime,
+    service_type: ServiceType,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClassifierRuntimeResponse {
+    detected: bool,
+    confidence: f32,
+}
+
+impl ClassifierProvider {
+    async fn new(
+        service_type: ServiceType,
+        config: &ServiceConfig,
+        runtime: &RuntimeSpec,
+        server: &ServerConfig,
+    ) -> Result<Self, ServiceError> {
+        if !matches!(
+            service_type,
+            ServiceType::ScreenshotDetection | ServiceType::DocumentDetection
+        ) {
+            return Err(ServiceError::Configuration(format!(
+                "{} is not a classifier service",
+                service_type.as_str()
+            )));
+        }
+        Ok(Self {
+            runtime: ManagedRuntime::new(config, runtime, server, "image classifier").await?,
+            service_type,
+        })
+    }
+
+    async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
+        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
+        let response = self
+            .runtime
+            .client
+            .post(url)
+            .json(&runtime_input_descriptor(input))
+            .send()
+            .await
+            .map_err(|error| {
+                ServiceError::RuntimeUnavailable(format!(
+                    "{} request failed: {error}",
+                    self.service_type.as_str()
+                ))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            ServiceError::Upstream(format!(
+                "failed to read {} response: {error}",
+                self.service_type.as_str()
+            ))
+        })?;
+        if !status.is_success() {
+            let message = format!(
+                "{} runtime returned {status}: {body}",
+                self.service_type.as_str()
+            );
+            return if status.is_client_error() {
+                Err(ServiceError::BadRequest(message))
+            } else {
+                Err(ServiceError::Upstream(message))
+            };
+        }
+        let runtime_response: ClassifierRuntimeResponse =
+            serde_json::from_str(&body).map_err(|error| {
+                ServiceError::Upstream(format!(
+                    "invalid {} response: {error}",
+                    self.service_type.as_str()
+                ))
+            })?;
+        validate_unit_score(
+            runtime_response.confidence,
+            "confidence",
+            self.service_type.as_str(),
+        )?;
+
+        let task = self.service_type.as_str().to_string();
+        Ok(InferenceResponse {
+            task: task.clone(),
+            text: String::new(),
+            markdown: String::new(),
+            provider: "image-classifier".to_string(),
+            model_type: task,
+            model_version: self.runtime.spec.model_version.clone(),
+            tags: Vec::new(),
+            embedding: None,
+            embedding_encoding: None,
+            embedding_dimensions: None,
+            perceptual_hash: None,
+            quality_score: None,
+            aesthetic_score: None,
+            scenic_score: None,
+            simplicity_score: None,
+            landscape_score: None,
+            technical_quality_score: None,
+            faces: Vec::new(),
+            detected: Some(runtime_response.detected),
+            confidence: Some(runtime_response.confidence),
+        })
+    }
+
+    async fn infer_inputs(
+        &self,
+        inputs: Vec<InferenceInput>,
+    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input).await?,
+            });
+        }
+        Ok(responses)
+    }
+
+    async fn shutdown(&self) -> Result<(), ServiceError> {
+        self.runtime.shutdown().await
+    }
+}
+
+fn classifier_runtime_spec(
+    service_type: ServiceType,
+    port: &str,
+    model_version: &str,
+) -> RuntimeSpec {
+    RuntimeSpec {
+        service_type,
+        executable: PathBuf::from("/opt/venvs/classifier/bin/python"),
+        arguments: vec![
+            "/app/runtimes/classifier_server.py",
+            "--classifier",
+            service_type.as_str(),
+            "--host",
+            RUNTIME_HOST,
+            "--port",
+            port,
+            "--max-concurrent-jobs",
+            RUNTIME_CONCURRENCY_PLACEHOLDER,
+            "--input-root",
+            RUNTIME_INPUT_PLACEHOLDER,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        environment: Vec::new(),
+        base_url: format!("http://{RUNTIME_HOST}:{port}"),
+        model: String::new(),
+        model_version: model_version.to_string(),
+        embedding_dimensions: 0,
     }
 }
 
@@ -1740,6 +1941,8 @@ mod tests {
             ServiceType::ImageClustering,
             ServiceType::ImageAesthetics,
             ServiceType::FaceDetection,
+            ServiceType::ScreenshotDetection,
+            ServiceType::DocumentDetection,
         ] {
             let runtime = runtimes.get(service_type).expect("production runtime");
             assert!(runtime.executable.starts_with("/opt/venvs"));
@@ -1770,5 +1973,20 @@ mod tests {
             .arguments
             .iter()
             .any(|argument| { argument == "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" }));
+
+        for service_type in [
+            ServiceType::ScreenshotDetection,
+            ServiceType::DocumentDetection,
+        ] {
+            let classifier = runtimes.get(service_type).expect("classifier runtime");
+            assert_eq!(
+                classifier.executable,
+                PathBuf::from("/opt/venvs/classifier/bin/python")
+            );
+            assert!(classifier
+                .arguments
+                .iter()
+                .any(|argument| argument == service_type.as_str()));
+        }
     }
 }

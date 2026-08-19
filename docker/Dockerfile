@@ -6,6 +6,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY src/frontend ./src/frontend
+COPY src/backend/version.txt ./src/backend/version.txt
 
 RUN pnpm install --frozen-lockfile && pnpm --dir /app/build/frontend/workspace/src/frontend build && mkdir -p /app/dist/frontend && cp -R /app/build/frontend/workspace/src/frontend/dist/. /app/dist/frontend/
 

@@ -7,6 +7,9 @@ services:
       PGID: "${PGID:-1000}"
       UMASK: "${UMASK:-022}"
       TZ: "${TZ:-UTC}"
+      RESET_ADMIN_PASSWORD: "${RESET_ADMIN_PASSWORD:-false}"
+      SECRET_KEY: "${SECRET_KEY:-playground-only-change-this-secret-before-exposing-the-server}"
+      LLM_SERVICE_API_KEY: "${LLM_SERVICE_API_KEY:-change-me-llm-service-key}"
       LLM_SERVICE_ADDRESS: "momento-llm-service:8100"
     volumes:
       - "${MOMENTO_DATA_DIR:-./data}:/data"
@@ -29,6 +32,7 @@ services:
       PGID: "${PGID:-1000}"
       UMASK: "${UMASK:-022}"
       TZ: "${TZ:-UTC}"
+      LLM_SERVICE_API_KEY: "${LLM_SERVICE_API_KEY:-change-me-llm-service-key}"
     volumes:
       - "${MOMENTO_DATA_DIR:-./data}:/data"
     networks:
@@ -46,4 +50,3 @@ services:
 
 networks:
   momento:
-    driver: bridge

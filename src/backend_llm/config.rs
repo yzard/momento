@@ -1,6 +1,7 @@
 mod defaults;
 
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -10,6 +11,7 @@ use crate::error::ServiceError;
 
 static DEFAULT_CONFIG_TEMPLATE: LazyLock<String> =
     LazyLock::new(|| defaults::render_template(include_str!("default.toml")));
+const LLM_SERVICE_API_KEY_PLACEHOLDER: &str = "${LLM_SERVICE_API_KEY}";
 
 pub fn default_config_template() -> &'static str {
     DEFAULT_CONFIG_TEMPLATE.as_str()
@@ -134,9 +136,12 @@ impl Config {
         let content = std::fs::read_to_string(path).map_err(|error| {
             ServiceError::Configuration(format!("failed to read {}: {error}", path.display()))
         })?;
-        let config = toml::from_str::<Self>(&content).map_err(|error| {
+        let api_key = read_environment_variable("LLM_SERVICE_API_KEY")?;
+        let content = resolve_config_environment(&content, api_key.as_deref())?;
+        let mut config = toml::from_str::<Self>(&content).map_err(|error| {
             ServiceError::Configuration(format!("failed to parse {}: {error}", path.display()))
         })?;
+        apply_config_environment(&mut config, api_key.as_deref())?;
         config.validate()?;
         Ok(config)
     }
@@ -232,6 +237,12 @@ impl Config {
             "image_clustering" => self.validate_image_clustering_service(service),
             "image_aesthetics" => self.validate_image_aesthetics_service(service),
             "face_detection" => self.validate_face_detection_service(service),
+            "screenshot_detection" => {
+                self.validate_image_service_timeouts(service, "screenshot detection")
+            }
+            "document_detection" => {
+                self.validate_image_service_timeouts(service, "document detection")
+            }
             model_type => Err(ServiceError::Configuration(format!(
                 "unsupported service model_type: {model_type}"
             ))),
@@ -311,6 +322,50 @@ impl Config {
     }
 }
 
+fn read_environment_variable(name: &str) -> Result<Option<String>, ServiceError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ServiceError::Configuration(format!(
+            "{name} must contain valid Unicode"
+        ))),
+    }
+}
+
+pub fn apply_config_environment(
+    config: &mut Config,
+    api_key: Option<&str>,
+) -> Result<(), ServiceError> {
+    let Some(api_key) = api_key else {
+        return Ok(());
+    };
+    if api_key.trim().is_empty() {
+        return Err(ServiceError::Configuration(
+            "LLM_SERVICE_API_KEY must not be empty".to_string(),
+        ));
+    }
+    config.server.api_key = api_key.to_string();
+    Ok(())
+}
+
+pub fn resolve_config_environment(
+    content: &str,
+    api_key: Option<&str>,
+) -> Result<String, ServiceError> {
+    if !content.contains(LLM_SERVICE_API_KEY_PLACEHOLDER) {
+        return Ok(content.to_string());
+    }
+    let api_key = api_key
+        .filter(|api_key| !api_key.trim().is_empty())
+        .ok_or_else(|| {
+            ServiceError::Configuration("LLM_SERVICE_API_KEY must not be empty".to_string())
+        })?;
+    Ok(content.replace(
+        &format!("\"{LLM_SERVICE_API_KEY_PLACEHOLDER}\""),
+        &toml::Value::String(api_key.to_string()).to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +418,8 @@ mod tests {
         config.service.push(service("image_clustering"));
         config.service.push(service("image_aesthetics"));
         config.service.push(service("face_detection"));
+        config.service.push(service("screenshot_detection"));
+        config.service.push(service("document_detection"));
 
         assert!(config.validate().is_ok());
     }

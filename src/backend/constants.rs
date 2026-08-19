@@ -62,6 +62,8 @@ pub const TRASH_RETENTION_DAYS: i64 = 30;
 pub const OCR_MODEL_TYPE: &str = "ocr";
 pub const IMAGE_TAGGING_MODEL_TYPE: &str = "image_tagging";
 pub const IMAGE_AESTHETICS_MODEL_TYPE: &str = "image_aesthetics";
+pub const SCREENSHOT_DETECTION_MODEL_TYPE: &str = "screenshot_detection";
+pub const DOCUMENT_DETECTION_MODEL_TYPE: &str = "document_detection";
 pub const FACE_DETECTION_MODEL_TYPE: &str = "face_detection";
 
 pub fn media_text_model_name(model_type: &str) -> Option<&'static str> {

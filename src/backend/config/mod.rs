@@ -8,11 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use momento_common::config_file::{replace_config, write_new_config};
+use tokio_tungstenite::tungstenite::http::uri::Authority;
 use toml_edit::{value, DocumentMut};
 
 static DEFAULT_CONFIG_TEMPLATE: LazyLock<String> =
     LazyLock::new(|| defaults::render_template(include_str!("default.toml")));
 const LLM_SERVICE_ADDRESS_PLACEHOLDER: &str = "${LLM_SERVICE_ADDRESS}";
+const RESET_ADMIN_PASSWORD_PLACEHOLDER: &str = "${RESET_ADMIN_PASSWORD}";
+const SECRET_KEY_PLACEHOLDER: &str = "${SECRET_KEY}";
+const LLM_SERVICE_API_KEY_PLACEHOLDER: &str = "${LLM_SERVICE_API_KEY}";
 
 pub fn default_config_template() -> &'static str {
     DEFAULT_CONFIG_TEMPLATE.as_str()
@@ -205,8 +209,8 @@ impl Default for RegenerateConfig {
 pub struct LlmConfig {
     #[serde(default = "defaults::llm_enabled")]
     pub enabled: bool,
-    #[serde(default = "defaults::llm_service_url")]
-    pub service_url: String,
+    #[serde(default = "defaults::llm_server_address")]
+    pub server_address: String,
     #[serde(default = "defaults::llm_client_id")]
     pub client_id: String,
     #[serde(default = "defaults::llm_api_key")]
@@ -219,6 +223,10 @@ pub struct LlmConfig {
     pub face_detection_enabled: bool,
     #[serde(default = "defaults::image_aesthetics_enabled")]
     pub image_aesthetics_enabled: bool,
+    #[serde(default = "defaults::screenshot_detection_enabled")]
+    pub screenshot_detection_enabled: bool,
+    #[serde(default = "defaults::document_detection_enabled")]
+    pub document_detection_enabled: bool,
     #[serde(default = "defaults::face_group_similarity_threshold")]
     pub face_group_similarity_threshold: f32,
 }
@@ -238,6 +246,10 @@ pub struct CronjobConfig {
     pub face_detection_cron: String,
     #[serde(default = "defaults::image_aesthetics_cron")]
     pub image_aesthetics_cron: String,
+    #[serde(default = "defaults::screenshot_detection_cron")]
+    pub screenshot_detection_cron: String,
+    #[serde(default = "defaults::document_detection_cron")]
+    pub document_detection_cron: String,
 }
 
 impl Default for CronjobConfig {
@@ -249,6 +261,8 @@ impl Default for CronjobConfig {
             deduplicate_cron: defaults::deduplicate_cron(),
             face_detection_cron: defaults::face_detection_cron(),
             image_aesthetics_cron: defaults::image_aesthetics_cron(),
+            screenshot_detection_cron: defaults::screenshot_detection_cron(),
+            document_detection_cron: defaults::document_detection_cron(),
         }
     }
 }
@@ -264,6 +278,8 @@ impl CronjobConfig {
             ("deduplicate", &self.deduplicate_cron),
             ("face_detection", &self.face_detection_cron),
             ("image_aesthetics", &self.image_aesthetics_cron),
+            ("screenshot_detection", &self.screenshot_detection_cron),
+            ("document_detection", &self.document_detection_cron),
         ] {
             let normalized_cron = format!("0 {expression} *");
             normalized_cron.parse::<cron::Schedule>().map_err(|error| {
@@ -278,13 +294,15 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             enabled: defaults::fallback::LLM_ENABLED,
-            service_url: defaults::llm_service_url(),
+            server_address: defaults::llm_server_address(),
             client_id: defaults::fallback::LLM_CLIENT_ID.to_string(),
             api_key: defaults::fallback::LLM_API_KEY.to_string(),
             image_tagging_enabled: defaults::fallback::IMAGE_TAGGING_ENABLED,
             deduplicate_enabled: defaults::fallback::DEDUPLICATE_ENABLED,
             face_detection_enabled: defaults::fallback::FACE_DETECTION_ENABLED,
             image_aesthetics_enabled: defaults::fallback::IMAGE_AESTHETICS_ENABLED,
+            screenshot_detection_enabled: defaults::fallback::SCREENSHOT_DETECTION_ENABLED,
+            document_detection_enabled: defaults::fallback::DOCUMENT_DETECTION_ENABLED,
             face_group_similarity_threshold: defaults::FACE_GROUP_SIMILARITY_THRESHOLD,
         }
     }
@@ -331,14 +349,20 @@ impl LlmConfig {
         if !self.enabled {
             return Ok(());
         }
-        if self.service_url.trim().is_empty() {
+        if self.server_address.is_empty() {
             return Err(std::io::Error::other(
-                "llm service_url is required when LLM is enabled",
+                "llm server_address is required when LLM is enabled",
             ));
         }
-        if !self.service_url.starts_with("ws://") && !self.service_url.starts_with("wss://") {
+        let server_address = self
+            .server_address
+            .parse::<Authority>()
+            .map_err(|_| std::io::Error::other("llm server_address must contain only host:port"))?;
+        if server_address.host().is_empty()
+            || server_address.port_u16().is_none_or(|port| port == 0)
+        {
             return Err(std::io::Error::other(
-                "llm service_url must use ws:// or wss:// when LLM is enabled",
+                "llm server_address must contain a host and positive port",
             ));
         }
         if !momento_common::llm::is_valid_client_id(&self.client_id) {
@@ -389,20 +413,27 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     }
 
     let content = fs::read_to_string(config_path)?;
-    let llm_service_address = if content.contains(LLM_SERVICE_ADDRESS_PLACEHOLDER) {
-        Some(env::var("LLM_SERVICE_ADDRESS").map_err(|_| {
-            std::io::Error::other(
-                "config references ${LLM_SERVICE_ADDRESS}, but LLM_SERVICE_ADDRESS is not set",
-            )
-        })?)
-    } else {
-        None
-    };
-    let content = resolve_config_environment(&content, llm_service_address.as_deref())?;
+    let llm_service_address = read_environment_variable("LLM_SERVICE_ADDRESS")?;
+    let reset_admin_password = read_environment_variable("RESET_ADMIN_PASSWORD")?;
+    let secret_key = read_environment_variable("SECRET_KEY")?;
+    let api_key = read_environment_variable("LLM_SERVICE_API_KEY")?;
+    let content = resolve_config_environment(
+        &content,
+        llm_service_address.as_deref(),
+        reset_admin_password.as_deref(),
+        secret_key.as_deref(),
+        api_key.as_deref(),
+    )?;
 
-    let config: Config = toml::from_str(&content).map_err(|e| {
+    let mut config: Config = toml::from_str(&content).map_err(|e| {
         std::io::Error::other(format!("invalid config at {}: {e}", config_path.display()))
     })?;
+    apply_config_environment(
+        &mut config,
+        reset_admin_password.as_deref(),
+        secret_key.as_deref(),
+        api_key.as_deref(),
+    )?;
     config.webdav.validate()?;
     config.llm.validate()?;
     config.llm_submission_worker.validate()?;
@@ -410,17 +441,111 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     Ok(config)
 }
 
+fn read_environment_variable(name: &str) -> std::io::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(std::io::Error::other(format!(
+            "{name} must contain valid Unicode"
+        ))),
+    }
+}
+
+pub fn apply_config_environment(
+    config: &mut Config,
+    reset_admin_password: Option<&str>,
+    secret_key: Option<&str>,
+    api_key: Option<&str>,
+) -> std::io::Result<()> {
+    if let Some(reset_admin_password) = reset_admin_password {
+        config.server.reset_admin_password = parse_reset_admin_password(reset_admin_password)?;
+    }
+    if let Some(secret_key) = secret_key {
+        validate_environment_secret(secret_key, "SECRET_KEY")?;
+        config.security.secret_key = secret_key.to_string();
+    }
+    if let Some(api_key) = api_key {
+        validate_environment_secret(api_key, "LLM_SERVICE_API_KEY")?;
+        config.llm.api_key = api_key.to_string();
+    }
+    Ok(())
+}
+
 pub fn resolve_config_environment(
     content: &str,
     llm_service_address: Option<&str>,
+    reset_admin_password: Option<&str>,
+    secret_key: Option<&str>,
+    api_key: Option<&str>,
 ) -> std::io::Result<String> {
-    if !content.contains(LLM_SERVICE_ADDRESS_PLACEHOLDER) {
-        return Ok(content.to_string());
+    let mut resolved = content.to_string();
+    if resolved.contains(LLM_SERVICE_ADDRESS_PLACEHOLDER) {
+        let llm_service_address =
+            required_environment_value(llm_service_address, "LLM_SERVICE_ADDRESS")?;
+        resolved = replace_toml_string_placeholder(
+            &resolved,
+            LLM_SERVICE_ADDRESS_PLACEHOLDER,
+            llm_service_address,
+        );
     }
-    let llm_service_address = llm_service_address
-        .filter(|address| !address.trim().is_empty())
-        .ok_or_else(|| std::io::Error::other("LLM_SERVICE_ADDRESS must not be empty"))?;
-    Ok(content.replace(LLM_SERVICE_ADDRESS_PLACEHOLDER, llm_service_address))
+    if resolved.contains(RESET_ADMIN_PASSWORD_PLACEHOLDER) {
+        let reset_admin_password =
+            required_environment_value(reset_admin_password, "RESET_ADMIN_PASSWORD")?;
+        let reset_admin_password = parse_reset_admin_password(reset_admin_password)?;
+        resolved = resolved.replace(
+            &format!("\"{RESET_ADMIN_PASSWORD_PLACEHOLDER}\""),
+            if reset_admin_password {
+                "true"
+            } else {
+                "false"
+            },
+        );
+    }
+    for (placeholder, value, name) in [
+        (SECRET_KEY_PLACEHOLDER, secret_key, "SECRET_KEY"),
+        (
+            LLM_SERVICE_API_KEY_PLACEHOLDER,
+            api_key,
+            "LLM_SERVICE_API_KEY",
+        ),
+    ] {
+        if resolved.contains(placeholder) {
+            let value = required_environment_value(value, name)?;
+            validate_environment_secret(value, name)?;
+            resolved = replace_toml_string_placeholder(&resolved, placeholder, value);
+        }
+    }
+    Ok(resolved)
+}
+
+fn required_environment_value<'a>(value: Option<&'a str>, name: &str) -> std::io::Result<&'a str> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| std::io::Error::other(format!("{name} must not be empty")))
+}
+
+fn parse_reset_admin_password(value: &str) -> std::io::Result<bool> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(std::io::Error::other(
+            "RESET_ADMIN_PASSWORD must be true or false",
+        )),
+    }
+}
+
+fn validate_environment_secret(value: &str, name: &str) -> std::io::Result<()> {
+    if value.trim().is_empty() {
+        return Err(std::io::Error::other(format!("{name} must not be empty")));
+    }
+    Ok(())
+}
+
+fn replace_toml_string_placeholder(content: &str, placeholder: &str, value: &str) -> String {
+    content.replace(
+        &format!("\"{placeholder}\""),
+        &toml::Value::String(value.to_string()).to_string(),
+    )
 }
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {

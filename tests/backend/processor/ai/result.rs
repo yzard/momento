@@ -46,6 +46,161 @@ fn insert_job_input(pool: &DbPool, job_id: &str, sequence: u32, frame_timestamp_
         .expect("job input");
 }
 
+fn classification_result(
+    job_id: &str,
+    media_id: i64,
+    task: &str,
+    detected: bool,
+    confidence: f64,
+) -> JobResult {
+    let classification = serde_json::json!({
+        "detected": detected,
+        "confidence": confidence
+    });
+    JobResult {
+        job_id: job_id.to_string(),
+        media_id,
+        task: task.to_string(),
+        attempt: 1,
+        status: "completed".to_string(),
+        model_type: Some(task.to_string()),
+        model_version: Some("classifier-v1".to_string()),
+        result: Some(classification.clone()),
+        input_results: Some(vec![JobInputResult {
+            sequence: 0,
+            frame_timestamp_ms: None,
+            result: classification,
+        }]),
+        error: None,
+    }
+}
+
+#[test]
+fn classifier_results_persist_overlapping_aggregate_and_input_rows() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "classifier-result.jpg");
+    for (job_id, task) in [
+        ("result-screenshot", "screenshot_detection"),
+        ("result-document", "document_detection"),
+    ] {
+        insert_submitted_job(&pool, job_id, media_id, task, 1);
+        insert_job_input(&pool, job_id, 0, None);
+        process_result(
+            &pool,
+            classification_result(job_id, media_id, task, true, 0.91),
+        )
+        .expect("classification result");
+    }
+
+    let connection = pool.get().expect("database connection");
+    let screenshot: (bool, f64) = connection
+        .query_row(
+            "SELECT is_screenshot, confidence FROM media_screenshot_classifications WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("screenshot aggregate");
+    let document: (bool, f64) = connection
+        .query_row(
+            "SELECT is_document, confidence FROM media_document_classifications WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("document aggregate");
+    let input_count: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM media_screenshot_classification_inputs) + (SELECT COUNT(*) FROM media_document_classification_inputs)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("classification input count");
+    assert_eq!(screenshot, (true, 0.91));
+    assert_eq!(document, (true, 0.91));
+    assert_eq!(input_count, 2);
+}
+
+#[test]
+fn classifier_results_reject_invalid_payloads_and_correlation() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "invalid-classifier-result.jpg");
+    insert_submitted_job(
+        &pool,
+        "invalid-classifier",
+        media_id,
+        "screenshot_detection",
+        1,
+    );
+    insert_job_input(&pool, "invalid-classifier", 0, None);
+
+    let invalid_confidence = classification_result(
+        "invalid-classifier",
+        media_id,
+        "screenshot_detection",
+        true,
+        1.1,
+    );
+    assert!(matches!(
+        process_result(&pool, invalid_confidence),
+        Err(AppError::BadRequest(_))
+    ));
+
+    let mut mismatched_model = classification_result(
+        "invalid-classifier",
+        media_id,
+        "screenshot_detection",
+        true,
+        0.8,
+    );
+    mismatched_model.model_type = Some("document_detection".to_string());
+    assert!(matches!(
+        process_result(&pool, mismatched_model),
+        Err(AppError::BadRequest(_))
+    ));
+
+    let mut mismatched_input = classification_result(
+        "invalid-classifier",
+        media_id,
+        "screenshot_detection",
+        true,
+        0.8,
+    );
+    mismatched_input
+        .input_results
+        .as_mut()
+        .expect("input results")[0]
+        .sequence = 1;
+    assert!(matches!(
+        process_result(&pool, mismatched_input),
+        Err(AppError::BadRequest(_))
+    ));
+
+    let mut mismatched_aggregate = classification_result(
+        "invalid-classifier",
+        media_id,
+        "screenshot_detection",
+        true,
+        0.8,
+    );
+    mismatched_aggregate.result = Some(serde_json::json!({
+        "detected": false,
+        "confidence": 0.8
+    }));
+    assert!(matches!(
+        process_result(&pool, mismatched_aggregate),
+        Err(AppError::BadRequest(_))
+    ));
+    let persisted: i64 = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT COUNT(*) FROM media_screenshot_classifications WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("classification count");
+    assert_eq!(persisted, 0);
+}
+
 #[test]
 fn result_rejects_stale_attempts_and_non_terminal_statuses() {
     let pool = create_test_db();

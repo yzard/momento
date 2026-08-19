@@ -4,15 +4,15 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use momento_api::config::{
-    consume_admin_password_reset, default_config_template, load_config, resolve_config_environment,
-    save_default_config, Config,
+    apply_config_environment, consume_admin_password_reset, default_config_template, load_config,
+    resolve_config_environment, save_default_config, Config,
 };
 use tempfile::TempDir;
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
     let contents = format!(
-        "{contents}\n[cronjob]\ntimezone = \"Etc/UTC\"\nocr_cron = \"0 1 * * *\"\nimage_tagging_cron = \"0 2 * * *\"\ndeduplicate_cron = \"0 3 * * *\"\nface_detection_cron = \"0 4 * * *\"\n"
+        "{contents}\n[cronjob]\ntimezone = \"Etc/UTC\"\nocr_cron = \"0 1 * * *\"\nimage_tagging_cron = \"0 2 * * *\"\ndeduplicate_cron = \"0 3 * * *\"\nface_detection_cron = \"0 4 * * *\"\nimage_aesthetics_cron = \"0 5 * * *\"\nscreenshot_detection_cron = \"0 6 * * *\"\ndocument_detection_cron = \"0 7 * * *\"\n"
     );
     std::fs::write(&path, contents).expect("Failed to write test config");
     path
@@ -38,23 +38,26 @@ fn test_load_config_reads_server_paths() {
 #[test]
 fn config_environment_resolves_the_llm_service_address() {
     let resolved = resolve_config_environment(
-        "service_url = \"ws://${LLM_SERVICE_ADDRESS}/api/v1/llm/connect\"",
+        "server_address = \"${LLM_SERVICE_ADDRESS}\"",
         Some("momento-llm-service:8100"),
+        None,
+        None,
+        None,
     )
     .expect("resolved config");
 
-    assert_eq!(
-        resolved,
-        "service_url = \"ws://momento-llm-service:8100/api/v1/llm/connect\""
-    );
+    assert_eq!(resolved, "server_address = \"momento-llm-service:8100\"");
 }
 
 #[test]
 fn config_environment_requires_a_non_empty_llm_service_address() {
     for address in [None, Some(""), Some("   ")] {
         let error = resolve_config_environment(
-            "service_url = \"ws://${LLM_SERVICE_ADDRESS}/api/v1/llm/connect\"",
+            "server_address = \"${LLM_SERVICE_ADDRESS}\"",
             address,
+            None,
+            None,
+            None,
         )
         .expect_err("missing address must fail");
         assert!(error.to_string().contains("LLM_SERVICE_ADDRESS"));
@@ -62,13 +65,75 @@ fn config_environment_requires_a_non_empty_llm_service_address() {
 }
 
 #[test]
-fn config_environment_leaves_literal_service_urls_unchanged() {
-    let content = "service_url = \"wss://llm.example.com/api/v1/llm/connect\"";
+fn config_environment_leaves_literal_server_addresses_unchanged() {
+    let content = "server_address = \"llm.example.com:8100\"";
 
     assert_eq!(
-        resolve_config_environment(content, None).expect("literal URL"),
+        resolve_config_environment(content, None, None, None, None).expect("literal URL"),
         content
     );
+}
+
+#[test]
+fn config_environment_resolves_boolean_and_escaped_secret_placeholders() {
+    let resolved = resolve_config_environment(
+        "reset_admin_password = \"${RESET_ADMIN_PASSWORD}\"\nsecret_key = \"${SECRET_KEY}\"\napi_key = \"${LLM_SERVICE_API_KEY}\"",
+        None,
+        Some("true"),
+        Some("secret-with-\"quote"),
+        Some("api\\key"),
+    )
+    .expect("resolved config");
+    let config: toml::Value = toml::from_str(&resolved).expect("resolved TOML");
+
+    assert_eq!(config["reset_admin_password"].as_bool(), Some(true));
+    assert_eq!(config["secret_key"].as_str(), Some("secret-with-\"quote"));
+    assert_eq!(config["api_key"].as_str(), Some("api\\key"));
+}
+
+#[test]
+fn config_environment_overrides_recovery_and_shared_secrets() {
+    let mut config = Config::default();
+
+    apply_config_environment(
+        &mut config,
+        Some("true"),
+        Some("environment-secret"),
+        Some("environment-api-key"),
+    )
+    .expect("environment overrides");
+
+    assert!(config.server.reset_admin_password);
+    assert_eq!(config.security.secret_key, "environment-secret");
+    assert_eq!(config.llm.api_key, "environment-api-key");
+
+    apply_config_environment(&mut config, Some("false"), None, None)
+        .expect("disabled recovery override");
+    assert!(!config.server.reset_admin_password);
+}
+
+#[test]
+fn config_environment_rejects_invalid_recovery_and_empty_secrets() {
+    for reset_admin_password in ["TRUE", "1", "yes", ""] {
+        let error = apply_config_environment(
+            &mut Config::default(),
+            Some(reset_admin_password),
+            None,
+            None,
+        )
+        .expect_err("invalid recovery value must fail");
+        assert!(error.to_string().contains("RESET_ADMIN_PASSWORD"));
+    }
+    for (secret_key, api_key, expected_name) in [
+        (Some(""), None, "SECRET_KEY"),
+        (Some("   "), None, "SECRET_KEY"),
+        (None, Some(""), "LLM_SERVICE_API_KEY"),
+        (None, Some("   "), "LLM_SERVICE_API_KEY"),
+    ] {
+        let error = apply_config_environment(&mut Config::default(), None, secret_key, api_key)
+            .expect_err("empty secret must fail");
+        assert!(error.to_string().contains(expected_name));
+    }
 }
 
 #[test]
@@ -197,6 +262,8 @@ fn test_existing_cronjob_section_receives_new_schedule_defaults() {
     assert_eq!(config.cronjob.deduplicate_cron, "30 3 * * *");
     assert_eq!(config.cronjob.face_detection_cron, "0 4 * * *");
     assert_eq!(config.cronjob.image_aesthetics_cron, "0 5 * * *");
+    assert_eq!(config.cronjob.screenshot_detection_cron, "0 6 * * *");
+    assert_eq!(config.cronjob.document_detection_cron, "0 7 * * *");
 }
 
 #[test]
@@ -358,8 +425,14 @@ fn test_save_default_config_round_trips() {
 
     save_default_config(&path).expect("Failed to save default config");
     let generated = std::fs::read_to_string(&path).expect("Failed to read generated config");
-    let resolved = resolve_config_environment(&generated, Some("llm-service:8100"))
-        .expect("Failed to resolve generated config");
+    let resolved = resolve_config_environment(
+        &generated,
+        Some("llm-service:8100"),
+        Some("false"),
+        Some("generated-secret"),
+        Some("generated-api-key"),
+    )
+    .expect("Failed to resolve generated config");
     std::fs::write(&path, resolved).expect("Failed to write resolved config");
     let config = load_config(&path).expect("Failed to reload saved config");
 
@@ -426,6 +499,8 @@ fn test_load_config_uses_disabled_deduplicate_llm_default_when_section_is_missin
 
     assert!(!config.llm.deduplicate_enabled);
     assert!(!config.llm.image_aesthetics_enabled);
+    assert!(!config.llm.screenshot_detection_enabled);
+    assert!(!config.llm.document_detection_enabled);
     assert_eq!(config.llm.face_group_similarity_threshold, 0.41);
 }
 
@@ -448,6 +523,9 @@ fn test_load_config_rejects_each_invalid_ai_schedule() {
         ("image_tagging_cron", "0 2 * * *"),
         ("deduplicate_cron", "0 3 * * *"),
         ("face_detection_cron", "0 4 * * *"),
+        ("image_aesthetics_cron", "0 5 * * *"),
+        ("screenshot_detection_cron", "0 6 * * *"),
+        ("document_detection_cron", "0 7 * * *"),
     ] {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = write_config(&dir, "");
@@ -485,35 +563,49 @@ fn test_load_config_rejects_invalid_deduplicate_timezone() {
 }
 
 #[test]
-fn test_load_config_requires_llm_service_url() {
+fn test_load_config_requires_llm_server_address() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let path = write_config(&dir, "[llm]\nenabled = true\nservice_url = \"\"\n");
+    let path = write_config(&dir, "[llm]\nenabled = true\nserver_address = \"\"\n");
 
-    let error = load_config(&path).expect_err("Enabled LLM must have a service URL");
+    let error = load_config(&path).expect_err("Enabled LLM must have a server address");
 
-    assert!(error.to_string().contains("service_url"));
+    assert!(error.to_string().contains("server_address"));
+}
+
+#[test]
+fn test_load_config_requires_host_and_port_only_for_llm_server_address() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    for server_address in [
+        "ws://127.0.0.1:8100",
+        "127.0.0.1:8100/api/v1/llm/connect",
+        "127.0.0.1",
+        "127.0.0.1:0",
+    ] {
+        let path = write_config(
+            &dir,
+            &format!(
+                "[llm]\nenabled = true\nserver_address = \"{server_address}\"\nclient_id = \"client_a\"\napi_key = \"key\"\n"
+            ),
+        );
+        let error = load_config(&path).expect_err("invalid LLM server address must fail");
+        assert!(error.to_string().contains("server_address"));
+    }
 }
 
 #[test]
 fn test_load_config_requires_websocket_client_identity_and_key() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let path = write_config(
-        &dir,
-        "[llm]\nenabled = true\nservice_url = \"http://127.0.0.1:8100\"\nclient_id = \"client_a\"\napi_key = \"key\"\n",
-    );
-    let error = load_config(&path).expect_err("HTTP LLM URL must be rejected");
-    assert!(error.to_string().contains("ws:// or wss://"));
 
     let path = write_config(
         &dir,
-        "[llm]\nenabled = true\nservice_url = \"ws://127.0.0.1:8100/api/v1/llm/connect\"\napi_key = \"key\"\n",
+        "[llm]\nenabled = true\nserver_address = \"127.0.0.1:8100\"\napi_key = \"key\"\n",
     );
     let error = load_config(&path).expect_err("LLM client ID must be required");
     assert!(error.to_string().contains("client_id"));
 
     let path = write_config(
         &dir,
-        "[llm]\nenabled = true\nservice_url = \"ws://127.0.0.1:8100/api/v1/llm/connect\"\nclient_id = \"client_a\"\n",
+        "[llm]\nenabled = true\nserver_address = \"127.0.0.1:8100\"\nclient_id = \"client_a\"\n",
     );
     let error = load_config(&path).expect_err("LLM API key must be required");
     assert!(error.to_string().contains("api_key"));
@@ -534,12 +626,24 @@ fn test_load_config_rejects_configurable_llm_inference_endpoint() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[llm]\nenabled = true\nservice_url = \"http://127.0.0.1:8100\"\ninference_endpoint = \"/custom\"\n",
+        "[llm]\nenabled = true\nserver_address = \"127.0.0.1:8100\"\ninference_endpoint = \"/custom\"\n",
     );
 
     let error = load_config(&path).expect_err("LLM inference endpoint is not configurable");
 
     assert!(error.to_string().contains("inference_endpoint"));
+}
+
+#[test]
+fn test_load_config_rejects_removed_llm_service_url() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[llm]\nenabled = true\nservice_url = \"ws://127.0.0.1:8100/api/v1/llm/connect\"\n",
+    );
+
+    let error = load_config(&path).expect_err("removed service_url must fail");
+    assert!(error.to_string().contains("service_url"));
 }
 
 #[test]

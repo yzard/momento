@@ -65,6 +65,7 @@ pub struct TimelineListRequest {
     pub group_by: String,
     pub search: String,
     pub media_type: Option<String>,
+    pub classification: Option<String>,
     pub direction: TimelineDirection,
     pub anchor_date: Option<String>,
 }
@@ -80,6 +81,7 @@ pub enum TimelineDirection {
 #[serde(rename_all = "camelCase")]
 pub struct TimelineMarkersRequest {
     pub media_type: Option<String>,
+    pub classification: Option<String>,
     pub search: String,
 }
 

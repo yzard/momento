@@ -277,6 +277,7 @@ fn query_timeline(
         ));
     }
     let media_type = validate_media_type(request.media_type.as_deref())?;
+    let classification = validate_classification(request.classification.as_deref())?;
 
     let page = fetch_timeline_page(
         conn,
@@ -285,6 +286,7 @@ fn query_timeline(
             cursor: request.cursor.as_deref(),
             search,
             media_type,
+            classification,
             start_date: TIMELINE_START_DATE,
             end_date: TIMELINE_END_DATE,
             direction: request.direction,
@@ -324,6 +326,7 @@ fn query_timeline(
             user_id,
             search,
             media_type: media_type.unwrap_or(""),
+            classification: classification.unwrap_or(""),
             start_date: TIMELINE_START_DATE,
             end_date: TIMELINE_END_DATE,
         };
@@ -367,6 +370,8 @@ async fn get_timeline_markers(
     let search = normalize_media_text_search(Some(&request.search));
     let media_type = validate_media_type(request.media_type.as_deref())?;
     let media_type_value = media_type.unwrap_or("");
+    let classification = validate_classification(request.classification.as_deref())?;
+    let classification_value = classification.unwrap_or("");
     let rows: Vec<(String, String)> = fetch_all(
         &conn,
         queries::timeline::SELECT_MONTH_MARKERS,
@@ -376,6 +381,9 @@ async fn get_timeline_markers(
             &search,
             &media_type_value,
             &media_type_value,
+            &classification_value,
+            &classification_value,
+            &classification_value,
         ],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -393,6 +401,15 @@ fn validate_media_type(media_type: Option<&str>) -> AppResult<Option<&str>> {
         None | Some("image") | Some("video") => Ok(media_type),
         Some(_) => Err(AppError::BadRequest(
             "mediaType must be either image or video".to_string(),
+        )),
+    }
+}
+
+fn validate_classification(classification: Option<&str>) -> AppResult<Option<&str>> {
+    match classification {
+        None | Some("screenshot") | Some("document") => Ok(classification),
+        Some(_) => Err(AppError::BadRequest(
+            "classification must be either screenshot or document".to_string(),
         )),
     }
 }
@@ -758,6 +775,7 @@ struct TimelineQuery<'a> {
     cursor: Option<&'a str>,
     search: &'a str,
     media_type: Option<&'a str>,
+    classification: Option<&'a str>,
     start_date: &'a str,
     end_date: &'a str,
     direction: TimelineDirection,
@@ -775,6 +793,7 @@ struct TimelineFilter<'a> {
     user_id: i64,
     search: &'a str,
     media_type: &'a str,
+    classification: &'a str,
     start_date: &'a str,
     end_date: &'a str,
 }
@@ -788,6 +807,7 @@ fn fetch_timeline_page(
         cursor,
         search,
         media_type,
+        classification,
         start_date,
         end_date,
         direction,
@@ -795,10 +815,12 @@ fn fetch_timeline_page(
         group_by,
     } = query;
     let media_type = media_type.unwrap_or("");
+    let classification = classification.unwrap_or("");
     let filter = TimelineFilter {
         user_id,
         search,
         media_type,
+        classification,
         start_date,
         end_date,
     };
@@ -813,11 +835,11 @@ fn fetch_timeline_page(
     let (period_start, period_end) = timeline_period_bounds(candidate_date, group_by)?;
     let rows = fetch_timeline_period(
         conn,
-        user_id,
-        search,
-        media_type,
-        &period_start,
-        &period_end,
+        TimelineFilter {
+            start_date: &period_start,
+            end_date: &period_end,
+            ..filter
+        },
         direction,
     )?;
     let Some((last_media, Some(last_date))) = rows.last() else {
@@ -844,6 +866,7 @@ fn fetch_timeline_candidate(
         user_id,
         search,
         media_type,
+        classification,
         start_date,
         end_date,
     } = filter;
@@ -855,6 +878,9 @@ fn fetch_timeline_candidate(
         &search,
         &media_type,
         &media_type,
+        &classification,
+        &classification,
+        &classification,
     ];
 
     if let Some(cursor) = cursor {
@@ -880,6 +906,9 @@ fn fetch_timeline_candidate(
                 query_params[4],
                 query_params[5],
                 query_params[6],
+                query_params[7],
+                query_params[8],
+                query_params[9],
                 &cursor_date,
                 &cursor_date,
                 &cursor_id,
@@ -903,6 +932,9 @@ fn fetch_timeline_candidate(
             query_params[4],
             query_params[5],
             query_params[6],
+            query_params[7],
+            query_params[8],
+            query_params[9],
             &anchor,
             &1_i64,
         ],
@@ -912,13 +944,17 @@ fn fetch_timeline_candidate(
 
 fn fetch_timeline_period(
     conn: &crate::database::DbConn,
-    user_id: i64,
-    search: &str,
-    media_type: &str,
-    period_start: &str,
-    period_end: &str,
+    filter: TimelineFilter<'_>,
     direction: TimelineDirection,
 ) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
+    let TimelineFilter {
+        user_id,
+        search,
+        media_type,
+        classification,
+        start_date: period_start,
+        end_date: period_end,
+    } = filter;
     let max_rows = i64::MAX;
     let query_params = [
         &user_id as &dyn rusqlite::ToSql,
@@ -928,6 +964,9 @@ fn fetch_timeline_period(
         &search,
         &media_type,
         &media_type,
+        &classification,
+        &classification,
+        &classification,
     ];
 
     if direction == TimelineDirection::Older {
@@ -942,6 +981,9 @@ fn fetch_timeline_period(
                 query_params[4],
                 query_params[5],
                 query_params[6],
+                query_params[7],
+                query_params[8],
+                query_params[9],
                 &period_end,
                 &max_rows,
             ],
@@ -960,6 +1002,9 @@ fn fetch_timeline_period(
             query_params[4],
             query_params[5],
             query_params[6],
+            query_params[7],
+            query_params[8],
+            query_params[9],
             &period_start,
             &period_start,
             &-1_i64,

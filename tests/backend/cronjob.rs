@@ -1,8 +1,32 @@
 use chrono::{TimeZone, Utc};
 use momento_api::config::{Config, CronjobConfig};
 use momento_api::cronjob::{next_scheduled_at, run_scheduled_occurrence, ScheduledTask};
+use momento_api::database::DbPool;
 
 use crate::test_utils::create_test_db;
+
+fn prepare_task_input(pool: &DbPool, task: &str, filename: &str) {
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute(
+            "INSERT INTO media (filename, original_filename, file_path, media_type) VALUES (?, ?, ?, 'image')",
+            [filename, filename, filename],
+        )
+        .expect("media");
+    let media_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    connection
+        .execute(
+            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', ?, ?, 'image/jpeg', 4, 'hash')",
+            rusqlite::params![media_id, task, filename, filename],
+        )
+        .expect("prepared input");
+}
 
 #[test]
 fn schedule_uses_configured_iana_timezone() {
@@ -48,6 +72,8 @@ fn schedules_dispatch_through_the_correct_run_abstractions() {
     config.llm.deduplicate_enabled = true;
     config.llm.face_detection_enabled = true;
     config.llm.image_aesthetics_enabled = true;
+    config.llm.screenshot_detection_enabled = true;
+    config.llm.document_detection_enabled = true;
     let scheduled_for = "2026-08-17T03:00:00Z";
 
     let text_pool = create_test_db();
@@ -60,6 +86,26 @@ fn schedules_dispatch_through_the_correct_run_abstractions() {
             &config,
             &text_pool,
             ScheduledTask::ImageAesthetics,
+            scheduled_for,
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        run_scheduled_occurrence(
+            &config,
+            &text_pool,
+            ScheduledTask::ScreenshotDetection,
+            scheduled_for,
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        run_scheduled_occurrence(
+            &config,
+            &text_pool,
+            ScheduledTask::DocumentDetection,
             scheduled_for,
         )
         .unwrap(),
@@ -120,6 +166,75 @@ fn schedules_dispatch_through_the_correct_run_abstractions() {
 }
 
 #[test]
+fn classification_schedules_queue_their_exact_durable_tasks() {
+    let mut config = Config::default();
+    config.llm.enabled = true;
+    config.llm.screenshot_detection_enabled = true;
+    config.llm.document_detection_enabled = true;
+    let pool = create_test_db();
+    prepare_task_input(&pool, "screenshot_detection", "screenshot.jpg");
+    prepare_task_input(&pool, "document_detection", "document.jpg");
+
+    assert_eq!(
+        run_scheduled_occurrence(
+            &config,
+            &pool,
+            ScheduledTask::ScreenshotDetection,
+            "2026-08-17T06:00:00Z",
+        )
+        .expect("screenshot schedule"),
+        1
+    );
+    assert_eq!(
+        run_scheduled_occurrence(
+            &config,
+            &pool,
+            ScheduledTask::DocumentDetection,
+            "2026-08-17T07:00:00Z",
+        )
+        .expect("document schedule"),
+        1
+    );
+
+    let connection = pool.get().expect("database connection");
+    let mut statement = connection
+        .prepare("SELECT task FROM llm_jobs ORDER BY task")
+        .expect("task query");
+    let tasks = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("queued tasks")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("task rows");
+    assert_eq!(tasks, ["document_detection", "screenshot_detection"]);
+}
+
+#[test]
+fn disabled_classification_features_do_not_queue_scheduled_tasks() {
+    let mut config = Config::default();
+    config.llm.enabled = true;
+    let pool = create_test_db();
+    prepare_task_input(&pool, "screenshot_detection", "screenshot.jpg");
+    prepare_task_input(&pool, "document_detection", "document.jpg");
+
+    for task in [
+        ScheduledTask::ScreenshotDetection,
+        ScheduledTask::DocumentDetection,
+    ] {
+        assert_eq!(
+            run_scheduled_occurrence(&config, &pool, task, "2026-08-17T06:00:00Z")
+                .expect("disabled classification schedule"),
+            0
+        );
+    }
+    let queued_jobs: i64 = pool
+        .get()
+        .expect("database connection")
+        .query_row("SELECT COUNT(*) FROM llm_jobs", [], |row| row.get(0))
+        .expect("job count");
+    assert_eq!(queued_jobs, 0);
+}
+
+#[test]
 fn disabled_global_llm_prevents_every_scheduled_task() {
     let mut config = Config::default();
     config.llm.deduplicate_enabled = true;
@@ -130,6 +245,8 @@ fn disabled_global_llm_prevents_every_scheduled_task() {
         ScheduledTask::Ocr,
         ScheduledTask::ImageTagging,
         ScheduledTask::ImageAesthetics,
+        ScheduledTask::ScreenshotDetection,
+        ScheduledTask::DocumentDetection,
         ScheduledTask::Deduplicate,
         ScheduledTask::FaceDetection,
     ] {

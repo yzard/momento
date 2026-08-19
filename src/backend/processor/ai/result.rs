@@ -2,6 +2,7 @@ use momento_common::llm::{JobInputResult, JobResult};
 use rusqlite::{Transaction, TransactionBehavior};
 use std::collections::HashSet;
 
+use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
 
@@ -69,6 +70,25 @@ pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
                 &result,
                 request.input_results.as_deref(),
             )?;
+        } else if matches!(
+            request.task.as_str(),
+            SCREENSHOT_DETECTION_MODEL_TYPE | DOCUMENT_DETECTION_MODEL_TYPE
+        ) {
+            if model_type != request.task {
+                return Err(AppError::BadRequest(format!(
+                    "{} result modelType must match the task",
+                    request.task
+                )));
+            }
+            persist_classification_results(
+                &transaction,
+                request.media_id,
+                &request.job_id,
+                &request.task,
+                &model_version,
+                &result,
+                request.input_results.as_deref(),
+            )?;
         } else if request.task == "face_detection" {
             face_file_changes = Some(crate::processor::face_detection::persist_result(
                 &transaction,
@@ -112,6 +132,126 @@ pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
         changes.commit();
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct ClassificationResult {
+    detected: bool,
+    confidence: f64,
+}
+
+fn persist_classification_results(
+    transaction: &rusqlite::Transaction<'_>,
+    media_id: i64,
+    job_id: &str,
+    task: &str,
+    model_version: &str,
+    result: &serde_json::Value,
+    input_results: Option<&[JobInputResult]>,
+) -> AppResult<()> {
+    let aggregate = parse_classification_result(result, task)?;
+    let input_results = input_results
+        .filter(|results| !results.is_empty())
+        .ok_or_else(|| AppError::BadRequest(format!("{task} inputResults are required")))?;
+    let submitted_inputs = transaction
+        .prepare(queries::llm_callback::SELECT_JOB_INPUT_CORRELATION)?
+        .query_map([job_id], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if submitted_inputs.len() != input_results.len() {
+        return Err(AppError::BadRequest(format!(
+            "{task} inputResults do not match submitted inputs"
+        )));
+    }
+
+    let mut sequences = HashSet::with_capacity(input_results.len());
+    let mut first_input_result = None;
+    for (input_result, submitted_input) in input_results.iter().zip(&submitted_inputs) {
+        if !sequences.insert(input_result.sequence) {
+            return Err(AppError::BadRequest(format!(
+                "{task} inputResults contain duplicate sequences"
+            )));
+        }
+        if (input_result.sequence, input_result.frame_timestamp_ms) != *submitted_input {
+            return Err(AppError::BadRequest(format!(
+                "{task} inputResults do not match submitted inputs"
+            )));
+        }
+        let classification = parse_classification_result(&input_result.result, task)?;
+        first_input_result.get_or_insert(classification);
+        let query = match task {
+            SCREENSHOT_DETECTION_MODEL_TYPE => {
+                queries::llm_callback::UPSERT_SCREENSHOT_CLASSIFICATION_INPUT
+            }
+            DOCUMENT_DETECTION_MODEL_TYPE => {
+                queries::llm_callback::UPSERT_DOCUMENT_CLASSIFICATION_INPUT
+            }
+            _ => {
+                return Err(AppError::BadRequest(
+                    "classification task is not supported".to_string(),
+                ));
+            }
+        };
+        transaction.execute(
+            query,
+            rusqlite::params![
+                media_id,
+                input_result.sequence,
+                input_result.frame_timestamp_ms,
+                model_version,
+                classification.detected,
+                classification.confidence
+            ],
+        )?;
+    }
+    if first_input_result != Some(aggregate) {
+        return Err(AppError::BadRequest(format!(
+            "{task} aggregate must match the first input result"
+        )));
+    }
+    let query = match task {
+        SCREENSHOT_DETECTION_MODEL_TYPE => queries::llm_callback::UPSERT_SCREENSHOT_CLASSIFICATION,
+        DOCUMENT_DETECTION_MODEL_TYPE => queries::llm_callback::UPSERT_DOCUMENT_CLASSIFICATION,
+        _ => {
+            return Err(AppError::BadRequest(
+                "classification task is not supported".to_string(),
+            ));
+        }
+    };
+    transaction.execute(
+        query,
+        rusqlite::params![
+            media_id,
+            model_version,
+            aggregate.detected,
+            aggregate.confidence
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_classification_result(
+    result: &serde_json::Value,
+    task: &str,
+) -> AppResult<ClassificationResult> {
+    let detected = result
+        .get("detected")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::BadRequest(format!("{task} detected is required")))?;
+    let confidence = result
+        .get("confidence")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| AppError::BadRequest(format!("{task} confidence is required")))?;
+    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+        return Err(AppError::BadRequest(format!(
+            "{task} confidence must be within [0, 1]"
+        )));
+    }
+    Ok(ClassificationResult {
+        detected,
+        confidence,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq)]

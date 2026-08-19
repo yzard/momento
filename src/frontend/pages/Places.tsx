@@ -104,6 +104,8 @@ function PlaceList() {
 function PlaceCard({ place }: { place: PlaceSummary }) {
   const cardRef = useRef<HTMLAnchorElement>(null)
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
+  const region = [place.state, place.country].filter(Boolean).join(', ')
+  const accessibleLocation = [place.city, place.state, place.country].filter(Boolean).join(', ')
 
   useEffect(() => {
     const card = cardRef.current
@@ -131,7 +133,7 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
     <Link
       ref={cardRef}
       to={`/places/${encodeURIComponent(place.placeId)}`}
-      aria-label={`${place.city}, ${place.country}, ${place.mediaCount} media`}
+      aria-label={`${accessibleLocation}, ${place.mediaCount} media`}
       className="group relative aspect-[3/2] overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
     >
       {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" /> : <div className="flex h-full w-full items-center justify-center bg-muted"><MapPinned className="h-9 w-9 text-muted-foreground/40" aria-hidden="true" /></div>}
@@ -139,7 +141,7 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
         <div className="flex items-end justify-between gap-3">
           <div className="min-w-0">
             <h2 className="truncate font-display text-xl font-semibold leading-tight">{place.city}</h2>
-            <p className="mt-0.5 truncate text-sm text-white/80">{place.country}</p>
+            <p className="mt-0.5 truncate text-sm text-white/80">{region}</p>
           </div>
           <span className="shrink-0 rounded-full bg-black/45 px-2.5 py-1 text-xs font-bold text-white backdrop-blur-sm">{place.mediaCount} media</span>
         </div>

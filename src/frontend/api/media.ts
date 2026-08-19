@@ -13,6 +13,7 @@ interface TimelineListRequest {
   groupBy: GroupBy
   search: string
   mediaType?: MediaTypeFilter
+  classification: TimelineClassification | null
   direction: TimelineDirection
   anchorDate?: string
 }
@@ -23,10 +24,11 @@ interface MediaBatchRequest {
 
 type GroupBy = 'year' | 'month' | 'week' | 'day'
 type MediaTypeFilter = 'image' | 'video'
+type TimelineClassification = 'screenshot' | 'document'
 type TimelineDirection = 'older' | 'newer'
 type ThumbnailSize = 'normal' | 'tiny' | 'place'
 
-export type { MediaTypeFilter, ThumbnailSize }
+export type { MediaTypeFilter, ThumbnailSize, TimelineClassification }
 
 
 interface MediaListResponse {
@@ -249,9 +251,10 @@ export const mediaApi = {
     return response.data
   },
 
-  getTimelineMarkers: async (mediaType: MediaTypeFilter | null, search: string): Promise<TimelineMarkersResponse> => {
+  getTimelineMarkers: async (mediaType: MediaTypeFilter | null, classification: TimelineClassification | null, search: string): Promise<TimelineMarkersResponse> => {
     const response = await apiClient.post<TimelineMarkersResponse>('/timeline/markers', {
       mediaType: mediaType ?? undefined,
+      classification,
       search,
     })
     return response.data

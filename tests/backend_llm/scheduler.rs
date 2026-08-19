@@ -358,6 +358,178 @@ fn queue_acceptance_recognizes_image_aesthetics_with_non_contiguous_sequences() 
 }
 
 #[test]
+fn queue_admission_and_cancellation_recognize_classifier_tasks() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = Scheduler::new(
+        directory.path().to_path_buf(),
+        SchedulerConfig::default(),
+        Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+            service: Vec::new(),
+            ..Config::default()
+        })))),
+        MockResultDeliveryTransport::acknowledging(),
+    )
+    .expect("scheduler");
+
+    for (index, task) in ["screenshot_detection", "document_detection"]
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = format!("classifier-{index}").into_bytes();
+        let descriptor = QueueInputDescriptor {
+            sequence: 0,
+            filename: format!("classifier-{index}.jpg"),
+            mime_type: "image/jpeg".to_string(),
+            byte_size: bytes.len() as u64,
+            content_hash: format!("{:x}", Sha256::digest(&bytes)),
+            input_kind: "image".to_string(),
+            frame_timestamp_ms: None,
+        };
+        scheduler
+            .accept(
+                QueueManifest {
+                    client_id: "classifier-client".to_string(),
+                    job_id: format!("abcdef0000000000000000000000000{index}"),
+                    media_id: index as i64,
+                    task: task.to_string(),
+                    attempt: 1,
+                    inputs: vec![descriptor.clone()],
+                },
+                vec![(descriptor, bytes)],
+            )
+            .expect("classifier admission");
+    }
+
+    let response = scheduler
+        .cancel_jobs(
+            "classifier-client",
+            &CancelJobsRequest {
+                all: false,
+                tasks: vec![
+                    "screenshot_detection".to_string(),
+                    "document_detection".to_string(),
+                ],
+                job_ids: Vec::new(),
+            },
+        )
+        .expect("classifier cancellation");
+
+    assert_eq!(response.cancelled_jobs, 2);
+    assert!(directory
+        .path()
+        .join("cancelled/classifier-client-abcdef00000000000000000000000000")
+        .is_file());
+    assert!(directory
+        .path()
+        .join("cancelled/classifier-client-abcdef00000000000000000000000001")
+        .is_file());
+}
+
+#[tokio::test]
+async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_results() {
+    let (_runtime_directory, script_path, start_log) = super::provider::fixture();
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("available port");
+        listener.local_addr().expect("local address").port()
+    };
+    let classifier = super::provider::service(
+        "document_detection",
+        "ordered_classifier",
+        port,
+        &script_path,
+        &start_log,
+    );
+    let manager = Arc::new(Mutex::new(super::provider::manager(vec![classifier])));
+    let directory = tempdir().expect("queue directory");
+    let result_delivery = MockResultDeliveryTransport::acknowledging();
+    let scheduler = Arc::new(
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig {
+                poll_interval_seconds: 1,
+                max_in_flight_jobs: 1,
+                ..SchedulerConfig::default()
+            },
+            Arc::clone(&manager),
+            result_delivery.clone(),
+        )
+        .expect("scheduler"),
+    );
+    let input_bytes = [b"first".to_vec(), b"second".to_vec()];
+    let descriptors = input_bytes
+        .iter()
+        .enumerate()
+        .map(|(sequence, bytes)| QueueInputDescriptor {
+            sequence: sequence as u32,
+            filename: format!("document-{sequence}.jpg"),
+            mime_type: "image/jpeg".to_string(),
+            byte_size: bytes.len() as u64,
+            content_hash: format!("{:x}", Sha256::digest(bytes)),
+            input_kind: "image".to_string(),
+            frame_timestamp_ms: Some(sequence as i64 * 1000),
+        })
+        .collect::<Vec<_>>();
+    scheduler
+        .accept(
+            QueueManifest {
+                client_id: "classifier-client".to_string(),
+                job_id: "abcdef1234567890abcdef1234567890".to_string(),
+                media_id: 9,
+                task: "document_detection".to_string(),
+                attempt: 1,
+                inputs: descriptors.clone(),
+            },
+            descriptors
+                .into_iter()
+                .zip(input_bytes.into_iter())
+                .collect(),
+        )
+        .expect("classifier admission");
+
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    for _ in 0..300 {
+        if !result_delivery.deliveries.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    scheduler_task.abort();
+    manager
+        .lock()
+        .await
+        .shutdown()
+        .await
+        .expect("runtime shutdown");
+
+    let deliveries = result_delivery.deliveries.lock().await;
+    let (_, result) = deliveries.first().expect("classifier delivery");
+    let aggregate = result.result.as_ref().expect("aggregate result");
+    let input_results = result.input_results.as_ref().expect("input results");
+    assert_eq!(aggregate["detected"], false);
+    assert!(
+        (aggregate["confidence"]
+            .as_f64()
+            .expect("aggregate confidence")
+            - 0.2)
+            .abs()
+            < 0.000_001
+    );
+    assert_eq!(input_results.len(), 2);
+    assert_eq!(input_results[0].sequence, 0);
+    assert_eq!(input_results[0].result["detected"], false);
+    assert_eq!(input_results[1].sequence, 1);
+    assert_eq!(input_results[1].result["detected"], true);
+    assert!(
+        (input_results[1].result["confidence"]
+            .as_f64()
+            .expect("second input confidence")
+            - 0.9)
+            .abs()
+            < 0.000_001
+    );
+}
+
+#[test]
 fn abandoned_staging_removes_temporary_queue_directory() {
     let directory = tempdir().expect("queue directory");
     let scheduler = Scheduler::new(

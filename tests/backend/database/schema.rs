@@ -1,4 +1,4 @@
-use crate::test_utils::create_test_db;
+use crate::test_utils::{create_test_db, create_test_media};
 use momento_api::database::init_database;
 
 #[test]
@@ -87,6 +87,41 @@ fn creates_durable_metadata_and_ai_job_tables() {
     assert_eq!(cancellation_scope_table, "llm_cancellation_scopes");
     assert_eq!(aesthetics_table, "media_aesthetics");
     assert_eq!(aesthetic_inputs_table, "media_aesthetic_inputs");
+    for classifier_table in [
+        "media_screenshot_classifications",
+        "media_screenshot_classification_inputs",
+        "media_document_classifications",
+        "media_document_classification_inputs",
+    ] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+                [classifier_table],
+                |row| row.get(0),
+            )
+            .expect("Failed to inspect classifier table");
+        assert_eq!(exists, 1, "{classifier_table} should exist");
+    }
+}
+
+#[test]
+fn classifier_tables_enforce_boolean_and_confidence_ranges() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "classifier-constraints.jpg");
+    let connection = pool.get().expect("database connection");
+
+    assert!(connection
+        .execute(
+            "INSERT INTO media_screenshot_classifications (media_id, model_type, model_version, is_screenshot, confidence) VALUES (?, 'screenshot_detection', 'test', 2, 0.5)",
+            [media_id],
+        )
+        .is_err());
+    assert!(connection
+        .execute(
+            "INSERT INTO media_document_classifications (media_id, model_type, model_version, is_document, confidence) VALUES (?, 'document_detection', 'test', 1, 1.1)",
+            [media_id],
+        )
+        .is_err());
 }
 
 #[test]

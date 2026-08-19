@@ -262,6 +262,102 @@ async fn image_aesthetics_reset_does_not_queue_when_disabled() {
 }
 
 #[tokio::test]
+async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
+    init_test_paths();
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.llm.screenshot_detection_enabled = true;
+    config.llm.document_detection_enabled = true;
+    let app = create_app(
+        Arc::new(config),
+        pool.clone(),
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let user_id = create_test_user(&pool, "classifier-admin", "classifier-admin@example.com");
+    let media_id = create_test_media(&pool, "classifier-admin.jpg");
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    for task in ["screenshot_detection", "document_detection"] {
+        connection
+            .execute(
+                "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'ai/classifier.jpg', 'classifier.jpg', 'image/jpeg', 4, 'hash')",
+                rusqlite::params![media_id, task],
+            )
+            .expect("classifier input");
+    }
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", admin_token(user_id));
+
+    server
+        .post("/api/v1/ai/screenshot_detection/trigger")
+        .json(&json!({}))
+        .await
+        .assert_status_unauthorized();
+    for task in ["screenshot_detection", "document_detection"] {
+        let trigger = server
+            .post(&format!("/api/v1/ai/{task}/trigger"))
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await;
+        trigger.assert_status_ok();
+        assert_eq!(trigger.json::<Value>()["queuedJobs"], 1);
+        let status = server
+            .post(&format!("/api/v1/ai/{task}/status"))
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await;
+        status.assert_status_ok();
+        assert_eq!(status.json::<Value>()["queuedJobs"], 1);
+        server
+            .post(&format!("/api/v1/ai/{task}/cancel"))
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await
+            .assert_status_ok();
+    }
+    let connection = pool.get().expect("database connection");
+    connection.execute("INSERT INTO media_screenshot_classifications (media_id, model_type, model_version, is_screenshot, confidence) VALUES (?, 'screenshot_detection', 'test', 1, 0.9)", [media_id]).expect("screenshot result");
+    connection.execute("INSERT INTO media_screenshot_classification_inputs (media_id, sequence, model_type, model_version, is_screenshot, confidence) VALUES (?, 0, 'screenshot_detection', 'test', 1, 0.9)", [media_id]).expect("screenshot input result");
+    connection.execute("INSERT INTO media_document_classifications (media_id, model_type, model_version, is_document, confidence) VALUES (?, 'document_detection', 'test', 1, 0.8)", [media_id]).expect("document result");
+    connection.execute("INSERT INTO media_document_classification_inputs (media_id, sequence, model_type, model_version, is_document, confidence) VALUES (?, 0, 'document_detection', 'test', 1, 0.8)", [media_id]).expect("document input result");
+    drop(connection);
+    for task in ["screenshot_detection", "document_detection"] {
+        server
+            .post(&format!("/api/v1/ai/{task}/clean"))
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await
+            .assert_status_ok();
+    }
+
+    let connection = pool.get().expect("database connection");
+    for table in [
+        "media_screenshot_classifications",
+        "media_screenshot_classification_inputs",
+        "media_document_classifications",
+        "media_document_classification_inputs",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("classifier row count");
+        assert_eq!(count, 0, "{table} should be empty");
+    }
+}
+
+#[tokio::test]
 async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     init_test_paths();
     let pool = create_test_db();

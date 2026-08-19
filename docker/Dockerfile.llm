@@ -66,6 +66,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     python3 \
     python3-venv \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     tini \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
@@ -143,7 +145,8 @@ RUN uv pip install --system --python /usr/bin/python3 \
 
 RUN uv venv --python /usr/bin/python3 --system-site-packages /opt/venvs/ram \
     && uv venv --python /usr/bin/python3 --system-site-packages /opt/venvs/dinov2 \
-    && uv venv --python /usr/bin/python3 /opt/venvs/insightface
+    && uv venv --python /usr/bin/python3 /opt/venvs/insightface \
+    && uv venv --python /usr/bin/python3 /opt/venvs/classifier
 
 RUN uv pip install --python /opt/venvs/ram/bin/python \
     "transformers==${TRANSFORMERS_RAM_VERSION}" \
@@ -178,11 +181,17 @@ RUN uv pip install --python /opt/venvs/insightface/bin/python \
     "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
     "Pillow==${PILLOW_VERSION}"
 
+RUN uv pip install --python /opt/venvs/classifier/bin/python \
+    "numpy==${NUMPY_VERSION}" \
+    "Pillow==${PILLOW_VERSION}"
+
 RUN uv pip check --system --python /usr/bin/python3 \
     && uv pip check --python /opt/venvs/insightface/bin/python \
+    && uv pip check --python /opt/venvs/classifier/bin/python \
     && /opt/venvs/ram/bin/python -c "import clip, fairscale, ram, timm, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
     && /opt/venvs/dinov2/bin/python -c "import clip, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert 'ViT-B/32' in clip.available_models()" \
-    && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime"
+    && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime" \
+    && /opt/venvs/classifier/bin/python -c "import numpy; from PIL import Image"
 
 FROM ocr-builder AS unlimited-ocr-model
 
@@ -271,6 +280,7 @@ COPY --from=python-builder /usr/local/lib/python3.10/dist-packages /usr/local/li
 COPY --from=python-builder /opt/venvs/ram /opt/venvs/ram
 COPY --from=python-builder /opt/venvs/dinov2 /opt/venvs/dinov2
 COPY --from=python-builder /opt/venvs/insightface /opt/venvs/insightface
+COPY --from=python-builder /opt/venvs/classifier /opt/venvs/classifier
 COPY --from=unlimited-ocr-model /opt/models/unlimited-ocr /opt/models/unlimited-ocr
 COPY --from=dinov2-model /opt/models/dinov2-small /opt/models/dinov2-small
 COPY --from=bert-tokenizer-model /opt/models/huggingface /opt/models/huggingface
@@ -287,6 +297,8 @@ RUN set -eux; \
     /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
     /opt/venvs/dinov2/bin/python -c "import clip, torch, transformers; from pathlib import Path; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True).hidden_size == 384; assert 'ViT-B/32' in clip.available_models(); state = torch.load('/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth', map_location='cpu', weights_only=True); assert state['weight'].shape == (1, 512); assert state['bias'].shape == (1,); assert Path('/opt/models/clip/ViT-B-32.pt').is_file()"; \
     /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"; \
+    /opt/venvs/classifier/bin/python -c "import numpy; from PIL import Image"; \
+    tesseract --version >/dev/null; \
     rm -rf /tmp/verification-cache
 
 WORKDIR /app

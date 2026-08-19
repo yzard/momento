@@ -41,6 +41,12 @@ mod template {
     pub(super) const FACE_DETECTION_MAX_CONCURRENT_JOBS: usize = 16;
     pub(super) const MINIMUM_FACE_LIKELIHOOD: f64 = 0.6;
     pub(super) const MINIMUM_FACE_RESOLUTION_PIXELS: u32 = 100;
+    pub(super) const SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
+    pub(super) const SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+    pub(super) const SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS: usize = 8;
+    pub(super) const DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
+    pub(super) const DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+    pub(super) const DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS: usize = 8;
 }
 
 pub(crate) fn server_host() -> String {
@@ -214,6 +220,30 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{MINIMUM_FACE_RESOLUTION_PIXELS}}",
             template::MINIMUM_FACE_RESOLUTION_PIXELS.to_string(),
+        ),
+        (
+            "{{SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
+            template::SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS}}",
+            template::SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS}}",
+            template::SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS.to_string(),
+        ),
+        (
+            "{{DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
+            template::DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS}}",
+            template::DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS}}",
+            template::DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS.to_string(),
         ),
     ];
 

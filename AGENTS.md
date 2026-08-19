@@ -41,9 +41,9 @@ Three rules are worth repeating because they are the ones most often violated:
 ## LLM Task Scheduling
 
 Every AI inference type follows one staged, durable propagation pattern. Current task identifiers
-are `ocr`, `image_tagging`, `image_clustering`, `image_aesthetics`, and `face_detection`; adding another identifier
-means extending this same pattern end to end, not creating a direct or type-specific transport
-path.
+are `ocr`, `image_tagging`, `image_clustering`, `image_aesthetics`, `face_detection`,
+`screenshot_detection`, and `document_detection`; adding another identifier means extending this
+same pattern end to end, not creating a direct or type-specific transport path.
 
 ### End-to-end ownership
 
@@ -110,6 +110,9 @@ Momento stores each prepared input below `previews/ai/<media-id>/<task>/` and in
 `media_ai_inputs` descriptor containing the task, sequence, input kind, relative file path,
 filename, MIME type, byte size, SHA-256 content hash, and optional frame timestamp. Job
 eligibility requires imported media, completed metadata, and at least one matching descriptor.
+Screenshot and document detection are photo-only. They each receive an immutable copy of the same
+orientation-correct, aspect-preserving JPEG preparation with a maximum 2048-pixel edge. No video
+descriptor is created for either classifier.
 
 Before each submission, Momento loads descriptors in sequence order, reads the prepared files,
 and rechecks their exact byte sizes and SHA-256 hashes. Missing or changed bytes fail the Momento
@@ -305,6 +308,9 @@ validates bounding boxes, eye centers, confidence, quality, frontality, and 512-
 embeddings before writing crops and face rows. A generic transport response does not remove the
 requirement for explicit validation, storage, clean/reset behavior, and optional downstream
 scheduling for each inference type.
+Screenshot and document results require a boolean `detected` and finite `confidence` in `[0, 1]`.
+Momento stores ordered input-level results plus a first-input aggregate in separate screenshot and
+document tables. The categories are independent, so a photo may be positive for both.
 
 Deduplication start and scheduled execution create a durable run plus image-clustering jobs and
 return without running inference inline. Clustering results only persist similarity data;
@@ -312,9 +318,10 @@ return without running inference inline. Clustering results only persist similar
 Cancellation prevents further creation and finalization. Startup marks interrupted runs failed and
 schedules replacement work rather than resuming the same run record.
 
-Momento has independent five-field cron schedules for OCR, image tagging, deduplication, image aesthetics, and face
-detection. They are evaluated in the configured IANA timezone and create work through the same
-durable processor operations as manual triggers. The field remains `deduplicate_cron`, not
+Momento has independent five-field cron schedules for OCR, image tagging, deduplication, image
+aesthetics, face detection, screenshot detection, and document detection. They are evaluated in
+the configured IANA timezone and create work through the same durable processor operations as
+manual triggers. The field remains `deduplicate_cron`, not
 `image_clustering_cron`, because it starts the complete deduplication pipeline; image clustering is
 only its inference stage. Global LLM enablement and each task's feature flag gate scheduled work.
 
@@ -353,17 +360,19 @@ Metadata generation lives in `processor/metadata/`; `processor/regenerator.rs` d
 Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH`. A missing or malformed
 config is a hard startup failure — it never falls back to defaults, because that would silently
 start the server against the wrong data directory. Momento resolves the exact
-`${LLM_SERVICE_ADDRESS}` placeholder when it appears in `llm.service_url`; the environment value is
-required and must be non-empty in that case. No other config interpolation or application
-environment variable is supported.
+`${LLM_SERVICE_ADDRESS}` placeholder when it appears in `llm.server_address`; the environment value is
+required and must be non-empty in that case. Momento also accepts exact runtime overrides from
+`RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and `LLM_SERVICE_API_KEY`; llm-service accepts
+`LLM_SERVICE_API_KEY`. No other config
+interpolation or application environment variable is supported.
 
 Both binaries also support `--init-config`, which writes their source-owned commented operational
 template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
 `/data/config.toml` for Momento and `/data/config_llm.toml` for llm-service. Each service owns all
 of its fallback and operational-template values in its `config/defaults.rs`; its commented TOML
 source contains named placeholders rather than duplicated values. The rendered templates exactly
-match `playground/config.toml` and `playground/config_llm.toml`, including their shared example
-API key. Normal startup never generates or replaces a configuration file except when atomically
+match `playground/config.toml` and `playground/config_llm.toml`, including their environment
+placeholders. Normal startup never generates or replaces a configuration file except when atomically
 consuming the one-shot administrator password-reset request described below.
 
 Momento has no `[admin]` configuration section. An empty database creates `admin` / `admin` with a
@@ -372,7 +381,8 @@ request: startup atomically writes it back to `false`, keeps the stored password
 accepts temporary `admin` / `admin` API authentication only in that process for the existing
 administrator. A successful forced password change replaces the stored hash; a restart before the
 change removes the temporary override and restores normal authentication with the unchanged stored
-username and password.
+username and password. `RESET_ADMIN_PASSWORD=true` applies the same request from the environment;
+operators must remove that override after startup so it is not requested again on every restart.
 
 Momento filesystem locations derive from `server.data_dir`:
 
@@ -384,9 +394,10 @@ static_dir = "/app/static"  # built frontend served as a fallback
 
 `main` calls `constants::init_paths(&config.server.data_dir)` once after parsing the
 config; everything else reads `constants::paths()`. Never hardcode a path under the data
-directory and never add a new `std::env::var` call. The config loader's exact
-`LLM_SERVICE_ADDRESS` interpolation is the only application-level environment exception; add a
-config field for every other setting.
+directory and never add a new `std::env::var` call. The config loaders own all supported environment
+access: `LLM_SERVICE_ADDRESS`, `RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and `LLM_SERVICE_API_KEY` for
+Momento, and `LLM_SERVICE_API_KEY` for llm-service. Add a config field rather than another
+environment setting.
 
 Log paths are not configurable. Each service writes plain daily rotated files below
 `server.data_dir/logs/` (`momento-api.YYYY-MM-DD.log` or `llm-service.YYYY-MM-DD.log`). Log events
@@ -406,8 +417,9 @@ Service configuration retains only enablement, startup/request timeouts, model c
 token limits, and task-specific thresholds. Local runtime requests contain job/input descriptors,
 never media bytes or caller-supplied paths.
 
-`llm.service_url` is a complete `ws://` or `wss://` URL resolved by Momento; `0.0.0.0` is only a
-server bind address and is never a client destination. llm-service has no Momento address. Its
+`llm.server_address` contains only the llm-service host and port. Momento owns the WebSocket scheme
+and `/api/v1/llm/connect` path as implementation details; `0.0.0.0` is only a server bind address
+and is never a client destination. llm-service has no Momento address. Its
 top-level `[scheduler]` section owns inference settings and every result-delivery setting, with
 result-delivery fields prefixed by `result_delivery_`. The Compose deployment mounts one shared
 data root into both containers; llm-service only uses its config, `logs/`, and `llm/` subtree and
@@ -476,8 +488,9 @@ Updating the dataset requires recording its snapshot date, source checksums, out
 CC BY 4.0 attribution in the source manifest.
 
 The Dockerfiles and entrypoints use `PUID`/`PGID`/`UMASK`/`TZ`; Compose additionally supplies
-`LLM_SERVICE_ADDRESS` to Momento for the explicit config placeholder. They prepare filesystem
-ownership and invoke each binary with its generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read
+`LLM_SERVICE_ADDRESS`, `RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and the shared
+`LLM_SERVICE_API_KEY`. They prepare
+filesystem ownership and invoke each binary with its generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read
 by `tracing-subscriber`, not application config.
 
 ---

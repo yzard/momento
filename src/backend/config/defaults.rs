@@ -27,6 +27,8 @@ pub(crate) const IMAGE_TAGGING_CRON: &str = "0 2 * * *";
 pub(crate) const DEDUPLICATE_CRON: &str = "0 3 * * *";
 pub(crate) const FACE_DETECTION_CRON: &str = "0 4 * * *";
 pub(crate) const IMAGE_AESTHETICS_CRON: &str = "0 5 * * *";
+pub(crate) const SCREENSHOT_DETECTION_CRON: &str = "0 6 * * *";
+pub(crate) const DOCUMENT_DETECTION_CRON: &str = "0 7 * * *";
 
 pub(crate) mod fallback {
     pub(crate) const SECURITY_SECRET_KEY: &str = "change-me-in-production-use-openssl-rand-hex-32";
@@ -35,13 +37,15 @@ pub(crate) mod fallback {
     pub(crate) const THUMBNAILS_QUALITY: u8 = 85;
     pub(crate) const THUMBNAILS_VIDEO_FRAME_QUALITY: u8 = 2;
     pub(crate) const LLM_ENABLED: bool = false;
-    pub(crate) const LLM_SERVICE_URL: &str = "ws://127.0.0.1:8100/api/v1/llm/connect";
+    pub(crate) const LLM_SERVER_ADDRESS: &str = "127.0.0.1:8100";
     pub(crate) const LLM_CLIENT_ID: &str = "";
     pub(crate) const LLM_API_KEY: &str = "";
     pub(crate) const IMAGE_TAGGING_ENABLED: bool = false;
     pub(crate) const DEDUPLICATE_ENABLED: bool = false;
     pub(crate) const FACE_DETECTION_ENABLED: bool = false;
     pub(crate) const IMAGE_AESTHETICS_ENABLED: bool = false;
+    pub(crate) const SCREENSHOT_DETECTION_ENABLED: bool = false;
+    pub(crate) const DOCUMENT_DETECTION_ENABLED: bool = false;
 
     pub(crate) fn metadata_worker_concurrency() -> usize {
         num_cpus::get()
@@ -61,13 +65,15 @@ mod template {
     pub(super) const THUMBNAILS_VIDEO_FRAME_QUALITY: u8 = 85;
     pub(super) const METADATA_WORKER_CONCURRENCY: usize = 16;
     pub(super) const LLM_ENABLED: bool = true;
-    pub(super) const LLM_SERVICE_URL: &str = "ws://${LLM_SERVICE_ADDRESS}/api/v1/llm/connect";
+    pub(super) const LLM_SERVER_ADDRESS: &str = "${LLM_SERVICE_ADDRESS}";
     pub(super) const LLM_CLIENT_ID: &str = "playground";
     pub(super) const LLM_API_KEY: &str = "change-me-llm-service-key";
     pub(super) const IMAGE_TAGGING_ENABLED: bool = true;
     pub(super) const DEDUPLICATE_ENABLED: bool = true;
     pub(super) const FACE_DETECTION_ENABLED: bool = true;
     pub(super) const IMAGE_AESTHETICS_ENABLED: bool = true;
+    pub(super) const SCREENSHOT_DETECTION_ENABLED: bool = true;
+    pub(super) const DOCUMENT_DETECTION_ENABLED: bool = true;
 }
 
 pub(crate) fn server_host() -> String {
@@ -186,8 +192,16 @@ pub(crate) fn image_aesthetics_cron() -> String {
     IMAGE_AESTHETICS_CRON.to_string()
 }
 
-pub(crate) fn llm_service_url() -> String {
-    fallback::LLM_SERVICE_URL.to_string()
+pub(crate) fn screenshot_detection_cron() -> String {
+    SCREENSHOT_DETECTION_CRON.to_string()
+}
+
+pub(crate) fn document_detection_cron() -> String {
+    DOCUMENT_DETECTION_CRON.to_string()
+}
+
+pub(crate) fn llm_server_address() -> String {
+    fallback::LLM_SERVER_ADDRESS.to_string()
 }
 
 pub(crate) fn llm_enabled() -> bool {
@@ -216,6 +230,14 @@ pub(crate) fn face_detection_enabled() -> bool {
 
 pub(crate) fn image_aesthetics_enabled() -> bool {
     fallback::IMAGE_AESTHETICS_ENABLED
+}
+
+pub(crate) fn screenshot_detection_enabled() -> bool {
+    fallback::SCREENSHOT_DETECTION_ENABLED
+}
+
+pub(crate) fn document_detection_enabled() -> bool {
+    fallback::DOCUMENT_DETECTION_ENABLED
 }
 
 pub(crate) fn face_group_similarity_threshold() -> f32 {
@@ -316,7 +338,10 @@ pub(crate) fn render_template(source: &str) -> String {
             LLM_SUBMISSION_MAX_IN_FLIGHT.to_string(),
         ),
         ("{{LLM_ENABLED}}", template::LLM_ENABLED.to_string()),
-        ("{{LLM_SERVICE_URL}}", template::LLM_SERVICE_URL.to_string()),
+        (
+            "{{LLM_SERVER_ADDRESS}}",
+            template::LLM_SERVER_ADDRESS.to_string(),
+        ),
         ("{{LLM_CLIENT_ID}}", template::LLM_CLIENT_ID.to_string()),
         ("{{LLM_API_KEY}}", template::LLM_API_KEY.to_string()),
         (
@@ -336,6 +361,14 @@ pub(crate) fn render_template(source: &str) -> String {
             template::IMAGE_AESTHETICS_ENABLED.to_string(),
         ),
         (
+            "{{SCREENSHOT_DETECTION_ENABLED}}",
+            template::SCREENSHOT_DETECTION_ENABLED.to_string(),
+        ),
+        (
+            "{{DOCUMENT_DETECTION_ENABLED}}",
+            template::DOCUMENT_DETECTION_ENABLED.to_string(),
+        ),
+        (
             "{{FACE_GROUP_SIMILARITY_THRESHOLD}}",
             FACE_GROUP_SIMILARITY_THRESHOLD.to_string(),
         ),
@@ -347,6 +380,14 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{IMAGE_AESTHETICS_CRON}}",
             IMAGE_AESTHETICS_CRON.to_string(),
+        ),
+        (
+            "{{SCREENSHOT_DETECTION_CRON}}",
+            SCREENSHOT_DETECTION_CRON.to_string(),
+        ),
+        (
+            "{{DOCUMENT_DETECTION_CRON}}",
+            DOCUMENT_DETECTION_CRON.to_string(),
         ),
     ];
 

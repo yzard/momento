@@ -7,13 +7,6 @@ PLAYGROUND_DIR="$ROOT_DIR/playground"
 
 mkdir -p "$PLAYGROUND_DIR/llm"
 
-for config_file in "$PLAYGROUND_DIR/config.toml" "$PLAYGROUND_DIR/config_llm.toml"; do
-    if [[ ! -f "$config_file" ]]; then
-        printf 'Missing playground config: %s\n' "$config_file" >&2
-        exit 1
-    fi
-done
-
 export COMPOSE_PROJECT_NAME=momento-playground
 export MOMENTO_DATA_DIR="$PLAYGROUND_DIR"
 export PUID="$(id -u)"

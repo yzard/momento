@@ -1,6 +1,8 @@
 mod defaults;
 
-use llm_service::config::{default_config_template, Config};
+use llm_service::config::{
+    apply_config_environment, default_config_template, resolve_config_environment, Config,
+};
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
 
@@ -19,6 +21,36 @@ fn loads_operational_runtime_configuration() {
 
     assert_eq!(config.service[0].model_type, "ocr");
     assert_eq!(config.service[0].max_concurrent_jobs, 1);
+}
+
+#[test]
+fn api_key_environment_overrides_the_llm_service_config() {
+    let mut config = Config::default();
+
+    apply_config_environment(&mut config, Some("environment-api-key")).expect("API key override");
+
+    assert_eq!(config.server.api_key, "environment-api-key");
+}
+
+#[test]
+fn api_key_environment_rejects_empty_values() {
+    for api_key in ["", "   "] {
+        let error = apply_config_environment(&mut Config::default(), Some(api_key))
+            .expect_err("empty API key must fail");
+        assert!(error.to_string().contains("LLM_SERVICE_API_KEY"));
+    }
+}
+
+#[test]
+fn api_key_environment_resolves_an_escaped_toml_placeholder() {
+    let resolved = resolve_config_environment(
+        "api_key = \"${LLM_SERVICE_API_KEY}\"",
+        Some("api-key-with-\"quote"),
+    )
+    .expect("resolved API key");
+    let config: toml::Value = toml::from_str(&resolved).expect("resolved TOML");
+
+    assert_eq!(config["api_key"].as_str(), Some("api-key-with-\"quote"));
 }
 
 #[test]
@@ -155,11 +187,17 @@ fn rejects_configurable_logging_path() {
 fn loads_playground_toml_configuration() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../playground/config_llm.toml");
-    let config = Config::load(&path).expect("Playground TOML configuration should load");
     let playground = std::fs::read_to_string(&path).expect("Playground config must exist");
+    let resolved = resolve_config_environment(&playground, Some("change-me-llm-service-key"))
+        .expect("Playground API key should resolve");
+    let mut file = NamedTempFile::new().expect("Resolved playground config fixture");
+    write!(file, "{resolved}").expect("Resolved playground config");
+    let config = Config::load(file.path()).expect("Playground TOML configuration should load");
     let clustering = config.service_for("image_clustering").unwrap();
     let aesthetics = config.service_for("image_aesthetics").unwrap();
     let face_detection = config.service_for("face_detection").unwrap();
+    let screenshot_detection = config.service_for("screenshot_detection").unwrap();
+    let document_detection = config.service_for("document_detection").unwrap();
     let tagging = config.service_for("image_tagging").unwrap();
     let ocr = config.service_for("ocr").unwrap();
 
@@ -178,6 +216,8 @@ fn loads_playground_toml_configuration() {
     assert_eq!(clustering.max_concurrent_jobs, 32);
     assert_eq!(aesthetics.max_concurrent_jobs, 16);
     assert_eq!(face_detection.max_concurrent_jobs, 16);
+    assert_eq!(screenshot_detection.max_concurrent_jobs, 8);
+    assert_eq!(document_detection.max_concurrent_jobs, 8);
     assert_eq!(
         config.scheduler.result_delivery_max_concurrent_deliveries,
         16
@@ -198,11 +238,14 @@ fn saves_commented_operational_default_configuration() {
 
     Config::save_default(&path).expect("Default config should be saved");
     let generated = std::fs::read_to_string(&path).expect("Generated config must be readable");
+    let resolved = resolve_config_environment(&generated, Some("change-me-llm-service-key"))
+        .expect("Generated API key should resolve");
+    std::fs::write(&path, resolved).expect("Resolved config must be writable");
     let config = Config::load(&path).expect("Generated config must load");
 
     assert_eq!(generated, default_config_template());
     assert!(generated.contains("# Durable results are retried"));
-    assert_eq!(config.service.len(), 5);
+    assert_eq!(config.service.len(), 7);
     assert_eq!(config.server.api_key, "change-me-llm-service-key");
 }
 
@@ -261,4 +304,26 @@ fn validates_image_aesthetics_timeouts_without_model_configuration() {
     assert_eq!(aesthetics.max_concurrent_jobs, 2);
     assert_eq!(aesthetics.startup_timeout_seconds, 1);
     assert_eq!(aesthetics.request_timeout_seconds, 1);
+}
+
+#[test]
+fn validates_both_classifier_services_without_model_configuration() {
+    for model_type in ["screenshot_detection", "document_detection"] {
+        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        write!(
+            file,
+            "{}\n[[service]]\nenabled = true\nmodel_type = \"{model_type}\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\n",
+            local_ocr_configuration("")
+        )
+        .expect("Failed to write config fixture");
+
+        let config = Config::load(file.path()).expect("classifier config should load");
+        let classifier = config
+            .service_for(model_type)
+            .expect("enabled classifier service");
+
+        assert_eq!(classifier.max_concurrent_jobs, 2);
+        assert_eq!(classifier.startup_timeout_seconds, 1);
+        assert_eq!(classifier.request_timeout_seconds, 1);
+    }
 }

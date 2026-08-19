@@ -1,5 +1,7 @@
-use crate::test_utils::{create_test_db, create_test_media};
+use crate::test_utils::{create_test_db, create_test_media, init_test_paths};
 use chrono::{TimeZone, Utc};
+use momento_api::config::Config;
+use momento_api::constants::paths;
 use momento_api::processor::metadata::{
     apply_supplemental_metadata, delete_supplemental_metadata, load_supplemental_metadata,
     supplemental_metadata_path, MediaMetadata,
@@ -8,6 +10,47 @@ use std::fs;
 
 mod reset;
 mod reverse_geocoding;
+
+#[tokio::test]
+async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
+    init_test_paths();
+    let pool = create_test_db();
+    let photo_id = create_test_media(&pool, "classifier-preparation.jpg");
+    let relative_path = format!("classifier-preparation-{photo_id}.jpg");
+    let original_path = paths().originals.join(&relative_path);
+    fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
+    image::RgbImage::from_pixel(3000, 1000, image::Rgb([20, 40, 60]))
+        .save(&original_path)
+        .expect("photo fixture");
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "UPDATE media SET file_path = ?, import_state = 'imported' WHERE id = ?",
+            rusqlite::params![relative_path, photo_id],
+        )
+        .expect("photo path");
+
+    momento_api::processor::metadata::generate_media_metadata(&pool, photo_id, &Config::default())
+        .await
+        .expect("metadata generation");
+
+    let connection = pool.get().expect("database connection");
+    let classifier_inputs = connection
+        .prepare("SELECT task, file_path FROM media_ai_inputs WHERE media_id = ? AND task IN ('screenshot_detection', 'document_detection') ORDER BY task")
+        .expect("classifier input query")
+        .query_map([photo_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("classifier input rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("classifier inputs");
+    assert_eq!(classifier_inputs.len(), 2);
+    for (task, input_path) in classifier_inputs {
+        let prepared = image::open(paths().previews.join(input_path)).expect("prepared classifier");
+        assert_eq!(prepared.width(), 2048, "{task} width");
+        assert!((682..=683).contains(&prepared.height()), "{task} height");
+    }
+}
 
 #[test]
 fn loads_google_photos_supplemental_metadata() {

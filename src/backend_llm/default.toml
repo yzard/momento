@@ -6,7 +6,7 @@
 host = "{{SERVER_HOST}}"
 port = {{SERVER_PORT}}
 # This must exactly match llm.api_key in the Momento config.toml.
-api_key = "{{SERVER_API_KEY}}"
+api_key = "${LLM_SERVICE_API_KEY}"
 # Queue and runtime cache data live below data_dir/llm; logs live below data_dir/logs.
 data_dir = "{{SERVER_DATA_DIR}}"
 
@@ -64,3 +64,19 @@ request_timeout_seconds = {{FACE_DETECTION_REQUEST_TIMEOUT_SECONDS}}
 max_concurrent_jobs = {{FACE_DETECTION_MAX_CONCURRENT_JOBS}}
 minimum_face_likelihood = {{MINIMUM_FACE_LIKELIHOOD}}
 minimum_face_resolution_pixels = {{MINIMUM_FACE_RESOLUTION_PIXELS}}
+
+[[service]]
+# CPU-local mobile screenshot heuristics with OCR-assisted status-region analysis.
+enabled = {{SERVICE_ENABLED}}
+model_type = "screenshot_detection"
+startup_timeout_seconds = {{SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS}}
+max_concurrent_jobs = {{SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS}}
+
+[[service]]
+# CPU-local document heuristics using text layout, paper color, and photo penalties.
+enabled = {{SERVICE_ENABLED}}
+model_type = "document_detection"
+startup_timeout_seconds = {{DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS}}
+request_timeout_seconds = {{DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS}}
+max_concurrent_jobs = {{DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS}}

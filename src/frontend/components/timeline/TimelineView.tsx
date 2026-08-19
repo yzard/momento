@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent, type WheelEvent } from 'react'
 import { Image as ImageIcon, Loader2 } from 'lucide-react'
-import type { GroupBy, MediaTypeFilter, TimelineMarker } from '../../api/media'
+import type { GroupBy, MediaTypeFilter, TimelineClassification, TimelineMarker } from '../../api/media'
 import type { Media } from '../../api/types'
 import { useTimelineMarkers, useTimelineWindow } from '../../hooks/useTimeline'
 import DateHeader from './DateHeader'
@@ -15,6 +15,7 @@ interface TimelineViewProps {
   groupBy: GroupBy
   search: string
   mediaType: MediaTypeFilter | null
+  classification: TimelineClassification | null
 }
 
 interface TimelineScrubberProps {
@@ -136,7 +137,7 @@ function TimelineScrubber({ markers, activeMarkerIndex, onMarkerSelect, onWheel 
   )
 }
 
-export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, groupBy, search, mediaType }: TimelineViewProps) {
+export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, groupBy, search, mediaType, classification }: TimelineViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const userInteractedRef = useRef(false)
   const pendingNewerRef = useRef(false)
@@ -144,7 +145,7 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
   const [selectedMarker, setSelectedMarker] = useState<TimelineMarker | null>(null)
   const [activeMarkerIndex, setActiveMarkerIndex] = useState(0)
   const [markerJumpKey, setMarkerJumpKey] = useState(0)
-  const markerQuery = useTimelineMarkers(mediaType, search)
+  const markerQuery = useTimelineMarkers(mediaType, classification, search)
   const { data: markerData, isLoading: isLoadingMarkers, error: markerError } = markerQuery
   const markers = markerData?.markers ?? EMPTY_MARKERS
 
@@ -161,6 +162,7 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
     groupBy,
     search,
     mediaType,
+    classification,
     marker: selectedMarker,
     preloadKey: markerJumpKey,
     refreshKey: markerQuery.dataUpdatedAt,
@@ -276,7 +278,17 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
   }
 
   if (markers.length === 0) {
-    return <div className="flex h-[50vh] flex-col items-center justify-center gap-6 text-muted-foreground"><ImageIcon className="h-12 w-12 opacity-40" /><div className="text-center"><h3 className="text-xl font-medium text-foreground">{search ? 'No matching media' : 'No media yet'}</h3><p className="mt-2 text-sm">{search ? `No media matched "${search}".` : 'Import some photos or videos to get started.'}</p></div></div>
+    const mediaLabel = classification === 'screenshot' ? 'screenshots' : classification === 'document' ? 'documents' : mediaType === 'image' ? 'photos' : mediaType === 'video' ? 'videos' : 'media'
+    const emptyDescription = classification === 'screenshot'
+      ? 'Screenshots identified by Screenshot Detection will appear here.'
+      : classification === 'document'
+        ? 'Documents identified by Document Detection will appear here.'
+        : mediaType === 'image'
+          ? 'Import some photos to get started.'
+          : mediaType === 'video'
+            ? 'Import some videos to get started.'
+            : 'Import some photos or videos to get started.'
+    return <div className="flex h-[50vh] flex-col items-center justify-center gap-6 text-muted-foreground"><ImageIcon className="h-12 w-12 opacity-40" /><div className="text-center"><h3 className="text-xl font-medium text-foreground">{search ? `No matching ${mediaLabel}` : `No ${mediaLabel} yet`}</h3><p className="mt-2 text-sm">{search ? `No ${mediaLabel} matched "${search}".` : emptyDescription}</p></div></div>
   }
 
   const allMedia = timelineGroups.flatMap((group) => group.media)
