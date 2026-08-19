@@ -1,5 +1,11 @@
 # Momento
 
+[![Open Source](https://img.shields.io/badge/open%20source-yes-3da639.svg)](https://github.com/yzard/momento)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/zhuoyin/momento.svg)](https://hub.docker.com/r/zhuoyin/momento)
+[![Backend: Rust](https://img.shields.io/badge/backend-Rust-b7410e.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Frontend: React](https://img.shields.io/badge/frontend-React-149eca.svg?logo=react&logoColor=white)](https://react.dev/)
+
 Momento is a self-hosted photo and video management service with optional AI features. It is designed for personal, family, and other small installations. It is not designed for a large number of users making concurrent requests.
 
 Momento stores its application data in SQLite and keeps original media, thumbnails, previews, and AI inputs on the local filesystem.
