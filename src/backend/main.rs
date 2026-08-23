@@ -13,7 +13,7 @@ use momento_api::database::{create_pool, init_database};
 use momento_api::logging::install_panic_hook;
 use momento_api::processor::ai;
 use momento_api::processor::import::{
-    recover_interrupted_imports, recover_webdav_claims, start_webdav_import_job,
+    recover_import_claims, recover_interrupted_imports, start_webdav_import_job,
 };
 use momento_api::processor::metadata_worker;
 use momento_api::routes::cleanup_expired_trash;
@@ -157,7 +157,8 @@ async fn main() {
     init_directories().expect("Failed to initialize data directories");
     momento_api::processor::metadata::reverse_geocoding::initialize()
         .expect("Failed to initialize local reverse geocoder");
-    recover_webdav_claims(&paths().webdav).expect("Failed to recover interrupted WebDAV imports");
+    recover_import_claims(&paths().imports).expect("Failed to recover interrupted local imports");
+    recover_import_claims(&paths().webdav).expect("Failed to recover interrupted WebDAV imports");
 
     // Create database pool
     let pool = create_pool().expect("Failed to create database pool");

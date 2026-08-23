@@ -97,29 +97,23 @@ pub fn load_supplemental_metadata(file_path: &Path) -> Option<serde_json::Value>
     }
 }
 
-pub fn delete_supplemental_metadata(file_path: &Path) -> std::io::Result<()> {
-    let Some(metadata_path) = supplemental_metadata_path(file_path) else {
-        return Ok(());
-    };
-    fs::remove_file(metadata_path)
-}
-
 pub fn apply_supplemental_metadata(metadata: &mut MediaMetadata, data: &serde_json::Value) {
     if metadata.gps_latitude == Some(0.0) && metadata.gps_longitude == Some(0.0) {
         metadata.gps_latitude = None;
         metadata.gps_longitude = None;
     }
 
-    if metadata.date_taken.is_none() {
-        metadata.date_taken = data
-            .get("photoTakenTime")
-            .and_then(|value| value.get("timestamp"))
-            .and_then(parse_unix_timestamp)
-            .or_else(|| {
-                data.get("creationTime")
-                    .and_then(|value| value.get("timestamp"))
-                    .and_then(parse_unix_timestamp)
-            });
+    let supplemental_date = data
+        .get("photoTakenTime")
+        .and_then(|value| value.get("timestamp"))
+        .and_then(parse_unix_timestamp)
+        .or_else(|| {
+            data.get("creationTime")
+                .and_then(|value| value.get("timestamp"))
+                .and_then(parse_unix_timestamp)
+        });
+    if supplemental_date.is_some() {
+        metadata.date_taken = supplemental_date;
     }
 
     let geo_data_exif = data.get("geoDataExif");
@@ -128,25 +122,26 @@ pub fn apply_supplemental_metadata(metadata: &mut MediaMetadata, data: &serde_js
         .and_then(gps_pair_from_json)
         .or_else(|| geo_data.and_then(gps_pair_from_json));
     if let Some((latitude, longitude)) = coordinates {
-        if metadata.gps_latitude.is_none() {
-            metadata.gps_latitude = Some(latitude);
-        }
-        if metadata.gps_longitude.is_none() {
-            metadata.gps_longitude = Some(longitude);
-        }
+        metadata.gps_latitude = Some(latitude);
+        metadata.gps_longitude = Some(longitude);
+        metadata.location_city = None;
+        metadata.location_state = None;
+        metadata.location_country = None;
     }
-    if metadata.gps_altitude.is_none() {
-        metadata.gps_altitude = geo_data_exif
-            .and_then(|data| json_f64(data.get("altitude")))
-            .or_else(|| geo_data.and_then(|data| json_f64(data.get("altitude"))));
+    let supplemental_altitude = geo_data_exif
+        .and_then(|data| json_f64(data.get("altitude")))
+        .or_else(|| geo_data.and_then(|data| json_f64(data.get("altitude"))));
+    if supplemental_altitude.is_some() {
+        metadata.gps_altitude = supplemental_altitude;
     }
 
-    if metadata.keywords.is_none() {
-        metadata.keywords = data
-            .get("description")
-            .and_then(|value| value.as_str())
-            .filter(|description| !description.is_empty())
-            .map(str::to_string);
+    let supplemental_keywords = data
+        .get("description")
+        .and_then(|value| value.as_str())
+        .filter(|description| !description.is_empty())
+        .map(str::to_string);
+    if supplemental_keywords.is_some() {
+        metadata.keywords = supplemental_keywords;
     }
 }
 

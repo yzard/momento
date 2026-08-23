@@ -190,7 +190,11 @@ describe('AiPanel', () => {
     await waitFor(() => expect(mocks.cleanDocumentDetection).toHaveBeenCalledOnce())
   })
 
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
 
   it('shows consolidated processing metrics', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -212,10 +216,13 @@ describe('AiPanel', () => {
     expect(screen.getByText('Face groups')).toBeTruthy()
   })
 
-  it('refreshes all metric sources', async () => {
+  it('refreshes all metric sources every second while focused', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(<QueryClientProvider client={queryClient}><AiPanel /></QueryClientProvider>)
-    await screen.findByText('12')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(screen.getByText('12')).toBeTruthy()
     const initialOcrCalls = mocks.getOcrStatus.mock.calls.length
     const initialTaggingCalls = mocks.getImageTaggingStatus.mock.calls.length
     const initialScreenshotDetectionCalls = mocks.getScreenshotDetectionStatus.mock.calls.length
@@ -223,16 +230,15 @@ describe('AiPanel', () => {
     const initialDeduplicationCalls = mocks.status.mock.calls.length
     const initialAestheticsCalls = mocks.getImageAestheticsStatus.mock.calls.length
     const initialFacesCalls = mocks.getFacesStatus.mock.calls.length
-    await userEvent.click(screen.getByRole('button', { name: 'Refresh metrics' }))
+    expect(screen.queryByRole('button', { name: 'Refresh metrics' })).toBeNull()
+    await vi.advanceTimersByTimeAsync(1000)
 
-    await waitFor(() => {
-      expect(mocks.getOcrStatus.mock.calls.length).toBeGreaterThan(initialOcrCalls)
-      expect(mocks.getImageTaggingStatus.mock.calls.length).toBeGreaterThan(initialTaggingCalls)
-      expect(mocks.getScreenshotDetectionStatus.mock.calls.length).toBeGreaterThan(initialScreenshotDetectionCalls)
-      expect(mocks.getDocumentDetectionStatus.mock.calls.length).toBeGreaterThan(initialDocumentDetectionCalls)
-      expect(mocks.status.mock.calls.length).toBeGreaterThan(initialDeduplicationCalls)
-      expect(mocks.getImageAestheticsStatus.mock.calls.length).toBeGreaterThan(initialAestheticsCalls)
-      expect(mocks.getFacesStatus.mock.calls.length).toBeGreaterThan(initialFacesCalls)
-    })
+    expect(mocks.getOcrStatus.mock.calls.length).toBeGreaterThan(initialOcrCalls)
+    expect(mocks.getImageTaggingStatus.mock.calls.length).toBeGreaterThan(initialTaggingCalls)
+    expect(mocks.getScreenshotDetectionStatus.mock.calls.length).toBeGreaterThan(initialScreenshotDetectionCalls)
+    expect(mocks.getDocumentDetectionStatus.mock.calls.length).toBeGreaterThan(initialDocumentDetectionCalls)
+    expect(mocks.status.mock.calls.length).toBeGreaterThan(initialDeduplicationCalls)
+    expect(mocks.getImageAestheticsStatus.mock.calls.length).toBeGreaterThan(initialAestheticsCalls)
+    expect(mocks.getFacesStatus.mock.calls.length).toBeGreaterThan(initialFacesCalls)
   })
 })

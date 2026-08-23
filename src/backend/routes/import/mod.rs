@@ -43,7 +43,7 @@ async fn get_import_job_status(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
 ) -> AppResult<Json<ImportStatusResponse>> {
-    let job = get_import_status(&state.pool)?;
+    let job = get_import_status(&state.pool, ImportSource::Local)?;
 
     Ok(Json(ImportStatusResponse {
         status: job.status,

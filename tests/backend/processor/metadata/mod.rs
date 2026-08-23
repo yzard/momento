@@ -3,8 +3,8 @@ use chrono::{TimeZone, Utc};
 use momento_api::config::Config;
 use momento_api::constants::paths;
 use momento_api::processor::metadata::{
-    apply_supplemental_metadata, delete_supplemental_metadata, load_supplemental_metadata,
-    supplemental_metadata_path, MediaMetadata,
+    apply_supplemental_metadata, load_supplemental_metadata, supplemental_metadata_path,
+    MediaMetadata,
 };
 use std::fs;
 
@@ -22,6 +22,14 @@ async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
     image::RgbImage::from_pixel(3000, 1000, image::Rgb([20, 40, 60]))
         .save(&original_path)
         .expect("photo fixture");
+    let supplemental_path = original_path.with_file_name(format!(
+        "{}.supplemental-metadata.json",
+        original_path
+            .file_name()
+            .expect("filename")
+            .to_string_lossy()
+    ));
+    fs::write(&supplemental_path, r#"{"description":"retained"}"#).expect("supplemental fixture");
     pool.get()
         .expect("database connection")
         .execute(
@@ -29,12 +37,29 @@ async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
             rusqlite::params![relative_path, photo_id],
         )
         .expect("photo path");
+    let expected_content_hash: String = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT content_hash FROM media WHERE id = ?",
+            [photo_id],
+            |row| row.get(0),
+        )
+        .expect("stored content hash");
 
     momento_api::processor::metadata::generate_media_metadata(&pool, photo_id, &Config::default())
         .await
         .expect("metadata generation");
 
     let connection = pool.get().expect("database connection");
+    let regenerated_content_hash: String = connection
+        .query_row(
+            "SELECT content_hash FROM media WHERE id = ?",
+            [photo_id],
+            |row| row.get(0),
+        )
+        .expect("regenerated content hash");
+    assert_eq!(regenerated_content_hash, expected_content_hash);
     let classifier_inputs = connection
         .prepare("SELECT task, file_path FROM media_ai_inputs WHERE media_id = ? AND task IN ('screenshot_detection', 'document_detection') ORDER BY task")
         .expect("classifier input query")
@@ -50,6 +75,7 @@ async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
         assert_eq!(prepared.width(), 2048, "{task} width");
         assert!((682..=683).contains(&prepared.height()), "{task} height");
     }
+    assert!(supplemental_path.is_file());
 }
 
 #[test]
@@ -112,23 +138,37 @@ fn does_not_find_sidecar_outside_media_directory() {
 }
 
 #[test]
-fn supplemental_metadata_does_not_replace_embedded_values() {
+fn supplemental_metadata_overrides_present_embedded_values() {
     let data = serde_json::json!({
         "photoTakenTime": {"timestamp": "1530569813"},
-        "geoData": {"latitude": 40.759, "longitude": -73.9859}
+        "geoData": {"latitude": 40.759, "longitude": -73.9859, "altitude": 303.0},
+        "description": "updated keywords"
     });
-    let embedded_date = Utc.timestamp_opt(1, 0).single();
     let mut metadata = MediaMetadata {
-        date_taken: embedded_date,
+        date_taken: Utc.timestamp_opt(1, 0).single(),
         gps_latitude: Some(1.0),
+        gps_longitude: Some(2.0),
+        gps_altitude: Some(3.0),
+        location_city: Some("Old city".to_string()),
+        location_state: Some("Old state".to_string()),
+        location_country: Some("Old country".to_string()),
+        keywords: Some("old keywords".to_string()),
         ..MediaMetadata::default()
     };
 
     apply_supplemental_metadata(&mut metadata, &data);
 
-    assert_eq!(metadata.date_taken, embedded_date);
-    assert_eq!(metadata.gps_latitude, Some(1.0));
+    assert_eq!(
+        metadata.date_taken,
+        Utc.timestamp_opt(1530569813, 0).single()
+    );
+    assert_eq!(metadata.gps_latitude, Some(40.759));
     assert_eq!(metadata.gps_longitude, Some(-73.9859));
+    assert_eq!(metadata.gps_altitude, Some(303.0));
+    assert_eq!(metadata.location_city, None);
+    assert_eq!(metadata.location_state, None);
+    assert_eq!(metadata.location_country, None);
+    assert_eq!(metadata.keywords.as_deref(), Some("updated keywords"));
 }
 
 #[test]
@@ -190,19 +230,6 @@ fn supplemental_metadata_ignores_zero_coordinate_components() {
 }
 
 #[test]
-fn deletes_consumed_supplemental_metadata() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let media_path = directory.path().join("camera.jpg");
-    let sidecar_path = directory
-        .path()
-        .join("camera.jpg.supplemental-metadata.json");
-    fs::write(&media_path, "image").expect("media");
-    fs::write(&sidecar_path, "{}\n").expect("sidecar");
-    delete_supplemental_metadata(&media_path).expect("delete sidecar");
-    assert!(!sidecar_path.exists());
-}
-
-#[test]
 fn metadata_claims_are_exclusive_and_expired_leases_are_recovered() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "claim.jpg");
@@ -230,6 +257,47 @@ fn metadata_claims_are_exclusive_and_expired_leases_are_recovered() {
         momento_api::processor::metadata_worker::claim_next_job(&pool).expect("reclaimed claim"),
         Some(media_id)
     );
+}
+
+#[test]
+fn metadata_rerun_requested_during_processing_runs_after_current_attempt() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "rerun-request.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, attempts, claimed_at) VALUES (?, 'processing', 1, datetime('now'))",
+            [media_id],
+        )
+        .expect("processing job");
+    connection
+        .execute(
+            momento_api::database::queries::metadata_jobs::REQUEST_RERUN,
+            [media_id],
+        )
+        .expect("request rerun");
+    let processing_state: (String, i64) = connection
+        .query_row(
+            "SELECT status, rerun_requested FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("processing state");
+    assert_eq!(processing_state, ("processing".to_string(), 1));
+    drop(connection);
+
+    momento_api::processor::metadata_worker::finish_job(&pool, media_id, Ok(()), 3)
+        .expect("finish current attempt");
+    let queued_state: (String, i64, i64) = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT status, rerun_requested, attempts FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("queued state");
+    assert_eq!(queued_state, ("queued".to_string(), 0, 0));
 }
 
 #[test]

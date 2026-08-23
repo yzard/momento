@@ -234,6 +234,7 @@ CREATE TABLE IF NOT EXISTS media_metadata_jobs (
     media_id INTEGER PRIMARY KEY,
     status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 0,
+    rerun_requested INTEGER NOT NULL DEFAULT 0 CHECK(rerun_requested IN (0, 1)),
     available_at TEXT NOT NULL DEFAULT (datetime('now')),
     claimed_at TEXT,
     completed_at TEXT,
@@ -254,6 +255,14 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
     last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS webdav_ready_files (
+    user_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, file_path),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS media_ai_inputs (
@@ -516,7 +525,7 @@ CREATE INDEX IF NOT EXISTS idx_media_gps
 CREATE INDEX IF NOT EXISTS idx_media_file_path
     ON media (file_path);
 
-CREATE INDEX IF NOT EXISTS idx_media_content_hash
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_content_hash
     ON media (content_hash)
     WHERE content_hash IS NOT NULL;
 

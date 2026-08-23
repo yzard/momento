@@ -26,7 +26,10 @@ describe('MetadataPanel', () => {
     render(<MetadataPanel />)
 
     const generateButton = await screen.findByRole('button', { name: 'Generate' })
+    const statusGrid = screen.getByText('Queued').parentElement?.parentElement
+
     expect(screen.queryByRole('button', { name: 'Reset & Generate All' })).toBeNull()
+    expect(statusGrid?.compareDocumentPosition(generateButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await userEvent.click(generateButton)
 
     expect(mocks.generate).toHaveBeenCalledOnce()

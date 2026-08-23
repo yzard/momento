@@ -19,8 +19,9 @@ use crate::constants::paths;
 pub use auth::WebDAVUser;
 use auth::{basic_auth_middleware, path_guard_middleware};
 use handler::{
-    contains_reserved_path, create_dav_handler, guard_response_body, handle_webdav_request,
-    validate_upload_size,
+    completed_upload_path, contains_reserved_destination, contains_reserved_path,
+    create_dav_handler, guard_response_body, handle_webdav_request, invalidated_upload_paths,
+    request_mutates_staging, validate_upload_size,
 };
 
 pub type WebDAVRequestGate = Arc<Semaphore>;
@@ -30,7 +31,9 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
     let Some(user) = user else {
         return (StatusCode::UNAUTHORIZED, "Not authenticated").into_response();
     };
-    if contains_reserved_path(request.uri().path()) {
+    if contains_reserved_path(request.uri().path())
+        || contains_reserved_destination(request.headers())
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -42,15 +45,98 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
         return status.into_response();
     }
 
-    let Ok(request_permit) = Arc::clone(&state.webdav_request_gate).acquire_owned().await else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "WebDAV is unavailable").into_response();
+    let request_permit = if request_mutates_staging(request.method()) {
+        let Ok(request_permit) = Arc::clone(&state.webdav_request_gate).acquire_owned().await
+        else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "WebDAV is unavailable").into_response();
+        };
+        Some(request_permit)
+    } else {
+        None
     };
+    let request_path = request.uri().path().to_string();
+    let invalidated_paths = invalidated_upload_paths(
+        request.method(),
+        request.headers(),
+        &request_path,
+        &state.config.webdav.mount_path,
+    );
+    let completed_path = completed_upload_path(
+        request.method(),
+        request.headers(),
+        &request_path,
+        &state.config.webdav.mount_path,
+    );
+    if !invalidated_paths.is_empty() {
+        let Ok(connection) = state.pool.get() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WebDAV readiness is unavailable",
+            )
+                .into_response();
+        };
+        let Ok(transaction) = connection.unchecked_transaction() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WebDAV readiness is unavailable",
+            )
+                .into_response();
+        };
+        for path in invalidated_paths {
+            if transaction
+                .execute(
+                    crate::database::queries::webdav_ready::DELETE,
+                    rusqlite::params![user.id, path],
+                )
+                .is_err()
+            {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "WebDAV readiness is unavailable",
+                )
+                    .into_response();
+            }
+        }
+        if transaction.commit().is_err() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WebDAV readiness is unavailable",
+            )
+                .into_response();
+        }
+    }
 
     let user_root = paths().webdav.join(&user.username);
     let dav_handler = create_dav_handler(&user_root, &state.config.webdav.mount_path);
-    let response = handle_webdav_request(dav_handler, request).await;
+    let mut response = handle_webdav_request(
+        dav_handler,
+        request,
+        &user_root,
+        &state.config.webdav.mount_path,
+        state.config.webdav.max_upload_bytes,
+    )
+    .await;
+    if response.status().is_success() {
+        if let Some(completed_path) = completed_path {
+            let readiness_saved = state.pool.get().ok().is_some_and(|connection| {
+                connection
+                    .execute(
+                        crate::database::queries::webdav_ready::UPSERT,
+                        rusqlite::params![user.id, completed_path],
+                    )
+                    .is_ok()
+            });
+            if !readiness_saved {
+                tracing::error!(path = %request_path, "Could not persist completed WebDAV upload readiness");
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        }
+    }
 
-    guard_response_body(response, request_permit)
+    match request_permit {
+        Some(request_permit) => guard_response_body(response, request_permit),
+        None => response,
+    }
 }
 
 pub fn webdav_router(app_state: AppState) -> Router<AppState> {

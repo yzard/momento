@@ -9,7 +9,6 @@ use crate::constants::{
 };
 use crate::database::{queries, DbPool};
 use crate::processor::media_processor::{calculate_geohash, generate_complete_metadata};
-use crate::processor::metadata::delete_supplemental_metadata;
 use crate::processor::thumbnails::{
     generate_image_preview, generate_image_thumbnail, generate_video_preview,
     generate_video_thumbnail,
@@ -24,13 +23,13 @@ pub async fn generate_media_metadata(
     media_id: i64,
     config: &Config,
 ) -> Result<(), String> {
-    let (file_path, media_type): (String, String) = {
+    let (file_path, media_type, stored_content_hash): (String, String, Option<String>) = {
         let connection = pool.get().map_err(|error| error.to_string())?;
         connection
             .query_row(
                 queries::metadata::SELECT_IMPORTED_MEDIA,
                 [media_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|error| error.to_string())?
     };
@@ -41,9 +40,12 @@ pub async fn generate_media_metadata(
             original_path.display()
         ));
     }
-    let content_hash = calculate_file_hash(&original_path)
-        .await
-        .map_err(|error| error.to_string())?;
+    let content_hash = match stored_content_hash {
+        Some(content_hash) => content_hash,
+        None => calculate_file_hash(&original_path)
+            .await
+            .map_err(|error| error.to_string())?,
+    };
     let metadata = generate_complete_metadata(&original_path, &media_type).await;
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
@@ -187,7 +189,6 @@ pub async fn generate_media_metadata(
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
-    delete_supplemental_metadata(&original_path).map_err(|error| error.to_string())?;
     prepare_ai_inputs(
         pool,
         media_id,

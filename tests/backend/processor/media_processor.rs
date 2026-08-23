@@ -90,7 +90,7 @@ fn insert_test_media(conn: &DbConn, id: i64, filename: &str) {
 }
 
 #[test]
-fn duplicate_content_hashes_are_allowed_for_fresh_imports() {
+fn duplicate_content_hashes_are_rejected_for_fresh_imports() {
     let pool = create_test_db();
     let conn = pool.get().expect("Failed to get connection");
     let first = conn
@@ -125,18 +125,31 @@ fn duplicate_content_hashes_are_allowed_for_fresh_imports() {
         .expect("Duplicate media insert should be ignored");
 
     assert_eq!(first, 1);
-    assert_eq!(second, 1);
+    assert_eq!(second, 0);
 }
 
 #[test]
-fn import_status_is_durable_and_prevents_concurrent_jobs() {
+fn import_status_is_durable_source_specific_and_prevents_concurrent_jobs() {
     let pool = create_test_db();
     let job_id = create_import_job(&pool, ImportSource::Local).expect("import job");
     assert!(job_id > 0);
     assert!(create_import_job(&pool, ImportSource::Webdav).is_err());
-    let status = get_import_status(&pool).expect("import status");
-    assert_eq!(status.status, "running");
-    assert_eq!(status.total_files, 0);
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE import_jobs SET status = 'completed', successful_imports = 2, completed_at = datetime('now') WHERE id = ?",
+            [job_id],
+        )
+        .expect("complete local import");
+    create_import_job(&pool, ImportSource::Webdav).expect("WebDAV import job");
+
+    let local_status = get_import_status(&pool, ImportSource::Local).expect("local import status");
+    let webdav_status =
+        get_import_status(&pool, ImportSource::Webdav).expect("WebDAV import status");
+    assert_eq!(local_status.status, "completed");
+    assert_eq!(local_status.successful_imports, 2);
+    assert_eq!(webdav_status.status, "running");
+    assert_eq!(webdav_status.successful_imports, 0);
 }
 
 #[test]
@@ -333,10 +346,19 @@ fn interrupted_import_recovery_restores_completed_media_and_queues_metadata() {
     let pool = create_test_db();
     let connection = pool.get().expect("connection");
     connection.execute("INSERT INTO users (id, username, email, hashed_password, role, is_active) VALUES (9001, 'recovery', 'recovery@example.com', 'hash', 'admin', 1)", []).expect("user");
-    connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (9001, '.importing', 'camera.jpg', '42/camera.jpg', 'image', 'importing', 'local')", []).expect("media");
+    connection
+        .execute(
+            "INSERT INTO import_jobs (source, status) VALUES ('local', 'running')",
+            [],
+        )
+        .expect("interrupted import job");
+    let original_filename = format!("recovery-{}.jpg", uuid::Uuid::new_v4());
+    connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (9001, '.importing', ?, '.importing/temporary', 'image', 'importing', 'local')", [&original_filename]).expect("media");
     let media_id = connection.last_insert_rowid();
     drop(connection);
-    let original_path = paths().originals.join("camera.jpg");
+    let final_filename =
+        build_original_filename(media_id, std::path::Path::new(&original_filename));
+    let original_path = paths().originals.join(&final_filename);
     fs::write(&original_path, b"image").expect("original");
     recover_interrupted_imports(&pool).expect("recovery");
     let connection = pool.get().expect("connection");
@@ -354,8 +376,34 @@ fn interrupted_import_recovery_restores_completed_media_and_queues_metadata() {
             |row| row.get(0),
         )
         .expect("metadata job");
+    let recovered_filename: String = connection
+        .query_row(
+            "SELECT filename FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("filename");
+    let access_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = 9001",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("access");
+    let import_job: (String, Option<String>) = connection
+        .query_row("SELECT status, last_error FROM import_jobs", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("import job");
     assert_eq!(state, "imported");
     assert_eq!(metadata_status, "queued");
+    assert_eq!(recovered_filename, final_filename);
+    assert_eq!(access_count, 1);
+    assert_eq!(import_job.0, "failed");
+    assert_eq!(
+        import_job.1.as_deref(),
+        Some("import interrupted by service restart")
+    );
 }
 
 #[tokio::test]
@@ -367,7 +415,7 @@ async fn import_flattens_originals_and_moves_supplemental_metadata() {
     let source_path = source_directory.path().join("camera.jpg");
     let source_sidecar_path = source_directory
         .path()
-        .join("camera.jpg.supplemental-metadata.json");
+        .join("camera.jpg.supplemental-metadata(10).json");
     fs::write(&source_path, b"image").expect("media source");
     fs::write(&source_sidecar_path, "{}\n").expect("metadata source");
     let media_id = momento_api::processor::import::finalize_staged_original(
@@ -395,4 +443,150 @@ async fn import_flattens_originals_and_moves_supplemental_metadata() {
         )
         .expect("file path");
     assert_eq!(file_path, final_filename);
+}
+
+#[tokio::test]
+async fn duplicate_import_reuses_media_and_absorbs_earlier_time_and_sidecar() {
+    init_test_paths();
+    let pool = create_test_db();
+    let first_user_id = create_test_user(&pool, "duplicate-first", "duplicate-first@example.com");
+    let second_user_id =
+        create_test_user(&pool, "duplicate-second", "duplicate-second@example.com");
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let unique_name = format!("duplicate-{}.jpg", uuid::Uuid::new_v4());
+    let first_source_path = source_directory.path().join(&unique_name);
+    let duplicate_source_path = source_directory.path().join(format!("copy-{unique_name}"));
+    fs::write(&first_source_path, b"identical media bytes").expect("first media source");
+    fs::write(&duplicate_source_path, b"identical media bytes").expect("duplicate media source");
+    let first_modified = FileTime::from_unix_time(1_640_995_200, 0);
+    set_file_times(&first_source_path, first_modified, first_modified).expect("first file time");
+
+    let media_id = momento_api::processor::import::finalize_staged_original(
+        &first_source_path,
+        momento_api::processor::import::ImportSource::Local,
+        first_user_id,
+        &pool,
+        false,
+    )
+    .await
+    .expect("first import");
+    let final_filename = build_original_filename(media_id, &first_source_path);
+    let final_path = paths().originals.join(&final_filename);
+    fs::write(&final_path, b"canonical original remains").expect("canonical marker");
+    let duplicate_modified = FileTime::from_unix_time(1_577_836_800, 0);
+    set_file_times(
+        &duplicate_source_path,
+        duplicate_modified,
+        duplicate_modified,
+    )
+    .expect("duplicate file time");
+    let duplicate_sidecar_path = duplicate_source_path.with_file_name(format!(
+        "{}.supplemental-metadata.json",
+        duplicate_source_path
+            .file_name()
+            .expect("duplicate filename")
+            .to_string_lossy()
+    ));
+    fs::write(
+        &duplicate_sidecar_path,
+        r#"{"description":"updated metadata"}"#,
+    )
+    .expect("duplicate sidecar");
+    let initial_created_at: String = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT created_at FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("initial created time");
+    assert_eq!(initial_created_at, "2022-01-01 00:00:00");
+    pool.get()
+        .expect("connection")
+        .execute(
+            "UPDATE media_metadata_jobs SET status = 'completed' WHERE media_id = ?",
+            [media_id],
+        )
+        .expect("completed metadata job");
+
+    let duplicate_media_id = momento_api::processor::import::finalize_staged_original(
+        &duplicate_source_path,
+        momento_api::processor::import::ImportSource::Local,
+        second_user_id,
+        &pool,
+        false,
+    )
+    .await
+    .expect("duplicate import");
+
+    assert_eq!(duplicate_media_id, media_id);
+    assert_eq!(
+        fs::read(&final_path).expect("canonical original"),
+        b"canonical original remains"
+    );
+    assert!(duplicate_source_path.is_file());
+    assert!(!duplicate_sidecar_path.exists());
+    assert_eq!(
+        fs::read_to_string(
+            final_path.with_file_name(format!("{final_filename}.supplemental-metadata.json"))
+        )
+        .expect("absorbed sidecar"),
+        r#"{"description":"updated metadata"}"#
+    );
+    let connection = pool.get().expect("connection");
+    let media_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM media", [], |row| row.get(0))
+        .expect("media count");
+    let created_at: String = connection
+        .query_row(
+            "SELECT created_at FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("created time");
+    let second_user_access: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ? AND deleted_at IS NULL",
+            rusqlite::params![media_id, second_user_id],
+            |row| row.get(0),
+        )
+        .expect("second user access");
+    let metadata_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("metadata status");
+    assert_eq!(media_count, 1);
+    assert_eq!(created_at, "2020-01-01 00:00:00");
+    assert_eq!(second_user_access, 1);
+    assert_eq!(metadata_status, "queued");
+
+    let newer_duplicate_path = source_directory.path().join(format!("newer-{unique_name}"));
+    fs::write(&newer_duplicate_path, b"identical media bytes").expect("newer duplicate");
+    let newer_modified = FileTime::from_unix_time(1_672_531_200, 0);
+    set_file_times(&newer_duplicate_path, newer_modified, newer_modified)
+        .expect("newer duplicate time");
+    let newer_media_id = momento_api::processor::import::finalize_staged_original(
+        &newer_duplicate_path,
+        momento_api::processor::import::ImportSource::Local,
+        first_user_id,
+        &pool,
+        false,
+    )
+    .await
+    .expect("newer duplicate import");
+    let unchanged_created_at: String = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT created_at FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("unchanged created time");
+    assert_eq!(newer_media_id, media_id);
+    assert_eq!(unchanged_created_at, "2020-01-01 00:00:00");
 }

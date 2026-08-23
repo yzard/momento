@@ -1,19 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, Bot, Eraser, Loader2, Play, RefreshCw, X } from 'lucide-react'
+import { AlertCircle, Bot, Eraser, Loader2, Play, X } from 'lucide-react'
 
 import { aiApi } from '../../api/ai'
 import { deduplicateApi } from '../../api/deduplicate'
 import { cn } from '../../lib/utils'
 
 export default function AiPanel() {
-  const ocrQuery = useQuery({ queryKey: ['ai', 'ocr', 'status'], queryFn: aiApi.getOcrStatus, refetchInterval: 2000 })
-  const taggingQuery = useQuery({ queryKey: ['ai', 'image-tagging', 'status'], queryFn: aiApi.getImageTaggingStatus, refetchInterval: 2000 })
-  const screenshotDetectionQuery = useQuery({ queryKey: ['ai', 'screenshot-detection', 'status'], queryFn: aiApi.getScreenshotDetectionStatus, refetchInterval: 2000 })
-  const documentDetectionQuery = useQuery({ queryKey: ['ai', 'document-detection', 'status'], queryFn: aiApi.getDocumentDetectionStatus, refetchInterval: 2000 })
-  const aestheticsQuery = useQuery({ queryKey: ['ai', 'image-aesthetics', 'status'], queryFn: aiApi.getImageAestheticsStatus, refetchInterval: 2000 })
-  const deduplicationQuery = useQuery({ queryKey: ['deduplicate', 'status'], queryFn: deduplicateApi.status, refetchInterval: 2000 })
-  const facesQuery = useQuery({ queryKey: ['ai', 'faces', 'status'], queryFn: aiApi.getFacesStatus, refetchInterval: 2000 })
-  const isRefreshing = ocrQuery.isFetching || taggingQuery.isFetching || screenshotDetectionQuery.isFetching || documentDetectionQuery.isFetching || aestheticsQuery.isFetching || deduplicationQuery.isFetching || facesQuery.isFetching
+  const ocrQuery = useQuery({ queryKey: ['ai', 'ocr', 'status'], queryFn: aiApi.getOcrStatus, refetchInterval: 1000 })
+  const taggingQuery = useQuery({ queryKey: ['ai', 'image-tagging', 'status'], queryFn: aiApi.getImageTaggingStatus, refetchInterval: 1000 })
+  const screenshotDetectionQuery = useQuery({ queryKey: ['ai', 'screenshot-detection', 'status'], queryFn: aiApi.getScreenshotDetectionStatus, refetchInterval: 1000 })
+  const documentDetectionQuery = useQuery({ queryKey: ['ai', 'document-detection', 'status'], queryFn: aiApi.getDocumentDetectionStatus, refetchInterval: 1000 })
+  const aestheticsQuery = useQuery({ queryKey: ['ai', 'image-aesthetics', 'status'], queryFn: aiApi.getImageAestheticsStatus, refetchInterval: 1000 })
+  const deduplicationQuery = useQuery({ queryKey: ['deduplicate', 'status'], queryFn: deduplicateApi.status, refetchInterval: 1000 })
+  const facesQuery = useQuery({ queryKey: ['ai', 'faces', 'status'], queryFn: aiApi.getFacesStatus, refetchInterval: 1000 })
   const ocrRunning = isActive(ocrQuery.data?.status)
   const taggingRunning = isActive(taggingQuery.data?.status)
   const screenshotDetectionRunning = isActive(screenshotDetectionQuery.data?.status)
@@ -24,7 +23,7 @@ export default function AiPanel() {
   const allRunning = ocrRunning || taggingRunning || screenshotDetectionRunning || documentDetectionRunning || aestheticsRunning || clusteringRunning || facesRunning
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-white shadow-sm">
-      <div className="flex flex-col gap-4 border-b border-border bg-muted/30 px-8 py-6 sm:flex-row sm:items-center sm:justify-between">
+      <div className="border-b border-border bg-muted/30 px-8 py-6">
         <div className="flex items-center gap-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-white text-primary shadow-sm">
             <Bot className="h-5 w-5" />
@@ -34,10 +33,6 @@ export default function AiPanel() {
             <p className="text-sm text-muted-foreground">Library processing and similarity-index coverage.</p>
           </div>
         </div>
-        <button type="button" onClick={() => void Promise.all([ocrQuery.refetch(), taggingQuery.refetch(), screenshotDetectionQuery.refetch(), documentDetectionQuery.refetch(), aestheticsQuery.refetch(), deduplicationQuery.refetch(), facesQuery.refetch()])} disabled={isRefreshing} className="flex min-h-10 items-center justify-center gap-2 self-start rounded-lg border border-border bg-background px-4 text-sm font-bold text-foreground transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto">
-          <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
-          Refresh metrics
-        </button>
       </div>
       <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-5 xl:grid-cols-10">
         <Metric label="Processed OCR" value={ocrQuery.data?.completedJobs} loading={ocrQuery.isLoading} />
@@ -94,7 +89,7 @@ function ControlRow({ label, running, start, cancel, clean }: { label: string; r
           Clean {label === 'All AI Jobs' ? 'All AI Data' : `${label} Data`}
         </button>
       </div>
-      {mutation.isError && <p role="alert" className="mt-2 flex items-center gap-2 text-sm text-destructive"><AlertCircle className="h-4 w-4" />The {label} action failed. Refresh the metrics and try again.</p>}
+      {mutation.isError && <p role="alert" className="mt-2 flex items-center gap-2 text-sm text-destructive"><AlertCircle className="h-4 w-4" />The {label} action failed. Metrics update automatically; try again.</p>}
     </div>
   )
 }

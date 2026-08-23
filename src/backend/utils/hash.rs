@@ -3,12 +3,14 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+const HASH_BUFFER_SIZE: usize = 1024 * 1024;
+
 /// Calculate SHA256 hash of a file
 /// Uses buffered reading for memory efficiency with large media files
 pub async fn calculate_file_hash(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path).await?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 8192]; // 8KB buffer
+    let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
 
     loop {
         let bytes_read = file.read(&mut buffer).await?;

@@ -67,11 +67,31 @@ llm-service performs inference; the WebSocket result handler persists results. T
 such as deduplication cluster generation, is another scheduled stage.
 
 Local and WebDAV imports use the same `finalize_staged_original` implementation. A source is
-claimed before finalization; import validates and stores the original, creates media ownership,
-marks the media imported, and queues exactly one metadata job. Import does not calculate the
-content hash, generate metadata or thumbnails, prepare AI inputs, or create LLM jobs. Identical
-file content may therefore receive different media IDs. Source cleanup failure after a committed
-import is logged as a warning rather than changing the durable import result.
+claimed before finalization and hashed before a media ID is allocated. A partial unique index on
+the content hash and a matching-hash import lock prevent concurrent imports from creating multiple
+media rows. New content is stored as the canonical original, receives media ownership, is marked
+imported, records the source modification time in `media.created_at`, and queues exactly one
+metadata job. Exact duplicate content reuses the imported media ID, grants or restores access for
+the importing user, keeps the canonical original bytes, and moves an incoming supplemental
+metadata sidecar beside that original. An older duplicate source modification time lowers
+`media.created_at`; a newer time never replaces it. A duplicate sidecar
+requests another metadata run, including when one is already processing. Supplemental values are
+authoritative for fields they contain, and sidecars remain beside originals so later regeneration
+is deterministic. Import does not generate metadata or thumbnails, prepare AI inputs, or create
+LLM jobs. Source cleanup failure after a committed import is logged as a warning rather than
+changing the durable import result.
+
+WebDAV PUT accepts either a valid declared length or an undeclared chunked body. Undeclared PUT
+bodies are bounded incrementally by `webdav.max_upload_bytes`; they are never buffered in full, and
+an oversized partial file is removed before returning 413. PATCH still requires a declared chunk
+size because partial-update range validation depends on it. Every staging mutation invalidates its
+durable `webdav_ready_files` entry before touching bytes. Only a successful complete PUT, a PATCH
+whose `Content-Range` reaches the declared total, or a successful MOVE/COPY records the resulting
+path as ready. The import worker selects only these durable ready paths, acquires the exclusive
+mutation gate, revalidates and claims each file, and calculates its content hash only after the
+transfer has completed and the file has been closed. GET, HEAD, OPTIONS, and PROPFIND do not hold
+the mutation gate. The modification-age check is a secondary settling delay, not the completion
+signal.
 
 Momento owns all media preparation. It applies orientation, generates thumbnails or previews,
 extracts the current representative first video frame, crops/resizes, and records descriptors

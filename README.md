@@ -15,8 +15,8 @@ Momento stores its application data in SQLite and keeps original media, thumbnai
 - Self-hosted photo and video library.
 - Uses SQLite instead of an external database server.
 - Best suited to a small number of users.
-- Imports local files and WebDAV uploads.
-- Understands Google Photos supplemental metadata sidecar files and uses them to restore information such as capture time and location when available.
+- Imports local files and WebDAV uploads, absorbing exact byte-for-byte duplicates into one media record while granting access to each importing user.
+- Understands Google Photos supplemental metadata sidecar files, keeps them beside the canonical original, and uses their values as authoritative capture time, location, and description metadata when available.
 - Keeps AI processing in a separate service named `llm-service`.
 - `llm-service` may run on the same machine as Momento or on another machine reachable over the network.
 - All model runtimes run locally beside `llm-service`; remote model providers are not supported.
@@ -122,8 +122,23 @@ local network.
 PhotoSync may create directories, upload to a hidden temporary filename, and rename the completed
 file into place. Momento supports that OPTIONS, PROPFIND, MKCOL, PUT, and MOVE sequence. Completed
 files are staged below `/data/webdav/<username>/`, imported for that user after the configured
-stability interval, and removed from the staging directory after a successful import. PUT and
-PATCH requests must declare their byte size and cannot exceed `webdav.max_upload_bytes`.
+stability interval, and removed from the staging directory after a successful import. PUT accepts
+either a declared content length or chunked transfer encoding; chunked uploads are bounded while
+streaming and do not need to be buffered in memory. PATCH must declare its chunk size. Every upload
+is limited by `webdav.max_upload_bytes`, and oversized partial files are removed.
+
+Momento records a file as import-ready only after a complete PUT finishes, a ranged PATCH reaches
+its declared total, or a MOVE/COPY finalizes the destination. The importer exclusively claims that
+closed file before calculating SHA-256, so an active or paused partial transfer is never hashed or
+queued. Read-only WebDAV requests do not pause importing. The generated defaults check every second,
+apply a two-second settling delay, and process up to four completed files concurrently.
+
+Local and WebDAV imports calculate a SHA-256 content hash before allocating a media record. An
+exact duplicate reuses the existing media ID and canonical original, grants the importing user
+access, and keeps the earliest imported file modification time as the record's creation fallback.
+If the duplicate includes a supplemental metadata sidecar, Momento moves it beside the canonical
+original and regenerates metadata so newly supplied values replace older values while fields not
+present in the sidecar continue to come from the original media.
 
 ## Features
 

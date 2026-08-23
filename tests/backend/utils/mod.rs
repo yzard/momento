@@ -1,1 +1,2 @@
 mod embedding;
+mod hash;

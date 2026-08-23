@@ -8,9 +8,28 @@ pub mod import {
       , media_type
       , mime_type
       , file_size
+      , content_hash
+      , created_at
       , import_state
       , import_source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'importing', ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?, 'unixepoch'), datetime('now')), 'importing', ?)
+    ON CONFLICT DO NOTHING
+    "#;
+
+    pub const SELECT_BY_CONTENT_HASH: &str = r#"
+    SELECT id
+         , file_path
+         , import_state
+      FROM media
+     WHERE content_hash = ?
+     LIMIT 1
+    "#;
+
+    pub const UPDATE_EARLIER_CREATED_AT: &str = r#"
+    UPDATE media
+       SET created_at = datetime(?, 'unixepoch')
+     WHERE id = ?
+       AND created_at > datetime(?, 'unixepoch')
     "#;
 
     pub const MARK_IMPORTED: &str = r#"
@@ -28,20 +47,29 @@ pub mod import {
     UPDATE media
        SET import_state = 'failed'
          , import_error = ?
+         , content_hash = NULL
      WHERE id = ?
        AND import_state = 'importing'
     "#;
 
     pub const SELECT_INTERRUPTED: &str = r#"
     SELECT id
-     , file_path
-     , original_filename
+         , file_path
+         , original_filename
+         , user_id
       FROM media
      WHERE import_state = 'importing'
      ORDER BY id
     "#;
+    pub const FAIL_INTERRUPTED_JOBS: &str = r#"
+    UPDATE import_jobs
+       SET status = 'failed'
+         , completed_at = datetime('now')
+         , last_error = 'import interrupted by service restart'
+     WHERE status = 'running'
+    "#;
     pub const INSERT_JOB: &str = "INSERT INTO import_jobs (source, status) VALUES (?, 'running')";
-    pub const SELECT_LATEST_JOB: &str = "SELECT status, total_files, processed_files, successful_imports, failed_imports, started_at, completed_at, last_error FROM import_jobs ORDER BY id DESC LIMIT 1";
+    pub const SELECT_LATEST_JOB_FOR_SOURCE: &str = "SELECT status, total_files, processed_files, successful_imports, failed_imports, started_at, completed_at, last_error FROM import_jobs WHERE source = ? ORDER BY id DESC LIMIT 1";
     pub const SET_JOB_TOTAL: &str =
         "UPDATE import_jobs SET total_files = ? WHERE id = ? AND status = 'running'";
     pub const SET_WEBDAV_JOB_TOTAL: &str = "UPDATE import_jobs SET total_files = ? WHERE id = ?";
@@ -49,11 +77,61 @@ pub mod import {
     pub const UPDATE_JOB_PROGRESS: &str = "UPDATE import_jobs SET processed_files = processed_files + 1, successful_imports = successful_imports + CASE WHEN ? THEN 1 ELSE 0 END, failed_imports = failed_imports + CASE WHEN ? THEN 0 ELSE 1 END, last_error = CASE WHEN ? = '' THEN last_error ELSE ? END WHERE id = ? AND status = 'running'";
 }
 
+pub mod webdav_ready {
+    pub const UPSERT: &str = r#"
+    INSERT INTO webdav_ready_files (user_id, file_path, completed_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(user_id, file_path) DO UPDATE SET
+        completed_at = datetime('now')
+    "#;
+    pub const DELETE: &str = r#"
+    DELETE FROM webdav_ready_files
+     WHERE user_id = ?
+       AND file_path = ?
+    "#;
+    pub const SELECT_FOR_USER: &str = r#"
+    SELECT file_path
+      FROM webdav_ready_files
+     WHERE user_id = ?
+     ORDER BY file_path
+    "#;
+    pub const EXISTS: &str = r#"
+    SELECT EXISTS (
+        SELECT 1
+          FROM webdav_ready_files
+         WHERE user_id = ?
+           AND file_path = ?
+    )
+    "#;
+}
+
 pub mod metadata_jobs {
     pub const INSERT_QUEUED: &str = r#"
     INSERT INTO media_metadata_jobs (media_id, status, available_at)
     VALUES (?, 'queued', datetime('now'))
     ON CONFLICT(media_id) DO NOTHING
+    "#;
+
+    pub const REQUEST_RERUN: &str = r#"
+    INSERT INTO media_metadata_jobs (media_id, status, available_at)
+    VALUES (?, 'queued', datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET
+        status = CASE
+            WHEN media_metadata_jobs.status = 'processing' THEN 'processing'
+            ELSE 'queued'
+        END
+      , attempts = CASE
+            WHEN media_metadata_jobs.status = 'processing' THEN media_metadata_jobs.attempts
+            ELSE 0
+        END
+      , rerun_requested = CASE
+            WHEN media_metadata_jobs.status = 'processing' THEN 1
+            ELSE 0
+        END
+      , available_at = datetime('now')
+      , completed_at = NULL
+      , last_error = NULL
+      , updated_at = datetime('now')
     "#;
 
     pub const QUEUE_INCOMPLETE: &str = r#"
@@ -108,14 +186,14 @@ pub mod metadata_jobs {
         "DELETE FROM media_document_classification_inputs";
     pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
     pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
-    pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
+    pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
     pub const MARK_IMPORTED_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) SELECT id, datetime('now') FROM media WHERE import_state = 'imported'";
     pub const SELECT_INPUT_PATHS: &str =
         "SELECT file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
     pub const CLAIM_NEXT_QUEUED: &str = "UPDATE media_metadata_jobs SET status = 'processing', claimed_at = datetime('now'), attempts = attempts + 1, updated_at = datetime('now') WHERE media_id = (SELECT media_id FROM media_metadata_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY media_id LIMIT 1) AND status = 'queued' RETURNING media_id";
-    pub const RECLAIM_EXPIRED: &str = "UPDATE media_metadata_jobs SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), last_error = 'metadata worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', ?)";
-    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = 'completed', completed_at = datetime('now'), last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
-    pub const MARK_FAILED_OR_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END, available_at = CASE WHEN attempts >= ? THEN available_at ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = ?, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
+    pub const RECLAIM_EXPIRED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, claimed_at = NULL, available_at = datetime('now'), last_error = 'metadata worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', ?)";
+    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' ELSE 'completed' END, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
+    pub const MARK_FAILED_OR_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' WHEN attempts >= ? THEN 'failed' ELSE 'queued' END, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') WHEN attempts >= ? THEN available_at ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
     pub const SELECT_FAILURES: &str = "SELECT last_error FROM media_metadata_jobs WHERE status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
 }
 
@@ -464,49 +542,7 @@ pub mod media {
       , file_size
       , content_hash
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    "#;
-
-    pub const UPDATE_FILE_LOCATION: &str = r#"
-    UPDATE media
-       SET filename = ?
-         , file_path = ?
-     WHERE id = ?
-    "#;
-
-    pub const INSERT_METADATA: &str = r#"
-    INSERT INTO media_metadata (
-        media_id
-      , thumbnail_path
-      , width
-      , height
-      , duration_seconds
-      , date_taken
-      , gps_latitude
-      , gps_longitude
-      , gps_altitude
-      , geohash
-      , location_city
-      , location_state
-      , location_country
-      , camera_make
-      , camera_model
-      , lens_make
-      , lens_model
-      , iso
-      , exposure_time
-      , f_number
-      , focal_length
-      , focal_length_35mm
-      , video_codec
-      , keywords
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    "#;
-
-    pub const SELECT_BY_CONTENT_HASH: &str = r#"
-    SELECT id
-      FROM media
-     WHERE content_hash = ?
-     LIMIT 1
+    ON CONFLICT DO NOTHING
     "#;
 
     pub const SELECT_ALL_FOR_USER: &str = r#"
@@ -1100,7 +1136,7 @@ pub mod media_text {
 
 pub mod metadata {
     pub const SELECT_IMPORTED_MEDIA: &str =
-        "SELECT file_path, media_type FROM media WHERE id = ? AND import_state = 'imported'";
+        "SELECT file_path, media_type, content_hash FROM media WHERE id = ? AND import_state = 'imported'";
     pub const DELETE_RTREE_FOR_MEDIA: &str = "DELETE FROM media_rtree WHERE media_id = ?";
     pub const INSERT_RTREE: &str = "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)";
     pub const UPSERT_GEOHASH: &str = "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash";

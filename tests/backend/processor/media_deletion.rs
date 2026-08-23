@@ -12,6 +12,13 @@ fn permanent_delete_cleans_every_media_owned_row() {
     let user_id = create_test_user(&pool, "owner", "owner@example.com");
     let media_id = create_test_media(&pool, "delete.jpg");
     grant_media_access(&pool, media_id, user_id);
+    let file_path = format!("delete-{}.jpg", uuid::Uuid::new_v4());
+    let original_path = paths().originals.join(&file_path);
+    let sidecar_path = paths()
+        .originals
+        .join(format!("{file_path}.supplemental-metadata.json"));
+    std::fs::write(&original_path, b"original").expect("original file");
+    std::fs::write(&sidecar_path, b"{}").expect("supplemental metadata");
     let connection = pool.get().expect("Failed to get connection");
     connection
         .execute(
@@ -85,7 +92,7 @@ fn permanent_delete_cleans_every_media_owned_row() {
         .expect("Failed to insert face group member");
 
     assert!(
-        permanently_delete_for_user(&connection, media_id, user_id, "missing.jpg", None,)
+        permanently_delete_for_user(&connection, media_id, user_id, &file_path, None,)
             .expect("Permanent deletion should succeed")
     );
 
@@ -111,6 +118,8 @@ fn permanent_delete_cleans_every_media_owned_row() {
         assert_eq!(count, 0, "{table} was not cleaned");
     }
     assert!(!crop_directory.exists());
+    assert!(!original_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]
