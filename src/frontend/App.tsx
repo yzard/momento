@@ -7,7 +7,6 @@ import Timeline from './pages/Timeline'
 import Albums from './pages/Albums'
 import Map from './pages/Map'
 import Settings from './pages/Settings'
-import Admin from './pages/Admin'
 import Trash from './pages/Trash'
 import Deduplicate from './pages/Deduplicate'
 import Faces from './pages/Faces'
@@ -22,20 +21,6 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />
-  }
-
-  return <>{children}</>
-}
-
-function AdminRoute({ children }: { children: React.ReactNode }) {
-  const { user, isLoading } = useAuth()
-
-  if (isLoading) {
-    return <div className="flex items-center justify-center h-screen">Loading...</div>
-  }
-
-  if (!user || user.role !== 'admin') {
-    return <Navigate to="/timeline" replace />
   }
 
   return <>{children}</>
@@ -68,15 +53,8 @@ function AppRoutes() {
         <Route path="utility" element={<Navigate to="/utility/deduplicate" replace />} />
         <Route path="utility/deduplicate" element={<Deduplicate />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="admin" element={<Navigate to="/settings" replace />} />
         <Route path="trash" element={<Trash />} />
-        <Route
-          path="admin"
-          element={
-            <AdminRoute>
-              <Admin />
-            </AdminRoute>
-          }
-        />
       </Route>
     </Routes>
   )

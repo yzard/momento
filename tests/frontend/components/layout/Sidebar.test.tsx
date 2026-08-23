@@ -18,6 +18,11 @@ describe('Sidebar', () => {
     expect(labels.indexOf('Utility')).toBe(labels.indexOf('Faces') + 1)
     expect(screen.getByText('v1.0.0')).toBeTruthy()
     expect(screen.queryByText('Momento v1.0.0')).toBeNull()
+    const androidDownload = screen.getByRole('link', { name: 'Android' })
+    expect(androidDownload.getAttribute('href')).toBe('/momento-android.apk')
+    expect(androidDownload.getAttribute('download')).toBe('momento-android.apk')
+    expect(screen.queryByRole('link', { name: 'Settings' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Admin' })).toBeNull()
   })
 
   it('shows screenshot and document timeline children', () => {

@@ -28,6 +28,15 @@ poll_interval_seconds = {{WEBDAV_POLL_INTERVAL_SECONDS}}
 stable_file_age_seconds = {{WEBDAV_STABLE_FILE_AGE_SECONDS}}
 max_concurrent_processing = {{WEBDAV_MAX_CONCURRENT_PROCESSING}}
 
+[backup]
+# Android uploads are resumable and staged below data_dir/backups before import.
+max_upload_bytes = {{BACKUP_MAX_UPLOAD_BYTES}}
+max_chunk_bytes = {{BACKUP_MAX_CHUNK_BYTES}}
+max_active_uploads_per_user = {{BACKUP_MAX_ACTIVE_UPLOADS_PER_USER}}
+session_expiry_hours = {{BACKUP_SESSION_EXPIRY_HOURS}}
+worker_poll_interval_seconds = {{BACKUP_WORKER_POLL_INTERVAL_SECONDS}}
+worker_concurrency = {{BACKUP_WORKER_CONCURRENCY}}
+
 [metadata]
 # Thumbnail dimensions are maximum bounding-box sizes in pixels; qualities use 1-100.
 thumbnails_max_size = {{THUMBNAILS_MAX_SIZE}}

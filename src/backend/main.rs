@@ -31,6 +31,7 @@ fn init_directories() -> std::io::Result<()> {
         &paths.albums,
         &paths.trash,
         &paths.webdav,
+        &paths.backups,
     ] {
         std::fs::create_dir_all(dir)?;
     }
@@ -58,6 +59,12 @@ fn start_background_tasks(
     let metadata_pool = pool.clone();
     tokio::spawn(async move {
         metadata_worker::run(metadata_config, metadata_pool).await;
+    });
+
+    let backup_config = Arc::clone(&config);
+    let backup_pool = pool.clone();
+    tokio::spawn(async move {
+        momento_api::processor::backup::run(backup_config, backup_pool).await;
     });
 
     let ai_config = Arc::clone(&config);

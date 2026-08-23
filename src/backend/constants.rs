@@ -18,6 +18,7 @@ pub struct Paths {
     pub albums: PathBuf,
     pub trash: PathBuf,
     pub webdav: PathBuf,
+    pub backups: PathBuf,
 }
 
 impl Paths {
@@ -34,6 +35,7 @@ impl Paths {
             albums: data_dir.join("albums"),
             trash: data_dir.join("trash"),
             webdav: data_dir.join("webdav"),
+            backups: data_dir.join("backups"),
         }
     }
 }

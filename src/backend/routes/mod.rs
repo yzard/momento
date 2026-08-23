@@ -1,6 +1,8 @@
 mod ai;
 mod albums;
 mod auth;
+mod backup;
+mod client;
 mod deduplicate;
 mod faces;
 #[path = "import/mod.rs"]
@@ -22,6 +24,8 @@ pub use trash::cleanup_expired_trash;
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .merge(auth::router())
+        .merge(client::router())
+        .merge(backup::router())
         .merge(ai::router())
         .merge(deduplicate::router())
         .merge(faces::router())

@@ -45,6 +45,13 @@ pub fn router() -> Router<AppState> {
         .route("/media/update", post(update_media))
         .route("/media/delete", post(delete_media))
         .route("/media/file/:media_id", get(get_media_file))
+        .route("/media/:media_id/original", get(get_media_original))
+        .route("/media/:media_id/thumbnail", get(get_media_thumbnail))
+        .route(
+            "/media/:media_id/thumbnail/tiny",
+            get(get_media_tiny_thumbnail),
+        )
+        .route("/media/:media_id/preview", get(get_media_preview))
 }
 
 pub fn thumbnail_router() -> Router<AppState> {
@@ -279,6 +286,12 @@ fn query_timeline(
     let media_type = validate_media_type(request.media_type.as_deref())?;
     let classification = validate_classification(request.classification.as_deref())?;
 
+    if !(1..=500).contains(&request.limit) {
+        return Err(AppError::BadRequest(
+            "limit must be within 1..=500".to_string(),
+        ));
+    }
+
     let page = fetch_timeline_page(
         conn,
         TimelineQuery {
@@ -292,6 +305,7 @@ fn query_timeline(
             direction: request.direction,
             anchor_date: request.anchor_date.as_deref(),
             group_by: &request.group_by,
+            limit: request.limit,
         },
     )?;
     let TimelinePage { rows, has_more } = page;
@@ -661,36 +675,7 @@ async fn get_media_file(
     Path(media_id): Path<i64>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let media = fetch_one(
-        &conn,
-        queries::media::SELECT_FILE_INFO,
-        &[&media_id, &current_user.id],
-        |row| {
-            Ok(FileInfo {
-                file_path: row.get(0)?,
-                mime_type: row.get(1)?,
-                original_filename: row.get(2)?,
-            })
-        },
-    )?
-    .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
-
-    let full_path = paths().originals.join(&media.file_path);
-    if !full_path.exists() {
-        return Err(AppError::NotFound("File not found".to_string()));
-    }
-
-    serve_file_with_range(
-        full_path,
-        &media
-            .mime_type
-            .unwrap_or_else(|| "application/octet-stream".to_string()),
-        &headers,
-        Some(&media.original_filename),
-    )
-    .await
+    serve_original(&state, current_user.id, media_id, &headers).await
 }
 
 fn fetch_default_media(
@@ -781,12 +766,15 @@ struct TimelineQuery<'a> {
     direction: TimelineDirection,
     anchor_date: Option<&'a str>,
     group_by: &'a str,
+    limit: u32,
 }
 
 struct TimelinePage {
-    rows: Vec<(MediaResponse, Option<String>)>,
+    rows: TimelineRows,
     has_more: bool,
 }
+
+type TimelineRows = Vec<(MediaResponse, Option<String>)>;
 
 #[derive(Clone, Copy)]
 struct TimelineFilter<'a> {
@@ -813,6 +801,7 @@ fn fetch_timeline_page(
         direction,
         anchor_date,
         group_by,
+        limit,
     } = query;
     let media_type = media_type.unwrap_or("");
     let classification = classification.unwrap_or("");
@@ -833,7 +822,7 @@ fn fetch_timeline_page(
     };
 
     let (period_start, period_end) = timeline_period_bounds(candidate_date, group_by)?;
-    let rows = fetch_timeline_period(
+    let (rows, period_has_more) = fetch_timeline_period(
         conn,
         TimelineFilter {
             start_date: &period_start,
@@ -841,6 +830,8 @@ fn fetch_timeline_page(
             ..filter
         },
         direction,
+        cursor,
+        limit,
     )?;
     let Some((last_media, Some(last_date))) = rows.last() else {
         return Ok(TimelinePage {
@@ -849,8 +840,8 @@ fn fetch_timeline_page(
         });
     };
     let last_cursor = format!("{}_{}", last_date, last_media.id);
-    let has_more =
-        !fetch_timeline_candidate(conn, filter, direction, Some(&last_cursor), None)?.is_empty();
+    let has_more = period_has_more
+        || !fetch_timeline_candidate(conn, filter, direction, Some(&last_cursor), None)?.is_empty();
 
     Ok(TimelinePage { rows, has_more })
 }
@@ -946,7 +937,9 @@ fn fetch_timeline_period(
     conn: &crate::database::DbConn,
     filter: TimelineFilter<'_>,
     direction: TimelineDirection,
-) -> AppResult<Vec<(MediaResponse, Option<String>)>> {
+    cursor: Option<&str>,
+    limit: u32,
+) -> AppResult<(TimelineRows, bool)> {
     let TimelineFilter {
         user_id,
         search,
@@ -955,7 +948,7 @@ fn fetch_timeline_period(
         start_date: period_start,
         end_date: period_end,
     } = filter;
-    let max_rows = i64::MAX;
+    let max_rows = i64::from(limit) + 1;
     let query_params = [
         &user_id as &dyn rusqlite::ToSql,
         &period_start,
@@ -970,7 +963,33 @@ fn fetch_timeline_period(
     ];
 
     if direction == TimelineDirection::Older {
-        return fetch_all(
+        if let Some((cursor_date, cursor_id)) = parse_timeline_cursor(cursor)? {
+            let mut rows = fetch_all(
+                conn,
+                queries::timeline::SELECT_PAGINATED_WINDOW,
+                &[
+                    query_params[0],
+                    query_params[1],
+                    query_params[2],
+                    query_params[3],
+                    query_params[4],
+                    query_params[5],
+                    query_params[6],
+                    query_params[7],
+                    query_params[8],
+                    query_params[9],
+                    &cursor_date,
+                    &cursor_date,
+                    &cursor_id,
+                    &max_rows,
+                ],
+                map_timeline_row,
+            )?;
+            let has_more = rows.len() > limit as usize;
+            rows.truncate(limit as usize);
+            return Ok((rows, has_more));
+        }
+        let mut rows = fetch_all(
             conn,
             queries::timeline::SELECT_WINDOW,
             &[
@@ -988,10 +1007,17 @@ fn fetch_timeline_period(
                 &max_rows,
             ],
             map_timeline_row,
-        );
+        )?;
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        return Ok((rows, has_more));
     }
 
-    fetch_all(
+    let (cursor_date, cursor_id) = match parse_timeline_cursor(cursor)? {
+        Some(cursor) => cursor,
+        None => (period_start.to_string(), -1),
+    };
+    let mut rows = fetch_all(
         conn,
         queries::timeline::SELECT_PAGINATED_WINDOW_ASC,
         &[
@@ -1005,13 +1031,29 @@ fn fetch_timeline_period(
             query_params[7],
             query_params[8],
             query_params[9],
-            &period_start,
-            &period_start,
-            &-1_i64,
+            &cursor_date,
+            &cursor_date,
+            &cursor_id,
             &max_rows,
         ],
         map_timeline_row,
-    )
+    )?;
+    let has_more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    Ok((rows, has_more))
+}
+
+fn parse_timeline_cursor(cursor: Option<&str>) -> AppResult<Option<(String, i64)>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let Some((date, id)) = cursor.rsplit_once('_') else {
+        return Err(AppError::BadRequest("Invalid timeline cursor".to_string()));
+    };
+    let id = id
+        .parse::<i64>()
+        .map_err(|_| AppError::BadRequest("Invalid timeline cursor".to_string()))?;
+    Ok(Some((date.to_string(), id)))
 }
 
 fn map_timeline_row(row: &rusqlite::Row) -> rusqlite::Result<(MediaResponse, Option<String>)> {
@@ -1022,10 +1064,185 @@ fn map_timeline_row(row: &rusqlite::Row) -> rusqlite::Result<(MediaResponse, Opt
     Ok((media, date_taken))
 }
 
-struct FileInfo {
+struct BinaryMediaInfo {
     file_path: String,
     mime_type: Option<String>,
     original_filename: String,
+    media_type: String,
+    thumbnail_path: Option<String>,
+}
+
+async fn get_media_original(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(media_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    serve_original(&state, current_user.id, media_id, &headers).await
+}
+
+async fn get_media_thumbnail(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(media_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    serve_thumbnail(
+        &state,
+        current_user.id,
+        media_id,
+        ThumbnailSize::Normal,
+        &headers,
+    )
+    .await
+}
+
+async fn get_media_tiny_thumbnail(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(media_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    serve_thumbnail(
+        &state,
+        current_user.id,
+        media_id,
+        ThumbnailSize::Tiny,
+        &headers,
+    )
+    .await
+}
+
+async fn get_media_preview(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(media_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let media = load_binary_media_info(&state, current_user.id, media_id)?;
+    let (path, content_type) = resolve_preview_path(&media, current_user.id).await?;
+    serve_file(path, &content_type, &headers, None, false).await
+}
+
+async fn serve_original(
+    state: &AppState,
+    user_id: i64,
+    media_id: i64,
+    headers: &HeaderMap,
+) -> AppResult<Response> {
+    let media = load_binary_media_info(state, user_id, media_id)?;
+    let path = paths().originals.join(&media.file_path);
+    if !path.is_file() {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
+    let content_type = media
+        .mime_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    serve_file(
+        path,
+        &content_type,
+        headers,
+        Some(&media.original_filename),
+        true,
+    )
+    .await
+}
+
+async fn serve_thumbnail(
+    state: &AppState,
+    user_id: i64,
+    media_id: i64,
+    size: ThumbnailSize,
+    headers: &HeaderMap,
+) -> AppResult<Response> {
+    let media = load_binary_media_info(state, user_id, media_id)?;
+    let path = thumbnail_path(&media, size);
+    if !path.is_file() {
+        return Err(AppError::NotFound("Thumbnail not found".to_string()));
+    }
+    serve_file(path, "image/jpeg", headers, None, false).await
+}
+
+fn load_binary_media_info(
+    state: &AppState,
+    user_id: i64,
+    media_id: i64,
+) -> AppResult<BinaryMediaInfo> {
+    let conn = state.pool.get().map_err(AppError::Pool)?;
+    fetch_one(
+        &conn,
+        queries::media::SELECT_BINARY_MEDIA_INFO,
+        &[&media_id, &user_id],
+        |row| {
+            Ok(BinaryMediaInfo {
+                file_path: row.get(0)?,
+                mime_type: row.get(1)?,
+                original_filename: row.get(2)?,
+                media_type: row.get(3)?,
+                thumbnail_path: row.get(4)?,
+            })
+        },
+    )?
+    .ok_or_else(|| AppError::NotFound("Media not found".to_string()))
+}
+
+fn thumbnail_path(media: &BinaryMediaInfo, size: ThumbnailSize) -> PathBuf {
+    resolve_thumbnail_path(media.thumbnail_path.as_deref(), &media.file_path, size)
+}
+
+fn resolve_thumbnail_path(
+    thumbnail_path: Option<&str>,
+    file_path: &str,
+    size: ThumbnailSize,
+) -> PathBuf {
+    let base_dir = match size {
+        ThumbnailSize::Normal => &paths().thumbnails,
+        ThumbnailSize::Tiny => &paths().thumbnails_tiny,
+    };
+    base_dir.join(thumbnail_relative_path(thumbnail_path, file_path))
+}
+
+async fn resolve_preview_path(
+    media: &BinaryMediaInfo,
+    user_id: i64,
+) -> AppResult<(PathBuf, String)> {
+    let original_path = paths().originals.join(&media.file_path);
+    if !original_path.is_file() {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
+    if media.media_type == "video" {
+        return Err(AppError::NotFound("Preview not found".to_string()));
+    }
+
+    let web_compatible = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    if let Some(mime_type) = &media.mime_type {
+        if web_compatible.contains(&mime_type.as_str()) {
+            return Ok((original_path, mime_type.clone()));
+        }
+    }
+
+    let preview_filename = format!(
+        "{}_preview.jpg",
+        original_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| AppError::NotFound("Preview not found".to_string()))?
+    );
+    let preview_path = paths()
+        .previews
+        .join(user_id.to_string())
+        .join(preview_filename);
+    if !preview_path.is_file() {
+        let parent = preview_path
+            .parent()
+            .ok_or_else(|| AppError::Internal("Preview path has no parent".to_string()))?;
+        tokio::fs::create_dir_all(parent).await?;
+        generate_image_preview(&original_path, &preview_path, 2048, 90).await;
+    }
+    if !preview_path.is_file() {
+        return Err(AppError::NotFound("Preview not found".to_string()));
+    }
+    Ok((preview_path, "image/jpeg".to_string()))
 }
 
 async fn get_media_thumbnail_batch(
@@ -1039,11 +1256,6 @@ async fn get_media_thumbnail_batch(
             thumbnails: HashMap::new(),
         }));
     }
-
-    let thumbnail_base_dir = match request.size {
-        ThumbnailSize::Normal => &paths().thumbnails,
-        ThumbnailSize::Tiny => &paths().thumbnails_tiny,
-    };
 
     let rows: Vec<(i64, Option<String>, String, String, i64)> = fetch_all(
         &conn,
@@ -1069,9 +1281,7 @@ async fn get_media_thumbnail_batch(
     let mut thumbnails: HashMap<i64, Option<String>> = HashMap::new();
 
     for (media_id, thumbnail_path, file_path, _media_type, _user_id) in rows {
-        let thumbnail_relative = thumbnail_relative_path(thumbnail_path.as_deref(), &file_path);
-
-        let full_path = thumbnail_base_dir.join(&thumbnail_relative);
+        let full_path = resolve_thumbnail_path(thumbnail_path.as_deref(), &file_path, request.size);
 
         if full_path.exists() {
             if let Ok(data) = tokio::fs::read(&full_path).await {
@@ -1135,77 +1345,63 @@ async fn get_media_preview_batch(
     let mut previews: HashMap<i64, Option<String>> = HashMap::new();
 
     for (media_id, file_path, media_type, mime_type) in rows {
-        let original_path = paths().originals.join(&file_path);
-        if !original_path.exists() {
+        let media = BinaryMediaInfo {
+            file_path,
+            mime_type,
+            original_filename: String::new(),
+            media_type,
+            thumbnail_path: None,
+        };
+        let Ok((preview_path, mime_type)) = resolve_preview_path(&media, current_user.id).await
+        else {
             previews.insert(media_id, None);
             continue;
-        }
-
-        if media_type == "video" {
-            previews.insert(media_id, None);
-            continue;
-        }
-
-        let web_compatible = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-        if let Some(ref mime) = mime_type {
-            if web_compatible.contains(&mime.as_str()) {
-                if let Ok(data) = tokio::fs::read(&original_path).await {
-                    let encoded = STANDARD.encode(data);
-                    previews.insert(media_id, Some(format!("data:{};base64,{}", mime, encoded)));
-                    continue;
-                }
-            }
-        }
-
-        let preview_filename = format!(
-            "{}_preview.jpg",
-            original_path.file_stem().unwrap().to_string_lossy()
+        };
+        let data = tokio::fs::read(preview_path).await.ok();
+        previews.insert(
+            media_id,
+            data.map(|data| format!("data:{mime_type};base64,{}", STANDARD.encode(data))),
         );
-        let preview_path = paths()
-            .previews
-            .join(current_user.id.to_string())
-            .join(&preview_filename);
-
-        if !preview_path.exists() {
-            tokio::fs::create_dir_all(preview_path.parent().unwrap())
-                .await
-                .ok();
-            generate_image_preview(&original_path, &preview_path, 2048, 90).await;
-        }
-
-        if preview_path.exists() {
-            if let Ok(data) = tokio::fs::read(&preview_path).await {
-                let encoded = STANDARD.encode(data);
-                previews.insert(
-                    media_id,
-                    Some(format!("data:image/jpeg;base64,{}", encoded)),
-                );
-                continue;
-            }
-        }
-
-        previews.insert(media_id, None);
     }
 
     Ok(Json(PreviewBatchResponse { previews }))
 }
 
-async fn serve_file_with_range(
+async fn serve_file(
     path: std::path::PathBuf,
     content_type: &str,
     headers: &HeaderMap,
     filename: Option<&str>,
+    allow_ranges: bool,
 ) -> AppResult<Response> {
     let metadata = tokio::fs::metadata(&path).await?;
     let file_size = metadata.len();
+    let etag = file_etag(&metadata);
+    if matches_if_none_match(headers, &etag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "private")
+            .body(Body::empty())
+            .map_err(|error| AppError::Internal(error.to_string()));
+    }
 
-    let range_header = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("bytes="));
+    let range_header = allow_ranges
+        .then(|| if_range_allows_range(headers, &etag))
+        .and_then(|allowed| {
+            allowed.then(|| {
+                headers
+                    .get(header::RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            })
+        })
+        .flatten();
 
     if let Some(range_str) = range_header {
-        let (start, end) = parse_range(range_str, file_size);
+        let Some((start, end)) = parse_range(&range_str, file_size) else {
+            return range_not_satisfiable(file_size);
+        };
 
         let mut file = File::open(&path).await?;
         file.seek(std::io::SeekFrom::Start(start)).await?;
@@ -1219,6 +1415,8 @@ async fn serve_file_with_range(
             .header(header::CONTENT_TYPE, content_type)
             .header(header::ACCEPT_RANGES, "bytes")
             .header(header::CONTENT_LENGTH, length)
+            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, "private")
             .header(
                 header::CONTENT_RANGE,
                 format!("bytes {}-{}/{}", start, end, file_size),
@@ -1227,7 +1425,10 @@ async fn serve_file_with_range(
         if let Some(name) = filename {
             response = response.header(
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", name),
+                format!(
+                    "inline; filename=\"{}\"",
+                    content_disposition_filename(name)
+                ),
             );
         }
 
@@ -1242,13 +1443,21 @@ async fn serve_file_with_range(
         let mut response = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type)
-            .header(header::ACCEPT_RANGES, "bytes")
-            .header(header::CONTENT_LENGTH, file_size);
+            .header(header::CONTENT_LENGTH, file_size)
+            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, "private");
+
+        if allow_ranges {
+            response = response.header(header::ACCEPT_RANGES, "bytes");
+        }
 
         if let Some(name) = filename {
             response = response.header(
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", name),
+                format!(
+                    "inline; filename=\"{}\"",
+                    content_disposition_filename(name)
+                ),
             );
         }
 
@@ -1258,27 +1467,85 @@ async fn serve_file_with_range(
     }
 }
 
-fn parse_range(range_str: &str, file_size: u64) -> (u64, u64) {
-    let parts: Vec<&str> = range_str.split('-').collect();
-    if parts.len() != 2 {
-        return (0, file_size - 1);
+fn file_etag(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("W/\"{}-{modified}\"", metadata.len())
+}
+
+fn matches_if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|candidate| candidate.trim() == "*" || candidate.trim() == etag)
+        })
+}
+
+fn if_range_allows_range(headers: &HeaderMap, etag: &str) -> bool {
+    match headers
+        .get(header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        None => true,
+        Some(value) => value == etag,
     }
+}
 
-    let start = if parts[0].is_empty() {
-        let suffix_len: u64 = parts[1].parse().unwrap_or(0);
-        file_size.saturating_sub(suffix_len)
-    } else {
-        parts[0].parse().unwrap_or(0)
-    };
+fn range_not_satisfiable(file_size: u64) -> AppResult<Response> {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+        .header(header::CACHE_CONTROL, "private")
+        .body(Body::empty())
+        .map_err(|error| AppError::Internal(error.to_string()))
+}
 
-    let end = if parts[1].is_empty() {
-        file_size - 1
-    } else {
-        parts[1].parse().unwrap_or(file_size - 1)
-    };
+fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
+    if file_size == 0 {
+        return None;
+    }
+    let range = range_header.strip_prefix("bytes=")?;
+    if range.contains(',') {
+        return None;
+    }
+    let (start, end) = range.split_once('-')?;
+    if start.is_empty() {
+        let suffix_length = end.parse::<u64>().ok()?;
+        if suffix_length == 0 {
+            return None;
+        }
+        return Some((file_size.saturating_sub(suffix_length), file_size - 1));
+    }
+    let start = start.parse::<u64>().ok()?;
+    if start >= file_size {
+        return None;
+    }
+    if end.is_empty() {
+        return Some((start, file_size - 1));
+    }
+    let end = end.parse::<u64>().ok()?;
+    if end < start {
+        return None;
+    }
+    Some((start, end.min(file_size - 1)))
+}
 
-    let start = start.min(file_size.saturating_sub(1));
-    let end = end.min(file_size - 1).max(start);
-
-    (start, end)
+fn content_disposition_filename(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|character| {
+            if character == '"' || character == '\\' || character.is_control() {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect()
 }

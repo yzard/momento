@@ -4,13 +4,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import Settings from '../../../src/frontend/pages/Settings'
 
-const mocks = vi.hoisted(() => ({ changePassword: vi.fn() }))
-
-vi.mock('../../../src/frontend/hooks/useAuth', () => ({
-  useAuth: () => ({ user: null, changePassword: mocks.changePassword }),
+const mocks = vi.hoisted(() => ({
+  changePassword: vi.fn(),
+  user: { username: 'alice', role: 'user', mustChangePassword: false },
 }))
 
-beforeEach(() => mocks.changePassword.mockResolvedValue(undefined))
+vi.mock('../../../src/frontend/hooks/useAuth', () => ({
+  useAuth: () => ({ user: mocks.user, changePassword: mocks.changePassword }),
+}))
+vi.mock('../../../src/frontend/components/admin/ImportPanel', () => ({ default: () => <div data-testid="import-panel" /> }))
+vi.mock('../../../src/frontend/components/admin/MetadataPanel', () => ({ default: () => <div data-testid="metadata-panel" /> }))
+vi.mock('../../../src/frontend/components/admin/AiPanel', () => ({ default: () => <div data-testid="ai-panel" /> }))
+vi.mock('../../../src/frontend/components/admin/UserManagement', () => ({ default: () => <div data-testid="user-panel" /> }))
+
+beforeEach(() => {
+  mocks.changePassword.mockResolvedValue(undefined)
+  mocks.user.role = 'user'
+})
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
@@ -39,5 +49,25 @@ describe('Settings', () => {
     await waitFor(() => {
       expect(mocks.changePassword).toHaveBeenCalledWith('old-password', 'new-password')
     })
+  })
+
+  it('keeps administrator controls out of regular user settings', () => {
+    render(<Settings />)
+
+    expect(screen.queryByRole('heading', { name: 'Admin' })).toBeNull()
+    expect(screen.queryByTestId('import-panel')).toBeNull()
+  })
+
+  it('places all administrator controls after the Admin separator', () => {
+    mocks.user.role = 'admin'
+    render(<Settings />)
+
+    const adminHeading = screen.getByRole('heading', { name: 'Admin' })
+    expect(adminHeading.closest('section')?.className).toContain('border-t')
+    expect(screen.getByTestId('import-panel')).toBeTruthy()
+    expect(screen.getByTestId('metadata-panel')).toBeTruthy()
+    expect(screen.getByTestId('ai-panel')).toBeTruthy()
+    expect(screen.getByTestId('user-panel')).toBeTruthy()
+    expect(screen.getByText('/data/imports/')).toBeTruthy()
   })
 })

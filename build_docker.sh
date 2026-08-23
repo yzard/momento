@@ -6,17 +6,19 @@ VERSION=$(<"$ROOT_DIR/src/backend/version.txt")
 LOCAL_NAMESPACE=zhuoyin
 
 usage() {
-    printf 'Usage: %s\n' "$(basename "$0")" >&2
-    printf '       %s publish <github|docker> <namespace>\n' "$(basename "$0")" >&2
+    printf 'Usage: %s <keystore directory>\n' "$(basename "$0")" >&2
+    printf '       %s publish <github|docker> <namespace> <keystore directory>\n' "$(basename "$0")" >&2
 }
 
 PUBLISH=false
 REGISTRY=
 NAMESPACE=$LOCAL_NAMESPACE
+KEYSTORE_DIR=
 
-if [[ $# -eq 0 ]]; then
+if [[ $# -eq 1 && $1 != publish ]]; then
     OUTPUT_MODE=--load
-elif [[ $# -eq 3 && $1 == publish ]]; then
+    KEYSTORE_DIR=$1
+elif [[ $# -eq 4 && $1 == publish ]]; then
     PUBLISH=true
     OUTPUT_MODE=--push
     case "$2" in
@@ -33,6 +35,7 @@ elif [[ $# -eq 3 && $1 == publish ]]; then
             ;;
     esac
     NAMESPACE=$3
+    KEYSTORE_DIR=$4
 else
     usage
     exit 2
@@ -47,6 +50,8 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
     printf 'Invalid version in src/backend/version.txt: %s\n' "$VERSION" >&2
     exit 1
 fi
+
+"$ROOT_DIR/build_mobile_clients.sh" "$KEYSTORE_DIR"
 
 TAG=${TAG:-$VERSION}
 SOURCE_REPOSITORY=${SOURCE_REPOSITORY:-https://github.com/yzard/momento}

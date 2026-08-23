@@ -144,6 +144,59 @@ impl WebDAVConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BackupConfig {
+    #[serde(default = "defaults::backup_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    #[serde(default = "defaults::backup_max_chunk_bytes")]
+    pub max_chunk_bytes: u64,
+    #[serde(default = "defaults::backup_max_active_uploads_per_user")]
+    pub max_active_uploads_per_user: usize,
+    #[serde(default = "defaults::backup_session_expiry_hours")]
+    pub session_expiry_hours: u64,
+    #[serde(default = "defaults::backup_worker_poll_interval_seconds")]
+    pub worker_poll_interval_seconds: u64,
+    #[serde(default = "defaults::backup_worker_concurrency")]
+    pub worker_concurrency: usize,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            max_upload_bytes: defaults::BACKUP_MAX_UPLOAD_BYTES,
+            max_chunk_bytes: defaults::BACKUP_MAX_CHUNK_BYTES,
+            max_active_uploads_per_user: defaults::BACKUP_MAX_ACTIVE_UPLOADS_PER_USER,
+            session_expiry_hours: defaults::BACKUP_SESSION_EXPIRY_HOURS,
+            worker_poll_interval_seconds: defaults::BACKUP_WORKER_POLL_INTERVAL_SECONDS,
+            worker_concurrency: defaults::BACKUP_WORKER_CONCURRENCY,
+        }
+    }
+}
+
+impl BackupConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.max_upload_bytes == 0
+            || self.max_chunk_bytes == 0
+            || self.max_chunk_bytes > self.max_upload_bytes
+        {
+            return Err(std::io::Error::other(
+                "backup upload and chunk limits must be positive and chunk must not exceed upload",
+            ));
+        }
+        if self.max_active_uploads_per_user == 0
+            || self.session_expiry_hours == 0
+            || self.worker_poll_interval_seconds == 0
+            || self.worker_concurrency == 0
+        {
+            return Err(std::io::Error::other(
+                "backup active uploads, expiry, worker poll interval, and concurrency must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataConfig {
     #[serde(default = "defaults::thumbnails_max_size")]
     pub thumbnails_max_size: u32,
@@ -389,6 +442,8 @@ pub struct Config {
     #[serde(default)]
     pub webdav: WebDAVConfig,
     #[serde(default)]
+    pub backup: BackupConfig,
+    #[serde(default)]
     pub metadata: MetadataConfig,
     #[serde(default)]
     pub regenerate: RegenerateConfig,
@@ -435,6 +490,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
         api_key.as_deref(),
     )?;
     config.webdav.validate()?;
+    config.backup.validate()?;
     config.llm.validate()?;
     config.llm_submission_worker.validate()?;
     config.cronjob.validate()?;

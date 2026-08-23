@@ -1,9 +1,4 @@
-use axum::{
-    extract::{Query, State},
-    routing::post,
-    Json, Router,
-};
-use serde::Deserialize;
+use axum::{extract::State, routing::post, Json, Router};
 
 use crate::auth::{hash_password, AppState, CurrentUser, RequireAdmin};
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
@@ -142,19 +137,13 @@ async fn get_user(
     Ok(Json(user))
 }
 
-#[derive(Deserialize)]
-struct UserIdQuery {
-    user_id: i64,
-}
-
 async fn update_user(
     State(state): State<AppState>,
     RequireAdmin(admin): RequireAdmin,
-    Query(query): Query<UserIdQuery>,
     Json(request): Json<UserUpdateRequest>,
 ) -> AppResult<Json<UserResponse>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let user_id = query.user_id;
+    let user_id = request.user_id;
 
     // Check user exists
     let exists = fetch_one(&conn, queries::users::CHECK_EXISTS, &[&user_id], |row| {

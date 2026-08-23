@@ -317,6 +317,30 @@ fn test_load_config_reads_flat_webdav_settings() {
 }
 
 #[test]
+fn test_load_config_reads_backup_settings_and_rejects_invalid_limits() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[backup]\nmax_upload_bytes = 4096\nmax_chunk_bytes = 1024\nmax_active_uploads_per_user = 3\nsession_expiry_hours = 12\nworker_poll_interval_seconds = 4\nworker_concurrency = 2\n",
+    );
+
+    let config = load_config(&path).expect("Failed to load backup config");
+    assert_eq!(config.backup.max_upload_bytes, 4096);
+    assert_eq!(config.backup.max_chunk_bytes, 1024);
+    assert_eq!(config.backup.max_active_uploads_per_user, 3);
+    assert_eq!(config.backup.session_expiry_hours, 12);
+    assert_eq!(config.backup.worker_poll_interval_seconds, 4);
+    assert_eq!(config.backup.worker_concurrency, 2);
+
+    let path = write_config(
+        &dir,
+        "[backup]\nmax_upload_bytes = 1\nmax_chunk_bytes = 2\n",
+    );
+    let error = load_config(&path).expect_err("Chunk limit larger than upload limit must fail");
+    assert!(error.to_string().contains("backup"));
+}
+
+#[test]
 fn test_load_config_rejects_removed_webdav_enabled_setting() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(&dir, "[webdav]\nenabled = false\n");

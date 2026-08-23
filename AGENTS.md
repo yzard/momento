@@ -528,9 +528,9 @@ pnpm dev                  # Dev servers (backend + frontend)
 pnpm lint                 # Lint all packages
 pnpm test                 # Run all tests
 
-./run_playground.sh                         # Build and run the playground stack
-./build_docker.sh                           # Build both images locally
-./build_docker.sh publish github yzard      # Build and publish both images to GHCR
+./run_playground.sh /path/to/keystore                         # Build and run the playground stack
+./build_docker.sh /path/to/keystore                           # Build both images locally
+./build_docker.sh publish github yzard /path/to/keystore      # Build and publish both images to GHCR
 ```
 
 `run_playground.sh` and `build_docker.sh` are the only scripts at the git root. Both
@@ -589,9 +589,9 @@ Docker build files live in `docker/`; the canonical `docker-compose.yaml` and
 `build_docker.sh` live at the git root. Builds use the git root as their context.
 
 ```bash
-./build_docker.sh                                      # Build both images locally
-./build_docker.sh publish github yzard                 # Build and publish to GHCR
-./build_docker.sh publish docker zhuoyin               # Build and publish to Docker Hub
+./build_docker.sh /path/to/keystore                                      # Build both images locally
+./build_docker.sh publish github yzard /path/to/keystore                 # Build and publish to GHCR
+./build_docker.sh publish docker zhuoyin /path/to/keystore               # Build and publish to Docker Hub
 docker compose up                                      # Full stack
 ```
 

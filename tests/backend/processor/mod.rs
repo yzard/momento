@@ -1,4 +1,5 @@
 mod ai;
+mod backup;
 mod deduplicator;
 mod face_detection;
 #[path = "import/mod.rs"]

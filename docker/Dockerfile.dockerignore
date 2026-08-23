@@ -5,7 +5,12 @@
 
 # Build artifacts
 build/
-dist/
+dist/*
+!dist/mobile/
+dist/mobile/*
+!dist/mobile/android/
+dist/mobile/android/*
+!dist/mobile/android/*.apk
 sdist/
 wheels/
 eggs/

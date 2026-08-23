@@ -21,8 +21,8 @@ export const adminApi = {
     return response.data
   },
 
-  updateUser: async (userId: number, data: { role?: 'admin' | 'user'; isActive?: boolean }): Promise<User> => {
-    const response = await apiClient.post<User>('/user/update', { userId, ...data })
+  updateUser: async (data: { userId: number; role?: 'admin' | 'user'; isActive?: boolean }): Promise<User> => {
+    const response = await apiClient.post<User>('/user/update', data)
     return response.data
   },
 

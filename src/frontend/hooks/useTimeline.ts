@@ -26,6 +26,7 @@ interface TimelinePageEntry {
 }
 
 type CachedPage = TimelineListResponse | Promise<TimelineListResponse>
+const timelinePageLimit = 100
 
 function mergeTimelinePages(pages: TimelinePageEntry[]): TimelineGroup[] {
   const mediaById = new Map<number, Media>()
@@ -139,6 +140,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
         const hasMore = direction === 'older' ? response.hasOlder : response.hasNewer
         if (!hasMore || !cursor) return
         const request: TimelineListRequest = {
+          limit: timelinePageLimit,
           groupBy,
           search: normalizedSearch,
           mediaType: mediaType ?? undefined,
@@ -178,6 +180,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
 
     setIsLoading(true)
     const request: TimelineListRequest = {
+      limit: timelinePageLimit,
       groupBy,
       search: normalizedSearch,
       mediaType: mediaType ?? undefined,
@@ -209,6 +212,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     loadingOlderRef.current = true
     setIsLoadingOlder(true)
     const request: TimelineListRequest = {
+      limit: timelinePageLimit,
       groupBy,
       search: normalizedSearch,
       mediaType: mediaType ?? undefined,
@@ -235,6 +239,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     loadingNewerRef.current = true
     setIsLoadingNewer(true)
     const request: TimelineListRequest = {
+      limit: timelinePageLimit,
       groupBy,
       search: normalizedSearch,
       mediaType: mediaType ?? undefined,

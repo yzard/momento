@@ -21,6 +21,43 @@ Momento stores its application data in SQLite and keeps original media, thumbnai
 - `llm-service` may run on the same machine as Momento or on another machine reachable over the network.
 - All model runtimes run locally beside `llm-service`; remote model providers are not supported.
 
+## Android Client
+
+The Android client connects to a Momento server for library browsing, timeline, albums, places,
+faces, search, media viewing, duplicate review, and device backup. It supports photo and video
+backup from the device media library; backups default to Wi-Fi only and run on a daily schedule.
+Grant the requested photo/video media permission to back up content. Android 13 and later use the
+system photo/video permissions; older Android versions use storage-read permission. Notifications
+are requested for visible foreground backup progress.
+
+On first run, enter the complete Momento server origin and authenticate. Use HTTPS outside a
+trusted local network. The current client permits HTTP for trusted local-network development only;
+HTTP exposes credentials and media traffic to the network and should not be used on untrusted
+networks.
+
+Development commands require Java 17 and an Android SDK with API 36:
+
+```bash
+cd src/android
+./gradlew test lint assembleDebug
+```
+
+Create a signed release with a directory containing exactly one direct `.jks` file and a
+`password.txt` file containing exactly one non-empty line. The password is used for both the
+keystore and key, and the keystore must contain exactly one private-key alias:
+
+```bash
+./build_mobile_clients.sh /secure/path/to/keystore-directory
+```
+
+The release script requires Docker only; Java, Gradle, and Android SDK 36 run inside the pinned
+`docker/Dockerfile.android` builder image. The keystore directory is mounted read-only, and signing
+values remain inside the temporary build container rather than appearing in Docker command arguments.
+The script stages Gradle state below `build/android/` and writes the final signed artifacts only to
+`dist/mobile/android/<keystore-stem>-<android-version>.apk` and
+`dist/mobile/android/<keystore-stem>-<android-version>.aab`. The Android version is owned by
+`src/android/version.txt`; it starts at `1.0.0` and is independent from the Momento server version.
+
 ## Docker Compose
 
 The canonical deployment definition is [`docker-compose.yaml`](docker-compose.yaml).
@@ -95,9 +132,13 @@ docker compose up -d
 Build both images locally with the tags used by Compose, or explicitly publish them:
 
 ```bash
-./build_docker.sh
-./build_docker.sh publish docker zhuoyin
+./build_docker.sh /secure/path/to/keystore-directory
+./build_docker.sh publish docker zhuoyin /secure/path/to/keystore-directory
 ```
+
+The build creates the signed Android release first and embeds its APK in the Momento image. Signed-in
+users can download that APK from the `Android` link beside the web sidebar version, which serves
+`/momento-android.apk` from the same Momento instance.
 
 Compose supplies one `LLM_SERVICE_API_KEY` to both services, `SECRET_KEY` to Momento, and
 `RESET_ADMIN_PASSWORD=false` by default. Set strong `LLM_SERVICE_API_KEY` and `SECRET_KEY` environment values
@@ -190,10 +231,10 @@ Requirements:
 Run from any working directory:
 
 ```bash
-./run_playground.sh
+./run_playground.sh /secure/path/to/keystore-directory
 ```
 
-The script builds both images, mounts `playground/` as `/data` in both containers, passes the
+The script builds the signed Android release and both images, mounts `playground/` as `/data` in both containers, passes the
 invoking UID/GID, starts the stack on the private Compose network, and removes the containers on
 exit. Open `http://localhost:8000`.
 

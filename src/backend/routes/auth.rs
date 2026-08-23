@@ -124,40 +124,30 @@ async fn refresh(
     Json(request): Json<RefreshTokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let token_hash = hash_refresh_token(&request.refresh_token);
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let token_row = fetch_one(
-        &conn,
-        queries::auth::VALIDATE_REFRESH_TOKEN,
-        &[&token_hash],
-        |row| {
-            Ok(RefreshTokenRow {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                revoked: row.get(3)?,
-                username: row.get(4)?,
-                role: row.get(5)?,
-                is_active: row.get(6)?,
-            })
-        },
-    )?
-    .ok_or_else(|| AppError::Authentication("Invalid refresh token".to_string()))?;
-
-    if token_row.revoked != 0 {
-        return Err(AppError::Authentication(
-            "Token has been revoked".to_string(),
-        ));
-    }
+    let mut conn = state.pool.get().map_err(AppError::Pool)?;
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let token_row = transaction
+        .query_row(
+            queries::auth::VALIDATE_REFRESH_TOKEN,
+            rusqlite::params![token_hash, now],
+            |row| {
+                Ok(RefreshTokenRow {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    username: row.get(4)?,
+                    role: row.get(5)?,
+                    is_active: row.get(6)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| AppError::Authentication("Invalid refresh token".to_string()))?;
 
     if token_row.is_active == 0 {
         return Err(AppError::Authentication("User is inactive".to_string()));
     }
 
-    // Revoke old token
-    execute_query(&conn, queries::auth::REVOKE_REFRESH_TOKEN, &[&token_row.id])?;
-    execute_query(&conn, queries::auth::DELETE_REVOKED_TOKEN, &[&token_row.id])?;
-
-    // Create new tokens
     let access_token = create_access_token(
         token_row.user_id,
         &token_row.username,
@@ -168,15 +158,24 @@ async fn refresh(
     let (raw_refresh, new_token_hash, expires_at) =
         create_refresh_token(token_row.user_id, &state.config);
 
-    insert_returning_id(
-        &conn,
-        queries::auth::INSERT_REFRESH_TOKEN,
-        &[
-            &new_token_hash,
-            &token_row.user_id,
-            &expires_at.to_rfc3339(),
-        ],
+    let consumed = transaction.execute(
+        queries::auth::REVOKE_REFRESH_TOKEN,
+        rusqlite::params![token_row.id, now],
     )?;
+    if consumed != 1 {
+        return Err(AppError::Authentication(
+            "Invalid refresh token".to_string(),
+        ));
+    }
+    transaction.execute(
+        queries::auth::INSERT_REFRESH_TOKEN,
+        rusqlite::params![new_token_hash, token_row.user_id, expires_at.to_rfc3339()],
+    )?;
+    transaction.execute(
+        queries::auth::DELETE_REVOKED_TOKEN,
+        rusqlite::params![token_row.id],
+    )?;
+    transaction.commit()?;
 
     Ok(Json(TokenResponse::new(access_token, raw_refresh)))
 }
@@ -184,7 +183,6 @@ async fn refresh(
 struct RefreshTokenRow {
     id: i64,
     user_id: i64,
-    revoked: i32,
     username: String,
     role: String,
     is_active: i32,

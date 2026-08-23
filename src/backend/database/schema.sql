@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS media (
     file_size INTEGER,
     content_hash TEXT,
     import_state TEXT NOT NULL DEFAULT 'imported' CHECK(import_state IN ('importing', 'imported', 'failed')),
-    import_source TEXT NOT NULL DEFAULT 'local' CHECK(import_source IN ('local', 'webdav')),
+    import_source TEXT NOT NULL DEFAULT 'local' CHECK(import_source IN ('local', 'webdav', 'mobile_backup')),
     import_error TEXT,
     imported_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -103,6 +103,61 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS backup_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, device_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS backup_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id TEXT NOT NULL,
+    client_asset_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+    source_modified_at TEXT,
+    status TEXT NOT NULL CHECK(status IN ('uploading', 'queued', 'processing', 'completed', 'failed', 'cancelled', 'expired')),
+    staged_path TEXT NOT NULL,
+    content_hash TEXT,
+    media_id INTEGER,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT,
+    UNIQUE (user_id, device_id, client_asset_id),
+    UNIQUE (user_id, operation_id),
+    FOREIGN KEY (user_id, device_id) REFERENCES backup_devices(user_id, device_id) ON DELETE CASCADE,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS backup_upload_sessions (
+    upload_id TEXT PRIMARY KEY,
+    asset_id INTEGER NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    expected_size INTEGER NOT NULL CHECK(expected_size > 0),
+    uploaded_size INTEGER NOT NULL DEFAULT 0 CHECK(uploaded_size >= 0),
+    status TEXT NOT NULL CHECK(status IN ('uploading', 'writing', 'queued', 'processing', 'completed', 'failed', 'cancelled', 'expired')),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (asset_id) REFERENCES backup_assets(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_backup_upload_sessions_user_active
+    ON backup_upload_sessions (user_id, status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_backup_assets_claim
+    ON backup_assets (status, id);
 
 CREATE TABLE IF NOT EXISTS media_access (
     media_id INTEGER NOT NULL,

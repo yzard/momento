@@ -29,6 +29,7 @@ fn default_role() -> String {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserUpdateRequest {
+    pub user_id: i64,
     pub role: Option<String>,
     pub is_active: Option<bool>,
 }

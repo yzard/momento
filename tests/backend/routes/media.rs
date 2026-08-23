@@ -2,7 +2,13 @@ use crate::test_utils::{
     create_test_app, create_test_db, create_test_media_with_gps_and_date, create_test_user,
     grant_media_access,
 };
-use axum::http::header::AUTHORIZATION;
+use axum::http::{
+    header::{
+        AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
+        RANGE,
+    },
+    StatusCode,
+};
 use axum_test::TestServer;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
@@ -79,6 +85,154 @@ async fn media_delete_accepts_media_ids_batch() {
 fn access_token(user_id: i64) -> String {
     create_access_token(user_id, "testuser", "user", &Config::default(), None)
         .expect("Failed to create test access token")
+}
+
+#[tokio::test]
+async fn individual_media_endpoints_require_access_and_honor_original_cache_and_ranges() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "binary-media", "binary-media@example.com");
+    let other_user_id = create_test_user(&pool, "hidden-media", "hidden-media@example.com");
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "binary-media.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    let relative_path = format!("route-tests/{media_id}.jpg");
+    let thumbnail_path = format!("route-tests/{media_id}.jpg");
+    let originals = momento_api::constants::paths()
+        .originals
+        .join(&relative_path);
+    let thumbnail = momento_api::constants::paths()
+        .thumbnails
+        .join(&thumbnail_path);
+    let tiny_thumbnail = momento_api::constants::paths()
+        .thumbnails_tiny
+        .join(&thumbnail_path);
+    std::fs::create_dir_all(originals.parent().expect("original parent"))
+        .expect("original directory");
+    std::fs::create_dir_all(thumbnail.parent().expect("thumbnail parent"))
+        .expect("thumbnail directory");
+    std::fs::create_dir_all(tiny_thumbnail.parent().expect("tiny thumbnail parent"))
+        .expect("tiny thumbnail directory");
+    std::fs::write(&originals, b"abcdef").expect("original bytes");
+    std::fs::write(&thumbnail, b"normal").expect("thumbnail bytes");
+    std::fs::write(&tiny_thumbnail, b"tiny").expect("tiny thumbnail bytes");
+    let connection = pool.get().expect("database");
+    connection
+        .execute(
+            "UPDATE media SET file_path = ? WHERE id = ?",
+            rusqlite::params![relative_path, media_id],
+        )
+        .expect("media path");
+    connection
+        .execute(
+            "UPDATE media_metadata SET thumbnail_path = ? WHERE media_id = ?",
+            rusqlite::params![thumbnail_path, media_id],
+        )
+        .expect("thumbnail path");
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    server
+        .get(&format!("/api/v1/media/{media_id}/thumbnail"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_ok();
+    server
+        .get(&format!("/api/v1/media/{media_id}/thumbnail/tiny"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_ok();
+    server
+        .get(&format!("/api/v1/media/{media_id}/preview"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_ok();
+    server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(
+            AUTHORIZATION,
+            format!("Bearer {}", access_token(other_user_id)),
+        )
+        .await
+        .assert_status_not_found();
+
+    let original = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await;
+    original.assert_status_ok();
+    original.assert_header(CACHE_CONTROL, "private");
+    original.assert_header(CONTENT_DISPOSITION, "inline; filename=\"binary-media.jpg\"");
+    let etag = original.header(ETAG).to_str().expect("etag").to_string();
+    server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header("if-none-match", &etag)
+        .await
+        .assert_status(StatusCode::NOT_MODIFIED);
+    let range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=1-3")
+        .await;
+    range.assert_status(StatusCode::PARTIAL_CONTENT);
+    range.assert_header(CONTENT_RANGE, "bytes 1-3/6");
+    let matching_if_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=1-3")
+        .add_header("if-range", etag.clone())
+        .await;
+    matching_if_range.assert_status(StatusCode::PARTIAL_CONTENT);
+    let stale_if_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=1-3")
+        .add_header("if-range", "W/\"stale\"")
+        .await;
+    stale_if_range.assert_status_ok();
+    stale_if_range.assert_header(CONTENT_LENGTH, "6");
+    let date_if_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=1-3")
+        .add_header("if-range", "Tue, 15 Nov 1994 08:12:31 GMT")
+        .await;
+    date_if_range.assert_status_ok();
+    let open_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=4-")
+        .await;
+    open_range.assert_status(StatusCode::PARTIAL_CONTENT);
+    open_range.assert_header(CONTENT_RANGE, "bytes 4-5/6");
+    let suffix_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=-2")
+        .await;
+    suffix_range.assert_status(StatusCode::PARTIAL_CONTENT);
+    suffix_range.assert_header(CONTENT_RANGE, "bytes 4-5/6");
+    let invalid_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=0-1,3-4")
+        .await;
+    invalid_range.assert_status(StatusCode::RANGE_NOT_SATISFIABLE);
+    invalid_range.assert_header(CONTENT_RANGE, "bytes */6");
+    std::fs::write(&originals, b"").expect("empty original bytes");
+    let empty_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization)
+        .add_header(RANGE, "bytes=0-0")
+        .await;
+    empty_range.assert_status(StatusCode::RANGE_NOT_SATISFIABLE);
+    empty_range.assert_header(CONTENT_RANGE, "bytes */0");
 }
 
 #[tokio::test]
@@ -252,6 +406,7 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "mountain",
             "anchorDate": "9999-12-31T23:59:59",
             "direction": "older"
@@ -270,6 +425,7 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "not-indexed",
             "anchorDate": "9999-12-31T23:59:59",
             "direction": "older"
@@ -278,6 +434,38 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
     no_match_response.assert_status_ok();
     let no_match_body: Value = no_match_response.json();
     assert!(no_match_body["groups"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn timeline_requires_a_bounded_nonzero_limit() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "timeline-limit", "timeline-limit@example.com");
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
+        }))
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({
+            "limit": 501,
+            "groupBy": "day",
+            "search": "",
+            "anchorDate": "9999-12-31T23:59:59",
+            "direction": "older"
+        }))
+        .await
+        .assert_status_bad_request();
 }
 
 #[tokio::test]
@@ -315,6 +503,7 @@ async fn test_timeline_media_type_filter() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "anchorDate": "9999-12-31T23:59:59",
             "direction": "older"
@@ -329,6 +518,7 @@ async fn test_timeline_media_type_filter() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "mediaType": "image",
             "anchorDate": "9999-12-31T23:59:59",
@@ -348,6 +538,7 @@ async fn test_timeline_media_type_filter() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "mediaType": "video",
             "anchorDate": "9999-12-31T23:59:59",
@@ -414,6 +605,7 @@ async fn timeline_classification_filters_allow_overlap_and_enforce_access() {
             .add_header(AUTHORIZATION, authorization.clone())
             .json(&json!({
                 "groupBy": "day",
+                "limit": 100,
                 "search": "",
                 "classification": classification,
                 "anchorDate": "9999-12-31T23:59:59",
@@ -450,6 +642,7 @@ async fn timeline_classification_filters_allow_overlap_and_enforce_access() {
         .add_header(AUTHORIZATION, authorization)
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "classification": "receipt",
             "direction": "older"
@@ -480,6 +673,7 @@ async fn test_timeline_page_contains_the_complete_group_period() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "anchorDate": "2024-01-15T10:30:00",
             "direction": "older"
@@ -489,8 +683,41 @@ async fn test_timeline_page_contains_the_complete_group_period() {
 
     let body: Value = response.json();
     assert_eq!(body["groups"].as_array().unwrap().len(), 1);
-    assert_eq!(body["groups"][0]["media"].as_array().unwrap().len(), 101);
-    assert!(!body["hasOlder"].as_bool().unwrap());
+    assert_eq!(body["groups"][0]["media"].as_array().unwrap().len(), 100);
+    assert!(body["hasOlder"].as_bool().unwrap());
+
+    let first_page_ids = body["groups"][0]["media"]
+        .as_array()
+        .expect("first page media")
+        .iter()
+        .map(|media| media["id"].as_i64().expect("media ID"))
+        .collect::<std::collections::HashSet<_>>();
+    let next_cursor = body["nextCursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+    let second_page = server
+        .post("/api/v1/timeline/list")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&json!({
+            "groupBy": "day",
+            "limit": 100,
+            "search": "",
+            "cursor": next_cursor,
+            "direction": "older"
+        }))
+        .await;
+    second_page.assert_status_ok();
+    let second_page: Value = second_page.json();
+    let second_page_ids = second_page["groups"][0]["media"]
+        .as_array()
+        .expect("second page media")
+        .iter()
+        .map(|media| media["id"].as_i64().expect("media ID"))
+        .collect::<Vec<_>>();
+    assert_eq!(second_page_ids.len(), 1);
+    assert!(!first_page_ids.contains(&second_page_ids[0]));
+    assert!(!second_page["hasOlder"].as_bool().unwrap());
 }
 
 #[tokio::test]
@@ -538,6 +765,7 @@ async fn test_timeline_markers_respect_media_type() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "anchorDate": body["markers"][0]["anchorDate"],
             "direction": "older"
@@ -602,6 +830,7 @@ async fn test_timeline_marker_query_stays_within_selected_month() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "anchorDate": marker["anchorDate"],
             "direction": "older",
@@ -619,6 +848,7 @@ async fn test_timeline_marker_query_stays_within_selected_month() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "cursor": body["nextCursor"],
             "direction": "older"
@@ -667,6 +897,7 @@ async fn test_timeline_reverse_pagination_does_not_repeat_media() {
     let request = |cursor: Option<&Value>| {
         let mut body = json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "anchorDate": "9999-12-31T23:59:59",
             "direction": "older",
@@ -742,6 +973,7 @@ async fn test_timeline_jump_can_page_newer_media() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "cursor": format!("2024-02-15T10:30:00_{}", newer_id),
             "direction": "older",
@@ -756,6 +988,7 @@ async fn test_timeline_jump_can_page_newer_media() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "cursor": older_body["previousCursor"],
             "direction": "newer",
@@ -770,6 +1003,7 @@ async fn test_timeline_jump_can_page_newer_media() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
+            "limit": 100,
             "search": "",
             "cursor": newer_body["previousCursor"],
             "direction": "newer",

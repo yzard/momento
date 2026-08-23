@@ -1,8 +1,11 @@
 mod ai;
 mod auth;
+mod backup;
+mod client;
 mod deduplicate;
 mod faces;
 mod map;
 mod media;
 mod metadata;
 mod places;
+mod users;

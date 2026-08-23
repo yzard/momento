@@ -1,6 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom'
 import { useState } from 'react'
-import { useAuth } from '../../hooks/useAuth'
 import {
   Camera,
   ChevronDown,
@@ -13,9 +12,7 @@ import {
   MapPinned,
   ScanText,
   ScanSearch,
-  Settings,
   Trash2,
-  User,
   Video,
   Wrench,
   type LucideIcon,
@@ -55,7 +52,6 @@ const navItems: NavItem[] = [
     ],
   },
   { to: '/trash', label: 'Trash', icon: Trash2 },
-  { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
 interface SidebarProps {
@@ -111,7 +107,7 @@ function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
             </>
           )}
         </NavLink>
-        {item.children && (
+        {item.children && isFocused && (
           <button
             type="button"
             aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${item.label}`}
@@ -159,8 +155,6 @@ function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
 }
 
 export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onNavigate }: SidebarProps) {
-  const { user } = useAuth()
-
   return (
     <aside
       className={cn(
@@ -183,51 +177,23 @@ export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onN
             <NavSection key={item.to} item={item} isCollapsed={isCollapsed} onNavigate={onNavigate} />
           ))}
         </div>
-
-        {user?.role === 'admin' && (
-          <div className="space-y-2">
-            <div className="border-t border-border/50 pt-2" aria-hidden="true" />
-            <NavLink
-              to="/admin"
-              onClick={onNavigate}
-              className={({ isActive }) =>
-                cn(
-                  "flex rounded-lg transition-all duration-200 font-medium border border-transparent",
-                  isCollapsed 
-                    ? "flex-col items-center justify-center gap-1 py-3 px-1 text-[10px]" 
-                    : "flex-row items-center gap-4 px-4 py-3.5 text-sm",
-                  isActive
-                    ? "bg-muted/50 text-foreground shadow-sm border-border/50"
-                    : "text-muted-foreground hover:bg-muted/30 hover:text-foreground"
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <User
-                    className={cn(
-                      "transition-colors duration-200",
-                      isCollapsed ? "w-6 h-6" : "w-5 h-5",
-                      isActive ? "text-secondary" : "text-muted-foreground"
-                    )}
-                    strokeWidth={2}
-                  />
-                  <span className={cn("tracking-wide whitespace-nowrap", isCollapsed ? "text-[10px] font-semibold" : "")}>
-                    Admin
-                  </span>
-                </>
-              )}
-            </NavLink>
-          </div>
-        )}
       </nav>
 
       <div className={cn("border-t border-border/50", isCollapsed ? "p-4 flex justify-center" : "p-6 flex items-center justify-between")}>
         {!isCollapsed ? (
-          <div className="px-4 py-2 bg-primary/5 rounded-xl border border-primary/10 animate-fade-in">
-            <p className="text-xs text-primary/80 font-medium text-center">
-              v{MOMENTO_VERSION}
-            </p>
+          <div className="flex items-center gap-2 animate-fade-in">
+            <div className="px-3 py-2 bg-primary/5 rounded-xl border border-primary/10">
+              <p className="text-xs text-primary/80 font-medium text-center">
+                v{MOMENTO_VERSION}
+              </p>
+            </div>
+            <a
+              href="/momento-android.apk"
+              download="momento-android.apk"
+              className="px-3 py-2 rounded-xl border border-border text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+            >
+              Android
+            </a>
           </div>
         ) : null}
         

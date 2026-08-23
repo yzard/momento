@@ -77,6 +77,216 @@ pub mod import {
     pub const UPDATE_JOB_PROGRESS: &str = "UPDATE import_jobs SET processed_files = processed_files + 1, successful_imports = successful_imports + CASE WHEN ? THEN 1 ELSE 0 END, failed_imports = failed_imports + CASE WHEN ? THEN 0 ELSE 1 END, last_error = CASE WHEN ? = '' THEN last_error ELSE ? END WHERE id = ? AND status = 'running'";
 }
 
+pub mod backup {
+    pub const UPSERT_DEVICE: &str = r#"
+    INSERT INTO backup_devices (user_id, device_id, device_name)
+    VALUES (?, ?, ?)
+    ON CONFLICT(user_id, device_id) DO UPDATE SET
+        device_name = excluded.device_name
+      , last_seen_at = datetime('now')
+    "#;
+    pub const DEVICE_EXISTS: &str =
+        "SELECT EXISTS(SELECT 1 FROM backup_devices WHERE user_id = ? AND device_id = ?)";
+    pub const SELECT_BY_OPERATION: &str = r#"
+    SELECT backup_upload_sessions.upload_id
+         , backup_assets.status
+         , backup_upload_sessions.uploaded_size
+         , backup_upload_sessions.expected_size
+         , backup_assets.media_id
+         , backup_assets.error
+      FROM backup_assets
+      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+     WHERE backup_assets.user_id = ?
+       AND backup_assets.operation_id = ?
+    "#;
+    pub const SELECT_BY_CLIENT_ASSET: &str = r#"
+    SELECT backup_upload_sessions.upload_id
+         , backup_assets.status
+         , backup_upload_sessions.uploaded_size
+         , backup_upload_sessions.expected_size
+         , backup_assets.media_id
+         , backup_assets.error
+      FROM backup_assets
+      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+     WHERE backup_assets.user_id = ?
+       AND backup_assets.device_id = ?
+       AND backup_assets.client_asset_id = ?
+    "#;
+    pub const COUNT_ACTIVE_UPLOADS: &str = "SELECT COUNT(*) FROM backup_upload_sessions WHERE user_id = ? AND status IN ('uploading', 'writing') AND expires_at > datetime('now')";
+    pub const INSERT_ASSET: &str = r#"
+    INSERT INTO backup_assets (
+        user_id
+      , device_id
+      , client_asset_id
+      , operation_id
+      , original_filename
+      , mime_type
+      , byte_size
+      , source_modified_at
+      , status
+      , staged_path
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?)
+    "#;
+    pub const INSERT_SESSION: &str = r#"
+    INSERT INTO backup_upload_sessions (
+        upload_id
+      , asset_id
+      , user_id
+      , expected_size
+      , status
+      , expires_at
+    ) VALUES (?, ?, ?, ?, 'uploading', datetime('now', ?))
+    "#;
+    pub const SELECT_UPLOAD: &str = r#"
+    SELECT backup_assets.id
+         , backup_upload_sessions.upload_id
+         , backup_assets.status
+         , backup_upload_sessions.status
+         , backup_upload_sessions.uploaded_size
+         , backup_upload_sessions.expected_size
+         , backup_assets.staged_path
+         , backup_assets.media_id
+         , backup_assets.error
+      FROM backup_assets
+      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+     WHERE backup_upload_sessions.upload_id = ?
+       AND backup_upload_sessions.user_id = ?
+    "#;
+    pub const CLAIM_CHUNK: &str = r#"
+    UPDATE backup_upload_sessions
+       SET status = 'writing'
+         , updated_at = datetime('now')
+     WHERE upload_id = ?
+       AND user_id = ?
+       AND status = 'uploading'
+       AND uploaded_size = ?
+       AND expires_at > datetime('now')
+    "#;
+    pub const COMPLETE_CHUNK: &str = r#"
+    UPDATE backup_upload_sessions
+       SET status = 'uploading'
+         , uploaded_size = ?
+         , updated_at = datetime('now')
+     WHERE upload_id = ?
+       AND user_id = ?
+       AND status = 'writing'
+       AND uploaded_size = ?
+    "#;
+    pub const ABANDON_CHUNK: &str = r#"
+    UPDATE backup_upload_sessions
+       SET status = 'uploading'
+         , updated_at = datetime('now')
+     WHERE upload_id = ?
+       AND user_id = ?
+       AND status = 'writing'
+    "#;
+    pub const QUEUE_SESSION: &str = r#"
+    UPDATE backup_upload_sessions
+       SET status = 'queued'
+         , updated_at = datetime('now')
+     WHERE upload_id = ?
+       AND user_id = ?
+       AND status = 'uploading'
+       AND uploaded_size = expected_size
+    "#;
+    pub const QUEUE_ASSET: &str = r#"
+    UPDATE backup_assets
+       SET status = 'queued'
+         , updated_at = datetime('now')
+     WHERE id = ?
+       AND status = 'uploading'
+    "#;
+    pub const CANCEL_SESSION: &str = r#"
+    UPDATE backup_upload_sessions
+       SET status = 'cancelled'
+         , updated_at = datetime('now')
+     WHERE upload_id = ?
+       AND user_id = ?
+       AND status IN ('uploading', 'queued')
+    "#;
+    pub const CANCEL_ASSET: &str = r#"
+    UPDATE backup_assets
+       SET status = 'cancelled'
+         , updated_at = datetime('now')
+     WHERE id = ?
+       AND status IN ('uploading', 'queued')
+    "#;
+    pub const CLAIM_QUEUED: &str = r#"
+    UPDATE backup_assets
+       SET status = 'processing'
+         , updated_at = datetime('now')
+     WHERE id = (
+        SELECT backup_assets.id
+          FROM backup_assets
+          JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+         WHERE backup_assets.status = 'queued'
+           AND backup_upload_sessions.status = 'queued'
+         ORDER BY backup_assets.id
+         LIMIT 1
+     )
+       AND status = 'queued'
+    RETURNING id, user_id, staged_path, source_modified_at
+    "#;
+    pub const STORE_CONTENT_HASH: &str = r#"
+    UPDATE backup_assets
+       SET content_hash = ?
+         , updated_at = datetime('now')
+     WHERE id = ?
+       AND status = 'processing'
+    "#;
+    pub const MARK_SESSION_PROCESSING: &str = "UPDATE backup_upload_sessions SET status = 'processing', updated_at = datetime('now') WHERE asset_id = ? AND status = 'queued'";
+    pub const COMPLETE_ASSET: &str = "UPDATE backup_assets SET status = 'completed', media_id = ?, error = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
+    pub const COMPLETE_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'completed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
+    pub const FAIL_ASSET: &str = "UPDATE backup_assets SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
+    pub const FAIL_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'failed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
+    pub const SELECT_PROCESSING_ASSETS: &str = r#"
+    SELECT id
+         , user_id
+         , staged_path
+         , content_hash
+      FROM backup_assets
+     WHERE status = 'processing'
+     ORDER BY id
+    "#;
+    pub const SELECT_RECOVERED_MEDIA: &str = r#"
+    SELECT media.id
+      FROM media
+      JOIN media_access ON media_access.media_id = media.id
+     WHERE media.content_hash = ?
+       AND media.import_state = 'imported'
+       AND media_access.user_id = ?
+       AND media_access.deleted_at IS NULL
+     LIMIT 1
+    "#;
+    pub const RECOVER_QUEUED_ASSET: &str = "UPDATE backup_assets SET status = 'queued', updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
+    pub const RECOVER_QUEUED_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'queued', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
+    pub const RECOVER_WRITING_SESSIONS: &str = "UPDATE backup_upload_sessions SET status = 'uploading', updated_at = datetime('now') WHERE status = 'writing'";
+    pub const SELECT_RESUMABLE_FILES: &str = r#"
+    SELECT backup_assets.id
+         , backup_assets.staged_path
+         , backup_upload_sessions.uploaded_size
+      FROM backup_assets
+      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+     WHERE backup_upload_sessions.status = 'uploading'
+    "#;
+    pub const FAIL_MISSING_STAGED_ASSET: &str = "UPDATE backup_assets SET status = 'failed', error = 'backup staging file is missing', updated_at = datetime('now') WHERE id = ? AND status = 'uploading'";
+    pub const FAIL_MISSING_STAGED_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'failed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'uploading'";
+    pub const EXPIRE_SESSIONS: &str = "UPDATE backup_upload_sessions SET status = 'expired', updated_at = datetime('now') WHERE status IN ('uploading', 'writing') AND expires_at <= datetime('now')";
+    pub const EXPIRE_ASSETS: &str = "UPDATE backup_assets SET status = 'expired', updated_at = datetime('now') WHERE id IN (SELECT asset_id FROM backup_upload_sessions WHERE status = 'expired') AND status = 'uploading'";
+    pub const SELECT_STATUS: &str = r#"
+    SELECT backup_upload_sessions.upload_id
+         , backup_assets.status
+         , backup_upload_sessions.uploaded_size
+         , backup_upload_sessions.expected_size
+         , backup_assets.media_id
+         , backup_assets.error
+      FROM backup_assets
+      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+     WHERE backup_assets.user_id = ?
+     ORDER BY backup_assets.id DESC
+    "#;
+}
+
 pub mod webdav_ready {
     pub const UPSERT: &str = r#"
     INSERT INTO webdav_ready_files (user_id, file_path, completed_at)
@@ -731,6 +941,20 @@ pub mod media {
          , m.original_filename
       FROM media AS m
       JOIN media_access AS ma ON m.id = ma.media_id
+     WHERE m.id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
+    "#;
+
+    pub const SELECT_BINARY_MEDIA_INFO: &str = r#"
+    SELECT m.file_path
+         , m.mime_type
+         , m.original_filename
+         , m.media_type
+         , mm.thumbnail_path
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE m.id = ?
        AND ma.user_id = ?
        AND ma.deleted_at IS NULL
@@ -1633,12 +1857,16 @@ pub mod auth {
       FROM refresh_tokens AS rt
       JOIN users AS u ON rt.user_id = u.id
      WHERE rt.token_hash = ?
+       AND rt.revoked = 0
+       AND datetime(rt.expires_at) > datetime(?)
     "#;
 
     pub const REVOKE_REFRESH_TOKEN: &str = r#"
     UPDATE refresh_tokens
        SET revoked = 1
      WHERE id = ?
+       AND revoked = 0
+       AND datetime(expires_at) > datetime(?)
     "#;
 
     pub const REVOKE_REFRESH_TOKEN_BY_HASH: &str = r#"

@@ -62,6 +62,7 @@ pub struct MediaListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TimelineListRequest {
     pub cursor: Option<String>,
+    pub limit: u32,
     pub group_by: String,
     pub search: String,
     pub media_type: Option<String>,

@@ -1,8 +1,10 @@
 import { useAuth } from '../../hooks/useAuth'
 import { LogOut, Bell, Menu } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 
 export default function Header({ onMenuClick }: { onMenuClick: () => void }) {
   const { user, logout } = useAuth()
+  const navigate = useNavigate()
 
   return (
     <header className="sticky top-0 z-10 px-4 py-4 sm:px-6 md:px-10 md:py-6 flex items-center justify-between bg-background/95 backdrop-blur-sm border-b border-transparent transition-all duration-200">
@@ -32,12 +34,17 @@ export default function Header({ onMenuClick }: { onMenuClick: () => void }) {
 
         <div className="hidden h-8 w-px bg-border/50 mx-2 sm:block" />
 
-        <div className="hidden items-center gap-3 pl-2 pr-2 py-1.5 bg-white border border-border rounded-full shadow-sm hover:shadow-md transition-shadow cursor-pointer group sm:flex">
+        <button
+          type="button"
+          aria-label="Open account settings"
+          onClick={() => navigate('/settings')}
+          className="flex items-center gap-3 p-1.5 bg-white border border-border rounded-full shadow-sm hover:shadow-md transition-shadow group"
+        >
           <div className="w-8 h-8 bg-primary text-primary-foreground rounded-full flex items-center justify-center font-bold text-sm">
             {user?.username?.[0]?.toUpperCase()}
           </div>
-          <span className="text-sm font-medium text-foreground tracking-tight pr-2 group-hover:text-primary transition-colors">{user?.username}</span>
-        </div>
+          <span className="hidden text-sm font-medium text-foreground tracking-tight pr-2 group-hover:text-primary transition-colors sm:block">{user?.username}</span>
+        </button>
         
         <button
           onClick={logout}

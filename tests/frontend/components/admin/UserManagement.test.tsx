@@ -34,4 +34,22 @@ describe('UserManagement', () => {
 
     expect(screen.queryByRole('dialog')).toBeNull()
   })
+
+  it('sends the user ID in the update request body', async () => {
+    mocks.listUsers.mockResolvedValue([{
+      id: 7,
+      username: 'member',
+      email: 'member@example.com',
+      role: 'user',
+      mustChangePassword: false,
+      isActive: true,
+      createdAt: '2024-01-01T00:00:00Z',
+    }])
+    mocks.updateUser.mockResolvedValue(undefined)
+    render(<UserManagement />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Deactivate' }))
+
+    expect(mocks.updateUser).toHaveBeenCalledWith({ userId: 7, isActive: false })
+  })
 })

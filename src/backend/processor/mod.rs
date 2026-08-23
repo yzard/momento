@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod backup;
 pub mod deduplicator;
 pub mod face_detection;
 pub mod import;

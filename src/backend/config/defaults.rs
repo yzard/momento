@@ -15,6 +15,12 @@ pub(crate) const WEBDAV_MAX_CONCURRENT_REQUESTS: usize = 16;
 pub(crate) const WEBDAV_POLL_INTERVAL_SECONDS: u64 = 1;
 pub(crate) const WEBDAV_STABLE_FILE_AGE_SECONDS: u64 = 2;
 pub(crate) const WEBDAV_MAX_CONCURRENT_PROCESSING: usize = 4;
+pub(crate) const BACKUP_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub(crate) const BACKUP_MAX_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const BACKUP_MAX_ACTIVE_UPLOADS_PER_USER: usize = 4;
+pub(crate) const BACKUP_SESSION_EXPIRY_HOURS: u64 = 24;
+pub(crate) const BACKUP_WORKER_POLL_INTERVAL_SECONDS: u64 = 2;
+pub(crate) const BACKUP_WORKER_CONCURRENCY: usize = 2;
 pub(crate) const METADATA_WORKER_POLL_INTERVAL_SECONDS: u64 = 10;
 pub(crate) const METADATA_WORKER_LEASE_SECONDS: u64 = 300;
 pub(crate) const METADATA_WORKER_MAX_ATTEMPTS: u32 = 5;
@@ -138,6 +144,30 @@ pub(crate) fn webdav_stable_file_age_seconds() -> u64 {
 
 pub(crate) fn webdav_max_concurrent_processing() -> usize {
     WEBDAV_MAX_CONCURRENT_PROCESSING
+}
+
+pub(crate) fn backup_max_upload_bytes() -> u64 {
+    BACKUP_MAX_UPLOAD_BYTES
+}
+
+pub(crate) fn backup_max_chunk_bytes() -> u64 {
+    BACKUP_MAX_CHUNK_BYTES
+}
+
+pub(crate) fn backup_max_active_uploads_per_user() -> usize {
+    BACKUP_MAX_ACTIVE_UPLOADS_PER_USER
+}
+
+pub(crate) fn backup_session_expiry_hours() -> u64 {
+    BACKUP_SESSION_EXPIRY_HOURS
+}
+
+pub(crate) fn backup_worker_poll_interval_seconds() -> u64 {
+    BACKUP_WORKER_POLL_INTERVAL_SECONDS
+}
+
+pub(crate) fn backup_worker_concurrency() -> usize {
+    BACKUP_WORKER_CONCURRENCY
 }
 
 pub(crate) fn thumbnails_max_size() -> u32 {
@@ -296,6 +326,30 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{WEBDAV_MAX_CONCURRENT_PROCESSING}}",
             WEBDAV_MAX_CONCURRENT_PROCESSING.to_string(),
+        ),
+        (
+            "{{BACKUP_MAX_UPLOAD_BYTES}}",
+            BACKUP_MAX_UPLOAD_BYTES.to_string(),
+        ),
+        (
+            "{{BACKUP_MAX_CHUNK_BYTES}}",
+            BACKUP_MAX_CHUNK_BYTES.to_string(),
+        ),
+        (
+            "{{BACKUP_MAX_ACTIVE_UPLOADS_PER_USER}}",
+            BACKUP_MAX_ACTIVE_UPLOADS_PER_USER.to_string(),
+        ),
+        (
+            "{{BACKUP_SESSION_EXPIRY_HOURS}}",
+            BACKUP_SESSION_EXPIRY_HOURS.to_string(),
+        ),
+        (
+            "{{BACKUP_WORKER_POLL_INTERVAL_SECONDS}}",
+            BACKUP_WORKER_POLL_INTERVAL_SECONDS.to_string(),
+        ),
+        (
+            "{{BACKUP_WORKER_CONCURRENCY}}",
+            BACKUP_WORKER_CONCURRENCY.to_string(),
         ),
         (
             "{{THUMBNAILS_MAX_SIZE}}",

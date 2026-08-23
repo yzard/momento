@@ -13,6 +13,14 @@ target/
 **/target/
 *.tsbuildinfo
 
+# Android local signing material and generated project state
+/src/android/.gradle/
+/src/android/app/build/
+/src/android/local.properties
+/src/android/captures/
+/src/android/*.jks
+/src/android/**/password.txt
+
 # Rust
 .cargo/
 *.rs.bk

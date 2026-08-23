@@ -76,9 +76,9 @@ describe('timeline classification queries', () => {
     await waitFor(() => expect(mocks.listTimeline).toHaveBeenCalledTimes(3))
 
     expect(mocks.listTimeline.mock.calls.map(([request]) => request)).toEqual([
-      { groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'screenshot', direction: 'older', anchorDate: '2026-08-01' },
-      { groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'document', direction: 'older', anchorDate: '2026-08-01' },
-      { groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'screenshot', direction: 'older', anchorDate: '2026-08-01' },
+      { limit: 100, groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'screenshot', direction: 'older', anchorDate: '2026-08-01' },
+      { limit: 100, groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'document', direction: 'older', anchorDate: '2026-08-01' },
+      { limit: 100, groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'screenshot', direction: 'older', anchorDate: '2026-08-01' },
     ])
   })
 })

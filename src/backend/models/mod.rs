@@ -1,6 +1,7 @@
 mod ai;
 mod album;
 mod auth;
+mod backup;
 mod deduplicate;
 mod imports;
 mod map;
@@ -14,6 +15,7 @@ mod user;
 pub use ai::*;
 pub use album::*;
 pub use auth::*;
+pub use backup::*;
 pub use deduplicate::*;
 pub use imports::*;
 pub use map::*;

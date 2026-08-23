@@ -105,6 +105,33 @@ fn creates_durable_metadata_and_ai_job_tables() {
 }
 
 #[test]
+fn backup_schema_enforces_device_ownership_and_statuses() {
+    let pool = create_test_db();
+    let user_id =
+        crate::test_utils::create_test_user(&pool, "backup-schema", "backup-schema@example.com");
+    let connection = pool.get().expect("database connection");
+
+    assert!(connection
+        .execute(
+            "INSERT INTO backup_assets (user_id, device_id, client_asset_id, operation_id, original_filename, mime_type, byte_size, source_modified_at, status, staged_path) VALUES (?, 'unknown', 'asset', 'operation', 'photo.jpg', 'image/jpeg', 1, '2024-01-01T00:00:00Z', 'uploading', 'asset.part')",
+            [user_id],
+        )
+        .is_err());
+    connection
+        .execute(
+            "INSERT INTO backup_devices (user_id, device_id, device_name) VALUES (?, 'known', 'Known device')",
+            [user_id],
+        )
+        .expect("backup device");
+    assert!(connection
+        .execute(
+            "INSERT INTO backup_assets (user_id, device_id, client_asset_id, operation_id, original_filename, mime_type, byte_size, source_modified_at, status, staged_path) VALUES (?, 'known', 'asset', 'operation', 'photo.jpg', 'image/jpeg', 1, '2024-01-01T00:00:00Z', 'writing', 'asset.part')",
+            [user_id],
+        )
+        .is_err());
+}
+
+#[test]
 fn classifier_tables_enforce_boolean_and_confidence_ranges() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "classifier-constraints.jpg");

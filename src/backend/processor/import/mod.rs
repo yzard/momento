@@ -45,6 +45,7 @@ enum ImportTarget {
 pub enum ImportSource {
     Local,
     Webdav,
+    MobileBackup,
 }
 
 impl ImportSource {
@@ -52,6 +53,7 @@ impl ImportSource {
         match self {
             Self::Local => "local",
             Self::Webdav => "webdav",
+            Self::MobileBackup => "mobile_backup",
         }
     }
 }

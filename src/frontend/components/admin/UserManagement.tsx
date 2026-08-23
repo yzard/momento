@@ -100,7 +100,7 @@ export default function UserManagement() {
 
   const handleToggleActive = async (user: User) => {
     try {
-      await adminApi.updateUser(user.id, { isActive: !user.isActive })
+      await adminApi.updateUser({ userId: user.id, isActive: !user.isActive })
       loadUsers()
     } catch {
       setActionError('Could not update the user.')

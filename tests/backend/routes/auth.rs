@@ -5,7 +5,7 @@ use axum_test::TestServer;
 use base64::Engine;
 use momento_api::{
     app::create_app,
-    auth::{hash_password, prepare_admin_password_reset, verify_password},
+    auth::{hash_password, hash_refresh_token, prepare_admin_password_reset, verify_password},
     config::Config,
 };
 use serde_json::{json, Value};
@@ -161,6 +161,64 @@ async fn temporary_admin_password_can_be_replaced_without_the_stored_password() 
     server
         .post("/api/v1/user/authenticate")
         .add_header(AUTHORIZATION, basic_credentials("admin", "admin"))
+        .await
+        .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn refresh_rejects_expired_tokens_and_rotates_a_token_once() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "refresh-user", "refresh@example.com");
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE users SET hashed_password = ? WHERE id = ?",
+            rusqlite::params![
+                hash_password("refresh-password").expect("password hash"),
+                user_id
+            ],
+        )
+        .expect("password");
+    let server = create_server(pool.clone(), None);
+
+    let login = server
+        .post("/api/v1/user/authenticate")
+        .add_header(
+            AUTHORIZATION,
+            basic_credentials("refresh-user", "refresh-password"),
+        )
+        .await;
+    login.assert_status_ok();
+    let refresh_token = login.json::<Value>()["refreshToken"]
+        .as_str()
+        .expect("refresh token")
+        .to_string();
+    let first_refresh = server
+        .post("/api/v1/user/refresh")
+        .json(&json!({"refreshToken": refresh_token}))
+        .await;
+    first_refresh.assert_status_ok();
+    server
+        .post("/api/v1/user/refresh")
+        .json(&json!({"refreshToken": refresh_token}))
+        .await
+        .assert_status_unauthorized();
+
+    let expired_token = "expired-refresh-token";
+    pool.get()
+        .expect("database")
+        .execute(
+            "INSERT INTO refresh_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+            rusqlite::params![
+                hash_refresh_token(expired_token),
+                user_id,
+                "2000-01-01T00:00:00+00:00"
+            ],
+        )
+        .expect("expired token");
+    server
+        .post("/api/v1/user/refresh")
+        .json(&json!({"refreshToken": expired_token}))
         .await
         .assert_status_unauthorized();
 }

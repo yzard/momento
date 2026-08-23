@@ -10,6 +10,7 @@ interface MediaListRequest {
 
 interface TimelineListRequest {
   cursor?: string
+  limit: number
   groupBy: GroupBy
   search: string
   mediaType?: MediaTypeFilter
@@ -282,15 +283,15 @@ export const mediaApi = {
   },
 
   getFileUrl: async (mediaId: number): Promise<string> => {
-    return fetchMediaAsBlob(`/api/v1/media/file/${mediaId}`, `file-${mediaId}`)
+    return fetchMediaAsBlob(`/api/v1/media/${mediaId}/original`, `file-${mediaId}`)
   },
 
   getFileStreamUrl: (mediaId: number): string => {
     const token = localStorage.getItem('momento_access_token')
     if (token) {
-      return `/api/v1/media/file/${mediaId}?token=${encodeURIComponent(token)}`
+      return `/api/v1/media/${mediaId}/original?token=${encodeURIComponent(token)}`
     }
-    return `/api/v1/media/file/${mediaId}`
+    return `/api/v1/media/${mediaId}/original`
   },
 
 

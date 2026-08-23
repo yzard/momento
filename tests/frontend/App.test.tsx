@@ -43,4 +43,10 @@ describe('App timeline routes', () => {
     expect(timeline.getAttribute('data-media-type')).toBe(mediaType)
     expect(timeline.getAttribute('data-classification')).toBe(classification)
   })
+
+  it('redirects the retired admin route to account settings', () => {
+    render(<MemoryRouter initialEntries={['/admin']}><App /></MemoryRouter>)
+
+    expect(screen.getByRole('heading', { name: 'Account Settings' })).toBeTruthy()
+  })
 })
