@@ -288,6 +288,7 @@ fun SettingsScreen(
             Text(
                 "Settings",
                 style = MaterialTheme.typography.headlineLarge,
+                color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp),
             )
             ListItem(
@@ -320,6 +321,7 @@ fun SettingsScreen(
             Text(
                 "Backup",
                 style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
