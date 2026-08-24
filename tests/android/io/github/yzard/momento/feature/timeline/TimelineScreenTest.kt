@@ -9,8 +9,17 @@ import org.junit.Test
 
 class TimelineScreenTest {
     @Test
-    fun mapsScreenshotsIndependentOfMediaType() {
-        assertEquals(null to "screenshot", timelineFilters("Screenshots"))
+    fun timelinePagesMapToIndependentBackendFilters() {
+        assertEquals(null, TimelinePage.TIMELINE.mediaType)
+        assertEquals("image", TimelinePage.PHOTOS.mediaType)
+        assertEquals("video", TimelinePage.VIDEOS.mediaType)
+        assertEquals("screenshot", TimelinePage.SCREENSHOTS.classification)
+        assertEquals("document", TimelinePage.DOCUMENTS.classification)
+    }
+
+    @Test
+    fun timelinePeriodsMapToBackendGrouping() {
+        assertEquals(listOf("day", "week", "month", "year"), TimelinePeriod.entries.map { it.groupBy })
     }
 
     @Test
@@ -18,6 +27,7 @@ class TimelineScreenTest {
         assertTrue(shouldAppendTimeline(8, 10, hasOlder = true, appending = false))
         assertFalse(shouldAppendTimeline(8, 10, hasOlder = true, appending = true))
         assertFalse(shouldAppendTimeline(8, 10, hasOlder = false, appending = false))
+        assertFalse(shouldAppendTimeline(-1, 0, hasOlder = true, appending = false))
     }
 
     @Test
@@ -32,6 +42,36 @@ class TimelineScreenTest {
 
         assertEquals(listOf("Today", "Yesterday"), merged.map { it.date })
         assertEquals(listOf(1L, 2L), merged.first().media.map { it.id })
+    }
+
+    @Test
+    fun flattensPeriodsIntoOneContinuousMediaSequence() {
+        val flattened = flattenTimelineGroups(
+            listOf(
+                TimelineGroup("Today", listOf(media(1), media(2))),
+                TimelineGroup("Yesterday", listOf(media(3))),
+            ),
+        )
+
+        assertEquals(listOf(1L, 2L, 3L), flattened.map { it.media.id })
+        assertEquals(listOf("Today", "Today", "Yesterday"), flattened.map { it.period })
+        assertEquals("Today", timelinePeriodAtIndex(flattened, 0))
+        assertEquals("Yesterday", timelinePeriodAtIndex(flattened, 2))
+        assertEquals("Today", timelinePeriodAtIndex(flattened, 1))
+        assertEquals(null, timelinePeriodAtIndex(flattened, 3))
+    }
+
+    @Test
+    fun removesSelectedMediaAndEmptyPeriods() {
+        val groups = listOf(
+            TimelineGroup("Today", listOf(media(1), media(2))),
+            TimelineGroup("Yesterday", listOf(media(3))),
+        )
+
+        val remaining = removeTimelineMedia(groups, setOf(2L, 3L))
+
+        assertEquals(listOf("Today"), remaining.map { it.date })
+        assertEquals(listOf(1L), remaining.single().media.map { it.id })
     }
 
     private fun media(id: Long) = Media(

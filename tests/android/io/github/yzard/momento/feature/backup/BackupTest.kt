@@ -31,4 +31,15 @@ class BackupTest {
         assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "completed", 10, 10, 4, null)))
         assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "failed", 10, 10, null, "bad file")))
     }
+
+    @Test fun backupNetworkRequiresValidatedInternet() {
+        assertFalse(backupNetworkAllowed(allowMobileData = true, hasValidatedInternet = false, unmetered = true))
+        assertFalse(backupNetworkAllowed(allowMobileData = false, hasValidatedInternet = false, unmetered = true))
+    }
+
+    @Test fun backupNetworkRespectsMobileDataPreference() {
+        assertTrue(backupNetworkAllowed(allowMobileData = true, hasValidatedInternet = true, unmetered = false))
+        assertFalse(backupNetworkAllowed(allowMobileData = false, hasValidatedInternet = true, unmetered = false))
+        assertTrue(backupNetworkAllowed(allowMobileData = false, hasValidatedInternet = true, unmetered = true))
+    }
 }

@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Folder,
+  LogOut,
   UsersRound,
   Image as ImageIcon,
   Map as MapIcon,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { MOMENTO_VERSION } from '../../lib/version'
+import { useAuth } from '../../hooks/useAuth'
 
 interface NavItem {
   to: string
@@ -155,6 +157,8 @@ function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
 }
 
 export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onNavigate }: SidebarProps) {
+  const { user, logout } = useAuth()
+
   return (
     <aside
       className={cn(
@@ -179,7 +183,7 @@ export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onN
         </div>
       </nav>
 
-      <div className={cn("border-t border-border/50", isCollapsed ? "p-4 flex justify-center" : "p-6 flex items-center justify-between")}>
+      <div className={cn("border-t border-border/50", isCollapsed ? "flex flex-col items-center gap-3 p-3" : "space-y-3 p-6")}>
         {!isCollapsed ? (
           <div className="flex items-center gap-2 animate-fade-in">
             <div className="px-3 py-2 bg-primary/5 rounded-xl border border-primary/10">
@@ -196,17 +200,43 @@ export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onN
             </a>
           </div>
         ) : null}
-        
-        <button
-          onClick={toggleCollapse}
-          className={cn(
-            "p-2 rounded-lg text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors",
-            !isCollapsed ? "ml-auto" : ""
+
+        <div className={cn("flex items-center", isCollapsed ? "flex-col gap-3" : "gap-2")}>
+          <NavLink
+            to="/settings"
+            onClick={onNavigate}
+            aria-label="Open account settings"
+            title={user?.username ?? 'Account'}
+            className={cn(
+              "flex items-center rounded-lg text-foreground transition-colors hover:bg-muted/50",
+              isCollapsed ? "justify-center p-1" : "min-w-0 flex-1 gap-3 p-1.5",
+            )}
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
+              {user?.username?.[0]?.toUpperCase()}
+            </span>
+            {!isCollapsed && <span className="truncate text-sm font-medium">{user?.username}</span>}
+          </NavLink>
+          {!isCollapsed && (
+            <button
+              type="button"
+              onClick={logout}
+              aria-label="Logout"
+              title="Logout"
+              className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+            >
+              <LogOut className="h-5 w-5" strokeWidth={2} />
+            </button>
           )}
-          aria-label={isCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
-        >
-          {isCollapsed ? <ChevronRight className="w-5 h-5" /> : <ChevronLeft className="w-5 h-5" />}
-        </button>
+          <button
+            type="button"
+            onClick={toggleCollapse}
+            className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+            aria-label={isCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
+          >
+            {isCollapsed ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+          </button>
+        </div>
       </div>
     </aside>
   )

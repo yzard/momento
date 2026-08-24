@@ -1093,6 +1093,7 @@ async fn get_media_thumbnail(
         media_id,
         ThumbnailSize::Normal,
         &headers,
+        queries::media::SELECT_BINARY_MEDIA_INFO,
     )
     .await
 }
@@ -1109,6 +1110,7 @@ async fn get_media_tiny_thumbnail(
         media_id,
         ThumbnailSize::Tiny,
         &headers,
+        queries::media::SELECT_BINARY_MEDIA_INFO,
     )
     .await
 }
@@ -1119,7 +1121,12 @@ async fn get_media_preview(
     Path(media_id): Path<i64>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let media = load_binary_media_info(&state, current_user.id, media_id)?;
+    let media = load_binary_media_info(
+        &state,
+        current_user.id,
+        media_id,
+        queries::media::SELECT_BINARY_MEDIA_INFO,
+    )?;
     let (path, content_type) = resolve_preview_path(&media, current_user.id).await?;
     serve_file(path, &content_type, &headers, None, false).await
 }
@@ -1130,7 +1137,12 @@ async fn serve_original(
     media_id: i64,
     headers: &HeaderMap,
 ) -> AppResult<Response> {
-    let media = load_binary_media_info(state, user_id, media_id)?;
+    let media = load_binary_media_info(
+        state,
+        user_id,
+        media_id,
+        queries::media::SELECT_BINARY_MEDIA_INFO,
+    )?;
     let path = paths().originals.join(&media.file_path);
     if !path.is_file() {
         return Err(AppError::NotFound("File not found".to_string()));
@@ -1154,8 +1166,9 @@ async fn serve_thumbnail(
     media_id: i64,
     size: ThumbnailSize,
     headers: &HeaderMap,
+    query: &str,
 ) -> AppResult<Response> {
-    let media = load_binary_media_info(state, user_id, media_id)?;
+    let media = load_binary_media_info(state, user_id, media_id, query)?;
     let path = thumbnail_path(&media, size);
     if !path.is_file() {
         return Err(AppError::NotFound("Thumbnail not found".to_string()));
@@ -1167,23 +1180,36 @@ fn load_binary_media_info(
     state: &AppState,
     user_id: i64,
     media_id: i64,
+    query: &str,
 ) -> AppResult<BinaryMediaInfo> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    fetch_one(
-        &conn,
-        queries::media::SELECT_BINARY_MEDIA_INFO,
-        &[&media_id, &user_id],
-        |row| {
-            Ok(BinaryMediaInfo {
-                file_path: row.get(0)?,
-                mime_type: row.get(1)?,
-                original_filename: row.get(2)?,
-                media_type: row.get(3)?,
-                thumbnail_path: row.get(4)?,
-            })
-        },
-    )?
+    fetch_one(&conn, query, &[&media_id, &user_id], |row| {
+        Ok(BinaryMediaInfo {
+            file_path: row.get(0)?,
+            mime_type: row.get(1)?,
+            original_filename: row.get(2)?,
+            media_type: row.get(3)?,
+            thumbnail_path: row.get(4)?,
+        })
+    })?
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))
+}
+
+pub(crate) async fn serve_deleted_tiny_thumbnail(
+    state: &AppState,
+    user_id: i64,
+    media_id: i64,
+    headers: &HeaderMap,
+) -> AppResult<Response> {
+    serve_thumbnail(
+        state,
+        user_id,
+        media_id,
+        ThumbnailSize::Tiny,
+        headers,
+        queries::media::SELECT_DELETED_BINARY_MEDIA_INFO,
+    )
+    .await
 }
 
 fn thumbnail_path(media: &BinaryMediaInfo, size: ThumbnailSize) -> PathBuf {

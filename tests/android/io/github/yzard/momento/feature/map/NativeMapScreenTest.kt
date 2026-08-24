@@ -24,4 +24,24 @@ class NativeMapScreenTest {
         assertNull(visibleMapBounds(0.0, 0.0, 0.0, 0.0))
         assertNull(visibleMapBounds(Double.NaN, 0.0, 0.0, 0.0))
     }
+
+    @Test fun capturesBoundsAndZoomAtTheTimeOfTheMapEvent() {
+        assertEquals(
+            MapViewport(BoundingBox(52.0, 51.0, 5.0, 4.0), 12),
+            mapViewport(52.0, 51.0, 5.0, 4.0, 12),
+        )
+        assertNull(mapViewport(0.0, 0.0, 0.0, 0.0, 2))
+    }
+
+    @Test fun multiMediaClustersZoomInWithoutExceedingTheMaximum() {
+        assertEquals(10, clusterClickZoom(currentZoom = 8, mediaCount = 3, maximumZoom = 20))
+        assertEquals(20, clusterClickZoom(currentZoom = 19, mediaCount = 3, maximumZoom = 20))
+        assertEquals(8, clusterClickZoom(currentZoom = 8, mediaCount = 1, maximumZoom = 20))
+    }
+
+    @Test fun cropsClusterThumbnailsFromTheCenter() {
+        assertEquals(CropBounds(50, 0, 150, 100), centerCropBounds(200, 100))
+        assertEquals(CropBounds(0, 50, 100, 150), centerCropBounds(100, 200))
+        assertEquals(CropBounds(0, 0, 100, 100), centerCropBounds(100, 100))
+    }
 }

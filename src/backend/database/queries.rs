@@ -960,6 +960,20 @@ pub mod media {
        AND ma.deleted_at IS NULL
     "#;
 
+    pub const SELECT_DELETED_BINARY_MEDIA_INFO: &str = r#"
+    SELECT m.file_path
+         , m.mime_type
+         , m.original_filename
+         , m.media_type
+         , mm.thumbnail_path
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
+     WHERE m.id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NOT NULL
+    "#;
+
     pub const SELECT_FOR_MAP: &str = r#"
     SELECT m.id
          , m.filename

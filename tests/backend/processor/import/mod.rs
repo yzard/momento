@@ -6,7 +6,8 @@ use momento_api::{
     constants::paths,
     database::{create_pool_at, init_database},
     processor::import::{
-        finalize_staged_original, recover_import_claims, run_webdav_import_cycle, ImportSource,
+        create_import_job, import_staged_file, recover_import_claims, run_local_import,
+        run_webdav_import_cycle, ImportSettings, ImportSource,
     },
 };
 
@@ -20,6 +21,63 @@ fn mark_webdav_file_ready(pool: &momento_api::database::DbPool, user_id: i64, fi
             rusqlite::params![user_id, file_path],
         )
         .expect("ready WebDAV file");
+}
+
+#[tokio::test]
+async fn test_local_import_uses_canonical_staged_file_import() {
+    init_test_paths();
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "local-import", "local-import@example.com");
+    let source_directory = paths()
+        .imports
+        .join(format!("processor-tests/{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&source_directory).expect("local import directory");
+    let source_path = source_directory.join("local-photo.jpg");
+    std::fs::write(&source_path, b"local import bytes").expect("local import source");
+    let job_id = create_import_job(&pool, ImportSource::Local).expect("local import job");
+
+    run_local_import(
+        ImportSettings {
+            user_id,
+            pool: pool.clone(),
+            delete_after_import: true,
+            concurrency: 1,
+        },
+        job_id,
+    )
+    .await;
+
+    assert!(!source_path.exists());
+    let connection = pool.get().expect("database");
+    let (media_id, media_path, import_state, import_source): (i64, String, String, String) =
+        connection
+            .query_row(
+                "SELECT id, file_path, import_state, import_source FROM media WHERE original_filename = 'local-photo.jpg'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("local imported media");
+    let metadata_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("metadata job");
+    let access_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ? AND deleted_at IS NULL",
+            rusqlite::params![media_id, user_id],
+            |row| row.get(0),
+        )
+        .expect("media access");
+    assert_eq!(import_state, "imported");
+    assert_eq!(import_source, "local");
+    assert_eq!(metadata_status, "queued");
+    assert_eq!(access_count, 1);
+
+    std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
+    std::fs::remove_dir_all(source_directory).expect("remove local import directory");
 }
 
 #[tokio::test]
@@ -58,17 +116,51 @@ async fn test_webdav_import_waits_for_active_uploads_before_claiming() {
         .expect("import cycle timeout")
         .expect("import cycle");
     assert!(!source_path.exists());
-    let imported_size: i64 = pool
+    let (media_id, media_path, imported_size, import_state, import_source): (
+        i64,
+        String,
+        i64,
+        String,
+        String,
+    ) = pool
         .get()
         .expect("database")
         .query_row(
-            "SELECT file_size FROM media WHERE original_filename = 'photo.jpg'",
+            "SELECT id, file_path, file_size, import_state, import_source FROM media WHERE original_filename = 'photo.jpg'",
             [],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .expect("imported media");
     assert_eq!(imported_size, b"complete upload".len() as i64);
+    assert_eq!(import_state, "imported");
+    assert_eq!(import_source, "webdav");
+    let connection = pool.get().expect("database");
+    let metadata_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("metadata job");
+    let access_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ? AND deleted_at IS NULL",
+            rusqlite::params![media_id, user_id],
+            |row| row.get(0),
+        )
+        .expect("media access");
+    assert_eq!(metadata_status, "queued");
+    assert_eq!(access_count, 1);
 
+    std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
     std::fs::remove_dir_all(user_root).expect("remove WebDAV test directory");
 }
 
@@ -136,7 +228,7 @@ async fn test_webdav_duplicate_reuses_existing_media() {
     let source_directory = tempfile::tempdir().expect("source directory");
     let first_source_path = source_directory.path().join("original.jpg");
     std::fs::write(&first_source_path, b"shared WebDAV bytes").expect("first source");
-    let media_id = finalize_staged_original(
+    let media_id = import_staged_file(
         &first_source_path,
         ImportSource::Local,
         first_user_id,
@@ -237,14 +329,14 @@ async fn test_concurrent_matching_hash_imports_create_one_media_row() {
     std::fs::write(&second_source_path, b"concurrent identical bytes").expect("second source");
 
     let (first_result, second_result) = tokio::join!(
-        finalize_staged_original(
+        import_staged_file(
             &first_source_path,
             ImportSource::Local,
             user_id,
             &pool,
             false,
         ),
-        finalize_staged_original(
+        import_staged_file(
             &second_source_path,
             ImportSource::Local,
             user_id,

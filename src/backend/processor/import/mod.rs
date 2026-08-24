@@ -165,7 +165,7 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
                         return;
                     }
                 };
-                let import_result = finalize_staged_original(
+                let import_result = import_staged_file(
                     &claimed_path,
                     ImportSource::Local,
                     settings.user_id,
@@ -220,7 +220,8 @@ fn update_import_progress(
     }
 }
 
-pub async fn finalize_staged_original(
+/// Imports one completed on-disk file after its source-specific claim and preparation.
+pub async fn import_staged_file(
     source_path: &Path,
     import_source: ImportSource,
     user_id: i64,
@@ -798,7 +799,7 @@ pub async fn run_webdav_import_cycle(
                 let Ok(_permit) = semaphore.acquire().await else {
                     return;
                 };
-                if let Err(error) = finalize_staged_original(&claimed_path, ImportSource::Webdav, user_id, &pool, true).await {
+                if let Err(error) = import_staged_file(&claimed_path, ImportSource::Webdav, user_id, &pool, true).await {
                     warn!(path = %source_path.display(), "WebDAV import failed: {error}");
                     if let Ok(recovered_path) = expose_claim_for_retry(&claimed_path).await {
                         if !update_recovered_ready_paths(

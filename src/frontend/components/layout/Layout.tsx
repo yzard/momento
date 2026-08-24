@@ -4,7 +4,7 @@ import Header from './Header'
 import Sidebar from './Sidebar'
 
 export default function Layout() {
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
 
   return (
@@ -18,7 +18,7 @@ export default function Layout() {
         />
       )}
       <Sidebar
-        isCollapsed={isSidebarCollapsed}
+        isCollapsed={isMobileSidebarOpen ? false : isSidebarCollapsed}
         isMobileOpen={isMobileSidebarOpen}
         toggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
         onNavigate={() => setIsMobileSidebarOpen(false)}

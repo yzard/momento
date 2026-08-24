@@ -418,7 +418,7 @@ async fn import_flattens_originals_and_moves_supplemental_metadata() {
         .join("camera.jpg.supplemental-metadata(10).json");
     fs::write(&source_path, b"image").expect("media source");
     fs::write(&source_sidecar_path, "{}\n").expect("metadata source");
-    let media_id = momento_api::processor::import::finalize_staged_original(
+    let media_id = momento_api::processor::import::import_staged_file(
         &source_path,
         momento_api::processor::import::ImportSource::Local,
         user_id,
@@ -461,7 +461,7 @@ async fn duplicate_import_reuses_media_and_absorbs_earlier_time_and_sidecar() {
     let first_modified = FileTime::from_unix_time(1_640_995_200, 0);
     set_file_times(&first_source_path, first_modified, first_modified).expect("first file time");
 
-    let media_id = momento_api::processor::import::finalize_staged_original(
+    let media_id = momento_api::processor::import::import_staged_file(
         &first_source_path,
         momento_api::processor::import::ImportSource::Local,
         first_user_id,
@@ -510,7 +510,7 @@ async fn duplicate_import_reuses_media_and_absorbs_earlier_time_and_sidecar() {
         )
         .expect("completed metadata job");
 
-    let duplicate_media_id = momento_api::processor::import::finalize_staged_original(
+    let duplicate_media_id = momento_api::processor::import::import_staged_file(
         &duplicate_source_path,
         momento_api::processor::import::ImportSource::Local,
         second_user_id,
@@ -569,7 +569,7 @@ async fn duplicate_import_reuses_media_and_absorbs_earlier_time_and_sidecar() {
     let newer_modified = FileTime::from_unix_time(1_672_531_200, 0);
     set_file_times(&newer_duplicate_path, newer_modified, newer_modified)
         .expect("newer duplicate time");
-    let newer_media_id = momento_api::processor::import::finalize_staged_original(
+    let newer_media_id = momento_api::processor::import::import_staged_file(
         &newer_duplicate_path,
         momento_api::processor::import::ImportSource::Local,
         first_user_id,

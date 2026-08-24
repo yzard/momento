@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "momento-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "axum",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "momento-common"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "futures",

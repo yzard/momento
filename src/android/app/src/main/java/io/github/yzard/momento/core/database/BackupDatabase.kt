@@ -42,11 +42,12 @@ data class BackupQueueCount(val state: BackupState, val count: Long)
 
 @Dao
 interface BackupAssetDao {
-    @Query("SELECT * FROM backup_assets WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING') ORDER BY modifiedAt")
-    suspend fun pending(): List<BackupAssetEntity>
+    @Query("SELECT * FROM backup_assets WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING') AND (:cameraOnly = 0 OR folder = 'Camera') ORDER BY modifiedAt")
+    suspend fun pending(cameraOnly: Boolean): List<BackupAssetEntity>
 
     @Query("SELECT * FROM backup_assets ORDER BY modifiedAt DESC") fun observeAll(): Flow<List<BackupAssetEntity>>
-    @Query("SELECT state, COUNT(*) AS count FROM backup_assets GROUP BY state") fun observeCounts(): Flow<List<BackupQueueCount>>
+    @Query("SELECT state, COUNT(*) AS count FROM backup_assets WHERE :cameraOnly = 0 OR folder = 'Camera' GROUP BY state")
+    fun observeCounts(cameraOnly: Boolean): Flow<List<BackupQueueCount>>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertDiscovered(asset: BackupAssetEntity): Long
 
     @Query("""

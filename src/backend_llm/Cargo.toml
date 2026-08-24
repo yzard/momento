@@ -1,8 +1,9 @@
 [package]
 name = "llm-service"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Standalone on-demand image inference service for Momento"
+build = "../common/build_version.rs"
 
 [lib]
 path = "lib.rs"

@@ -38,6 +38,18 @@ class DtoMappingTest {
         assertEquals("running", duplicate.status)
     }
 
+    @Test fun decodesTrashMediaMetadataContract() {
+        val trash = Json.decodeFromString<TrashResponse>("{\"items\":[{\"id\":8,\"filename\":\"8.jpg\",\"originalFilename\":\"photo.jpg\",\"mediaType\":\"image\",\"mimeType\":\"image/jpeg\",\"width\":1200,\"height\":800,\"fileSize\":2048,\"durationSeconds\":null,\"dateTaken\":\"2026-08-23T10:30:00\",\"deletedAt\":\"2026-08-24T10:30:00Z\",\"createdAt\":\"2026-08-23T10:30:00Z\"}],\"totalCount\":1}")
+
+        assertEquals(1200, trash.items.single().width)
+        assertEquals("2026-08-23T10:30:00", trash.items.single().dateTaken)
+    }
+
+    @Test fun decodesPlaceThumbnailContract() {
+        val response = Json.decodeFromString<PlaceThumbnailResponse>("{\"thumbnail\":\"data:image/jpeg;base64,AQID\"}")
+        assertEquals("data:image/jpeg;base64,AQID", response.thumbnail)
+    }
+
     @Test fun encodesMapBoundsAndAlbumMediaRequestContracts() {
         val map = MapClustersRequest(BoundingBox(2.0, 1.0, 4.0, 3.0), 12)
         assertEquals("{\"bounds\":{\"north\":2.0,\"south\":1.0,\"east\":4.0,\"west\":3.0},\"zoom\":12}", Json.encodeToString(MapClustersRequest.serializer(), map))

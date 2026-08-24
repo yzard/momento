@@ -1,26 +1,41 @@
 package io.github.yzard.momento.feature.timeline
 
-import android.content.res.Configuration
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -28,30 +43,43 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.TimelineGroup
+import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
+import io.github.yzard.momento.feature.media.EmptyState
 import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
-import io.github.yzard.momento.feature.media.MediaRow
+import io.github.yzard.momento.feature.media.SelectableMediaThumbnail
 import io.github.yzard.momento.feature.media.adaptiveGridColumns
-import io.github.yzard.momento.feature.media.mediaCellWidth
+import io.github.yzard.momento.feature.media.toggleMediaSelection
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.serialization.SerializationException
 import java.io.IOException
+import java.time.Instant
 import retrofit2.HttpException
 
-data class TimelineSelection(val groupBy: String, val filter: String)
-
-fun timelineFilters(filter: String): Pair<String?, String?> = when (filter) {
-    "Photos" -> "image" to null
-    "Videos" -> "video" to null
-    "Screenshots" -> null to "screenshot"
-    "Documents" -> null to "document"
-    else -> null to null
+enum class TimelinePage(
+    val mediaType: String?,
+    val classification: String?,
+) {
+    TIMELINE(null, null),
+    PHOTOS("image", null),
+    VIDEOS("video", null),
+    SCREENSHOTS(null, "screenshot"),
+    DOCUMENTS(null, "document"),
 }
+
+enum class TimelinePeriod(val label: String, val groupBy: String) {
+    DAY("Day", "day"),
+    WEEK("Week", "week"),
+    MONTH("Month", "month"),
+    YEAR("Year", "year"),
+}
+
+data class TimelineMediaItem(val period: String, val media: Media)
 
 fun shouldAppendTimeline(
     lastVisibleItemIndex: Int,
@@ -62,55 +90,99 @@ fun shouldAppendTimeline(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun TimelineScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
-    var selection by remember { mutableStateOf(TimelineSelection("day", "All")) }
+fun TimelineScreen(
+    repository: MomentoRepository,
+    page: TimelinePage,
+    period: TimelinePeriod,
+    openMedia: (List<Media>, Int) -> Unit,
+) {
+    key(page, period) {
+        TimelinePageContent(repository, page, period, openMedia)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TimelinePageContent(
+    repository: MomentoRepository,
+    page: TimelinePage,
+    period: TimelinePeriod,
+    openMedia: (List<Media>, Int) -> Unit,
+) {
     var groups by remember { mutableStateOf<List<TimelineGroup>?>(null) }
     var cursor by remember { mutableStateOf<String?>(null) }
     var hasOlder by remember { mutableStateOf(false) }
     var appending by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    val listState = rememberLazyListState()
+    var selecting by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var confirmTrash by remember { mutableStateOf(false) }
+    var selectionError by remember { mutableStateOf<String?>(null) }
+    val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
-    val portrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
+    val anchorDate = remember(page, period) { Instant.now().toString() }
 
     suspend fun load(reset: Boolean) {
         if (!reset && (appending || !hasOlder || cursor == null)) return
-        if (!reset) appending = true
-        val requestedSelection = selection
-        val filters = timelineFilters(selection.filter)
+        if (reset) {
+            groups = null
+            cursor = null
+            hasOlder = false
+            error = null
+        } else {
+            appending = true
+        }
         try {
-            val page = repository.timelinePage(
+            val timelineResponse = repository.timelinePage(
                 cursor = if (reset) null else cursor,
-                groupBy = selection.groupBy,
-                mediaType = filters.first,
-                classification = filters.second,
+                groupBy = period.groupBy,
+                mediaType = page.mediaType,
+                classification = page.classification,
+                anchorDate = anchorDate,
             )
-            if (selection != requestedSelection) return
-            groups = if (reset) page.groups else mergeTimelineGroups(groups.orEmpty(), page.groups)
-            cursor = page.nextCursor
-            hasOlder = page.hasOlder
+            groups = if (reset) {
+                timelineResponse.groups
+            } else {
+                mergeTimelineGroups(groups.orEmpty(), timelineResponse.groups)
+            }
+            cursor = timelineResponse.nextCursor
+            hasOlder = timelineResponse.hasOlder
             error = null
         } catch (_: IOException) {
-            error = "Could not load photos"
+            error = "Could not load timeline"
         } catch (_: HttpException) {
-            error = "Could not load photos"
+            error = "Could not load timeline"
+        } catch (_: SerializationException) {
+            error = "Could not load timeline"
         } finally {
             appending = false
         }
     }
 
-    LaunchedEffect(selection) {
-        listState.scrollToItem(0)
-        groups = null
-        cursor = null
-        hasOlder = false
-        error = null
+    suspend fun moveSelectedToTrash() {
+        if (selectedIds.isEmpty()) return
+        confirmTrash = false
+        try {
+            repository.moveToTrash(selectedIds.toList())
+            groups = removeTimelineMedia(groups.orEmpty(), selectedIds)
+            selectedIds = emptySet()
+            selecting = false
+        } catch (_: IOException) {
+            selectionError = "Could not move the selected media to Trash"
+        } catch (_: HttpException) {
+            selectionError = "Could not move the selected media to Trash"
+        } catch (_: SerializationException) {
+            selectionError = "Could not move the selected media to Trash"
+        }
+    }
+
+    LaunchedEffect(repository, page, period, anchorDate) {
         load(true)
     }
 
-    LaunchedEffect(listState, cursor, hasOlder) {
+    LaunchedEffect(gridState, cursor, hasOlder) {
         snapshotFlow {
-            val layout = listState.layoutInfo
+            val layout = gridState.layoutInfo
             shouldAppendTimeline(
                 lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
                 totalItemsCount = layout.totalItemsCount,
@@ -120,98 +192,201 @@ fun TimelineScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) 
         }.filter { it }.collect { load(false) }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        TimelineTabs(selection) { selection = it }
-        val current = groups
-        when {
-            current == null && error != null -> ErrorState(error!!) { scope.launch { load(true) } }
-            current == null -> LoadingState()
-            else -> BoxWithConstraints(Modifier.weight(1f)) {
-                val columns = adaptiveGridColumns(maxWidth.value.toInt())
-                val cellWidth = mediaCellWidth(maxWidth.value, columns, 1f).dp
-                val allMedia = remember(current) { current.flatMap { it.media } }
-                LazyColumn(state = listState) {
-                    current.forEach { group ->
-                        if (portrait) {
-                            stickyHeader(key = "header-${group.date}") {
-                                FloatingTimelineHeader(group.date)
+    val current = groups
+    when {
+        current == null && error != null -> ErrorState(error!!) { scope.launch { load(true) } }
+        current == null -> LoadingState()
+        else -> ContinuousTimelineGrid(
+            groups = current,
+            repository = repository,
+            gridState = gridState,
+            appending = appending,
+            error = error,
+            selecting = selecting,
+            selectedIds = selectedIds,
+            startSelecting = { selecting = true },
+            cancelSelecting = {
+                selecting = false
+                selectedIds = emptySet()
+            },
+            toggleSelection = { mediaId -> selectedIds = toggleMediaSelection(selectedIds, mediaId) },
+            requestTrash = { confirmTrash = true },
+            retry = { scope.launch { error = null; load(false) } },
+            openMedia = openMedia,
+        )
+    }
+
+
+    if (confirmTrash) {
+        AlertDialog(
+            onDismissRequest = { confirmTrash = false },
+            title = { Text("Move to Trash?") },
+            text = { Text("Move ${selectedIds.size} selected item${if (selectedIds.size == 1) "" else "s"} to Trash?") },
+            confirmButton = {
+                TextButton(onClick = { scope.launch { moveSelectedToTrash() } }) { Text("Move") }
+            },
+            dismissButton = { TextButton(onClick = { confirmTrash = false }) { Text("Cancel") } },
+        )
+    }
+    selectionError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { selectionError = null },
+            title = { Text("Trash unavailable") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { selectionError = null }) { Text("OK") } },
+        )
+    }
+}
+
+@Composable
+private fun ContinuousTimelineGrid(
+    groups: List<TimelineGroup>,
+    repository: MomentoRepository,
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    appending: Boolean,
+    error: String?,
+    selecting: Boolean,
+    selectedIds: Set<Long>,
+    startSelecting: () -> Unit,
+    cancelSelecting: () -> Unit,
+    toggleSelection: (Long) -> Unit,
+    requestTrash: () -> Unit,
+    retry: () -> Unit,
+    openMedia: (List<Media>, Int) -> Unit,
+) {
+    val timelineMedia = remember(groups) { flattenTimelineGroups(groups) }
+    if (timelineMedia.isEmpty()) {
+        EmptyState("No media yet")
+        return
+    }
+    val allMedia = remember(timelineMedia) { timelineMedia.map { it.media } }
+    val visiblePeriod by remember(timelineMedia, gridState) {
+        derivedStateOf {
+            timelinePeriodAtIndex(timelineMedia, gridState.firstVisibleItemIndex)
+                ?: timelineMedia.last().period
+        }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        val columns = adaptiveGridColumns(maxWidth.value.toInt())
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            state = gridState,
+            contentPadding = PaddingValues(bottom = 104.dp),
+        ) {
+            items(timelineMedia, key = { it.media.id }) { timelineItem ->
+                SelectableMediaThumbnail(
+                    media = timelineItem.media,
+                    repository = repository,
+                    trashed = false,
+                    selected = timelineItem.media.id in selectedIds,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .padding(0.5.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable {
+                            if (selecting) {
+                                toggleSelection(timelineItem.media.id)
+                            } else {
+                                openMedia(
+                                    allMedia,
+                                    allMedia.indexOfFirst { it.id == timelineItem.media.id },
+                                )
                             }
-                        } else {
-                            item(key = "header-${group.date}") {
-                                Text(group.date, Modifier.padding(16.dp, 16.dp, 16.dp, 8.dp))
-                            }
-                        }
-                        group.media.chunked(columns).forEachIndexed { rowIndex, row ->
-                            item(key = "${group.date}-$rowIndex-${row.first().id}") {
-                                MediaRow(row, repository, columns, cellWidth) { media ->
-                                    openMedia(allMedia, allMedia.indexOfFirst { it.id == media.id })
-                                }
-                            }
-                        }
+                        },
+                )
+            }
+            if (appending) {
+                item(key = "append-loading", span = { GridItemSpan(maxLineSpan) }) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(20.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
                     }
-                    if (appending) {
-                        item(key = "append-loading") {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(20.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                CircularProgressIndicator()
-                            }
-                        }
-                    } else if (error != null) {
-                        item(key = "append-error") {
-                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                TextButton(onClick = { scope.launch { error = null; load(false) } }) { Text("Could not load more photos. Retry") }
-                            }
-                        }
+                }
+            } else if (error != null) {
+                item(key = "append-error", span = { GridItemSpan(maxLineSpan) }) {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        TextButton(onClick = retry) { Text("Could not load more media. Retry") }
                     }
                 }
             }
         }
+        FloatingTimelineHeader(
+            label = visiblePeriod,
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
+        TimelineSelectionControl(
+            selecting = selecting,
+            selectedCount = selectedIds.size,
+            startSelecting = startSelecting,
+            cancelSelecting = cancelSelecting,
+            requestTrash = requestTrash,
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
+        )
     }
 }
 
 @Composable
-private fun TimelineTabs(selection: TimelineSelection, select: (TimelineSelection) -> Unit) {
-    val groupings = listOf("day", "week", "month", "year")
-    val filters = listOf("All", "Photos", "Videos", "Screenshots", "Documents")
-    ScrollableTabRow(groupings.indexOf(selection.groupBy)) {
-        groupings.forEach { value ->
-            Tab(
-                selected = selection.groupBy == value,
-                onClick = { select(selection.copy(groupBy = value)) },
-                text = { Text(value.replaceFirstChar { it.uppercase() }) },
-            )
-        }
-    }
-    ScrollableTabRow(filters.indexOf(selection.filter)) {
-        filters.forEach { value ->
-            Tab(
-                selected = selection.filter == value,
-                onClick = { select(selection.copy(filter = value)) },
-                text = { Text(value) },
-            )
-        }
-    }
-}
-
-@Composable
-private fun FloatingTimelineHeader(label: String) {
-    Box(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        contentAlignment = Alignment.TopCenter,
+private fun FloatingTimelineHeader(label: String, modifier: Modifier) {
+    val floatingColors = momentoFloatingControlColors()
+    Surface(
+        modifier = modifier
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(top = 10.dp),
+        color = floatingColors.container,
+        contentColor = floatingColors.content,
+        shape = MaterialTheme.shapes.extraLarge,
+        shadowElevation = 3.dp,
+        tonalElevation = 1.dp,
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            shape = MaterialTheme.shapes.extraLarge,
-            shadowElevation = 6.dp,
-            tonalElevation = 3.dp,
-        ) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun TimelineSelectionControl(
+    selecting: Boolean,
+    selectedCount: Int,
+    startSelecting: () -> Unit,
+    cancelSelecting: () -> Unit,
+    requestTrash: () -> Unit,
+    modifier: Modifier,
+) {
+    val floatingColors = momentoFloatingControlColors()
+    Surface(
+        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
+        color = floatingColors.container,
+        contentColor = floatingColors.content,
+        shape = MaterialTheme.shapes.extraLarge,
+        shadowElevation = 3.dp,
+    ) {
+        Row {
+            if (selecting && selectedCount > 0) {
+                TextButton(
+                    onClick = requestTrash,
+                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+                ) {
+                    Icon(Icons.Default.Delete, "Move selected media to Trash")
+                    Text("$selectedCount")
+                }
+            }
+            if (selecting) {
+                IconButton(onClick = cancelSelecting) {
+                    Icon(Icons.Default.Close, "Cancel selection")
+                }
+            } else {
+                TextButton(
+                    onClick = startSelecting,
+                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+                ) { Text("Select") }
+            }
         }
     }
 }
@@ -219,4 +394,16 @@ private fun FloatingTimelineHeader(label: String) {
 fun mergeTimelineGroups(existing: List<TimelineGroup>, next: List<TimelineGroup>): List<TimelineGroup> =
     (existing + next).groupBy { it.date }.map { (date, groups) ->
         TimelineGroup(date, groups.flatMap { it.media }.distinctBy { it.id })
+    }
+
+fun flattenTimelineGroups(groups: List<TimelineGroup>): List<TimelineMediaItem> =
+    groups.flatMap { group -> group.media.map { media -> TimelineMediaItem(group.date, media) } }
+
+fun timelinePeriodAtIndex(timelineMedia: List<TimelineMediaItem>, index: Int): String? =
+    timelineMedia.getOrNull(index)?.period
+
+fun removeTimelineMedia(groups: List<TimelineGroup>, mediaIds: Set<Long>): List<TimelineGroup> =
+    groups.mapNotNull { group ->
+        val remaining = group.media.filterNot { it.id in mediaIds }
+        if (remaining.isEmpty()) null else TimelineGroup(group.date, remaining)
     }

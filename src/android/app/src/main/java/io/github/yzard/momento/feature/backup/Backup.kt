@@ -6,6 +6,9 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
@@ -30,6 +33,10 @@ import io.github.yzard.momento.core.model.BackupUploadCreateRequest
 import io.github.yzard.momento.core.model.BackupUploadResponse
 import io.github.yzard.momento.core.network.NetworkClient
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.HttpException
@@ -80,6 +87,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
             val settings = settingsStore.settings.first()
             if (!tokenStore.isAuthenticated.value || settings.origin == null) return Result.failure()
+            if (!isBackupNetworkAllowed(applicationContext, settings.mobileDataEnabled)) return Result.retry()
 
             setForeground(progress("Preparing backup"))
             val deviceId = settingsStore.deviceId()
@@ -87,7 +95,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             MediaStoreScanner(applicationContext, assets).scan(settings.cameraOnly)
             val chunkSize = repository.capabilities(settings.origin).backup.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
             var waitingForServer = false
-            for (asset in assets.pending()) {
+            for (asset in assets.pending(settings.cameraOnly)) {
                 if (transfer(asset, assets, repository, deviceId, chunkSize) == BackupProgress.WAITING_FOR_SERVER) waitingForServer = true
             }
             if (waitingForServer) Result.retry() else Result.success()
@@ -180,6 +188,45 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
 }
 
 internal fun isRetryable(statusCode: Int): Boolean = statusCode == 408 || statusCode == 429 || statusCode >= 500
+
+internal fun backupNetworkAllowed(
+    allowMobileData: Boolean,
+    hasValidatedInternet: Boolean,
+    unmetered: Boolean,
+): Boolean = hasValidatedInternet && (allowMobileData || unmetered)
+
+fun isBackupNetworkAllowed(context: Context, allowMobileData: Boolean): Boolean {
+    val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
+    val capabilities = connectivityManager.getNetworkCapabilities(connectivityManager.activeNetwork)
+        ?: return false
+    return backupNetworkAllowed(
+        allowMobileData = allowMobileData,
+        hasValidatedInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+        unmetered = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+    )
+}
+
+fun observeBackupNetworkAllowed(context: Context, allowMobileData: Boolean): Flow<Boolean> =
+    callbackFlow {
+        val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                trySend(isBackupNetworkAllowed(context, allowMobileData))
+            }
+
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                trySend(isBackupNetworkAllowed(context, allowMobileData))
+            }
+
+            override fun onLost(network: Network) {
+                trySend(isBackupNetworkAllowed(context, allowMobileData))
+            }
+        }
+        connectivityManager.registerDefaultNetworkCallback(callback)
+        trySend(isBackupNetworkAllowed(context, allowMobileData))
+        awaitClose { connectivityManager.unregisterNetworkCallback(callback) }
+    }.distinctUntilChanged()
 
 private const val BACKUP_CHANNEL = "backup"
 private const val BACKUP_WORK = "momento_backup"

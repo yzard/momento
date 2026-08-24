@@ -37,6 +37,7 @@ FROM ${RUST_IMAGE} AS rust-builder
 WORKDIR /app
 
 COPY src/backend_llm ./src/backend_llm
+COPY src/backend/version.txt ./src/backend/version.txt
 COPY src/common ./src/common
 
 RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --locked --manifest-path /app/src/backend_llm/Cargo.toml

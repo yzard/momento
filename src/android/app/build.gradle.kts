@@ -16,6 +16,7 @@ val androidVersionMatch = requireNotNull(Regex("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]
 val (androidVersionMajor, androidVersionMinor, androidVersionPatch) = androidVersionMatch.destructured
 val androidVersionCode = androidVersionMajor.toLong() * 1_000_000L +
     androidVersionMinor.toLong() * 1_000L + androidVersionPatch.toLong()
+val androidBuildTimeMillis = System.currentTimeMillis()
 require(androidVersionMinor.toLong() <= 999L && androidVersionPatch.toLong() <= 999L) {
     "Android version minor and patch components must not exceed 999."
 }
@@ -33,6 +34,8 @@ android {
         targetSdk = 36
         versionCode = androidVersionCode.toInt()
         versionName = androidVersion
+        buildConfigField("long", "BUILD_TIME_MILLIS", "${androidBuildTimeMillis}L")
+        manifestPlaceholders["momentoBuildTime"] = "epochMillis:$androidBuildTimeMillis"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }

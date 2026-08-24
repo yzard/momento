@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::constants::paths;
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
-use crate::processor::import::{finalize_staged_original, ImportSource};
+use crate::processor::import::{import_staged_file, ImportSource};
 use crate::utils::hash::calculate_file_hash;
 
 struct ClaimedAsset {
@@ -192,7 +192,7 @@ async fn process_claimed_asset(pool: &DbPool, asset: ClaimedAsset) -> AppResult<
                 "backup asset changed while preparing import".to_string(),
             ));
         }
-        finalize_staged_original(
+        import_staged_file(
             &source_path,
             ImportSource::MobileBackup,
             asset.user_id,

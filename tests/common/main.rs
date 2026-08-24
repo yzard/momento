@@ -1,3 +1,4 @@
+mod build_version;
 mod config_cli;
 mod config_file;
 mod llm;

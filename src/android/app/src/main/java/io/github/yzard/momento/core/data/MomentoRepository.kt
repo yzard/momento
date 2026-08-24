@@ -5,14 +5,17 @@ import io.github.yzard.momento.core.network.MomentoApi
 import io.github.yzard.momento.core.network.NetworkClient
 import io.github.yzard.momento.core.network.basicAuthorization
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.RequestBody
+import okhttp3.Request
 import okhttp3.OkHttpClient
 import coil.ImageLoader
 import android.content.Context
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 import java.io.IOException
-import java.time.Instant
+import java.io.File
 
 class MomentoRepository(
     private val settingsStore: SettingsStore,
@@ -48,11 +51,14 @@ class MomentoRepository(
             tokenStore.clear()
         }
     }
-    suspend fun timeline(groupBy: String, mediaType: String?, classification: String?): List<TimelineGroup> = api().timeline(
-        timelineRequest(groupBy, mediaType, classification, Instant.now().toString()),
-    ).groups
-    suspend fun timelinePage(cursor: String?, groupBy: String, mediaType: String?, classification: String?): TimelineResponse = api().timeline(
-        TimelineRequest(cursor, 100, groupBy, "", mediaType, classification, "older", Instant.now().toString()),
+    suspend fun timelinePage(
+        cursor: String?,
+        groupBy: String,
+        mediaType: String?,
+        classification: String?,
+        anchorDate: String,
+    ): TimelineResponse = api().timeline(
+        timelineRequest(cursor, groupBy, mediaType, classification, anchorDate),
     )
     suspend fun search(query: String): List<Media> {
         val ids = api().search(SearchRequest(query)).results.map { it.imageId }
@@ -69,13 +75,14 @@ class MomentoRepository(
     suspend fun reorderAlbumMedia(id: Long, mediaIds: List<Long>): MessageResponse = api().reorderAlbumMedia(AlbumMediaRequest(id, mediaIds))
     suspend fun places(): List<Place> = api().places(PageRequest(null, 100)).places
     suspend fun place(placeId: String, cursor: String?): PlaceResponse = api().place(PlaceRequest(placeId, cursor, 100))
+    suspend fun placeThumbnail(placeId: String): String? = api().placeThumbnail(PlaceThumbnailRequest(placeId)).thumbnail
     suspend fun faces(): List<FaceGroup> = api().faces(PageRequest(null, 100)).groups
     suspend fun faceGroup(id: Long): FaceGroupMediaResponse = api().face(FaceGroupRequest(id))
     suspend fun faceThumbnail(id: Long): ByteArray = api().faceThumbnail(FaceGroupRequest(id)).bytes()
     suspend fun mergeFaces(ids: List<Long>): FaceMergeResponse = api().mergeFaces(FaceMergeRequest(ids))
     suspend fun trash(): List<TrashMedia> = api().trash().items
-    suspend fun restore(id: Long): MessageResponse = api().restore(MediaIdsRequest(listOf(id)))
-    suspend fun deleteForever(id: Long): MessageResponse = api().deleteForever(MediaIdsRequest(listOf(id)))
+    suspend fun restore(ids: List<Long>): MessageResponse = api().restore(MediaIdsRequest(ids))
+    suspend fun deleteForever(ids: List<Long>): MessageResponse = api().deleteForever(MediaIdsRequest(ids))
     suspend fun emptyTrash(): MessageResponse = api().emptyTrash()
     suspend fun duplicateGroups(): List<DeduplicateGroup> = api().duplicates(PageRequest(null, 100)).groups
     suspend fun startDeduplicate(): MessageResponse = api().startDuplicates()
@@ -109,10 +116,32 @@ class MomentoRepository(
     suspend fun originalUrl(mediaId: Long): String = mediaUrl(mediaId, "original")
     suspend fun previewUrl(mediaId: Long): String = mediaUrl(mediaId, "preview")
     suspend fun thumbnailUrl(mediaId: Long, tiny: Boolean): String = mediaUrl(mediaId, if (tiny) "thumbnail/tiny" else "thumbnail")
+    suspend fun trashThumbnailUrl(mediaId: Long): String =
+        "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/trash/$mediaId/thumbnail/tiny"
     private suspend fun mediaUrl(mediaId: Long, suffix: String): String = "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/media/$mediaId/$suffix"
     fun authorizationHeader(): String? = tokenStore.accessToken()?.let { "Bearer $it" }
     fun authenticatedHttpClient(): OkHttpClient = networkClient.httpClient()
     fun authenticatedImageLoader(context: Context): ImageLoader = networkClient.imageLoader(context)
+    suspend fun downloadOriginal(mediaId: Long, destination: File) =
+        downloadToFile(originalUrl(mediaId), destination)
+    suspend fun downloadAndroidApk(destination: File) {
+        val origin = requireNotNull(settingsStore.settings.first().origin).trimEnd('/')
+        downloadToFile("$origin/momento-android.apk", destination)
+    }
+    private suspend fun downloadToFile(url: String, destination: File) = withContext(Dispatchers.IO) {
+        val parent = destination.parentFile
+        if (parent == null || (!parent.isDirectory && !parent.mkdirs())) {
+            throw IOException("Could not create the download cache")
+        }
+        val request = Request.Builder().url(url).build()
+        authenticatedHttpClient().newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("Download failed with status ${response.code}")
+            val body = response.body ?: throw IOException("Download returned no content")
+            body.byteStream().use { input ->
+                destination.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+    }
 
     suspend fun registerBackupDevice(deviceId: String, deviceName: String): BackupDeviceRegisterResponse = api().registerDevice(BackupDeviceRegisterRequest(deviceId, deviceName))
     suspend fun createBackupUpload(request: BackupUploadCreateRequest): BackupUploadResponse = api().createUpload(request)
@@ -121,5 +150,19 @@ class MomentoRepository(
     suspend fun completeBackupUpload(uploadId: String): BackupUploadResponse = api().completeUpload(BackupUploadIdRequest(uploadId))
 }
 
-fun timelineRequest(groupBy: String, mediaType: String?, classification: String?, anchorDate: String): TimelineRequest =
-    TimelineRequest(null, 100, groupBy, "", mediaType, classification, "older", anchorDate)
+fun timelineRequest(
+    cursor: String?,
+    groupBy: String,
+    mediaType: String?,
+    classification: String?,
+    anchorDate: String,
+): TimelineRequest = TimelineRequest(
+    cursor,
+    100,
+    groupBy,
+    "",
+    mediaType,
+    classification,
+    "older",
+    anchorDate,
+)

@@ -8,4 +8,5 @@ mod map;
 mod media;
 mod metadata;
 mod places;
+mod trash;
 mod users;

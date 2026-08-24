@@ -1,4 +1,10 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::{Path, State},
+    http::HeaderMap,
+    response::Response,
+    routing::{get, post},
+    Json, Router,
+};
 use chrono::{Duration, Utc};
 
 use crate::auth::{AppState, CurrentUser};
@@ -13,9 +19,23 @@ use crate::processor::media_deletion::permanently_delete_for_user;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/trash/list", post(list_trash))
+        .route(
+            "/trash/:media_id/thumbnail/tiny",
+            get(get_deleted_tiny_thumbnail),
+        )
         .route("/trash/restore", post(restore_from_trash))
         .route("/trash/delete", post(permanently_delete))
         .route("/trash/empty", post(empty_trash))
+}
+
+async fn get_deleted_tiny_thumbnail(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(media_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    crate::routes::media::serve_deleted_tiny_thumbnail(&state, current_user.id, media_id, &headers)
+        .await
 }
 
 fn map_trash_row(row: &rusqlite::Row) -> rusqlite::Result<TrashMediaResponse> {

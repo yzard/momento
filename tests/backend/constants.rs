@@ -3,6 +3,14 @@ use momento_api::constants::paths;
 use crate::test_utils::init_test_paths;
 
 #[test]
+fn release_version_matches_the_backend_package() {
+    let release_version = include_str!("../../src/backend/version.txt").trim();
+
+    assert_eq!(momento_api::VERSION, release_version);
+    assert_eq!(env!("CARGO_PKG_VERSION"), release_version);
+}
+
+#[test]
 fn test_paths_derive_from_data_dir() {
     init_test_paths();
     let paths = paths();

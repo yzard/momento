@@ -3,7 +3,7 @@ use momento_api::{
     database::queries,
     processor::{
         backup::{recover, run_cycle},
-        import::{finalize_staged_original, ImportSource},
+        import::{import_staged_file, ImportSource},
     },
     utils::hash::calculate_file_hash,
 };
@@ -127,7 +127,7 @@ async fn recovery_completes_backup_after_import_commits_before_asset_completion(
         )
         .expect("processing session");
 
-    finalize_staged_original(
+    import_staged_file(
         &source_path,
         ImportSource::MobileBackup,
         user_id,
@@ -152,13 +152,32 @@ async fn recovery_completes_backup_after_import_commits_before_asset_completion(
         .expect("reconciled asset");
     assert_eq!(status, "completed");
     let media_id = media_id.expect("recovered media ID");
-    let media_path: String = connection
+    let (media_path, import_state, import_source): (String, String, String) = connection
         .query_row(
-            "SELECT file_path FROM media WHERE id = ?",
+            "SELECT file_path, import_state, import_source FROM media WHERE id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("imported media");
+    let metadata_status: String = connection
+        .query_row(
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
             [media_id],
             |row| row.get(0),
         )
-        .expect("imported media");
+        .expect("metadata job");
+    let access_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ? AND deleted_at IS NULL",
+            rusqlite::params![media_id, user_id],
+            |row| row.get(0),
+        )
+        .expect("media access");
+    assert!(!source_path.exists());
+    assert_eq!(import_state, "imported");
+    assert_eq!(import_source, "mobile_backup");
+    assert_eq!(metadata_status, "queued");
+    assert_eq!(access_count, 1);
     std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
 }
 
@@ -362,12 +381,33 @@ async fn worker_finalizes_queued_backup_and_records_media() {
         .expect("completed backup");
     assert_eq!(status, "completed");
     let media_id = media_id.expect("recorded media ID");
-    let media_path: String = connection
+    let (media_path, import_state, import_source, created_at): (String, String, String, String) =
+        connection
+            .query_row(
+                "SELECT file_path, import_state, import_source, created_at FROM media WHERE id = ?",
+                [media_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("imported media");
+    let metadata_status: String = connection
         .query_row(
-            "SELECT file_path FROM media WHERE id = ?",
+            "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
             [media_id],
             |row| row.get(0),
         )
-        .expect("imported media");
+        .expect("metadata job");
+    let access_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ? AND deleted_at IS NULL",
+            rusqlite::params![media_id, user_id],
+            |row| row.get(0),
+        )
+        .expect("media access");
+    assert!(!file_path.exists());
+    assert_eq!(import_state, "imported");
+    assert_eq!(import_source, "mobile_backup");
+    assert_eq!(created_at, "2020-01-02 03:04:05");
+    assert_eq!(metadata_status, "queued");
+    assert_eq!(access_count, 1);
     std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
 }

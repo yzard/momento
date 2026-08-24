@@ -6,6 +6,14 @@ use llm_service::config::{
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
 
+#[test]
+fn release_version_matches_the_llm_service_package() {
+    let release_version = include_str!("../../src/backend/version.txt").trim();
+
+    assert_eq!(llm_service::VERSION, release_version);
+    assert_eq!(env!("CARGO_PKG_VERSION"), release_version);
+}
+
 fn local_ocr_configuration(extra: &str) -> String {
     format!(
         "[server]\napi_key = \"test-key\"\n\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n{extra}"

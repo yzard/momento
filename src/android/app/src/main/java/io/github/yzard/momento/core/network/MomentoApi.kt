@@ -32,6 +32,7 @@ interface MomentoApi {
     @POST("api/v1/album/reorder") suspend fun reorderAlbumMedia(@Body request: AlbumMediaRequest): MessageResponse
     @POST("api/v1/places/list") suspend fun places(@Body request: PageRequest): PlacesResponse
     @POST("api/v1/places/get") suspend fun place(@Body request: PlaceRequest): PlaceResponse
+    @POST("api/v1/places/thumbnail") suspend fun placeThumbnail(@Body request: PlaceThumbnailRequest): PlaceThumbnailResponse
     @POST("api/v1/faces/groups/list") suspend fun faces(@Body request: PageRequest): FacesResponse
     @POST("api/v1/faces/groups/get") suspend fun face(@Body request: FaceGroupRequest): FaceGroupMediaResponse
     @POST("api/v1/faces/groups/merge") suspend fun mergeFaces(@Body request: FaceMergeRequest): FaceMergeResponse
