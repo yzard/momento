@@ -107,7 +107,7 @@ mapfile -t verify_invocations < "$invocation_log"
 
 : > "$invocation_log"
 run_script assemble-debug
-[[ -f "$workspace/dist/mobile/android/debug/momento-android-1.0.0-debug.apk" ]] || fail "debug APK was not validated"
+[[ -f "$workspace/dist/android/debug/momento-android-1.0.0-debug.apk" ]] || fail "debug APK was not validated"
 
 expect_failure "release requires --keystore-dir" run_script release
 expect_failure "exactly one direct .jks file" run_script release --keystore-dir "$keystore_dir"
@@ -126,8 +126,8 @@ printf 'secret\n' > "$keystore_dir/password.txt"
 
 : > "$invocation_log"
 run_script release --keystore-dir "$keystore_dir"
-[[ -f "$workspace/dist/mobile/android/Momento-Release-1.0.0.apk" ]] || fail "release APK name did not include the Android version"
-[[ -f "$workspace/dist/mobile/android/Momento-Release-1.0.0.aab" ]] || fail "release AAB name did not include the Android version"
+[[ -f "$workspace/dist/android/Momento-Release-1.0.0.apk" ]] || fail "release APK name did not include the Android version"
+[[ -f "$workspace/dist/android/Momento-Release-1.0.0.aab" ]] || fail "release AAB name did not include the Android version"
 mapfile -t release_invocations < "$invocation_log"
 [[ "${release_invocations[0]}" == *"--target android-builder"* ]] || fail "release did not build the builder target"
 [[ "${release_invocations[1]}" == *":/signing:ro"*" release" ]] || fail "release did not mount signing material for the release command"

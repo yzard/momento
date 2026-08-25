@@ -45,7 +45,7 @@ All Android compilation, debugging, and tests run in Docker. The host needs only
 
 `verify` compiles the debug variant, runs JVM unit tests, and runs Android lint. `shell` opens the
 containerized Java 17, Gradle, Android SDK 36, and ADB environment. A debug APK is written to
-`dist/mobile/android/debug/`.
+`dist/android/debug/`.
 
 Instrumented tests use a headless Android emulator inside a separate Docker target. They require a
 Linux Docker host with KVM exposed as `/dev/kvm`:
@@ -66,8 +66,8 @@ The release script requires Docker only; Java, Gradle, and Android SDK 36 run in
 `docker/Dockerfile.android` builder image. The keystore directory is mounted read-only, and signing
 values remain inside the temporary build container rather than appearing in Docker command arguments.
 The script stages Gradle state below `build/android/` and writes the final signed artifacts only to
-`dist/mobile/android/<keystore-stem>-<android-version>.apk` and
-`dist/mobile/android/<keystore-stem>-<android-version>.aab`. The Android version is owned by
+`dist/android/<keystore-stem>-<android-version>.apk` and
+`dist/android/<keystore-stem>-<android-version>.aab`. The Android version is owned by
 `src/android/version.txt`; it starts at `1.0.0` and is independent from the Momento server version.
 Run `./build_android_client.sh --help` for every command, option, requirement, and output path.
 

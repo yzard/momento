@@ -41,7 +41,7 @@ RUN apk add --no-cache \
 
 COPY --from=backend-builder /app/dist/backend/momento-api /app/momento-api
 COPY --from=frontend-builder /app/dist/frontend ./static
-COPY dist/mobile/android/*.apk /app/android/
+COPY dist/android/*.apk /app/android/
 RUN set -- /app/android/*.apk; \
     [ "$#" -eq 1 ]; \
     cp "$1" /app/static/momento-android.apk; \

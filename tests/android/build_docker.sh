@@ -38,8 +38,8 @@ set -euo pipefail
 [[ "$1" == release ]]
 [[ "$2" == --keystore-dir ]]
 [[ -d "$3" ]]
-mkdir -p "$(dirname "$0")/dist/mobile/android"
-: > "$(dirname "$0")/dist/mobile/android/Momento-Release-1.0.0.apk"
+mkdir -p "$(dirname "$0")/dist/android"
+: > "$(dirname "$0")/dist/android/Momento-Release-1.0.0.apk"
 printf 'android:%s\n' "$*" >> "$MOMENTO_TEST_INVOCATIONS"
 ANDROID
 chmod +x "$workspace/build_android_client.sh"
@@ -49,7 +49,7 @@ cat > "$tools_dir/docker" <<'DOCKER'
 set -euo pipefail
 [[ "$1" == buildx && "$2" == build ]]
 if [[ "$*" == *"docker/Dockerfile "* ]]; then
-    [[ -f "${MOMENTO_TEST_WORKSPACE}/dist/mobile/android/Momento-Release-1.0.0.apk" ]]
+    [[ -f "${MOMENTO_TEST_WORKSPACE}/dist/android/Momento-Release-1.0.0.apk" ]]
 fi
 printf 'docker:%s\n' "$*" >> "$MOMENTO_TEST_INVOCATIONS"
 DOCKER

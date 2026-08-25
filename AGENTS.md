@@ -567,8 +567,8 @@ belong in either directory.
 `assemble-debug`, `instrumented-test`, `shell`, and `release` commands all run in Docker. Only
 `release` accepts `--keystore-dir`; only `instrumented-test` uses the emulator image and `/dev/kvm`.
 Intermediate state belongs below `build/android/`, debug APKs below
-`dist/mobile/android/debug/`, and the single release APK plus AAB directly below
-`dist/mobile/android/`. Run `./build_android_client.sh --help` for the complete option contract.
+`dist/android/debug/`, and the single release APK plus AAB directly below
+`dist/android/`. Run `./build_android_client.sh --help` for the complete option contract.
 
 `build_docker.sh` calls only `build_android_client.sh release`, then verifies and embeds the one
 release APK into the momento-api image as `/app/static/momento-android.apk`. It separately builds

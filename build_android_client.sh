@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly build_dir="$repository_root/build/android"
-readonly distribution_dir="$repository_root/dist/mobile/android"
+readonly distribution_dir="$repository_root/dist/android"
 readonly builder_image="momento-android-builder:local"
 readonly emulator_image="momento-android-emulator:local"
 readonly version_file="$repository_root/src/android/version.txt"
@@ -41,8 +41,8 @@ Options:
 
 Outputs:
   Intermediate Gradle state: build/android/
-  Debug APK:                dist/mobile/android/debug/
-  Signed release APK/AAB:   dist/mobile/android/
+  Debug APK:                dist/android/debug/
+  Signed release APK/AAB:   dist/android/
 
 Notes:
   The host needs only Docker. Host Java, Gradle, Android SDK, emulator, and ADB
