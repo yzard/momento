@@ -71,7 +71,7 @@ fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
 }
 
 #[test]
-fn queue_all_keeps_ocr_independent_of_optional_tasks() {
+fn start_all_keeps_ocr_independent_of_optional_tasks() {
     let (_application, pool) = create_test_app();
     let media_id = create_test_media(&pool, "ocr-input.jpg");
     let connection = pool.get().expect("connection");
@@ -83,8 +83,11 @@ fn queue_all_keeps_ocr_independent_of_optional_tasks() {
         .expect("metadata job");
     connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
     drop(connection);
+    let mut config = momento_api::config::Config::default();
+    config.llm.enabled = true;
     assert_eq!(
-        ai::queue_all(&pool, false, false, false, false).expect("queue ocr"),
+        ai::operation::start_all_features(&config, &pool, ai::operation::AiStartSource::Manual,)
+            .expect("start OCR"),
         1
     );
 }

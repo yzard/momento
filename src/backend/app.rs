@@ -34,6 +34,10 @@ async fn healthcheck() -> Json<HealthcheckResponse> {
     })
 }
 
+async fn api_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
+}
+
 pub fn create_app(
     config: Arc<Config>,
     pool: DbPool,
@@ -64,7 +68,8 @@ pub fn create_app(
             state.clone(),
             password_change_guard,
         ))
-        .layer(cors);
+        .layer(cors)
+        .fallback(api_not_found);
 
     let mut app = Router::new()
         .nest("/api/v1", api_routes)

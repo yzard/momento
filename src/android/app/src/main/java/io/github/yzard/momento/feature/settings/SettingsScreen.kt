@@ -64,6 +64,7 @@ import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.backup.backupReadPermissions
 import io.github.yzard.momento.feature.backup.isBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.observeBackupNetworkAllowed
+import io.github.yzard.momento.feature.backup.requestBackupCancellation
 import io.github.yzard.momento.feature.backup.scheduleBackup
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
@@ -110,6 +111,8 @@ fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): Stri
     val total = counts.sumOf { it.count }
     val uploaded = counts.filter { it.state == BackupState.SERVER_PROCESSING || it.state == BackupState.COMPLETED }.sumOf { it.count }
     val failed = counts.filter { it.state == BackupState.TERMINAL_FAILED || it.state == BackupState.CANCELLED }.sumOf { it.count }
+    val cancelling = counts.filter { it.state == BackupState.CANCELLING }.sumOf { it.count }
+    if (cancelling > 0) return "$uploaded/$total media uploaded, $cancelling cancelling..."
     if (failed > 0) return "$uploaded/$total media uploaded, $failed failed."
     if (uploaded == total) return "$uploaded/$total media uploaded, all set."
     if (!networkAllowed) return "$uploaded/$total media uploaded, pausing"
@@ -154,6 +157,16 @@ fun SettingsScreen(
     var updateStatus by remember { mutableStateOf("Check the signed-in host for a newer Android release") }
     var pendingUpdatePath by rememberSaveable { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val canCancelBackup = queueCounts.any { (state, count) ->
+        count > 0 && state in setOf(
+            BackupState.QUEUED,
+            BackupState.FAILED,
+            BackupState.UPLOADING,
+            BackupState.COMPLETING,
+            BackupState.SERVER_PROCESSING,
+            BackupState.CANCELLING,
+        )
+    }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
         if (permissions.values.all { it }) scheduleBackup(context, settings.mobileDataEnabled, true)
     }
@@ -347,8 +360,24 @@ fun SettingsScreen(
                 },
                 leadingContent = { Icon(Icons.Default.Backup, null) },
                 trailingContent = {
-                    TextButton(onClick = { permissionRequest.launch(backupReadPermissions()) }) {
-                        Text("Backup Now")
+                    Row {
+                        if (canCancelBackup) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        requestBackupCancellation(
+                                            context.applicationContext,
+                                            database.backupAssetDao(),
+                                        )
+                                    }
+                                },
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
+                        TextButton(onClick = { permissionRequest.launch(backupReadPermissions()) }) {
+                            Text("Backup Now")
+                        }
                     }
                 },
             )

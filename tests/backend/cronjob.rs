@@ -269,3 +269,46 @@ fn disabled_global_llm_prevents_every_scheduled_task() {
     assert_eq!(deduplicate_runs, 0);
     assert_eq!(face_runs, 0);
 }
+
+#[test]
+fn one_scheduled_feature_does_not_wait_for_another_feature_result() {
+    let mut config = Config::default();
+    config.llm.enabled = true;
+    config.llm.image_tagging_enabled = true;
+    let pool = create_test_db();
+    prepare_task_input(&pool, "ocr", "long-running-ocr.jpg");
+    prepare_task_input(&pool, "image_tagging", "scheduled-tagging.jpg");
+
+    assert_eq!(
+        run_scheduled_occurrence(&config, &pool, ScheduledTask::Ocr, "2026-08-25T10:00:00Z",)
+            .expect("scheduled OCR"),
+        1
+    );
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "UPDATE llm_jobs SET status = 'submitted' WHERE task = 'ocr'",
+            [],
+        )
+        .expect("submitted OCR job");
+    assert_eq!(
+        run_scheduled_occurrence(
+            &config,
+            &pool,
+            ScheduledTask::ImageTagging,
+            "2026-08-25T10:05:00Z",
+        )
+        .expect("scheduled tagging"),
+        1
+    );
+
+    let connection = pool.get().expect("database connection");
+    let active_task_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT task) FROM llm_jobs WHERE status IN ('queued', 'submitted')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("active task count");
+    assert_eq!(active_task_count, 2);
+}

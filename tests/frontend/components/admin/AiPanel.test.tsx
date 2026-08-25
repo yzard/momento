@@ -4,27 +4,24 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  trigger: vi.fn(),
+  start: vi.fn(),
   cancel: vi.fn(),
   clean: vi.fn(),
-  triggerOcr: vi.fn(),
+  startOcr: vi.fn(),
   cancelOcr: vi.fn(),
   cleanOcr: vi.fn(),
-  triggerImageTagging: vi.fn(),
+  startImageTagging: vi.fn(),
   cancelImageTagging: vi.fn(),
   cleanImageTagging: vi.fn(),
-  triggerScreenshotDetection: vi.fn(),
+  startScreenshotDetection: vi.fn(),
   cancelScreenshotDetection: vi.fn(),
   cleanScreenshotDetection: vi.fn(),
-  triggerDocumentDetection: vi.fn(),
+  startDocumentDetection: vi.fn(),
   cancelDocumentDetection: vi.fn(),
   cleanDocumentDetection: vi.fn(),
-  triggerImageAesthetics: vi.fn(),
+  startImageAesthetics: vi.fn(),
   cancelImageAesthetics: vi.fn(),
   cleanImageAesthetics: vi.fn(),
-  triggerImageClustering: vi.fn(),
-  cancelImageClustering: vi.fn(),
-  cleanImageClustering: vi.fn(),
   startFaces: vi.fn(),
   cancelFaces: vi.fn(),
   cleanFaces: vi.fn(),
@@ -35,31 +32,31 @@ const mocks = vi.hoisted(() => ({
   getImageAestheticsStatus: vi.fn(),
   getFacesStatus: vi.fn(),
   status: vi.fn(),
+  startDeduplicate: vi.fn(),
+  cancelDeduplicate: vi.fn(),
+  cleanDeduplicate: vi.fn(),
 }))
 
 vi.mock('../../../../src/frontend/api/ai', () => ({
   aiApi: {
-    trigger: mocks.trigger,
+    start: mocks.start,
     cancel: mocks.cancel,
     clean: mocks.clean,
-    triggerOcr: mocks.triggerOcr,
+    startOcr: mocks.startOcr,
     cancelOcr: mocks.cancelOcr,
     cleanOcr: mocks.cleanOcr,
-    triggerImageTagging: mocks.triggerImageTagging,
+    startImageTagging: mocks.startImageTagging,
     cancelImageTagging: mocks.cancelImageTagging,
     cleanImageTagging: mocks.cleanImageTagging,
-    triggerScreenshotDetection: mocks.triggerScreenshotDetection,
+    startScreenshotDetection: mocks.startScreenshotDetection,
     cancelScreenshotDetection: mocks.cancelScreenshotDetection,
     cleanScreenshotDetection: mocks.cleanScreenshotDetection,
-    triggerDocumentDetection: mocks.triggerDocumentDetection,
+    startDocumentDetection: mocks.startDocumentDetection,
     cancelDocumentDetection: mocks.cancelDocumentDetection,
     cleanDocumentDetection: mocks.cleanDocumentDetection,
-    triggerImageAesthetics: mocks.triggerImageAesthetics,
+    startImageAesthetics: mocks.startImageAesthetics,
     cancelImageAesthetics: mocks.cancelImageAesthetics,
     cleanImageAesthetics: mocks.cleanImageAesthetics,
-    triggerImageClustering: mocks.triggerImageClustering,
-    cancelImageClustering: mocks.cancelImageClustering,
-    cleanImageClustering: mocks.cleanImageClustering,
     startFaces: mocks.startFaces,
     cancelFaces: mocks.cancelFaces,
     cleanFaces: mocks.cleanFaces,
@@ -71,7 +68,12 @@ vi.mock('../../../../src/frontend/api/ai', () => ({
     getFacesStatus: mocks.getFacesStatus,
   },
 }))
-vi.mock('../../../../src/frontend/api/deduplicate', () => ({ deduplicateApi: { status: mocks.status } }))
+vi.mock('../../../../src/frontend/api/deduplicate', () => ({ deduplicateApi: {
+  status: mocks.status,
+  start: mocks.startDeduplicate,
+  cancel: mocks.cancelDeduplicate,
+  clean: mocks.cleanDeduplicate,
+} }))
 
 import AiPanel from '../../../../src/frontend/components/admin/AiPanel'
 
@@ -85,19 +87,19 @@ describe('AiPanel', () => {
     mocks.getImageAestheticsStatus.mockResolvedValue({ status: 'idle', completedJobs: 8 })
     mocks.status.mockResolvedValue({ status: 'idle', ensembledMedia: 30, candidateComparisons: 44, clustersCreated: 5 })
     mocks.getFacesStatus.mockResolvedValue({ status: 'idle', completedJobs: 7, faceGroups: 6 })
-    mocks.trigger.mockResolvedValue({})
+    mocks.start.mockResolvedValue({})
     mocks.cancel.mockResolvedValue({})
     mocks.clean.mockResolvedValue({})
-    mocks.triggerOcr.mockResolvedValue({})
-    mocks.triggerImageTagging.mockResolvedValue({})
-    mocks.triggerScreenshotDetection.mockResolvedValue({})
+    mocks.startOcr.mockResolvedValue({})
+    mocks.startImageTagging.mockResolvedValue({})
+    mocks.startScreenshotDetection.mockResolvedValue({})
     mocks.cancelScreenshotDetection.mockResolvedValue({})
     mocks.cleanScreenshotDetection.mockResolvedValue({})
-    mocks.triggerDocumentDetection.mockResolvedValue({})
+    mocks.startDocumentDetection.mockResolvedValue({})
     mocks.cancelDocumentDetection.mockResolvedValue({})
     mocks.cleanDocumentDetection.mockResolvedValue({})
-    mocks.triggerImageAesthetics.mockResolvedValue({})
-    mocks.triggerImageClustering.mockResolvedValue({})
+    mocks.startImageAesthetics.mockResolvedValue({})
+    mocks.startDeduplicate.mockResolvedValue({})
     mocks.startFaces.mockResolvedValue({})
   })
 
@@ -108,19 +110,19 @@ describe('AiPanel', () => {
     const user = userEvent.setup()
 
     await user.click(screen.getByRole('button', { name: 'All AI Jobs' }))
-    await waitFor(() => expect(mocks.trigger).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('button', { name: 'OCR' }))
-    await waitFor(() => expect(mocks.triggerOcr).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.startOcr).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('button', { name: 'Image Tagging' }))
-    await waitFor(() => expect(mocks.triggerImageTagging).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.startImageTagging).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('button', { name: 'Screenshot Detection' }))
-    await waitFor(() => expect(mocks.triggerScreenshotDetection).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.startScreenshotDetection).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('button', { name: 'Document Detection' }))
-    await waitFor(() => expect(mocks.triggerDocumentDetection).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.startDocumentDetection).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('button', { name: 'Image Aesthetics' }))
-    await waitFor(() => expect(mocks.triggerImageAesthetics).toHaveBeenCalledOnce())
-    await user.click(screen.getByRole('button', { name: 'Image Clustering (Duplicate)' }))
-    await waitFor(() => expect(mocks.triggerImageClustering).toHaveBeenCalledOnce())
+    await waitFor(() => expect(mocks.startImageAesthetics).toHaveBeenCalledOnce())
+    await user.click(screen.getByRole('button', { name: 'Deduplicate' }))
+    await waitFor(() => expect(mocks.startDeduplicate).toHaveBeenCalledOnce())
     await user.click(screen.getByRole('button', { name: 'Face Detection' }))
     await waitFor(() => expect(mocks.startFaces).toHaveBeenCalledOnce())
   })
@@ -149,7 +151,7 @@ describe('AiPanel', () => {
     await waitFor(() => expect(mocks.cancel).toHaveBeenCalledOnce())
   })
 
-  it('starts face detection without triggering image clustering', async () => {
+  it('starts face detection without starting deduplication', async () => {
     let resolveFaceStart: ((response: { message: string; queuedJobs: number }) => void) | undefined
     mocks.startFaces.mockReturnValue(new Promise((resolve) => { resolveFaceStart = resolve }))
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -159,8 +161,8 @@ describe('AiPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Face Detection' }))
 
     await waitFor(() => expect(mocks.startFaces).toHaveBeenCalledOnce())
-    expect(mocks.triggerImageClustering).not.toHaveBeenCalled()
-    expect(screen.getByRole('button', { name: 'Image Clustering (Duplicate)' }).hasAttribute('disabled')).toBe(false)
+    expect(mocks.startDeduplicate).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Deduplicate' }).hasAttribute('disabled')).toBe(false)
     resolveFaceStart?.({ message: 'queued', queuedJobs: 1 })
   })
 
@@ -175,7 +177,7 @@ describe('AiPanel', () => {
     expect(screen.getByRole('button', { name: 'Clean Screenshot Detection Data' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Clean Document Detection Data' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Clean Image Aesthetics Data' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Clean Image Clustering (Duplicate) Data' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Clean Deduplicate Data' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Clean Face Detection Data' })).toBeTruthy()
   })
 

@@ -49,16 +49,25 @@ enum SubmissionEvent {
 
 #[derive(Clone, Default)]
 pub struct TransportHandle {
-    wake: Arc<Notify>,
+    submission_wake: Arc<Notify>,
+    cancellation_wake: Arc<Notify>,
 }
 
 impl TransportHandle {
-    pub fn wake(&self) {
-        self.wake.notify_one();
+    pub fn wake_submissions(&self) {
+        self.submission_wake.notify_one();
     }
 
-    pub async fn notified(&self) {
-        self.wake.notified().await;
+    pub async fn submission_notified(&self) {
+        self.submission_wake.notified().await;
+    }
+
+    pub fn wake_cancellations(&self) {
+        self.cancellation_wake.notify_one();
+    }
+
+    pub async fn cancellation_notified(&self) {
+        self.cancellation_wake.notified().await;
     }
 }
 

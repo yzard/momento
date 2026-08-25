@@ -10,11 +10,12 @@ use tokio::io::AsyncReadExt;
 
 use crate::config::Config;
 use crate::constants::{
-    paths, DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE,
-    OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
+    paths, DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
+    SCREENSHOT_DETECTION_MODEL_TYPE,
 };
 use crate::database::{queries, DbPool};
 
+pub mod operation;
 pub mod result;
 pub mod transport;
 
@@ -49,12 +50,14 @@ pub async fn run(config: Arc<Config>, pool: DbPool, handle: TransportHandle) {
         let submission_config = Arc::clone(&config);
         let submission_pool = pool.clone();
         let submission_connection = connection.clone();
+        let submission_handle = handle.clone();
         let submission_task = tokio::spawn(async move {
             let mut poll = tokio::time::interval(interval);
             loop {
                 tokio::select! {
                     _ = submission_connection.closed() => return,
                     _ = poll.tick() => {}
+                    _ = submission_handle.submission_notified() => {}
                 }
                 if let Err(error) =
                     submit_cycle(&submission_config, &submission_pool, &submission_connection).await
@@ -72,7 +75,7 @@ pub async fn run(config: Arc<Config>, pool: DbPool, handle: TransportHandle) {
                 tokio::select! {
                     _ = cancellation_connection.closed() => return,
                     _ = poll.tick() => {}
-                    _ = cancellation_handle.notified() => {}
+                    _ = cancellation_handle.cancellation_notified() => {}
                 }
                 if let Err(error) =
                     deliver_pending_cancellations(&cancellation_pool, &cancellation_connection)
@@ -232,28 +235,6 @@ pub fn queue_task(pool: &DbPool, task: &str, task_enabled: bool) -> Result<usize
     transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     transaction.commit()?;
     Ok(queued)
-}
-
-pub fn queue_all(
-    pool: &DbPool,
-    image_tagging_enabled: bool,
-    image_aesthetics_enabled: bool,
-    screenshot_detection_enabled: bool,
-    document_detection_enabled: bool,
-) -> Result<usize, rusqlite::Error> {
-    Ok(queue_task(pool, OCR_MODEL_TYPE, true)?
-        + queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, image_tagging_enabled)?
-        + queue_task(pool, IMAGE_AESTHETICS_MODEL_TYPE, image_aesthetics_enabled)?
-        + queue_task(
-            pool,
-            SCREENSHOT_DETECTION_MODEL_TYPE,
-            screenshot_detection_enabled,
-        )?
-        + queue_task(
-            pool,
-            DOCUMENT_DETECTION_MODEL_TYPE,
-            document_detection_enabled,
-        )?)
 }
 
 async fn submit_cycle(

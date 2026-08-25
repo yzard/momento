@@ -10,9 +10,8 @@ use crate::models::{
     DeduplicateActionResponse, DeduplicateGroup, DeduplicateGroupsRequest,
     DeduplicateGroupsResponse, DeduplicateStatusResponse,
 };
-use crate::processor::deduplicator::{
-    clean, create_run, latest_run, queue_clustering_jobs, request_cancel,
-};
+use crate::processor::ai::operation::{start_feature, AiFeature, AiStartSource};
+use crate::processor::deduplicator::{clean, latest_run, request_cancel};
 
 use super::media::map_media_row;
 
@@ -29,13 +28,15 @@ async fn start(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
 ) -> AppResult<Json<DeduplicateActionResponse>> {
-    if !state.config.llm.deduplicate_enabled {
-        return Err(AppError::Validation(
-            "deduplication is disabled in LLM configuration".to_string(),
-        ));
+    let queued_jobs = start_feature(
+        &state.config,
+        &state.pool,
+        AiFeature::Deduplicate,
+        AiStartSource::Manual,
+    )?;
+    if queued_jobs > 0 {
+        state.llm_transport.wake_submissions();
     }
-    let run_id = create_run(&state.pool, "manual", None)?;
-    queue_clustering_jobs(&state.pool, run_id)?;
     Ok(Json(DeduplicateActionResponse {
         message: "Deduplicate scan started".to_string(),
         status: "running".to_string(),
@@ -103,7 +104,7 @@ async fn cancel(
 ) -> AppResult<Json<DeduplicateActionResponse>> {
     let cancelled = request_cancel(&state.pool)?;
     if cancelled {
-        state.llm_transport.wake();
+        state.llm_transport.wake_cancellations();
     }
     Ok(Json(DeduplicateActionResponse {
         message: if cancelled {

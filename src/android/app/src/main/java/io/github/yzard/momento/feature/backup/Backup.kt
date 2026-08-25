@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.HttpException
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.time.Instant
 import java.util.UUID
@@ -71,6 +72,8 @@ internal fun discoveredAsset(uri: String, mediaStoreId: Long, displayName: Strin
     BackupAssetEntity(uri, "media_$mediaStoreId", UUID.randomUUID().toString(), displayName, mimeType, byteSize, modifiedAt, folder, BackupState.QUEUED, null, 0, null, null)
 
 internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER }
+
+private class TerminalBackupException(message: String) : Exception(message)
 
 internal fun serverProgress(response: BackupUploadResponse): BackupProgress = when (response.status) {
     "completed", "failed", "cancelled" -> BackupProgress.COMPLETED
@@ -109,7 +112,12 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
     }
 
     private suspend fun transfer(asset: BackupAssetEntity, assets: BackupAssetDao, repository: MomentoRepository, deviceId: String, chunkSize: Int): BackupProgress {
+        var activeUploadId = asset.uploadId
+        var durableUploadedBytes = asset.uploadedBytes
         try {
+            if (asset.state == BackupState.CANCELLING) {
+                return cancelBackupAsset(asset, assets, repository)
+            }
             val existing = asset.uploadId?.let { repository.backupUploadStatus(it) }
             if (existing != null) {
                 val progress = recordServerStatus(asset, existing, assets)
@@ -118,12 +126,19 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             }
 
             val upload = existing ?: repository.createBackupUpload(BackupUploadCreateRequest(deviceId, asset.clientAssetId, asset.operationId, asset.displayName, asset.mimeType, asset.byteSize, Instant.ofEpochSecond(asset.modifiedAt).toString()))
+            activeUploadId = upload.uploadId
+            durableUploadedBytes = upload.uploadedSize
             if (upload.status != "uploading") return recordServerStatus(asset, upload, assets)
 
             var offset = upload.uploadedSize
             assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, upload.uploadId, null, null)
-            applicationContext.contentResolver.openInputStream(Uri.parse(asset.uri)).use { stream ->
-                requireNotNull(stream) { "Media asset is no longer available" }
+            val mediaStream = try {
+                applicationContext.contentResolver.openInputStream(Uri.parse(asset.uri))
+            } catch (error: FileNotFoundException) {
+                throw TerminalBackupException(error.message ?: "Media asset is no longer available")
+            }
+            mediaStream.use { stream ->
+                if (stream == null) throw TerminalBackupException("Media asset is no longer available")
                 skipFully(stream, offset)
                 val buffer = ByteArray(chunkSize)
                 while (offset < asset.byteSize) {
@@ -132,23 +147,57 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                     val end = offset + read - 1
                     val response = repository.uploadBackupChunk(upload.uploadId, "bytes $offset-$end/${asset.byteSize}", buffer.copyOf(read).toRequestBody(asset.mimeType.toMediaTypeOrNull()))
                     offset = response.uploadedSize
+                    durableUploadedBytes = offset
                     assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, response.uploadId, response.mediaId, response.error)
                     setForeground(progress("Uploading ${asset.displayName}"))
                 }
             }
-            require(offset == asset.byteSize) { "Upload ended before source file" }
+            if (offset != asset.byteSize) throw TerminalBackupException("Upload ended before source file")
             assets.updateTransfer(asset.uri, BackupState.COMPLETING, offset, upload.uploadId, null, null)
             return recordServerStatus(asset, repository.completeBackupUpload(upload.uploadId), assets)
         } catch (error: HttpException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, asset.uploadedBytes, asset.uploadId, asset.mediaId, "HTTP ${error.code()}")
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, "HTTP ${error.code()}")
             if (isRetryable(error.code())) throw error
             return BackupProgress.COMPLETED
         } catch (error: IOException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, asset.uploadedBytes, asset.uploadId, asset.mediaId, error.message)
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
             throw error
+        } catch (error: TerminalBackupException) {
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            return cancelBackupAsset(
+                asset.copy(
+                    state = BackupState.CANCELLING,
+                    uploadId = activeUploadId,
+                    uploadedBytes = durableUploadedBytes,
+                    errorMessage = error.message,
+                ),
+                assets,
+                repository,
+            )
+        } catch (error: SecurityException) {
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            return cancelBackupAsset(
+                asset.copy(
+                    state = BackupState.CANCELLING,
+                    uploadId = activeUploadId,
+                    uploadedBytes = durableUploadedBytes,
+                    errorMessage = error.message,
+                ),
+                assets,
+                repository,
+            )
         } catch (error: IllegalArgumentException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, asset.uploadedBytes, asset.uploadId, asset.mediaId, error.message)
-            return BackupProgress.COMPLETED
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            return cancelBackupAsset(
+                asset.copy(
+                    state = BackupState.CANCELLING,
+                    uploadId = activeUploadId,
+                    uploadedBytes = durableUploadedBytes,
+                    errorMessage = error.message,
+                ),
+                assets,
+                repository,
+            )
         }
     }
 
@@ -157,8 +206,12 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             assets.updateTransfer(asset.uri, BackupState.COMPLETED, response.uploadedSize, response.uploadId, response.mediaId, response.error)
             BackupProgress.COMPLETED
         }
-        "failed", "cancelled" -> {
+        "failed" -> {
             assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, response.uploadedSize, response.uploadId, response.mediaId, response.error ?: "Server upload ${response.status}")
+            BackupProgress.COMPLETED
+        }
+        "cancelled" -> {
+            assets.updateTransfer(asset.uri, BackupState.CANCELLED, response.uploadedSize, response.uploadId, response.mediaId, response.error)
             BackupProgress.COMPLETED
         }
         else -> {
@@ -175,7 +228,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 remaining -= skipped
                 continue
             }
-            if (stream.read() == -1) throw IOException("Media asset ended before the server offset")
+            if (stream.read() == -1) throw TerminalBackupException("Media asset ended before the server offset")
             remaining -= 1
         }
     }
@@ -184,6 +237,85 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
         val notification = NotificationCompat.Builder(applicationContext, BACKUP_CHANNEL).setSmallIcon(android.R.drawable.stat_sys_upload).setContentTitle("Momento backup").setContentText(text).setOngoing(true).build()
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return ForegroundInfo(42, notification)
         return ForegroundInfo(42, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    }
+}
+
+internal suspend fun cancelBackupAsset(
+    asset: BackupAssetEntity,
+    assets: BackupAssetDao,
+    repository: MomentoRepository,
+): BackupProgress {
+    val uploadId = asset.uploadId
+    if (uploadId == null) {
+        assets.updateTransfer(asset.uri, BackupState.CANCELLED, 0, null, null, null)
+        return BackupProgress.COMPLETED
+    }
+    return try {
+        recordCancellationStatus(asset, repository.cancelBackupUpload(uploadId), assets)
+    } catch (error: IOException) {
+        assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message)
+        BackupProgress.WAITING_FOR_SERVER
+    } catch (error: HttpException) {
+        if (!isCancellationRetryable(error.code())) {
+            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${error.code()} while cancelling")
+            return BackupProgress.COMPLETED
+        }
+        val current = try {
+            repository.backupUploadStatus(uploadId)
+        } catch (_: IOException) {
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message)
+            return BackupProgress.WAITING_FOR_SERVER
+        } catch (statusError: HttpException) {
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${statusError.code()} while checking cancellation")
+            return BackupProgress.WAITING_FOR_SERVER
+        }
+        recordCancellationStatus(asset, current, assets)
+    }
+}
+
+private suspend fun recordCancellationStatus(
+    asset: BackupAssetEntity,
+    response: BackupUploadResponse,
+    assets: BackupAssetDao,
+): BackupProgress {
+    val state = cancellationState(response.status)
+    val error = response.error ?: if (state == BackupState.TERMINAL_FAILED) "Server upload failed" else null
+    assets.updateTransfer(asset.uri, state, response.uploadedSize, response.uploadId, response.mediaId, error)
+    if (state == BackupState.CANCELLING || state == BackupState.SERVER_PROCESSING) {
+        return BackupProgress.WAITING_FOR_SERVER
+    }
+    return BackupProgress.COMPLETED
+}
+
+internal fun cancellationState(status: String): BackupState = when (status) {
+    "cancelled" -> BackupState.CANCELLED
+    "completed" -> BackupState.COMPLETED
+    "failed" -> BackupState.TERMINAL_FAILED
+    "processing" -> BackupState.SERVER_PROCESSING
+    else -> BackupState.CANCELLING
+}
+
+internal fun isCancellationRetryable(statusCode: Int): Boolean =
+    statusCode == 409 || isRetryable(statusCode)
+
+class BackupCancellationWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result {
+        val database = BackupDatabase.create(applicationContext)
+        return try {
+            val settingsStore = SettingsStore(applicationContext)
+            val tokenStore = EncryptedTokenStore(applicationContext)
+            if (!tokenStore.isAuthenticated.value || settingsStore.settings.first().origin == null) return Result.failure()
+            val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
+            var waiting = false
+            for (asset in database.backupAssetDao().cancellationPending()) {
+                if (cancelBackupAsset(asset, database.backupAssetDao(), repository) == BackupProgress.WAITING_FOR_SERVER) {
+                    waiting = true
+                }
+            }
+            if (waiting) Result.retry() else Result.success()
+        } finally {
+            database.close()
+        }
     }
 }
 
@@ -230,6 +362,7 @@ fun observeBackupNetworkAllowed(context: Context, allowMobileData: Boolean): Flo
 
 private const val BACKUP_CHANNEL = "backup"
 private const val BACKUP_WORK = "momento_backup"
+private const val BACKUP_CANCELLATION_WORK = "momento_backup_cancellation"
 
 fun backupReadPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) arrayOf(android.Manifest.permission.READ_MEDIA_IMAGES, android.Manifest.permission.READ_MEDIA_VIDEO, android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(android.Manifest.permission.READ_MEDIA_IMAGES, android.Manifest.permission.READ_MEDIA_VIDEO)
@@ -241,4 +374,16 @@ fun scheduleBackup(context: Context, allowMobileData: Boolean, immediate: Boolea
     val workManager = WorkManager.getInstance(context)
     if (immediate) workManager.enqueueUniqueWork(BACKUP_WORK, ExistingWorkPolicy.KEEP, OneTimeWorkRequestBuilder<BackupWorker>().setConstraints(constraints).build())
     else workManager.enqueueUniquePeriodicWork(BACKUP_WORK, ExistingPeriodicWorkPolicy.UPDATE, PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS).setConstraints(constraints).build())
+}
+
+suspend fun requestBackupCancellation(context: Context, assets: BackupAssetDao) {
+    assets.requestCancellation()
+    val workManager = WorkManager.getInstance(context)
+    workManager.cancelUniqueWork(BACKUP_WORK)
+    val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+    workManager.enqueueUniqueWork(
+        BACKUP_CANCELLATION_WORK,
+        ExistingWorkPolicy.REPLACE,
+        OneTimeWorkRequestBuilder<BackupCancellationWorker>().setConstraints(constraints).build(),
+    )
 }

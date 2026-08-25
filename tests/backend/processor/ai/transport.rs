@@ -2,7 +2,7 @@ use std::future::Future;
 
 use futures::{SinkExt, StreamExt};
 use momento_api::processor::ai::transport::{
-    LlmConnection, PreparedSubmissionInput, SubmissionOutcome,
+    LlmConnection, PreparedSubmissionInput, SubmissionOutcome, TransportHandle,
 };
 use momento_api::processor::ai::{cancel_active_jobs, deliver_pending_cancellations};
 use momento_common::llm::{
@@ -23,6 +23,32 @@ const CLIENT_ID: &str = "momento-test";
 const API_KEY: &str = "test-key";
 
 type ServerSocket = WebSocketStream<TcpStream>;
+
+#[tokio::test]
+async fn submission_and_cancellation_wakes_are_independent() {
+    let handle = TransportHandle::default();
+    handle.wake_submissions();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        handle.submission_notified(),
+    )
+    .await
+    .expect("submission wake");
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        handle.cancellation_notified(),
+    )
+    .await
+    .is_err());
+
+    handle.wake_cancellations();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        handle.cancellation_notified(),
+    )
+    .await
+    .expect("cancellation wake");
+}
 
 #[allow(clippy::result_large_err)]
 async fn start_server<H, F>(accept_protocol: bool, handler: H) -> (String, JoinHandle<()>)

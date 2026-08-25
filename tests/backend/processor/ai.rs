@@ -1,10 +1,11 @@
 use crate::test_utils::{create_test_db, create_test_media};
+use momento_api::config::Config;
 use momento_api::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
-use momento_api::processor::ai::{
-    cancel_active_jobs, queue_all, queue_task, verify_prepared_input,
-};
+use momento_api::processor::ai::operation::{start_all_features, AiStartSource};
+use momento_api::processor::ai::{cancel_active_jobs, queue_task, verify_prepared_input};
 use sha2::{Digest, Sha256};
 
+mod operation;
 mod result;
 mod transport;
 
@@ -72,8 +73,12 @@ fn classifier_queueing_allows_overlap_and_skips_completed_results() {
         .expect("document input");
     drop(connection);
 
+    let mut config = Config::default();
+    config.llm.enabled = true;
+    config.llm.screenshot_detection_enabled = true;
+    config.llm.document_detection_enabled = true;
     assert_eq!(
-        queue_all(&pool, false, false, true, true).expect("queue classifiers"),
+        start_all_features(&config, &pool, AiStartSource::Manual).expect("start classifiers"),
         2
     );
     let connection = pool.get().expect("database connection");

@@ -32,6 +32,20 @@ class BackupTest {
         assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "failed", 10, 10, null, "bad file")))
     }
 
+    @Test fun cancellationKeepsWritableAndTransientSessionsRetryable() {
+        assertEquals(BackupState.CANCELLING, cancellationState("uploading"))
+        assertEquals(BackupState.SERVER_PROCESSING, cancellationState("processing"))
+        assertTrue(isCancellationRetryable(409))
+        assertTrue(isCancellationRetryable(503))
+        assertFalse(isCancellationRetryable(400))
+    }
+
+    @Test fun cancellationPreservesServerTerminalStates() {
+        assertEquals(BackupState.CANCELLED, cancellationState("cancelled"))
+        assertEquals(BackupState.COMPLETED, cancellationState("completed"))
+        assertEquals(BackupState.TERMINAL_FAILED, cancellationState("failed"))
+    }
+
     @Test fun backupNetworkRequiresValidatedInternet() {
         assertFalse(backupNetworkAllowed(allowMobileData = true, hasValidatedInternet = false, unmetered = true))
         assertFalse(backupNetworkAllowed(allowMobileData = false, hasValidatedInternet = false, unmetered = true))

@@ -6,16 +6,11 @@ use cron::Schedule;
 use tracing::{info, warn};
 
 use crate::config::{Config, CronjobConfig};
-use crate::constants::{
-    DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE, IMAGE_TAGGING_MODEL_TYPE,
-    OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
-};
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
-use crate::processor::deduplicator::{
-    create_run, latest_run, log_schedule_start, queue_clustering_jobs,
-};
-use crate::processor::{ai, face_detection};
+use crate::processor::ai::operation::{start_feature, AiFeature, AiStartSource};
+use crate::processor::ai::transport::TransportHandle;
+use crate::processor::deduplicator::{latest_run, log_schedule_start};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScheduledTask {
@@ -29,6 +24,18 @@ pub enum ScheduledTask {
 }
 
 impl ScheduledTask {
+    fn feature(self) -> AiFeature {
+        match self {
+            Self::Ocr => AiFeature::Ocr,
+            Self::ImageTagging => AiFeature::ImageTagging,
+            Self::ImageAesthetics => AiFeature::ImageAesthetics,
+            Self::ScreenshotDetection => AiFeature::ScreenshotDetection,
+            Self::DocumentDetection => AiFeature::DocumentDetection,
+            Self::Deduplicate => AiFeature::Deduplicate,
+            Self::FaceDetection => AiFeature::FaceDetection,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Ocr => "ocr",
@@ -54,18 +61,7 @@ impl ScheduledTask {
     }
 
     fn is_enabled(self, config: &Config) -> bool {
-        if !config.llm.enabled {
-            return false;
-        }
-        match self {
-            Self::Ocr => true,
-            Self::ImageTagging => config.llm.image_tagging_enabled,
-            Self::ImageAesthetics => config.llm.image_aesthetics_enabled,
-            Self::ScreenshotDetection => config.llm.screenshot_detection_enabled,
-            Self::DocumentDetection => config.llm.document_detection_enabled,
-            Self::Deduplicate => config.llm.deduplicate_enabled,
-            Self::FaceDetection => config.llm.face_detection_enabled,
-        }
+        self.feature().is_enabled(config)
     }
 }
 
@@ -88,7 +84,7 @@ pub fn next_scheduled_at(
         .ok_or_else(|| AppError::Validation(format!("{job_name} cronjob has no next occurrence")))
 }
 
-pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool) {
+pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool, transport: TransportHandle) {
     let mut cronjobs = tokio::task::JoinSet::new();
     for task in [
         ScheduledTask::Ocr,
@@ -105,11 +101,12 @@ pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool) {
         }
         let task_config = Arc::clone(&config);
         let task_pool = pool.clone();
+        let task_transport = transport.clone();
         cronjobs.spawn(async move {
             if task == ScheduledTask::Deduplicate {
-                run_deduplicate_cronjob(task_config, task_pool).await;
+                run_deduplicate_cronjob(task_config, task_pool, task_transport).await;
             } else {
-                run_task_cronjob(task_config, task_pool, task).await;
+                run_task_cronjob(task_config, task_pool, task_transport, task).await;
             }
         });
     }
@@ -121,7 +118,12 @@ pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool) {
     }
 }
 
-async fn run_task_cronjob(config: Arc<Config>, pool: DbPool, task: ScheduledTask) {
+async fn run_task_cronjob(
+    config: Arc<Config>,
+    pool: DbPool,
+    transport: TransportHandle,
+    task: ScheduledTask,
+) {
     loop {
         let now = Utc::now();
         let next = match next_scheduled_at(
@@ -141,7 +143,12 @@ async fn run_task_cronjob(config: Arc<Config>, pool: DbPool, task: ScheduledTask
             .unwrap_or_else(|_| std::time::Duration::from_secs(1));
         tokio::time::sleep(delay).await;
         match run_scheduled_occurrence(&config, &pool, task, &next.to_rfc3339()) {
-            Ok(queued) => info!(task = task.name(), queued, "Scheduled AI task queued"),
+            Ok(queued) => {
+                if queued > 0 {
+                    transport.wake_submissions();
+                }
+                info!(task = task.name(), queued, "Scheduled AI task queued");
+            }
             Err(error) => warn!(task = task.name(), "Scheduled AI task failed: {error}"),
         }
     }
@@ -156,34 +163,19 @@ pub fn run_scheduled_occurrence(
     if !task.is_enabled(config) {
         return Ok(0);
     }
-    match task {
-        ScheduledTask::Ocr => {
-            ai::queue_task(pool, OCR_MODEL_TYPE, true).map_err(AppError::Database)
-        }
-        ScheduledTask::ImageTagging => {
-            ai::queue_task(pool, IMAGE_TAGGING_MODEL_TYPE, true).map_err(AppError::Database)
-        }
-        ScheduledTask::ImageAesthetics => {
-            ai::queue_task(pool, IMAGE_AESTHETICS_MODEL_TYPE, true).map_err(AppError::Database)
-        }
-        ScheduledTask::ScreenshotDetection => {
-            ai::queue_task(pool, SCREENSHOT_DETECTION_MODEL_TYPE, true).map_err(AppError::Database)
-        }
-        ScheduledTask::DocumentDetection => {
-            ai::queue_task(pool, DOCUMENT_DETECTION_MODEL_TYPE, true).map_err(AppError::Database)
-        }
-        ScheduledTask::Deduplicate => match create_run(pool, "scheduled", Some(scheduled_for)) {
-            Ok(run_id) => queue_clustering_jobs(pool, run_id),
-            Err(AppError::Conflict(_)) => Ok(0),
-            Err(error) => Err(error),
-        },
-        ScheduledTask::FaceDetection => face_detection::start(pool, true),
-    }
+    start_feature(
+        config,
+        pool,
+        task.feature(),
+        AiStartSource::Scheduled { scheduled_for },
+    )
 }
 
-async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool) {
-    if let Err(error) = run_startup_or_catch_up(&config, &pool).await {
-        warn!("Deduplicate startup scheduling failed: {}", error);
+async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool, transport: TransportHandle) {
+    match run_startup_or_catch_up(&config, &pool).await {
+        Ok(queued) if queued > 0 => transport.wake_submissions(),
+        Ok(_) => {}
+        Err(error) => warn!("Deduplicate startup scheduling failed: {}", error),
     }
 
     loop {
@@ -207,17 +199,25 @@ async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool) {
         let scheduled_for = next.to_rfc3339();
         log_schedule_start(&scheduled_for);
         match run_scheduled_occurrence(&config, &pool, ScheduledTask::Deduplicate, &scheduled_for) {
-            Ok(queued) => info!(queued, "Scheduled deduplicate jobs queued"),
+            Ok(queued) => {
+                if queued > 0 {
+                    transport.wake_submissions();
+                }
+                info!(queued, "Scheduled deduplicate jobs queued");
+            }
             Err(error) => warn!("Could not queue scheduled deduplicate jobs: {error}"),
         }
     }
 }
 
-async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<()> {
+async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<usize> {
     if latest_run(pool)?.is_some_and(|run| run.status == "interrupted" || run.status == "failed") {
-        let run_id = create_run(pool, "startup", None)?;
-        queue_clustering_jobs(pool, run_id)?;
-        return Ok(());
+        return start_feature(
+            config,
+            pool,
+            AiFeature::Deduplicate,
+            AiStartSource::StartupRecovery,
+        );
     }
     let last_scheduled = last_scheduled_for(pool)?;
     let now = Utc::now();
@@ -239,21 +239,18 @@ async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<()
             )?;
         }
         let Some(latest_due) = latest_due else {
-            return Ok(());
+            return Ok(0);
         };
         ("scheduled", Some(latest_due.to_rfc3339()))
     } else {
         ("startup", None)
     };
 
-    match create_run(pool, trigger.0, trigger.1.as_deref()) {
-        Ok(run_id) => {
-            queue_clustering_jobs(pool, run_id)?;
-        }
-        Err(AppError::Conflict(_)) => {}
-        Err(error) => return Err(error),
-    }
-    Ok(())
+    let source = match trigger {
+        ("scheduled", Some(ref scheduled_for)) => AiStartSource::Scheduled { scheduled_for },
+        _ => AiStartSource::StartupRecovery,
+    };
+    start_feature(config, pool, AiFeature::Deduplicate, source)
 }
 
 fn last_scheduled_for(pool: &DbPool) -> AppResult<Option<DateTime<Utc>>> {

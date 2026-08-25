@@ -26,6 +26,14 @@ fn completed_result(job_id: &str, media_id: i64, attempt: u32) -> JobResult {
     }
 }
 
+fn completed_text_result(job_id: &str, media_id: i64, task: &str, text: &str) -> JobResult {
+    let mut result = completed_result(job_id, media_id, 1);
+    result.task = task.to_string();
+    result.model_type = Some(task.to_string());
+    result.result = Some(serde_json::json!({ "text": text }));
+    result
+}
+
 fn insert_submitted_job(pool: &DbPool, job_id: &str, media_id: i64, task: &str, attempt: u32) {
     pool.get()
         .expect("connection")
@@ -237,6 +245,67 @@ fn terminal_result_is_idempotent() {
         )
         .expect("text count");
     assert_eq!(text_count, 1);
+}
+
+#[test]
+fn different_task_results_complete_independently_in_arrival_order() {
+    let pool = create_test_db();
+    let ocr_media_id = create_test_media(&pool, "result-ocr-independent.jpg");
+    let tagging_media_id = create_test_media(&pool, "result-tagging-independent.jpg");
+    insert_submitted_job(&pool, "result-ocr", ocr_media_id, "ocr", 1);
+    insert_submitted_job(
+        &pool,
+        "result-tagging",
+        tagging_media_id,
+        "image_tagging",
+        1,
+    );
+
+    process_result(
+        &pool,
+        completed_text_result(
+            "result-tagging",
+            tagging_media_id,
+            "image_tagging",
+            "mountain, lake",
+        ),
+    )
+    .expect("tagging result may arrive before OCR");
+
+    let connection = pool.get().expect("database connection");
+    let states: (String, String) = connection
+        .query_row(
+            "SELECT (SELECT status FROM llm_jobs WHERE id = 'result-ocr'), (SELECT status FROM llm_jobs WHERE id = 'result-tagging')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("independent job states");
+    assert_eq!(states, ("submitted".to_string(), "completed".to_string()));
+    drop(connection);
+
+    process_result(
+        &pool,
+        completed_text_result("result-ocr", ocr_media_id, "ocr", "receipt text"),
+    )
+    .expect("OCR result completes later");
+
+    let connection = pool.get().expect("database connection");
+    let completed_jobs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_jobs WHERE id IN ('result-ocr', 'result-tagging') AND status = 'completed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("completed job count");
+    let persisted_results: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_text WHERE media_id IN (?, ?)",
+            rusqlite::params![ocr_media_id, tagging_media_id],
+            |row| row.get(0),
+        )
+        .expect("persisted result count");
+    assert_eq!(completed_jobs, 2);
+    assert_eq!(persisted_results, 2);
 }
 
 #[test]

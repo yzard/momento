@@ -6,37 +6,35 @@ use crate::database::queries;
 use crate::error::AppResult;
 use crate::models::{AiRequest, MetadataActionResponse, MetadataStatusResponse};
 use crate::processor::ai;
-use crate::processor::deduplicator::{
-    clean, create_run, latest_run, queue_clustering_jobs, request_cancel,
+use crate::processor::ai::operation::{
+    start_all_features, start_feature, AiFeature, AiStartSource,
 };
+use crate::processor::deduplicator::{clean, request_cancel};
 use crate::processor::face_detection;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/ai/trigger", post(trigger))
+        .route("/ai/start", post(start_all))
         .route("/ai/cancel", post(cancel))
         .route("/ai/clean", post(clean_all))
-        .route("/ai/ocr/trigger", post(trigger_ocr))
+        .route("/ai/ocr/start", post(start_ocr))
         .route("/ai/ocr/cancel", post(cancel_ocr))
         .route("/ai/ocr/clean", post(clean_ocr))
         .route("/ai/ocr/status", post(ocr_status))
         .route("/ai/ocr/reset", post(reset_ocr))
-        .route("/ai/image_tagging/trigger", post(trigger_image_tagging))
+        .route("/ai/image_tagging/start", post(start_image_tagging))
         .route("/ai/image_tagging/cancel", post(cancel_image_tagging))
         .route("/ai/image_tagging/clean", post(clean_image_tagging))
         .route("/ai/image_tagging/status", post(image_tagging_status))
         .route("/ai/image_tagging/reset", post(reset_image_tagging))
-        .route(
-            "/ai/image_aesthetics/trigger",
-            post(trigger_image_aesthetics),
-        )
+        .route("/ai/image_aesthetics/start", post(start_image_aesthetics))
         .route("/ai/image_aesthetics/cancel", post(cancel_image_aesthetics))
         .route("/ai/image_aesthetics/clean", post(clean_image_aesthetics))
         .route("/ai/image_aesthetics/status", post(image_aesthetics_status))
         .route("/ai/image_aesthetics/reset", post(reset_image_aesthetics))
         .route(
-            "/ai/screenshot_detection/trigger",
-            post(trigger_screenshot_detection),
+            "/ai/screenshot_detection/start",
+            post(start_screenshot_detection),
         )
         .route(
             "/ai/screenshot_detection/cancel",
@@ -55,8 +53,8 @@ pub fn router() -> Router<AppState> {
             post(reset_screenshot_detection),
         )
         .route(
-            "/ai/document_detection/trigger",
-            post(trigger_document_detection),
+            "/ai/document_detection/start",
+            post(start_document_detection),
         )
         .route(
             "/ai/document_detection/cancel",
@@ -74,12 +72,6 @@ pub fn router() -> Router<AppState> {
             "/ai/document_detection/reset",
             post(reset_document_detection),
         )
-        .route(
-            "/ai/image_clustering/trigger",
-            post(trigger_image_clustering),
-        )
-        .route("/ai/image_clustering/cancel", post(cancel_image_clustering))
-        .route("/ai/image_clustering/clean", post(clean_image_clustering))
         .route("/ai/faces/start", post(start_faces))
         .route("/ai/faces/cancel", post(cancel_faces))
         .route("/ai/faces/clean", post(clean_faces))
@@ -160,42 +152,16 @@ async fn clean_document_detection(
 ) -> AppResult<Json<MetadataActionResponse>> {
     clean_task(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)
 }
-async fn cancel_image_clustering(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let cancelled_jobs = ai::cancel_active_jobs(&state.pool, Some("image_clustering"))? as i64;
-    request_cancel(&state.pool)?;
-    deliver_cancellations(&state).await;
-    Ok(Json(MetadataActionResponse {
-        message: "Image clustering cancellation requested".to_string(),
-        queued_jobs: cancelled_jobs,
-    }))
-}
-async fn clean_image_clustering(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    clean(&state.pool)?;
-    Ok(Json(MetadataActionResponse {
-        message: "Image clustering data cleaned".to_string(),
-        queued_jobs: 0,
-    }))
-}
-
 async fn start_faces(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs =
-        face_detection::start(&state.pool, state.config.llm.face_detection_enabled)? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Face detection processing queued".to_string(),
-        queued_jobs,
-    }))
+    start_feature_response(
+        &state,
+        AiFeature::FaceDetection,
+        "Face detection processing queued",
+    )
 }
 
 async fn cancel_faces(
@@ -467,28 +433,18 @@ async fn reset_task(
     }))
 }
 
-async fn trigger(
+async fn start_all(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_all(
-        &state.pool,
-        state.config.llm.image_tagging_enabled,
-        state.config.llm.image_aesthetics_enabled,
-        state.config.llm.screenshot_detection_enabled,
-        state.config.llm.document_detection_enabled,
-    )? as i64;
-    let face_jobs = if state.config.llm.face_detection_enabled {
-        face_detection::start(&state.pool, true)? as i64
-    } else {
-        0
-    };
-    let clustering_jobs =
-        trigger_clustering_jobs(&state.pool, state.config.llm.deduplicate_enabled)? as i64;
+    let queued_jobs = start_all_features(&state.config, &state.pool, AiStartSource::Manual)? as i64;
+    if queued_jobs > 0 {
+        state.llm_transport.wake_submissions();
+    }
     Ok(Json(MetadataActionResponse {
         message: "AI processing queued".to_string(),
-        queued_jobs: queued_jobs + clustering_jobs + face_jobs,
+        queued_jobs,
     }))
 }
 
@@ -512,109 +468,77 @@ async fn cancel(
 }
 
 async fn deliver_cancellations(state: &AppState) {
-    state.llm_transport.wake();
+    state.llm_transport.wake_cancellations();
 }
 
-async fn trigger_ocr(
+async fn start_ocr(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_task(&state.pool, "ocr", true)? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "OCR processing queued".to_string(),
-        queued_jobs,
-    }))
+    start_feature_response(&state, AiFeature::Ocr, "OCR processing queued")
 }
 
-async fn trigger_image_tagging(
+async fn start_image_tagging(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_task(
-        &state.pool,
-        "image_tagging",
-        state.config.llm.image_tagging_enabled,
-    )? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Image tagging processing queued".to_string(),
-        queued_jobs,
-    }))
+    start_feature_response(
+        &state,
+        AiFeature::ImageTagging,
+        "Image tagging processing queued",
+    )
 }
 
-async fn trigger_image_aesthetics(
+async fn start_image_aesthetics(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_task(
-        &state.pool,
-        "image_aesthetics",
-        state.config.llm.image_aesthetics_enabled,
-    )? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Image aesthetics processing queued".to_string(),
-        queued_jobs,
-    }))
+    start_feature_response(
+        &state,
+        AiFeature::ImageAesthetics,
+        "Image aesthetics processing queued",
+    )
 }
 
-async fn trigger_screenshot_detection(
+async fn start_screenshot_detection(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_task(
-        &state.pool,
-        SCREENSHOT_DETECTION_MODEL_TYPE,
-        state.config.llm.screenshot_detection_enabled,
-    )? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Screenshot detection processing queued".to_string(),
-        queued_jobs,
-    }))
+    start_feature_response(
+        &state,
+        AiFeature::ScreenshotDetection,
+        "Screenshot detection processing queued",
+    )
 }
 
-async fn trigger_document_detection(
+async fn start_document_detection(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     Json(_request): Json<AiRequest>,
 ) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = ai::queue_task(
-        &state.pool,
-        DOCUMENT_DETECTION_MODEL_TYPE,
-        state.config.llm.document_detection_enabled,
-    )? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Document detection processing queued".to_string(),
-        queued_jobs,
-    }))
+    start_feature_response(
+        &state,
+        AiFeature::DocumentDetection,
+        "Document detection processing queued",
+    )
 }
 
-async fn trigger_image_clustering(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
+fn start_feature_response(
+    state: &AppState,
+    feature: AiFeature,
+    message: &str,
 ) -> AppResult<Json<MetadataActionResponse>> {
     let queued_jobs =
-        trigger_clustering_jobs(&state.pool, state.config.llm.deduplicate_enabled)? as i64;
+        start_feature(&state.config, &state.pool, feature, AiStartSource::Manual)? as i64;
+    if queued_jobs > 0 {
+        state.llm_transport.wake_submissions();
+    }
     Ok(Json(MetadataActionResponse {
-        message: "Image clustering processing queued".to_string(),
+        message: message.to_string(),
         queued_jobs,
     }))
-}
-
-fn trigger_clustering_jobs(
-    pool: &crate::database::DbPool,
-    deduplicate_enabled: bool,
-) -> AppResult<usize> {
-    if !deduplicate_enabled {
-        return Ok(0);
-    }
-    if latest_run(pool)?.is_some_and(|run| matches!(run.status.as_str(), "running" | "cancelling"))
-    {
-        return Ok(0);
-    }
-    let run_id = create_run(pool, "manual", None)?;
-    queue_clustering_jobs(pool, run_id)
 }

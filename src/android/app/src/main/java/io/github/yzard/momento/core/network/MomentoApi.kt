@@ -36,7 +36,7 @@ interface MomentoApi {
     @POST("api/v1/faces/groups/merge") suspend fun mergeFaces(@Body request: FaceMergeRequest): FaceMergeResponse
     @POST("api/v1/faces/thumbnails/get") suspend fun faceThumbnail(@Body request: FaceGroupRequest): ResponseBody
     @POST("api/v1/ai/deduplicate/groups") suspend fun duplicates(@Body request: PageRequest): DeduplicateGroupsResponse
-    @POST("api/v1/ai/deduplicate/start") suspend fun startDuplicates(): MessageResponse
+    @POST("api/v1/ai/deduplicate/start") suspend fun startDuplicates(): DeduplicateActionResponse
     @POST("api/v1/ai/deduplicate/status") suspend fun duplicateStatus(): DeduplicateStatusResponse
     @POST("api/v1/ai/deduplicate/cancel") suspend fun cancelDuplicates(): DeduplicateActionResponse
     @POST("api/v1/ai/deduplicate/clean") suspend fun cleanDuplicates(): DeduplicateActionResponse
@@ -56,7 +56,7 @@ interface MomentoApi {
     @POST("api/v1/metadata/generate") suspend fun generateMetadata(@Body request: EmptyRequest): JobActionResponse
     @POST("api/v1/metadata/status") suspend fun metadataStatus(@Body request: EmptyRequest): JobStatus
     @POST("api/v1/metadata/reset") suspend fun resetMetadata(@Body request: EmptyRequest): JobActionResponse
-    @POST("api/v1/ai/trigger") suspend fun triggerAi(@Body request: EmptyRequest): JobActionResponse
+    @POST("api/v1/ai/start") suspend fun startAi(@Body request: EmptyRequest): JobActionResponse
     @POST("api/v1/ai/cancel") suspend fun cancelAi(@Body request: EmptyRequest): JobActionResponse
     @POST("api/v1/ai/clean") suspend fun cleanAi(@Body request: EmptyRequest): JobActionResponse
     @POST("api/v1/ai/ocr/status") suspend fun ocrStatus(@Body request: EmptyRequest): JobStatus
@@ -66,4 +66,5 @@ interface MomentoApi {
     @POST("api/v1/backup/upload/status") suspend fun uploadStatus(@Body request: BackupUploadIdRequest): BackupUploadResponse
     @PUT("api/v1/backup/upload/chunk/{uploadId}") suspend fun uploadChunk(@Path("uploadId") uploadId: String, @Header("Content-Range") range: String, @Body bytes: RequestBody): BackupUploadResponse
     @POST("api/v1/backup/upload/complete") suspend fun completeUpload(@Body request: BackupUploadIdRequest): BackupUploadResponse
+    @POST("api/v1/backup/upload/cancel") suspend fun cancelUpload(@Body request: BackupUploadIdRequest): BackupUploadResponse
 }

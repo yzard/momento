@@ -102,4 +102,4 @@ import kotlinx.serialization.Serializable
 @Serializable data class BackupUploadIdRequest(val uploadId: String)
 @Serializable data class BackupUploadResponse(val uploadId: String, val status: String, val uploadedSize: Long, val expectedSize: Long, val mediaId: Long?, val error: String?)
 
-enum class BackupState { QUEUED, UPLOADING, COMPLETING, SERVER_PROCESSING, COMPLETED, FAILED, TERMINAL_FAILED, CANCELLED }
+enum class BackupState { QUEUED, UPLOADING, COMPLETING, SERVER_PROCESSING, COMPLETED, FAILED, TERMINAL_FAILED, CANCELLING, CANCELLED }

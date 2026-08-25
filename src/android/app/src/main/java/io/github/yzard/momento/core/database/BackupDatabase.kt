@@ -42,8 +42,14 @@ data class BackupQueueCount(val state: BackupState, val count: Long)
 
 @Dao
 interface BackupAssetDao {
-    @Query("SELECT * FROM backup_assets WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING') AND (:cameraOnly = 0 OR folder = 'Camera') ORDER BY modifiedAt")
+    @Query("SELECT * FROM backup_assets WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING', 'CANCELLING') AND (:cameraOnly = 0 OR folder = 'Camera') ORDER BY modifiedAt")
     suspend fun pending(cameraOnly: Boolean): List<BackupAssetEntity>
+
+    @Query("SELECT * FROM backup_assets WHERE state IN ('CANCELLING', 'SERVER_PROCESSING') ORDER BY modifiedAt")
+    suspend fun cancellationPending(): List<BackupAssetEntity>
+
+    @Query("UPDATE backup_assets SET state = 'CANCELLING', errorMessage = NULL WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING')")
+    suspend fun requestCancellation(): Int
 
     @Query("SELECT * FROM backup_assets ORDER BY modifiedAt DESC") fun observeAll(): Flow<List<BackupAssetEntity>>
     @Query("SELECT state, COUNT(*) AS count FROM backup_assets WHERE :cameraOnly = 0 OR folder = 'Camera' GROUP BY state")

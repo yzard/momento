@@ -49,13 +49,13 @@ export default function AiPanel() {
       <div className="border-t border-border px-8 py-6">
         <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-muted-foreground">AI job controls</h3>
         <div className="space-y-3">
-          <ControlRow label="All AI Jobs" running={allRunning} start={() => aiApi.trigger()} cancel={() => aiApi.cancel()} clean={() => aiApi.clean()} />
-          <ControlRow label="OCR" running={ocrRunning} start={() => aiApi.triggerOcr()} cancel={() => aiApi.cancelOcr()} clean={() => aiApi.cleanOcr()} />
-          <ControlRow label="Image Tagging" running={taggingRunning} start={() => aiApi.triggerImageTagging()} cancel={() => aiApi.cancelImageTagging()} clean={() => aiApi.cleanImageTagging()} />
-          <ControlRow label="Screenshot Detection" running={screenshotDetectionRunning} start={() => aiApi.triggerScreenshotDetection()} cancel={() => aiApi.cancelScreenshotDetection()} clean={() => aiApi.cleanScreenshotDetection()} />
-          <ControlRow label="Document Detection" running={documentDetectionRunning} start={() => aiApi.triggerDocumentDetection()} cancel={() => aiApi.cancelDocumentDetection()} clean={() => aiApi.cleanDocumentDetection()} />
-          <ControlRow label="Image Aesthetics" running={aestheticsRunning} start={() => aiApi.triggerImageAesthetics()} cancel={() => aiApi.cancelImageAesthetics()} clean={() => aiApi.cleanImageAesthetics()} />
-          <ControlRow label="Image Clustering (Duplicate)" running={clusteringRunning} start={() => aiApi.triggerImageClustering()} cancel={() => aiApi.cancelImageClustering()} clean={() => aiApi.cleanImageClustering()} />
+          <ControlRow label="All AI Jobs" running={allRunning} start={() => aiApi.start()} cancel={() => aiApi.cancel()} clean={() => aiApi.clean()} />
+          <ControlRow label="OCR" running={ocrRunning} start={() => aiApi.startOcr()} cancel={() => aiApi.cancelOcr()} clean={() => aiApi.cleanOcr()} />
+          <ControlRow label="Image Tagging" running={taggingRunning} start={() => aiApi.startImageTagging()} cancel={() => aiApi.cancelImageTagging()} clean={() => aiApi.cleanImageTagging()} />
+          <ControlRow label="Screenshot Detection" running={screenshotDetectionRunning} start={() => aiApi.startScreenshotDetection()} cancel={() => aiApi.cancelScreenshotDetection()} clean={() => aiApi.cleanScreenshotDetection()} />
+          <ControlRow label="Document Detection" running={documentDetectionRunning} start={() => aiApi.startDocumentDetection()} cancel={() => aiApi.cancelDocumentDetection()} clean={() => aiApi.cleanDocumentDetection()} />
+          <ControlRow label="Image Aesthetics" running={aestheticsRunning} start={() => aiApi.startImageAesthetics()} cancel={() => aiApi.cancelImageAesthetics()} clean={() => aiApi.cleanImageAesthetics()} />
+          <ControlRow label="Deduplicate" running={clusteringRunning} start={() => deduplicateApi.start()} cancel={() => deduplicateApi.cancel()} clean={() => deduplicateApi.clean()} />
           <ControlRow label="Face Detection" running={facesRunning} start={() => aiApi.startFaces()} cancel={() => aiApi.cancelFaces()} clean={() => aiApi.cleanFaces()} />
         </div>
       </div>
@@ -67,10 +67,10 @@ function isActive(status: string | undefined): boolean {
   return status === 'queued' || status === 'processing' || status === 'running' || status === 'cancelling'
 }
 
-function ControlRow({ label, running, start, cancel, clean }: { label: string; running: boolean; start: () => Promise<{ message: string; queuedJobs: number }>; cancel: () => Promise<{ message: string; queuedJobs: number }>; clean: () => Promise<{ message: string; queuedJobs: number }> }) {
+function ControlRow({ label, running, start, cancel, clean }: { label: string; running: boolean; start: () => Promise<{ message: string }>; cancel: () => Promise<{ message: string }>; clean: () => Promise<{ message: string }> }) {
   const queryClient = useQueryClient()
   const mutation = useMutation({
-    mutationFn: (action: () => Promise<{ message: string; queuedJobs: number }>) => action(),
+    mutationFn: (action: () => Promise<{ message: string }>) => action(),
     onSuccess: () => void Promise.all([
       queryClient.invalidateQueries({ queryKey: ['ai'] }),
       queryClient.invalidateQueries({ queryKey: ['deduplicate', 'status'] }),

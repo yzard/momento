@@ -250,7 +250,7 @@ private fun ProcessingAdministration(repository: MomentoRepository) {
                 Text("$name: ${statusSummary(status)}", Modifier.padding(horizontal = 16.dp))
                 status.errors.forEach { failure -> Text(failure, Modifier.padding(horizontal = 16.dp)) }
             }
-            TextButton({ runAction { repository.triggerAi() } }) { Text("Trigger AI") }
+            TextButton({ runAction { repository.startAi() } }) { Text("Start AI") }
             TextButton({ runAction { repository.cancelAi() } }) { Text("Cancel AI") }
             TextButton({ runAction { repository.cleanAi() } }) { Text("Clean AI") }
         }

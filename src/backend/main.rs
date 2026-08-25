@@ -46,13 +46,14 @@ fn start_background_tasks(
 ) {
     let config_clone = Arc::clone(&config);
     let pool_clone = pool.clone();
+    let cronjob_transport = llm_transport.clone();
 
     tokio::spawn(async move {
         if let Ok(conn) = pool_clone.get() {
             let _ = cleanup_expired_trash(&conn);
         }
 
-        run_cronjobs(config_clone, pool_clone).await;
+        run_cronjobs(config_clone, pool_clone, cronjob_transport).await;
     });
 
     let metadata_config = Arc::clone(&config);
@@ -69,8 +70,9 @@ fn start_background_tasks(
 
     let ai_config = Arc::clone(&config);
     let ai_pool = pool.clone();
+    let ai_transport = llm_transport.clone();
     tokio::spawn(async move {
-        ai::run(ai_config, ai_pool, llm_transport).await;
+        ai::run(ai_config, ai_pool, ai_transport).await;
     });
 
     let deduplicate_pool = pool.clone();

@@ -46,6 +46,20 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun summarizesPendingServerCancellation() {
+        assertEquals(
+            "2/3 media uploaded, 1 cancelling...",
+            backupSummary(
+                listOf(
+                    BackupQueueCount(BackupState.COMPLETED, 2),
+                    BackupQueueCount(BackupState.CANCELLING, 1),
+                ),
+                networkAllowed = true,
+            ),
+        )
+    }
+
+    @Test
     fun validatesNewPasswordLengthAndConfirmation() {
         assertEquals("New password must be at least 8 characters", validateNewPassword("short", "short"))
         assertEquals("New passwords do not match", validateNewPassword("longenough", "different"))

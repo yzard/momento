@@ -81,7 +81,7 @@ class MomentoRepository(
     suspend fun deleteForever(ids: List<Long>): MessageResponse = api().deleteForever(MediaIdsRequest(ids))
     suspend fun emptyTrash(): MessageResponse = api().emptyTrash()
     suspend fun duplicateGroups(): List<DeduplicateGroup> = api().duplicates(PageRequest(null, 100)).groups
-    suspend fun startDeduplicate(): MessageResponse = api().startDuplicates()
+    suspend fun startDeduplicate(): DeduplicateActionResponse = api().startDuplicates()
     suspend fun deduplicateStatus(): DeduplicateStatusResponse = api().duplicateStatus()
     suspend fun cancelDeduplicate(): DeduplicateActionResponse = api().cancelDuplicates()
     suspend fun cleanDeduplicate(): DeduplicateActionResponse = api().cleanDuplicates()
@@ -95,7 +95,7 @@ class MomentoRepository(
     suspend fun generateMetadata(): JobActionResponse = api().generateMetadata(EmptyRequest())
     suspend fun metadataStatus(): JobStatus = api().metadataStatus(EmptyRequest())
     suspend fun resetMetadata(): JobActionResponse = api().resetMetadata(EmptyRequest())
-    suspend fun triggerAi(): JobActionResponse = api().triggerAi(EmptyRequest())
+    suspend fun startAi(): JobActionResponse = api().startAi(EmptyRequest())
     suspend fun cancelAi(): JobActionResponse = api().cancelAi(EmptyRequest())
     suspend fun cleanAi(): JobActionResponse = api().cleanAi(EmptyRequest())
     suspend fun ocrStatus(): JobStatus = api().ocrStatus(EmptyRequest())
@@ -138,6 +138,7 @@ class MomentoRepository(
     suspend fun backupUploadStatus(uploadId: String): BackupUploadResponse = api().uploadStatus(BackupUploadIdRequest(uploadId))
     suspend fun uploadBackupChunk(uploadId: String, range: String, body: RequestBody): BackupUploadResponse = api().uploadChunk(uploadId, range, body)
     suspend fun completeBackupUpload(uploadId: String): BackupUploadResponse = api().completeUpload(BackupUploadIdRequest(uploadId))
+    suspend fun cancelBackupUpload(uploadId: String): BackupUploadResponse = api().cancelUpload(BackupUploadIdRequest(uploadId))
 }
 
 fun timelineRequest(

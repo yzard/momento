@@ -65,7 +65,7 @@ async fn cancel_cancels_all_active_ai_jobs() {
 }
 
 #[tokio::test]
-async fn trigger_succeeds_when_image_clustering_is_already_running() {
+async fn start_succeeds_when_deduplicate_is_already_running() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "trigger-admin", "trigger-admin@example.com");
     let connection = pool.get().expect("Failed to get connection");
@@ -82,7 +82,7 @@ async fn trigger_succeeds_when_image_clustering_is_already_running() {
     let server = TestServer::new(app).expect("Failed to create server");
 
     let response = server
-        .post("/api/v1/ai/trigger")
+        .post("/api/v1/ai/start")
         .add_header(AUTHORIZATION, format!("Bearer {}", admin_token(user_id)))
         .json(&json!({}))
         .await;
@@ -147,6 +147,7 @@ async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
     init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
+    config.llm.enabled = true;
     config.llm.image_aesthetics_enabled = true;
     let app = create_app(
         Arc::new(config),
@@ -173,7 +174,7 @@ async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
     let authorization = format!("Bearer {}", admin_token(user_id));
 
     let trigger = server
-        .post("/api/v1/ai/image_aesthetics/trigger")
+        .post("/api/v1/ai/image_aesthetics/start")
         .add_header(AUTHORIZATION, authorization.clone())
         .json(&json!({}))
         .await;
@@ -266,6 +267,7 @@ async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
     init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
+    config.llm.enabled = true;
     config.llm.screenshot_detection_enabled = true;
     config.llm.document_detection_enabled = true;
     let app = create_app(
@@ -300,18 +302,18 @@ async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
     let authorization = format!("Bearer {}", admin_token(user_id));
 
     server
-        .post("/api/v1/ai/screenshot_detection/trigger")
+        .post("/api/v1/ai/screenshot_detection/start")
         .json(&json!({}))
         .await
         .assert_status_unauthorized();
     for task in ["screenshot_detection", "document_detection"] {
-        let trigger = server
-            .post(&format!("/api/v1/ai/{task}/trigger"))
+        let start = server
+            .post(&format!("/api/v1/ai/{task}/start"))
             .add_header(AUTHORIZATION, authorization.clone())
             .json(&json!({}))
             .await;
-        trigger.assert_status_ok();
-        assert_eq!(trigger.json::<Value>()["queuedJobs"], 1);
+        start.assert_status_ok();
+        assert_eq!(start.json::<Value>()["queuedJobs"], 1);
         let status = server
             .post(&format!("/api/v1/ai/{task}/status"))
             .add_header(AUTHORIZATION, authorization.clone())
@@ -362,6 +364,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
+    config.llm.enabled = true;
     config.llm.face_detection_enabled = true;
     let app = create_app(
         Arc::new(config),
@@ -452,5 +455,113 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
             })
             .expect("table count");
         assert_eq!(count, 0, "{table} should be empty");
+    }
+}
+
+#[tokio::test]
+async fn different_ai_features_start_independently() {
+    init_test_paths();
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.llm.enabled = true;
+    config.llm.image_tagging_enabled = true;
+    let app = create_app(
+        Arc::new(config),
+        pool.clone(),
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let user_id = create_test_user(&pool, "independent-admin", "independent@example.com");
+    let media_id = create_test_media(&pool, "independent.jpg");
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    for task in ["ocr", "image_tagging"] {
+        connection
+            .execute(
+                "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', ?, ?, 'image/jpeg', 4, 'hash')",
+                rusqlite::params![media_id, task, format!("ai/{task}.jpg"), format!("{task}.jpg")],
+            )
+            .expect("prepared input");
+    }
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", admin_token(user_id));
+
+    server
+        .post("/api/v1/ai/ocr/start")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({}))
+        .await
+        .assert_status_ok();
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "UPDATE llm_jobs SET status = 'submitted' WHERE task = 'ocr'",
+            [],
+        )
+        .expect("submitted OCR job");
+    server
+        .post("/api/v1/ai/image_tagging/start")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({}))
+        .await
+        .assert_status_ok();
+
+    let connection = pool.get().expect("database connection");
+    let ocr_status: String = connection
+        .query_row(
+            "SELECT status FROM llm_jobs WHERE task = 'ocr'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("OCR status");
+    let tagging_status: String = connection
+        .query_row(
+            "SELECT status FROM llm_jobs WHERE task = 'image_tagging'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("tagging status");
+    assert_eq!(ocr_status, "submitted");
+    assert_eq!(tagging_status, "queued");
+}
+
+#[tokio::test]
+async fn removed_trigger_and_image_clustering_routes_return_not_found() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "removed-route-admin", "removed-route@example.com");
+    pool.get()
+        .expect("database connection")
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", admin_token(user_id));
+
+    for path in [
+        "/api/v1/ai/trigger",
+        "/api/v1/ai/ocr/trigger",
+        "/api/v1/ai/image_tagging/trigger",
+        "/api/v1/ai/image_aesthetics/trigger",
+        "/api/v1/ai/screenshot_detection/trigger",
+        "/api/v1/ai/document_detection/trigger",
+        "/api/v1/ai/image_clustering/trigger",
+        "/api/v1/ai/image_clustering/cancel",
+        "/api/v1/ai/image_clustering/clean",
+    ] {
+        server
+            .post(path)
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await
+            .assert_status_not_found();
     }
 }

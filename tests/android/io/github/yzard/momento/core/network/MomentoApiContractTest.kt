@@ -16,7 +16,9 @@ import retrofit2.http.POST
 class MomentoApiContractTest {
     @Test fun uploadStatusUsesTheBodyBasedBackendRoute() {
         val method = MomentoApi::class.java.getMethod("uploadStatus", BackupUploadIdRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val cancel = MomentoApi::class.java.getMethod("cancelUpload", BackupUploadIdRequest::class.java, kotlin.coroutines.Continuation::class.java)
         assertEquals("api/v1/backup/upload/status", requireNotNull(method.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/backup/upload/cancel", requireNotNull(cancel.getAnnotation(POST::class.java)).value)
     }
 
     @Test fun albumAndMapUseTheServerContracts() {
@@ -41,10 +43,10 @@ class MomentoApiContractTest {
     }
 
     @Test fun aiAndMetadataActionsSendTheRequiredEmptyJsonBody() {
-        val ai = MomentoApi::class.java.getMethod("triggerAi", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val ai = MomentoApi::class.java.getMethod("startAi", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
         val metadata = MomentoApi::class.java.getMethod("metadataStatus", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
 
-        assertEquals("api/v1/ai/trigger", requireNotNull(ai.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/ai/start", requireNotNull(ai.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/metadata/status", requireNotNull(metadata.getAnnotation(POST::class.java)).value)
         assertEquals("{}", Json.encodeToString(EmptyRequest()))
     }
