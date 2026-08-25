@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use sha2::Digest;
-
 use crate::config::Config;
 use crate::constants::{
     paths, DOCUMENT_DETECTION_MODEL_TYPE, FACE_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
     IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
 };
 use crate::database::{queries, DbPool};
+use crate::processor::ai::input::AiInputStorage;
 use crate::processor::media_processor::{calculate_geohash, generate_complete_metadata};
 use crate::processor::thumbnails::{
     generate_image_preview, generate_image_thumbnail, generate_video_preview,
@@ -16,28 +15,39 @@ use crate::processor::thumbnails::{
 use crate::utils::hash::calculate_file_hash;
 use crate::utils::path::resolve_existing_storage_path;
 
-const CLASSIFICATION_PREVIEW_MAXIMUM_SIZE: u32 = 2048;
-const CLASSIFICATION_PREVIEW_QUALITY: u8 = 95;
-
 pub async fn generate_media_metadata(
     pool: &DbPool,
     media_id: i64,
     config: &Config,
 ) -> Result<(), String> {
-    let (file_path, media_type, stored_content_hash): (String, String, Option<String>) = {
+    let (file_path, media_type, stored_content_hash, original_filename, stored_mime_type): (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+    ) = {
         let connection = pool.get().map_err(|error| error.to_string())?;
         connection
             .query_row(
                 queries::metadata::SELECT_IMPORTED_MEDIA,
                 [media_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .map_err(|error| error.to_string())?
     };
     let original_path = resolve_existing_storage_path(&paths().originals, &file_path)
         .await
         .map_err(|error| error.to_string())?;
-    let content_hash = match stored_content_hash {
+    let content_hash = match stored_content_hash.filter(|content_hash| is_sha256(content_hash)) {
         Some(content_hash) => content_hash,
         None => calculate_file_hash(&original_path)
             .await
@@ -103,98 +113,96 @@ pub async fn generate_media_metadata(
     if !place_thumbnail_generated {
         return Err("place thumbnail generation failed".to_string());
     }
-    let classification_preview_path = paths()
-        .previews
-        .join("ai")
-        .join(media_id.to_string())
-        .join("classification-source.jpg");
-    if media_type == "image"
-        && !generate_image_preview(
-            &original_path,
-            &classification_preview_path,
-            CLASSIFICATION_PREVIEW_MAXIMUM_SIZE,
-            CLASSIFICATION_PREVIEW_QUALITY,
-        )
-        .await
-    {
-        return Err("classification preview generation failed".to_string());
-    }
     let geohash = metadata
         .gps_latitude
         .zip(metadata.gps_longitude)
         .and_then(|(latitude, longitude)| calculate_geohash(latitude, longitude));
-    let connection = pool.get().map_err(|error| error.to_string())?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            queries::metadata::UPDATE_METADATA,
-            rusqlite::params![
-                media_id,
-                metadata.width,
-                metadata.height,
-                metadata.date_taken.map(|date| date.to_rfc3339()),
-                metadata.gps_latitude,
-                metadata.gps_longitude,
-                metadata.gps_altitude,
-                metadata.camera_make,
-                metadata.camera_model,
-                metadata.lens_make,
-                metadata.lens_model,
-                metadata.iso,
-                metadata.exposure_time,
-                metadata.f_number,
-                metadata.focal_length,
-                metadata.focal_length_35mm,
-                metadata.location_city,
-                metadata.location_state,
-                metadata.location_country,
-                metadata.video_codec,
-                metadata.keywords,
-                metadata.duration_seconds
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            queries::metadata::UPDATE_THUMBNAIL,
-            rusqlite::params![thumbnail_relative.to_string_lossy(), media_id],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            queries::media::UPDATE_CONTENT_HASH,
-            rusqlite::params![content_hash, media_id],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(queries::metadata::DELETE_RTREE_FOR_MEDIA, [media_id])
-        .map_err(|error| error.to_string())?;
-    if let (Some(latitude), Some(longitude)) = (metadata.gps_latitude, metadata.gps_longitude) {
+    {
+        let connection = pool.get().map_err(|error| error.to_string())?;
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
         transaction
             .execute(
-                queries::metadata::INSERT_RTREE,
-                rusqlite::params![media_id, latitude, latitude, longitude, longitude],
+                queries::metadata::UPDATE_METADATA,
+                rusqlite::params![
+                    media_id,
+                    metadata.width,
+                    metadata.height,
+                    metadata.date_taken.map(|date| date.to_rfc3339()),
+                    metadata.gps_latitude,
+                    metadata.gps_longitude,
+                    metadata.gps_altitude,
+                    metadata.camera_make,
+                    metadata.camera_model,
+                    metadata.lens_make,
+                    metadata.lens_model,
+                    metadata.iso,
+                    metadata.exposure_time,
+                    metadata.f_number,
+                    metadata.focal_length,
+                    metadata.focal_length_35mm,
+                    metadata.location_city,
+                    metadata.location_state,
+                    metadata.location_country,
+                    metadata.video_codec,
+                    metadata.keywords,
+                    metadata.duration_seconds
+                ],
             )
             .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                queries::metadata::UPDATE_THUMBNAIL,
+                rusqlite::params![thumbnail_relative.to_string_lossy(), media_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                queries::media::UPDATE_CONTENT_HASH,
+                rusqlite::params![content_hash, media_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(queries::metadata::DELETE_RTREE_FOR_MEDIA, [media_id])
+            .map_err(|error| error.to_string())?;
+        if let (Some(latitude), Some(longitude)) = (metadata.gps_latitude, metadata.gps_longitude) {
+            transaction
+                .execute(
+                    queries::metadata::INSERT_RTREE,
+                    rusqlite::params![media_id, latitude, latitude, longitude, longitude],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                queries::metadata::UPSERT_GEOHASH,
+                rusqlite::params![media_id, geohash],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
     }
-    transaction
-        .execute(
-            queries::metadata::UPSERT_GEOHASH,
-            rusqlite::params![media_id, geohash],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction.commit().map_err(|error| error.to_string())?;
     prepare_ai_inputs(
         pool,
         media_id,
         &original_path,
-        &thumbnail_path,
-        &place_thumbnail_path,
-        (media_type == "image").then_some(classification_preview_path.as_path()),
+        OriginalAiInput {
+            relative_path: &file_path,
+            filename: &original_filename,
+            mime_type: stored_mime_type.as_deref(),
+            content_hash: &content_hash,
+        },
         &media_type,
     )
+    .await?;
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 async fn generate_thumbnail(
@@ -223,20 +231,62 @@ async fn generate_thumbnail(
     .await
 }
 
-fn prepare_ai_inputs(
+async fn prepare_ai_inputs(
     pool: &DbPool,
     media_id: i64,
-    original_path: &std::path::Path,
-    thumbnail_path: &std::path::Path,
-    place_thumbnail_path: &std::path::Path,
-    classification_preview_path: Option<&Path>,
+    original_path: &Path,
+    original: OriginalAiInput<'_>,
     media_type: &str,
 ) -> Result<(), String> {
     let output_directory = paths().previews.join("ai").join(media_id.to_string());
-    let frames = if media_type == "video" {
-        extract_first_video_frame(original_path, &output_directory)?
+    let input = if media_type == "video" {
+        let filename = format!("{}.png", original.content_hash);
+        let frame_path = output_directory.join("frames").join(&filename);
+        if !frame_path.is_file() {
+            extract_first_video_frame(original_path, &frame_path)?;
+        }
+        let byte_size = std::fs::metadata(&frame_path)
+            .map_err(|error| error.to_string())?
+            .len();
+        let content_hash = calculate_file_hash(&frame_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        AiInputDescriptor {
+            storage: AiInputStorage::Previews,
+            file_path: PathBuf::from("ai")
+                .join(media_id.to_string())
+                .join("frames")
+                .join(&filename)
+                .to_string_lossy()
+                .into_owned(),
+            filename,
+            mime_type: "image/png".to_string(),
+            byte_size,
+            content_hash,
+            input_kind: "video_frame",
+            frame_timestamp_ms: Some(0),
+        }
     } else {
-        vec![(0, None, thumbnail_path.to_path_buf())]
+        let mime_type = original
+            .mime_type
+            .filter(|mime_type| mime_type.starts_with("image/"))
+            .ok_or_else(|| "canonical original has no supported image MIME type".to_string())?;
+        let byte_size = std::fs::metadata(original_path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if byte_size == 0 {
+            return Err("canonical original is empty".to_string());
+        }
+        AiInputDescriptor {
+            storage: AiInputStorage::Originals,
+            file_path: original.relative_path.to_string(),
+            filename: original.filename.to_string(),
+            mime_type: mime_type.to_string(),
+            byte_size,
+            content_hash: original.content_hash.to_string(),
+            input_kind: "image",
+            frame_timestamp_ms: None,
+        }
     };
     let mut tasks = vec![
         OCR_MODEL_TYPE,
@@ -251,95 +301,84 @@ fn prepare_ai_inputs(
             DOCUMENT_DETECTION_MODEL_TYPE,
         ]);
     }
+    let connection = pool.get().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
     for task in tasks {
-        let task_directory = output_directory.join(task);
-        std::fs::create_dir_all(&task_directory).map_err(|error| error.to_string())?;
-        pool.get()
-            .map_err(|error| error.to_string())?
+        transaction
             .execute(
                 queries::metadata::DELETE_AI_INPUTS_FOR_TASK,
                 rusqlite::params![media_id, task],
             )
             .map_err(|error| error.to_string())?;
-        let image_aesthetics_frame = [(
-            0,
-            (media_type == "video").then_some(0),
-            place_thumbnail_path.to_path_buf(),
-        )];
-        let classification_frames = match classification_preview_path {
-            Some(source_path) => vec![(0, None, source_path.to_path_buf())],
-            None => Vec::new(),
-        };
-        let task_frames = if task == IMAGE_AESTHETICS_MODEL_TYPE {
-            image_aesthetics_frame.as_slice()
-        } else if task == SCREENSHOT_DETECTION_MODEL_TYPE || task == DOCUMENT_DETECTION_MODEL_TYPE {
-            classification_frames.as_slice()
-        } else {
-            frames.as_slice()
-        };
-        for (sequence, frame_timestamp_ms, source_path) in task_frames {
-            let filename = format!("{sequence:03}.jpg");
-            let output_path = task_directory.join(&filename);
-            std::fs::copy(source_path, &output_path).map_err(|error| error.to_string())?;
-            let source_bytes = std::fs::read(&output_path).map_err(|error| error.to_string())?;
-            let content_hash = format!("{:x}", sha2::Sha256::digest(&source_bytes));
-            let relative_path = PathBuf::from("ai")
-                .join(media_id.to_string())
-                .join(task)
-                .join(&filename);
-            let input_kind = if media_type == "video" {
-                "video_frame"
-            } else {
-                "image"
-            };
-            pool.get()
-                .map_err(|error| error.to_string())?
-                .execute(
-                    queries::metadata::INSERT_AI_INPUT,
-                    rusqlite::params![
-                        media_id,
-                        task,
-                        sequence,
-                        input_kind,
-                        relative_path.to_string_lossy(),
-                        filename,
-                        source_bytes.len() as i64,
-                        content_hash,
-                        frame_timestamp_ms
-                    ],
-                )
-                .map_err(|error| error.to_string())?;
-        }
+        transaction
+            .execute(
+                queries::metadata::INSERT_AI_INPUT,
+                rusqlite::params![
+                    media_id,
+                    task,
+                    0,
+                    input.input_kind,
+                    input.storage.as_str(),
+                    input.file_path,
+                    input.filename,
+                    input.mime_type,
+                    i64::try_from(input.byte_size)
+                        .map_err(|_| "AI input byte size exceeds SQLite range".to_string())?,
+                    input.content_hash,
+                    input.frame_timestamp_ms
+                ],
+            )
+            .map_err(|error| error.to_string())?;
     }
-    Ok(())
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+struct OriginalAiInput<'a> {
+    relative_path: &'a str,
+    filename: &'a str,
+    mime_type: Option<&'a str>,
+    content_hash: &'a str,
+}
+
+struct AiInputDescriptor {
+    storage: AiInputStorage,
+    file_path: String,
+    filename: String,
+    mime_type: String,
+    byte_size: u64,
+    content_hash: String,
+    input_kind: &'static str,
+    frame_timestamp_ms: Option<i64>,
 }
 
 fn extract_first_video_frame(
     original_path: &std::path::Path,
-    output_directory: &std::path::Path,
-) -> Result<Vec<(i64, Option<i64>, PathBuf)>, String> {
-    let frames_directory = output_directory.join("frames");
-    std::fs::create_dir_all(&frames_directory).map_err(|error| error.to_string())?;
-    let output_path = frames_directory.join("000.jpg");
+    output_path: &std::path::Path,
+) -> Result<(), String> {
+    let frames_directory = output_path
+        .parent()
+        .ok_or_else(|| "video frame path has no parent".to_string())?;
+    std::fs::create_dir_all(frames_directory).map_err(|error| error.to_string())?;
+    let temporary_path = frames_directory.join(format!(".frame-{}.png", uuid::Uuid::new_v4()));
     let output = std::process::Command::new("ffmpeg")
         .args(["-y", "-ss", "0", "-i"])
         .arg(original_path)
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale='min(1920,iw)':-2",
-            "-q:v",
-            "2",
-        ])
-        .arg(&output_path)
+        .args(["-map", "0:v:0", "-frames:v", "1", "-c:v", "png"])
+        .arg(&temporary_path)
         .output()
         .map_err(|error| error.to_string())?;
-    if !output.status.success() || !output_path.is_file() {
+    if !output.status.success() || !temporary_path.is_file() {
+        let _ = std::fs::remove_file(&temporary_path);
         return Err(format!(
             "FFmpeg frame extraction failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(vec![(0, Some(0), output_path)])
+    if let Err(error) = std::fs::rename(&temporary_path, output_path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error.to_string());
+    }
+    Ok(())
 }

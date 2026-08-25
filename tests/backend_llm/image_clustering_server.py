@@ -106,7 +106,7 @@ class ImageClusteringServerTests(unittest.TestCase):
         Image.new("RGB", (32, 32), color=(20, 40, 60)).save(encoded, format="JPEG")
         truncated = encoded.getvalue()[:-2]
 
-        image = IMAGE_CLUSTERING_SERVER.decode_image(truncated)
+        image = IMAGE_CLUSTERING_SERVER.decode_image(io.BytesIO(truncated))
 
         self.assertEqual(image.mode, "RGB")
         self.assertEqual(image.size, (32, 32))

@@ -7,7 +7,7 @@ import stat
 
 
 MAX_DESCRIPTOR_BYTES = 64 * 1024
-MAX_INPUT_BYTES = 50 * 1024 * 1024
+MAX_INPUT_BYTES = 32 * 1024 * 1024 * 1024
 DESCRIPTOR_FIELDS = {"jobId", "sequence", "byteSize", "contentHash", "mimeType"}
 
 
@@ -73,13 +73,20 @@ def read_runtime_input(handler, input_root):
             raise ValueError("runtime input is not a regular file")
         if metadata.st_size != byte_size:
             raise ValueError("runtime input size does not match descriptor")
-        with os.fdopen(input_fd, "rb") as input_file:
-            input_fd = -1
-            image_bytes = input_file.read()
+        input_file = os.fdopen(input_fd, "rb")
+        input_fd = -1
     finally:
         if input_fd >= 0:
             os.close(input_fd)
 
-    if hashlib.sha256(image_bytes).hexdigest() != content_hash:
-        raise ValueError("runtime input hash does not match descriptor")
-    return image_bytes
+    try:
+        hasher = hashlib.sha256()
+        while chunk := input_file.read(1024 * 1024):
+            hasher.update(chunk)
+        if hasher.hexdigest() != content_hash:
+            raise ValueError("runtime input hash does not match descriptor")
+        input_file.seek(0)
+        return input_file
+    except (OSError, ValueError):
+        input_file.close()
+        raise

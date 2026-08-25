@@ -1648,11 +1648,8 @@ fn validate_normalized_embedding(
         )));
     }
     let mut squared_norm = 0.0_f64;
-    for encoded_value in embedding_bytes.chunks_exact(4) {
-        let value =
-            f32::from_le_bytes(encoded_value.try_into().map_err(|_| {
-                ServiceError::Internal("failed to decode embedding value".to_string())
-            })?);
+    for encoded_value in embedding_bytes.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*encoded_value);
         if !value.is_finite() {
             return Err(ServiceError::Upstream(format!(
                 "{provider_name} returned a non-finite embedding"

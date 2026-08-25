@@ -23,7 +23,7 @@ type CancellationWaiters =
 
 pub struct PreparedSubmissionInput {
     pub sequence: u32,
-    pub path: std::path::PathBuf,
+    pub file: tokio::fs::File,
 }
 
 pub enum SubmissionOutcome {
@@ -261,13 +261,11 @@ impl LlmConnection {
             SubmissionEvent::ConnectionError(error) => return Err(error),
             _ => return Err("submission response correlation does not match request".to_string()),
         }
-        for input in inputs {
-            let mut file = tokio::fs::File::open(&input.path)
-                .await
-                .map_err(|error| error.to_string())?;
+        for mut input in inputs {
             let mut buffer = vec![0_u8; MAX_BINARY_CHUNK_BYTES];
             loop {
-                let bytes_read = file
+                let bytes_read = input
+                    .file
                     .read(&mut buffer)
                     .await
                     .map_err(|error| error.to_string())?;

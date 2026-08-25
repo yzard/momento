@@ -202,11 +202,11 @@ async fn verify_share_password(
     let share = load_active_share(&conn, &token)?;
 
     let Some(password_hash) = share.password_hash else {
-        return Ok(share_verify_response(true, "No password required", None)?);
+        return share_verify_response(true, "No password required", None);
     };
 
     if !verify_password(&request.password, &password_hash) {
-        return Ok(share_verify_response(false, "Invalid password", None)?);
+        return share_verify_response(false, "Invalid password", None);
     }
 
     let share_expiration = parse_share_expiration(share.expires_at.as_deref())?;
@@ -216,11 +216,7 @@ async fn verify_share_password(
     let cookie = format!(
         "{SHARE_SESSION_COOKIE_NAME}={session_token}; Path=/api/v1/public/share/{token}; Max-Age={maximum_age}; HttpOnly; Secure; SameSite=Strict"
     );
-    Ok(share_verify_response(
-        true,
-        "Password correct",
-        Some(&cookie),
-    )?)
+    share_verify_response(true, "Password correct", Some(&cookie))
 }
 
 async fn get_shared_media_file(

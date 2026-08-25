@@ -387,7 +387,7 @@ pub mod metadata_jobs {
     pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
     pub const MARK_IMPORTED_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) SELECT id, datetime('now') FROM media WHERE import_state = 'imported'";
     pub const SELECT_INPUT_PATHS: &str =
-        "SELECT file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
+        "SELECT storage_root, file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
     pub const CLAIM_NEXT_QUEUED: &str = "UPDATE media_metadata_jobs SET status = 'processing', claimed_at = datetime('now'), attempts = attempts + 1, updated_at = datetime('now') WHERE media_id = (SELECT media_id FROM media_metadata_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY media_id LIMIT 1) AND status = 'queued' RETURNING media_id";
     pub const RECLAIM_EXPIRED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, claimed_at = NULL, available_at = datetime('now'), last_error = 'metadata worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', ?)";
     pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' ELSE 'completed' END, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
@@ -405,8 +405,8 @@ pub mod ai_jobs {
     pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued'";
     pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
     pub const REQUEUE_AMBIGUOUS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
-    pub const SNAPSHOT_QUEUED_INPUTS: &str = "INSERT OR IGNORE INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) SELECT llm_jobs.id, media_ai_inputs.sequence, media_ai_inputs.input_kind, media_ai_inputs.file_path, media_ai_inputs.filename, media_ai_inputs.mime_type, media_ai_inputs.byte_size, media_ai_inputs.content_hash, media_ai_inputs.frame_timestamp_ms FROM llm_jobs JOIN media_ai_inputs ON media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = llm_jobs.task WHERE llm_jobs.status = 'queued'";
-    pub const SELECT_INPUTS: &str = "SELECT sequence, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
+    pub const SNAPSHOT_QUEUED_INPUTS: &str = "INSERT OR IGNORE INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) SELECT llm_jobs.id, media_ai_inputs.sequence, media_ai_inputs.input_kind, media_ai_inputs.storage_root, media_ai_inputs.file_path, media_ai_inputs.filename, media_ai_inputs.mime_type, media_ai_inputs.byte_size, media_ai_inputs.content_hash, media_ai_inputs.frame_timestamp_ms FROM llm_jobs JOIN media_ai_inputs ON media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = llm_jobs.task WHERE llm_jobs.status = 'queued'";
+    pub const SELECT_INPUTS: &str = "SELECT sequence, storage_root, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
     pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND claimed_at < datetime('now', '-5 minutes')";
     pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
@@ -520,7 +520,7 @@ pub mod faces {
     pub const CLEAN_RESULTS: &str = "DELETE FROM media_face_detection_results";
     pub const CLEAN_JOBS: &str = "DELETE FROM llm_jobs WHERE task = 'face_detection'";
     pub const SELECT_INPUT_CORRELATION: &str = "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
-    pub const SELECT_INPUT_PATH: &str = "SELECT file_path, byte_size, content_hash FROM llm_job_inputs WHERE job_id = ? AND sequence = ?";
+    pub const SELECT_INPUT_PATH: &str = "SELECT storage_root, file_path, byte_size, content_hash FROM llm_job_inputs WHERE job_id = ? AND sequence = ?";
     pub const SELECT_MEDIA_CROPS: &str = "SELECT crop_path FROM media_faces WHERE media_id = ?";
     pub const UPSERT_RESULT: &str = "INSERT INTO media_face_detection_results (media_id, model_type, model_version) VALUES (?, 'face_detection', ?) ON CONFLICT(media_id) DO UPDATE SET model_type = excluded.model_type, model_version = excluded.model_version, completed_at = datetime('now')";
     pub const LIST_GROUPS: &str = "SELECT fg.id, COUNT(fgm.face_id), COUNT(DISTINCT mf.media_id) AS media_count FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id ORDER BY media_count DESC, fg.id ASC LIMIT ? OFFSET ?";
@@ -1288,13 +1288,13 @@ pub mod media_text {
 
 pub mod metadata {
     pub const SELECT_IMPORTED_MEDIA: &str =
-        "SELECT file_path, media_type, content_hash FROM media WHERE id = ? AND import_state = 'imported'";
+        "SELECT file_path, media_type, content_hash, original_filename, mime_type, file_size FROM media WHERE id = ? AND import_state = 'imported'";
     pub const DELETE_RTREE_FOR_MEDIA: &str = "DELETE FROM media_rtree WHERE media_id = ?";
     pub const INSERT_RTREE: &str = "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)";
     pub const UPSERT_GEOHASH: &str = "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash";
     pub const DELETE_AI_INPUTS_FOR_TASK: &str =
         "DELETE FROM media_ai_inputs WHERE media_id = ? AND task = ?";
-    pub const INSERT_AI_INPUT: &str = "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, ?, ?, ?, ?, 'image/jpeg', ?, ?, ?)";
+    pub const INSERT_AI_INPUT: &str = "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     pub const SELECT_THUMBNAILS: &str = r#"
     SELECT m.id
          , mm.thumbnail_path

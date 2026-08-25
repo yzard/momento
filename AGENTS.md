@@ -93,12 +93,14 @@ transfer has completed and the file has been closed. GET, HEAD, OPTIONS, and PRO
 the mutation gate. The modification-age check is a secondary settling delay, not the completion
 signal.
 
-Momento owns all media preparation. It applies orientation, generates thumbnails or previews,
-extracts the current representative first video frame, crops/resizes, and records descriptors
-before an inference job is eligible. The transport supports multiple ordered inputs even though
-current metadata generation creates one prepared input per task. llm-service may decode bytes and
-perform model-required tensor transforms, but it never reads Momento paths, generates task inputs,
-or assumes a shared filesystem.
+Momento owns every AI input reference. Photo tasks reference the immutable canonical original
+without resizing or creating a task-specific copy. Video-capable tasks share one lossless,
+full-resolution representative PNG frame below Momento previews; screenshot and document detection
+remain photo-only. UI thumbnails and place thumbnails are separate presentation assets and are
+never AI inputs. The transport supports multiple ordered inputs even though current metadata
+generation creates one input per task. llm-service may decode the received bytes, apply orientation,
+and perform model-required tensor transforms, but it never reads Momento paths, generates task
+inputs, or assumes a shared filesystem.
 
 The primary implementation points are:
 
@@ -126,18 +128,24 @@ is changed.
 
 ### Prepared input contract
 
-Momento stores each prepared input below `previews/ai/<media-id>/<task>/` and inserts a
-`media_ai_inputs` descriptor containing the task, sequence, input kind, relative file path,
-filename, MIME type, byte size, SHA-256 content hash, and optional frame timestamp. Job
-eligibility requires imported media, completed metadata, and at least one matching descriptor.
-Screenshot and document detection are photo-only. They each receive an immutable copy of the same
-orientation-correct, aspect-preserving JPEG preparation with a maximum 2048-pixel edge. No video
-descriptor is created for either classifier.
+`media_ai_inputs` records a Momento-owned `storage_root` (`originals` or `previews`) plus the task,
+sequence, input kind, relative file path, filename, MIME type, byte size, SHA-256 content hash, and
+optional frame timestamp. Every photo task points at the same canonical original descriptor.
+Every video-capable task points at one file named by the canonical original hash below
+`previews/ai/<media-id>/frames/`; metadata reruns reuse it, and no task directory or copy is created. Job eligibility requires
+imported media, completed metadata, and at least one
+matching descriptor. Screenshot and document detection are photo-only and receive the canonical
+original. A missing or non-image original MIME type is an explicit metadata failure; Momento never
+falls back to a thumbnail.
 
-Before each submission, Momento loads descriptors in sequence order, reads the prepared files,
-and rechecks their exact byte sizes and SHA-256 hashes. Missing or changed bytes fail the Momento
-job; they are never submitted. The request is self-contained because llm-service receives the
-raw prepared bytes rather than Momento file paths.
+`llm_job_inputs` snapshots the storage root and descriptor when the job is queued. Before each
+submission, Momento resolves the path only inside the selected Momento storage root, opens it,
+streams its exact byte size and SHA-256 hash, rewinds that same open handle, and sends from the
+verified handle. Missing or changed bytes fail the Momento job and are never submitted. The wire
+manifest contains no storage root or path: llm-service receives only descriptors and raw bytes,
+persists those bytes below its own data root, and can run on another server with unrelated storage.
+Input and job admission allow up to 32 GiB so large streamed media is not rejected by the previous
+50 MiB cap; deployments still must monitor durable queue space.
 
 Multi-input jobs preserve every descriptor's `sequence` and optional `frameTimestampMs` through
 the queue, provider response, result message, and input-level persistence. Concurrency is across jobs;
@@ -352,8 +360,10 @@ layers below in the same change. Do not add a second submission endpoint, bypass
 call llm-service inline from metadata/import, let llm-service access Momento storage, or add a
 type-specific queue/scheduler.
 
-1. Add metadata preparation and completion verification for task-ready inputs, including stable
-   sequence/timestamp rules and durable `media_ai_inputs` descriptors.
+1. Add metadata reference/preparation and completion verification for task-ready inputs, including
+   an explicit Momento storage root, stable sequence/timestamp rules, and durable
+   `media_ai_inputs` descriptors. Reuse the canonical original or shared full-resolution video
+   frame; do not create a task-specific media copy.
 2. Extend schema constraints and centralized queries for eligibility, idempotent job creation,
    active-job uniqueness, status, cancellation, reset, clean, retry, and any run relationship.
 3. Add administrator trigger/status API behavior and matching frontend API/UI behavior where the
@@ -490,8 +500,9 @@ visible media count descending, then city, state, and country ascending. Place i
 opaque encodings of the complete tuple. Manual GPS changes immediately recompute or clear the local
 reverse-geocoded fields so grouping cannot retain stale location names.
 
-Metadata generates a separate aspect-preserving place thumbnail and uses it as the prepared
-`image_aesthetics` input for photos and representative video frames. Cover ranking prefers completed
+Metadata generates a separate aspect-preserving place thumbnail for UI cover rendering only.
+`image_aesthetics` uses the canonical photo original or the shared full-resolution video frame.
+Cover ranking prefers completed
 aesthetic inference and combines aesthetic 40%, scenic 25%, simplicity 20%, landscape 10%, and
 technical quality 5%, then applies OCR-clutter and dominant-face penalties. Media without an
 aesthetic result use a deterministic landscape, capture-date, and media-ID fallback. A user's place
@@ -500,8 +511,9 @@ stored or cached as a representative media ID. Every place-thumbnail request rer
 against current metadata, aesthetic results, and active `media_access`, so changed membership is
 visible on the next request.
 
-`schema.sql` defines the current schema only. Do not add schema migration or compatibility code;
-breaking schema changes require a fresh database for development and playground data.
+`schema.sql` and the Android Room database define only their current schemas. Keep only the current
+Room schema export. Do not add schema migration or compatibility code; breaking schema changes
+require a fresh database and data directory.
 
 Reverse geocoding is always local and uses the pinned GeoNames `cities500` asset embedded in the
 Momento API binary. It has no enablement, URL, user-agent, timeout, or rate-limit configuration.
@@ -776,7 +788,7 @@ playground/                 # End-to-end config and data
 │   └── queue/              # Durable inference queue
 ├── database.sqlite         # SQLite database
 ├── originals/              # Original media files
-├── previews/               # Generated previews
+├── previews/               # Generated previews, including one shared full-resolution AI frame per video
 ├── thumbnails/             # Generated thumbnails
 ├── imports/                # Import staging area
 ├── webdav/                 # WebDAV processing area

@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
+use crate::processor::ai::input::AiInputStorage;
 use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
-use crate::utils::path::{resolve_existing_storage_path_sync, resolve_storage_path};
+use crate::utils::path::resolve_storage_path;
 use momento_common::llm::JobInputResult;
 
 const EMBEDDING_DIMENSIONS: usize = 512;
@@ -293,12 +294,16 @@ fn write_crop(
     media_id: i64,
     face: &FaceResult,
 ) -> AppResult<(String, PathBuf)> {
-    let (input_path, expected_size, expected_hash): (String, i64, String) = transaction.query_row(
-        queries::faces::SELECT_INPUT_PATH,
-        rusqlite::params![job_id, face.sequence],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    let input_path = resolve_existing_storage_path_sync(&paths().previews, &input_path)?;
+    let (storage_root, input_path, expected_size, expected_hash): (String, String, i64, String) =
+        transaction.query_row(
+            queries::faces::SELECT_INPUT_PATH,
+            rusqlite::params![job_id, face.sequence],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    let storage = AiInputStorage::parse(&storage_root).map_err(AppError::Internal)?;
+    let input_path = storage
+        .resolve_existing_sync(&input_path)
+        .map_err(AppError::Internal)?;
     let input_bytes = std::fs::read(input_path)?;
     if input_bytes.len() as i64 != expected_size
         || format!("{:x}", Sha256::digest(&input_bytes)) != expected_hash

@@ -132,15 +132,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_inference(self):
         try:
-            image_bytes = read_runtime_input(self, self.input_root)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.send_json(400, {"detail": f"invalid request: {error}"})
-            return
-
-        try:
-            response = self.runtime.infer(image_bytes)
+            with read_runtime_input(self, self.input_root) as image_source:
+                response = self.runtime.infer(image_source)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
+            return
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.send_json(400, {"detail": f"invalid request: {error}"})
             return
         except RuntimeError as error:
             self.send_json(500, {"detail": str(error)})

@@ -49,7 +49,8 @@ class ImageRuntimeTests(unittest.TestCase):
         encoded = io.BytesIO()
         Image.new("RGB", (120, 40), color=(10, 20, 30)).save(encoded, format="PNG")
 
-        decoded = IMAGE_RUNTIME.decode_image(encoded.getvalue())
+        encoded.seek(0)
+        decoded = IMAGE_RUNTIME.decode_image(encoded)
 
         self.assertEqual(decoded.mode, "RGB")
         self.assertEqual(decoded.size, (120, 40))

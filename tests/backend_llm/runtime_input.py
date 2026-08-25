@@ -41,9 +41,10 @@ class RuntimeInputTests(unittest.TestCase):
             (root / job_id).mkdir()
             (root / job_id / "input-0").write_bytes(content)
 
-            result = read_runtime_input(FakeHandler(descriptor(job_id, content)), root)
-
-            self.assertEqual(result, content)
+            with read_runtime_input(
+                FakeHandler(descriptor(job_id, content)), root
+            ) as result:
+                self.assertEqual(result.read(), content)
 
     def test_rejects_a_symlinked_input(self):
         if not hasattr(os, "O_NOFOLLOW"):

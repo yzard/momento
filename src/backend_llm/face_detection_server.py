@@ -9,7 +9,6 @@ import sys
 import threading
 from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
 from pathlib import Path
 
 from runtime_input import read_runtime_input
@@ -52,12 +51,12 @@ def select_providers(onnxruntime_module):
     return ["CUDAExecutionProvider"]
 
 
-def decode_image(image_bytes):
+def decode_image(image_source):
     from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     try:
-        with Image.open(BytesIO(image_bytes)) as source:
+        with Image.open(image_source) as source:
             source.load()
             return ImageOps.exif_transpose(source).convert("RGB")
     except (OSError, UnidentifiedImageError, ValueError) as error:
@@ -247,14 +246,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_inference(self):
         try:
-            image_bytes = read_runtime_input(self, self.input_root)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.send_json(400, {"detail": f"invalid request: {error}"})
-            return
-        try:
-            response = self.runtime.infer(image_bytes)
+            with read_runtime_input(self, self.input_root) as image_source:
+                response = self.runtime.infer(image_source)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
+            return
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.send_json(400, {"detail": f"invalid request: {error}"})
             return
         except RuntimeError as error:
             self.send_json(500, {"detail": str(error)})

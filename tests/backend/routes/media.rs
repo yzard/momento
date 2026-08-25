@@ -13,7 +13,7 @@ use axum_test::TestServer;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
 use momento_api::constants::{IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE};
-use momento_api::database::{init_database, queries};
+use momento_api::database::queries;
 use rusqlite::params;
 use serde_json::{json, Value};
 
@@ -1121,23 +1121,4 @@ fn test_media_text_is_removed_when_media_is_deleted() {
         )
         .expect("Failed to count image text");
     assert_eq!(count, 0);
-}
-
-#[test]
-fn test_existing_database_receives_media_text_schema() {
-    let pool = create_test_db();
-    let conn = pool.get().expect("Failed to get database connection");
-    conn.execute("DROP TABLE media_text", [])
-        .expect("Failed to remove media text table");
-
-    init_database(&conn).expect("Failed to reinitialize database schema");
-
-    let table_exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'media_text'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("Failed to check media text table");
-    assert_eq!(table_exists, 1);
 }

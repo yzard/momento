@@ -60,7 +60,7 @@ fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'ai/clustering.jpg', 'clustering.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("prepared input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'previews', 'ai/clustering.jpg', 'clustering.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("prepared input");
     drop(connection);
     let run_id = create_run(&pool, "manual", None).expect("run");
 

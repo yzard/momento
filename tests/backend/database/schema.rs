@@ -1,5 +1,4 @@
 use crate::test_utils::{create_test_db, create_test_media};
-use momento_api::database::init_database;
 
 #[test]
 fn creates_active_media_access_index() {
@@ -105,6 +104,23 @@ fn creates_durable_metadata_and_ai_job_tables() {
 }
 
 #[test]
+fn ai_input_tables_record_the_momento_storage_root() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("database connection");
+
+    for table in ["media_ai_inputs", "llm_job_inputs"] {
+        let storage_root_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = 'storage_root' AND \"notnull\" = 1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("storage_root column");
+        assert_eq!(storage_root_column, 1, "{table} storage root");
+    }
+}
+
+#[test]
 fn backup_schema_enforces_device_ownership_and_statuses() {
     let pool = create_test_db();
     let user_id =
@@ -149,27 +165,4 @@ fn classifier_tables_enforce_boolean_and_confidence_ranges() {
             [media_id],
         )
         .is_err());
-}
-
-#[test]
-fn rerunning_schema_recreates_missing_table_and_index() {
-    let pool = create_test_db();
-    let connection = pool.get().expect("Failed to get database connection");
-    connection
-        .execute_batch("DROP INDEX idx_llm_jobs_claim; DROP TABLE llm_jobs;")
-        .expect("Failed to remove LLM job schema objects");
-
-    init_database(&connection).expect("Schema should be safe to rerun");
-    init_database(&connection).expect("Repeated schema initialization should succeed");
-
-    for (object_type, object_name) in [("table", "llm_jobs"), ("index", "idx_llm_jobs_claim")] {
-        let exists: i64 = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?)",
-                [object_type, object_name],
-                |row| row.get(0),
-            )
-            .expect("Failed to inspect recreated schema object");
-        assert_eq!(exists, 1, "{object_type} {object_name} should be recreated");
-    }
 }

@@ -6,7 +6,7 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::database::{queries, DbPool};
-use crate::utils::path::resolve_existing_storage_path_sync;
+use crate::processor::ai::input::AiInputStorage;
 
 pub async fn run(config: Arc<Config>, pool: DbPool) {
     let interval = std::time::Duration::from_secs(config.metadata_worker.poll_interval_seconds);
@@ -172,7 +172,7 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
             .prepare(queries::metadata_jobs::SELECT_INPUT_PATHS)
             .map_err(|error| error.to_string())?
             .query_map(rusqlite::params![media_id, task], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
@@ -180,11 +180,11 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
         if inputs.is_empty() {
             return Err(format!("missing prepared {task} AI inputs"));
         }
-        if inputs.iter().any(|file_path| {
-            resolve_existing_storage_path_sync(&crate::constants::paths().previews, file_path)
-                .is_err()
-        }) {
-            return Err(format!("prepared {task} AI input file is missing"));
+        for (storage_root, file_path) in inputs {
+            let storage = AiInputStorage::parse(&storage_root)?;
+            if storage.resolve_existing_sync(&file_path).is_err() {
+                return Err(format!("prepared {task} AI input file is missing"));
+            }
         }
     }
     Ok(())

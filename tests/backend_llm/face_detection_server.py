@@ -113,8 +113,8 @@ class FaceDetectionServerTests(unittest.TestCase):
         class RecordingRuntime:
             received = None
 
-            def infer(self, image_bytes):
-                self.received = image_bytes
+            def infer(self, image_source):
+                self.received = image_source.read()
                 return {"faces": []}
 
         runtime = RecordingRuntime()

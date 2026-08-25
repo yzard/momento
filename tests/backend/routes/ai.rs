@@ -329,7 +329,7 @@ async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("aesthetics input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'previews', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("aesthetics input");
     drop(connection);
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {}", admin_token(user_id));
@@ -413,7 +413,7 @@ async fn removed_image_aesthetics_reset_returns_not_found() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("aesthetics input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'previews', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("aesthetics input");
     drop(connection);
     let server = TestServer::new(app).expect("server");
 
@@ -465,7 +465,7 @@ async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
     for task in ["screenshot_detection", "document_detection"] {
         connection
             .execute(
-                "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'ai/classifier.jpg', 'classifier.jpg', 'image/jpeg', 4, 'hash')",
+                "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'previews', 'ai/classifier.jpg', 'classifier.jpg', 'image/jpeg', 4, 'hash')",
                 rusqlite::params![media_id, task],
             )
             .expect("classifier input");
@@ -565,7 +565,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'ai/face.jpg', 'face.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("face input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'previews', 'ai/face.jpg', 'face.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("face input");
     connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, 0, 0, 1, 1, 1, 1, 1, X'00000000', 'faces/test.jpg')", [media_id]).expect("face");
     let face_id = connection.last_insert_rowid();
     connection
@@ -678,7 +678,7 @@ async fn different_ai_features_start_independently() {
     for task in ["ocr", "image_tagging"] {
         connection
             .execute(
-                "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', ?, ?, 'image/jpeg', 4, 'hash')",
+                "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'previews', ?, ?, 'image/jpeg', 4, 'hash')",
                 rusqlite::params![media_id, task, format!("ai/{task}.jpg"), format!("{task}.jpg")],
             )
             .expect("prepared input");
@@ -853,7 +853,7 @@ async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'ai/cluster.jpg', 'cluster.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("clustering input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'previews', 'ai/cluster.jpg', 'cluster.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("clustering input");
     drop(connection);
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {}", admin_token(user_id));

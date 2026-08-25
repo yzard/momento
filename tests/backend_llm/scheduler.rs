@@ -572,6 +572,42 @@ fn abandoned_staging_removes_temporary_queue_directory() {
 }
 
 #[test]
+fn admission_allows_streamed_media_descriptors_larger_than_twenty_gibibytes() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = Scheduler::new(
+        directory.path().to_path_buf(),
+        SchedulerConfig::default(),
+        Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+            service: Vec::new(),
+            ..Config::default()
+        })))),
+        MockResultDeliveryTransport::acknowledging(),
+    )
+    .expect("scheduler");
+    let job_id = "1123456789abcdef0123456789abcdef";
+    let admission = scheduler
+        .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: job_id.to_string(),
+            media_id: 1,
+            task: "ocr".to_string(),
+            attempt: 1,
+            inputs: vec![QueueInputDescriptor {
+                sequence: 0,
+                filename: "large-image.tiff".to_string(),
+                mime_type: "image/tiff".to_string(),
+                byte_size: 20 * 1024 * 1024 * 1024 + 1,
+                content_hash: "a".repeat(64),
+                input_kind: "image".to_string(),
+                frame_timestamp_ms: None,
+            }],
+        })
+        .expect("large streamed input descriptor");
+
+    assert!(matches!(admission, QueueAdmission::Staging(_)));
+}
+
+#[test]
 fn queue_selection_is_task_aware_and_bounded() {
     let directory = tempdir().expect("queue directory");
     let scheduler = Scheduler::new(

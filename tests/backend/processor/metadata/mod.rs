@@ -12,7 +12,7 @@ mod reset;
 mod reverse_geocoding;
 
 #[tokio::test]
-async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
+async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
     init_test_paths();
     let pool = create_test_db();
     let photo_id = create_test_media(&pool, "classifier-preparation.jpg");
@@ -37,16 +37,6 @@ async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
             rusqlite::params![relative_path, photo_id],
         )
         .expect("photo path");
-    let expected_content_hash: String = pool
-        .get()
-        .expect("database connection")
-        .query_row(
-            "SELECT content_hash FROM media WHERE id = ?",
-            [photo_id],
-            |row| row.get(0),
-        )
-        .expect("stored content hash");
-
     momento_api::processor::metadata::generate_media_metadata(&pool, photo_id, &Config::default())
         .await
         .expect("metadata generation");
@@ -59,23 +49,165 @@ async fn metadata_prepares_aspect_preserving_photo_only_classifier_inputs() {
             |row| row.get(0),
         )
         .expect("regenerated content hash");
-    assert_eq!(regenerated_content_hash, expected_content_hash);
-    let classifier_inputs = connection
-        .prepare("SELECT task, file_path FROM media_ai_inputs WHERE media_id = ? AND task IN ('screenshot_detection', 'document_detection') ORDER BY task")
-        .expect("classifier input query")
+    assert_eq!(regenerated_content_hash.len(), 64);
+    let ai_inputs = connection
+        .prepare("SELECT task, storage_root, file_path, content_hash FROM media_ai_inputs WHERE media_id = ? ORDER BY task")
+        .expect("AI input query")
         .query_map([photo_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })
-        .expect("classifier input rows")
+        .expect("AI input rows")
         .collect::<Result<Vec<_>, _>>()
-        .expect("classifier inputs");
-    assert_eq!(classifier_inputs.len(), 2);
-    for (task, input_path) in classifier_inputs {
-        let prepared = image::open(paths().previews.join(input_path)).expect("prepared classifier");
-        assert_eq!(prepared.width(), 2048, "{task} width");
-        assert!((682..=683).contains(&prepared.height()), "{task} height");
+        .expect("AI inputs");
+    assert_eq!(ai_inputs.len(), 7);
+    for (task, storage_root, input_path, content_hash) in ai_inputs {
+        assert_eq!(storage_root, "originals", "{task} storage root");
+        assert_eq!(input_path, relative_path, "{task} original path");
+        assert_eq!(content_hash, regenerated_content_hash, "{task} hash");
     }
     assert!(supplemental_path.is_file());
+}
+
+#[tokio::test]
+async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
+    init_test_paths();
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "full-resolution-frame.mp4");
+    let ai_directory = paths().previews.join("ai").join(media_id.to_string());
+    if ai_directory.exists() {
+        fs::remove_dir_all(&ai_directory).expect("remove stale AI fixture directory");
+    }
+    let relative_path = format!("full-resolution-frame-{media_id}.mp4");
+    let original_path = paths().originals.join(&relative_path);
+    fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
+    let ffmpeg = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x32:d=1",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&original_path)
+        .output()
+        .expect("video fixture command");
+    assert!(
+        ffmpeg.status.success(),
+        "video fixture: {}",
+        String::from_utf8_lossy(&ffmpeg.stderr)
+    );
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "UPDATE media SET file_path = ?, media_type = 'video', mime_type = 'video/mp4', import_state = 'imported' WHERE id = ?",
+            rusqlite::params![relative_path, media_id],
+        )
+        .expect("video media");
+
+    momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
+        .await
+        .expect("video metadata generation");
+    let canonical_original_hash: String = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT content_hash FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("video original hash");
+
+    momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
+        .await
+        .expect("repeated video metadata generation");
+
+    let connection = pool.get().expect("database connection");
+    let inputs = connection
+        .prepare("SELECT storage_root, file_path, mime_type, input_kind, frame_timestamp_ms FROM media_ai_inputs WHERE media_id = ? ORDER BY task")
+        .expect("video AI input query")
+        .query_map([media_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        })
+        .expect("video AI input rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("video AI inputs");
+    assert_eq!(inputs.len(), 5);
+    let expected_relative_path = inputs
+        .first()
+        .map(|(_, file_path, _, _, _)| file_path.clone())
+        .expect("shared video frame path");
+    assert_eq!(
+        expected_relative_path,
+        format!("ai/{media_id}/frames/{canonical_original_hash}.png")
+    );
+    for (storage_root, file_path, mime_type, input_kind, timestamp) in inputs {
+        assert_eq!(storage_root, "previews");
+        assert_eq!(file_path, expected_relative_path);
+        assert_eq!(mime_type, "image/png");
+        assert_eq!(input_kind, "video_frame");
+        assert_eq!(timestamp, Some(0));
+    }
+    let frame = image::open(paths().previews.join(expected_relative_path)).expect("video frame");
+    assert_eq!((frame.width(), frame.height()), (64, 32));
+    let frame_count = fs::read_dir(ai_directory.join("frames"))
+        .expect("video frame directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .count();
+    assert_eq!(frame_count, 1);
+}
+
+#[tokio::test]
+async fn metadata_rejects_an_original_without_an_image_mime_type() {
+    init_test_paths();
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "unsupported-original.jpg");
+    let relative_path = format!("unsupported-original-{media_id}.jpg");
+    let original_path = paths().originals.join(&relative_path);
+    fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
+    image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]))
+        .save(&original_path)
+        .expect("photo fixture");
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "UPDATE media SET file_path = ?, mime_type = 'application/octet-stream', import_state = 'imported' WHERE id = ?",
+            rusqlite::params![relative_path, media_id],
+        )
+        .expect("unsupported media MIME");
+
+    let error = momento_api::processor::metadata::generate_media_metadata(
+        &pool,
+        media_id,
+        &Config::default(),
+    )
+    .await
+    .expect_err("unsupported original should fail");
+
+    assert!(error.contains("supported image MIME type"));
+    let input_count: i64 = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT COUNT(*) FROM media_ai_inputs WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("AI input count");
+    assert_eq!(input_count, 0);
 }
 
 #[test]

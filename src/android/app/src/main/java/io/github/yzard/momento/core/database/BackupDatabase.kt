@@ -11,8 +11,6 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
 import io.github.yzard.momento.core.model.BackupState
 import kotlinx.coroutines.flow.Flow
 
@@ -84,15 +82,7 @@ abstract class BackupDatabase : RoomDatabase() {
     abstract fun backupAssetDao(): BackupAssetDao
 
     companion object {
-        private val migration1To2 = object : Migration(1, 2) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE backup_assets ADD COLUMN mediaId INTEGER")
-            }
-        }
-        private val migration2To3 = object : Migration(2, 3) { override fun migrate(db: SupportSQLiteDatabase) {} }
-
         fun create(context: Context): BackupDatabase = Room.databaseBuilder(context, BackupDatabase::class.java, "momento-backup.db")
-            .addMigrations(migration1To2, migration2To3)
             .build()
     }
 }

@@ -22,7 +22,7 @@ fn prepare_task_input(pool: &DbPool, task: &str, filename: &str) {
         .expect("metadata job");
     connection
         .execute(
-            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', ?, ?, 'image/jpeg', 4, 'hash')",
+            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'previews', ?, ?, 'image/jpeg', 4, 'hash')",
             rusqlite::params![media_id, task, filename, filename],
         )
         .expect("prepared input");

@@ -23,8 +23,8 @@ use crate::provider::{
 };
 use crate::transport::ResultDeliveryTransport;
 
-const MAX_INPUT_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_JOB_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_INPUT_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_JOB_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_INPUTS_PER_JOB: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

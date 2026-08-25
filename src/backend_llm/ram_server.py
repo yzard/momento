@@ -6,7 +6,6 @@ import json
 import threading
 import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
 from pathlib import Path
 
 import torch
@@ -49,9 +48,9 @@ class TaggingRuntime:
         self.model = ram_plus(pretrained=checkpoint, image_size=image_size, vit="swin_l")
         self.model.eval().to(self.device)
 
-    def infer(self, image_bytes):
+    def infer(self, image_source):
         try:
-            with Image.open(BytesIO(image_bytes)) as source:
+            with Image.open(image_source) as source:
                 source.load()
                 image = source.convert("RGB")
         except (OSError, ValueError) as error:
@@ -89,14 +88,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_inference(self):
         try:
-            image = read_runtime_input(self, self.input_root)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.send_json(400, {"detail": f"invalid runtime input: {error}"})
-            return
-        try:
-            tags = self.runtime.infer(image)
+            with read_runtime_input(self, self.input_root) as image_source:
+                tags = self.runtime.infer(image_source)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
+            return
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.send_json(400, {"detail": f"invalid runtime input: {error}"})
             return
         self.send_json(200, {"tags": tags})
 

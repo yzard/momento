@@ -66,7 +66,7 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "face.jpg");
     let connection = pool.get().expect("connection");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'previews', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
     connection
         .execute(
             "INSERT INTO face_grouping_runs (id, status) VALUES (1, 'running')",
@@ -74,7 +74,7 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
         )
         .expect("run");
     connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES ('face-job', ?, 1, 'face_detection', 'submitted')", [media_id]).expect("job");
-    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES ('face-job', 0, 'image', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", []).expect("job input");
+    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('face-job', 0, 'image', 'previews', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", []).expect("job input");
     let transaction = connection.unchecked_transaction().expect("transaction");
     let results = vec![JobInputResult {
         sequence: 0,
@@ -110,7 +110,7 @@ fn face_callback_records_success_when_no_faces_are_detected() {
         )
         .expect("run");
     connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES ('no-face-job', ?, 1, 'face_detection', 'submitted')", [media_id]).expect("job");
-    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES ('no-face-job', 0, 'image', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", []).expect("job input");
+    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('no-face-job', 0, 'image', 'previews', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", []).expect("job input");
     let transaction = connection.unchecked_transaction().expect("transaction");
     let results = vec![JobInputResult {
         sequence: 0,
@@ -326,7 +326,7 @@ fn face_start_associates_jobs_and_snapshots_self_contained_inputs() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'ai/face.jpg', 'face.jpg', 'image/jpeg', 4, 'abcd')", [media_id]).expect("input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'face_detection', 0, 'image', 'previews', 'ai/face.jpg', 'face.jpg', 'image/jpeg', 4, 'abcd')", [media_id]).expect("input");
     drop(connection);
 
     assert_eq!(face_detection::start(&pool, true).expect("start"), 1);

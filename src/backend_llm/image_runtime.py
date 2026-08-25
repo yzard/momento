@@ -2,7 +2,6 @@
 
 import threading
 from http.server import ThreadingHTTPServer
-from io import BytesIO
 
 
 class InvalidImageError(ValueError):
@@ -23,12 +22,12 @@ def select_cuda_device(requested_device, torch_module, task_name):
     return torch_module.device(requested_device)
 
 
-def decode_image(image_bytes):
+def decode_image(image_source):
     from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     try:
-        with Image.open(BytesIO(image_bytes)) as source:
+        with Image.open(image_source) as source:
             source.load()
             return ImageOps.exif_transpose(source).convert("RGB")
     except (OSError, UnidentifiedImageError, ValueError) as error:

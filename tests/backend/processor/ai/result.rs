@@ -48,7 +48,7 @@ fn insert_job_input(pool: &DbPool, job_id: &str, sequence: u32, frame_timestamp_
     pool.get()
         .expect("connection")
         .execute(
-            "INSERT INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, 'image', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash', ?)",
+            "INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, 'image', 'previews', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash', ?)",
             rusqlite::params![job_id, sequence, frame_timestamp_ms],
         )
         .expect("job input");
@@ -532,7 +532,7 @@ fn face_result_persists_crop_and_success_marker() {
         )
         .expect("run");
     connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status, attempts) VALUES ('result-face', ?, 1, 'face_detection', 'submitted', 1)", [media_id]).expect("job");
-    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES ('result-face', 0, 'image', ?, 'input.jpg', 'image/jpeg', ?, ?)", rusqlite::params![input_relative, input_bytes.len() as i64, input_hash]).expect("job input");
+    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('result-face', 0, 'image', 'previews', ?, 'input.jpg', 'image/jpeg', ?, ?)", rusqlite::params![input_relative, input_bytes.len() as i64, input_hash]).expect("job input");
     drop(connection);
     let embedding = base64::engine::general_purpose::STANDARD.encode(
         (0..512)

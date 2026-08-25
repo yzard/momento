@@ -27,7 +27,7 @@ fn metadata_reset_clears_durable_ai_input_records() {
     let connection = pool.get().expect("connection");
     connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (?, 'test.jpg', 'test.jpg', 'test.jpg', 'image', 'imported', 'local')", [media_id]).expect("media");
     let imported_media_id = connection.last_insert_rowid();
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'ai/test.jpg', 'test.jpg', 'image/jpeg', 1, 'hash')", [imported_media_id]).expect("input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'previews', 'ai/test.jpg', 'test.jpg', 'image/jpeg', 1, 'hash')", [imported_media_id]).expect("input");
     drop(connection);
     momento_api::processor::metadata_worker::reset_all(&pool).expect("reset");
     let connection = pool.get().expect("connection");
@@ -81,7 +81,7 @@ fn start_all_keeps_ocr_independent_of_optional_tasks() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'image', 'previews', 'ai/input.jpg', 'input.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
     drop(connection);
     let mut config = momento_api::config::Config::default();
     config.llm.enabled = true;
@@ -103,7 +103,7 @@ fn image_aesthetics_queueing_uses_its_result_table_and_enablement() {
             [media_id],
         )
         .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_aesthetics', 0, 'image', 'previews', 'ai/aesthetics.jpg', 'aesthetics.jpg', 'image/jpeg', 1, 'hash')", [media_id]).expect("input");
     drop(connection);
 
     assert_eq!(

@@ -445,7 +445,9 @@ async fn submission_streams_prepared_input_in_bounded_binary_chunks() {
             manifest,
             vec![PreparedSubmissionInput {
                 sequence: 0,
-                path: input_path,
+                file: tokio::fs::File::open(input_path)
+                    .await
+                    .expect("submission input"),
             }],
         )
         .await

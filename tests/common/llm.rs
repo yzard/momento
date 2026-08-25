@@ -51,6 +51,8 @@ fn websocket_control_contract_uses_tagged_camel_case() {
     assert_eq!(json["type"], "submissionStart");
     assert_eq!(json["manifest"]["jobId"], "abcdef12");
     assert_eq!(json["manifest"]["inputs"][0]["mimeType"], "image/jpeg");
+    assert!(json["manifest"]["inputs"][0].get("path").is_none());
+    assert!(json["manifest"]["inputs"][0].get("storageRoot").is_none());
     assert_eq!(
         serde_json::from_value::<ClientControlMessage>(json).expect("control message"),
         message

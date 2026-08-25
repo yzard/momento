@@ -6,20 +6,22 @@ use momento_common::llm::{CancelJobsRequest, JobInputDescriptor, JobManifest};
 use momento_common::rolling::{run_rolling_window, RollingWindowControl};
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::config::Config;
 use crate::constants::{
-    paths, DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
-    SCREENSHOT_DETECTION_MODEL_TYPE,
+    DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
 };
 use crate::database::{queries, DbPool};
 
+pub mod input;
 pub mod operation;
 pub mod result;
 pub mod transport;
 
 use transport::{LlmConnection, PreparedSubmissionInput, SubmissionOutcome, TransportHandle};
+
+use self::input::AiInputStorage;
 
 const CANCELLATION_CHUNK_SIZE: usize = 1000;
 
@@ -320,12 +322,11 @@ async fn submit_claimed_job(
     let mut descriptors = Vec::new();
     let mut prepared_inputs = Vec::new();
     for input in inputs {
-        let input_path = match crate::utils::path::resolve_existing_storage_path(
-            &paths().previews,
-            &input.file_path,
-        )
-        .await
-        {
+        let storage = match AiInputStorage::parse(&input.storage_root) {
+            Ok(storage) => storage,
+            Err(error) => return mark_failed(pool, &job_id, &error),
+        };
+        let input_path = match storage.resolve_existing(&input.file_path).await {
             Ok(input_path) => input_path,
             Err(error) => return mark_failed(pool, &job_id, &error.to_string()),
         };
@@ -335,22 +336,18 @@ async fn submit_claimed_job(
                 return mark_failed(pool, &job_id, "prepared AI input has an invalid byte size")
             }
         };
-        if let Err(error) =
-            verify_prepared_input(&input_path, input_size, &input.content_hash).await
-        {
-            return mark_failed(pool, &job_id, &error);
-        }
         if input_size == 0 {
             return mark_failed(pool, &job_id, "prepared AI input must not be empty");
         }
+        let file = match open_verified_input(&input_path, input_size, &input.content_hash).await {
+            Ok(file) => file,
+            Err(error) => return mark_failed(pool, &job_id, &error),
+        };
         let sequence = match u32::try_from(input.sequence) {
             Ok(sequence) => sequence,
             Err(_) => return mark_failed(pool, &job_id, "prepared AI input sequence is invalid"),
         };
-        prepared_inputs.push(PreparedSubmissionInput {
-            sequence,
-            path: input_path,
-        });
+        prepared_inputs.push(PreparedSubmissionInput { sequence, file });
         descriptors.push(JobInputDescriptor {
             sequence,
             filename: input.filename,
@@ -413,6 +410,16 @@ pub async fn verify_prepared_input(
     expected_size: u64,
     expected_hash: &str,
 ) -> Result<(), String> {
+    open_verified_input(path, expected_size, expected_hash)
+        .await
+        .map(|_| ())
+}
+
+pub async fn open_verified_input(
+    path: &std::path::Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<tokio::fs::File, String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| error.to_string())?;
@@ -438,11 +445,15 @@ pub async fn verify_prepared_input(
     if byte_count != expected_size || format!("{:x}", hasher.finalize()) != expected_hash {
         return Err("prepared AI input no longer matches its durable descriptor".to_string());
     }
-    Ok(())
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(file)
 }
 
 struct PreparedInput {
     sequence: i64,
+    storage_root: String,
     file_path: String,
     filename: String,
     mime_type: String,
@@ -460,13 +471,14 @@ fn load_inputs(pool: &DbPool, job_id: &str) -> Result<Vec<PreparedInput>, String
         .query_map([job_id], |row| {
             Ok(PreparedInput {
                 sequence: row.get(0)?,
-                file_path: row.get(1)?,
-                filename: row.get(2)?,
-                mime_type: row.get(3)?,
-                byte_size: row.get(4)?,
-                content_hash: row.get(5)?,
-                input_kind: row.get(6)?,
-                frame_timestamp_ms: row.get(7)?,
+                storage_root: row.get(1)?,
+                file_path: row.get(2)?,
+                filename: row.get(3)?,
+                mime_type: row.get(4)?,
+                byte_size: row.get(5)?,
+                content_hash: row.get(6)?,
+                input_kind: row.get(7)?,
+                frame_timestamp_ms: row.get(8)?,
             })
         })
         .map_err(|error| error.to_string())?

@@ -2,9 +2,13 @@ use crate::test_utils::{create_test_db, create_test_media};
 use momento_api::config::Config;
 use momento_api::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
 use momento_api::processor::ai::operation::{start_all_features, AiStartSource};
-use momento_api::processor::ai::{cancel_active_jobs, queue_task, verify_prepared_input};
+use momento_api::processor::ai::{
+    cancel_active_jobs, open_verified_input, queue_task, verify_prepared_input,
+};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
 
+mod input;
 mod operation;
 mod result;
 mod transport;
@@ -19,7 +23,7 @@ fn complete_metadata_with_input(pool: &momento_api::database::DbPool, media_id: 
         .expect("metadata job");
     connection
         .execute(
-            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'ai/classifier.jpg', 'classifier.jpg', 'image/jpeg', 4, 'hash')",
+            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, ?, 0, 'image', 'previews', 'ai/classifier.jpg', 'classifier.jpg', 'image/jpeg', 4, 'hash')",
             rusqlite::params![media_id, task],
         )
         .expect("classifier input");
@@ -67,7 +71,7 @@ fn classifier_queueing_allows_overlap_and_skips_completed_results() {
     let connection = pool.get().expect("database connection");
     connection
         .execute(
-            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'document_detection', 0, 'image', 'ai/document.jpg', 'document.jpg', 'image/jpeg', 4, 'hash')",
+            "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'document_detection', 0, 'image', 'previews', 'ai/document.jpg', 'document.jpg', 'image/jpeg', 4, 'hash')",
             [media_id],
         )
         .expect("document input");
@@ -124,6 +128,26 @@ async fn prepared_input_verification_streams_size_and_hash_validation() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn verified_input_handle_survives_source_path_removal() {
+    let directory = tempfile::tempdir().expect("input directory");
+    let path = directory.path().join("canonical-original.jpg");
+    let bytes = b"canonical original bytes";
+    std::fs::write(&path, bytes).expect("canonical original");
+    let content_hash = format!("{:x}", Sha256::digest(bytes));
+
+    let mut file = open_verified_input(&path, bytes.len() as u64, &content_hash)
+        .await
+        .expect("verified handle");
+    std::fs::remove_file(&path).expect("remove original path after verification");
+    let mut streamed = Vec::new();
+    file.read_to_end(&mut streamed)
+        .await
+        .expect("stream handle");
+
+    assert_eq!(streamed, bytes);
 }
 
 #[test]
