@@ -39,4 +39,21 @@ describe('mediaApi timeline classification', () => {
       search: 'holiday',
     })
   })
+
+  it('requests a resource-scoped URL for original media streaming', async () => {
+    post.mockResolvedValueOnce({
+      data: {
+        url: '/api/v1/media/42/original?ticket=signed',
+        expiresAt: '2026-08-26T00:00:00Z',
+      },
+    })
+
+    await expect(mediaApi.getFileStreamURL(42)).resolves.toBe(
+      '/api/v1/media/42/original?ticket=signed',
+    )
+    expect(post).toHaveBeenCalledWith('/media/access-ticket', {
+      mediaId: 42,
+      resource: 'original',
+    })
+  })
 })

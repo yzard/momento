@@ -82,6 +82,10 @@ pub struct SecurityConfig {
     pub access_token_expire_minutes: i64,
     #[serde(default = "defaults::refresh_token_expire_days")]
     pub refresh_token_expire_days: i64,
+    #[serde(default = "defaults::media_access_ticket_expire_hours")]
+    pub media_access_ticket_expire_hours: i64,
+    #[serde(default = "defaults::share_session_expire_hours")]
+    pub share_session_expire_hours: i64,
 }
 
 impl Default for SecurityConfig {
@@ -90,7 +94,32 @@ impl Default for SecurityConfig {
             secret_key: defaults::security_secret_key(),
             access_token_expire_minutes: defaults::ACCESS_TOKEN_EXPIRE_MINUTES,
             refresh_token_expire_days: defaults::REFRESH_TOKEN_EXPIRE_DAYS,
+            media_access_ticket_expire_hours: defaults::MEDIA_ACCESS_TICKET_EXPIRE_HOURS,
+            share_session_expire_hours: defaults::SHARE_SESSION_EXPIRE_HOURS,
         }
+    }
+}
+
+impl SecurityConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.secret_key.trim().is_empty() {
+            return Err(std::io::Error::other(
+                "security secret_key must not be empty",
+            ));
+        }
+        if self.access_token_expire_minutes <= 0 || self.refresh_token_expire_days <= 0 {
+            return Err(std::io::Error::other(
+                "security access-token and refresh-token expirations must be positive",
+            ));
+        }
+        if !(1..=168).contains(&self.media_access_ticket_expire_hours)
+            || !(1..=168).contains(&self.share_session_expire_hours)
+        {
+            return Err(std::io::Error::other(
+                "security media ticket and share session expirations must be within 1..=168 hours",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -509,6 +538,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
         api_key.as_deref(),
     )?;
     config.server.validate()?;
+    config.security.validate()?;
     config.webdav.validate()?;
     config.backup.validate()?;
     config.llm.validate()?;

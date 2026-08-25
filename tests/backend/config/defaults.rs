@@ -15,6 +15,14 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         Some(runtime_defaults.server.request_log_body_max_bytes as i64)
     );
     assert_eq!(
+        template["security"]["media_access_ticket_expire_hours"].as_integer(),
+        Some(runtime_defaults.security.media_access_ticket_expire_hours)
+    );
+    assert_eq!(
+        template["security"]["share_session_expire_hours"].as_integer(),
+        Some(runtime_defaults.security.share_session_expire_hours)
+    );
+    assert_eq!(
         template["webdav"]["max_upload_bytes"].as_integer(),
         Some(50 * 1024 * 1024 * 1024)
     );

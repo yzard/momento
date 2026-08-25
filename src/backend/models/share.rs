@@ -40,6 +40,13 @@ pub struct ShareVerifyRequest {
     pub password: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareVerifyResponse {
+    pub valid: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareMediaRequest {

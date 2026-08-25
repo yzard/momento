@@ -1,17 +1,18 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   getBatch: vi.fn(),
   getPreviewBatch: vi.fn(),
+  getFileStreamURL: vi.fn(),
 }))
 
 vi.mock('../../../../src/frontend/api/media', () => ({
   mediaApi: {
     getBatch: mocks.getBatch,
     getPreviewBatch: mocks.getPreviewBatch,
-    getFileStreamUrl: (id: number) => `/stream/${id}`,
+    getFileStreamURL: mocks.getFileStreamURL,
   },
 }))
 
@@ -33,6 +34,8 @@ describe('Lightbox', () => {
   beforeEach(() => {
     mocks.getBatch.mockReset()
     mocks.getPreviewBatch.mockReset()
+    mocks.getFileStreamURL.mockReset()
+    mocks.getFileStreamURL.mockImplementation(async (id: number) => `/stream/${id}`)
     mocks.getBatch.mockResolvedValue([
       { id: 1, mediaType: 'image', originalFilename: 'first.jpg' },
       { id: 2, mediaType: 'image', originalFilename: 'second.jpg' },
@@ -65,5 +68,44 @@ describe('Lightbox', () => {
 
     await act(async () => first.resolve(new Map([[1, 'first-preview']])) )
     expect(screen.getByRole('img', { name: 'second.jpg' }).getAttribute('src')).toBe('second-preview')
+  })
+
+  it('loads video through an asynchronous media access ticket', async () => {
+    mocks.getBatch.mockResolvedValueOnce([
+      { id: 7, mediaType: 'video', originalFilename: 'video.mp4' },
+    ])
+
+    const view = render(
+      <MemoryRouter>
+        <Lightbox mediaIds={[7]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(7))
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/7'))
+  })
+
+  it('restores video position after refreshing a failed stream ticket', async () => {
+    mocks.getBatch.mockResolvedValueOnce([
+      { id: 8, mediaType: 'video', originalFilename: 'long-video.mp4' },
+    ])
+    mocks.getFileStreamURL
+      .mockResolvedValueOnce('/stream/8/first')
+      .mockResolvedValueOnce('/stream/8/refreshed')
+    const view = render(
+      <MemoryRouter>
+        <Lightbox mediaIds={[8]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/8/first'))
+    const firstVideo = view.container.querySelector('video') as HTMLVideoElement
+    firstVideo.currentTime = 321
+    fireEvent.error(firstVideo)
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/8/refreshed'))
+    const refreshedVideo = view.container.querySelector('video') as HTMLVideoElement
+    fireEvent.loadedMetadata(refreshedVideo)
+
+    expect(refreshedVideo.currentTime).toBe(321)
+    expect(mocks.getFileStreamURL).toHaveBeenCalledTimes(2)
   })
 })

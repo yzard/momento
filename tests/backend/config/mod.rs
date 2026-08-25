@@ -36,6 +36,22 @@ fn test_load_config_reads_server_paths() {
 }
 
 #[test]
+fn security_scoped_credential_expirations_must_be_within_one_week() {
+    for (field, value) in [
+        ("media_access_ticket_expire_hours", 0),
+        ("share_session_expire_hours", 169),
+    ] {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = write_config(&directory, &format!("[security]\n{field} = {value}\n"));
+
+        let error = load_config(&path).expect_err("invalid scoped credential expiration");
+        assert!(error.to_string().contains(
+            "security media ticket and share session expirations must be within 1..=168 hours"
+        ));
+    }
+}
+
+#[test]
 fn config_environment_resolves_the_llm_service_address() {
     let resolved = resolve_config_environment(
         "server_address = \"${LLM_SERVICE_ADDRESS}\"",

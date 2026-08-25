@@ -1,7 +1,11 @@
-use crate::auth::{jwt::decode_access_token, AdminPasswordReset};
+use crate::auth::{
+    jwt::{decode_access_token, decode_media_access_ticket},
+    AdminPasswordReset,
+};
 use crate::config::Config;
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::AppError;
+use crate::models::MediaAccessResource;
 use axum::{
     body::Body,
     extract::{FromRequestParts, Request, State},
@@ -30,11 +34,6 @@ pub struct AppState {
     pub admin_password_reset: AdminPasswordReset,
 }
 
-#[derive(Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
-}
-
 #[axum::async_trait]
 impl<S> FromRequestParts<S> for CurrentUser
 where
@@ -49,30 +48,9 @@ where
             return Ok(current_user.clone());
         }
 
-        // Try to get token from Authorization header
-        let mut token_str: Option<String> = None;
+        let token = bearer_token(parts)?;
 
-        if let Some(auth_header) = parts.headers.get(AUTHORIZATION) {
-            if let Ok(auth_value) = auth_header.to_str() {
-                if let Some(bearer_token) = auth_value.strip_prefix("Bearer ") {
-                    token_str = Some(bearer_token.to_string());
-                }
-            }
-        }
-
-        // Fall back to query parameter
-        if token_str.is_none() {
-            if let Some(query) = parts.uri.query() {
-                if let Ok(params) = serde_urlencoded::from_str::<TokenQuery>(query) {
-                    token_str = params.token;
-                }
-            }
-        }
-
-        let token =
-            token_str.ok_or_else(|| AppError::Authentication("Not authenticated".to_string()))?;
-
-        let claims = decode_access_token(&token, &app_state.config)
+        let claims = decode_access_token(token, &app_state.config)
             .ok_or_else(|| AppError::Authentication("Invalid or expired token".to_string()))?;
 
         let user_id: i64 = claims
@@ -90,40 +68,117 @@ where
             }
         }
 
-        let conn = app_state.pool.get().map_err(AppError::Pool)?;
+        load_current_user(&app_state, user_id)
+    }
+}
 
-        let user = fetch_one(
-            &conn,
-            queries::auth::SELECT_USER_FOR_TOKEN,
-            &[&user_id],
-            |row| {
-                Ok(UserRow {
-                    id: row.get(0)?,
-                    username: row.get(1)?,
-                    email: row.get(2)?,
-                    role: row.get(3)?,
-                    must_change_password: row.get(4)?,
-                    is_active: row.get(5)?,
-                })
-            },
-        )?
-        .ok_or_else(|| AppError::Authentication("User not found".to_string()))?;
+#[derive(Deserialize)]
+struct MediaAccessTicketQuery {
+    ticket: String,
+}
 
-        if user.is_active == 0 {
-            return Err(AppError::Authentication("User is inactive".to_string()));
+pub struct MediaAccessAuthorization {
+    user_id: i64,
+    ticket_scope: Option<(i64, MediaAccessResource)>,
+}
+
+impl MediaAccessAuthorization {
+    pub fn authorize(&self, media_id: i64, resource: MediaAccessResource) -> Result<i64, AppError> {
+        if let Some((ticket_media_id, ticket_resource)) = self.ticket_scope {
+            if ticket_media_id != media_id || ticket_resource != resource {
+                return Err(AppError::Authorization(
+                    "Media access ticket does not match the requested resource".to_string(),
+                ));
+            }
+        }
+        Ok(self.user_id)
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for MediaAccessAuthorization
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        if parts.headers.contains_key(AUTHORIZATION) {
+            let current_user = CurrentUser::from_request_parts(parts, state).await?;
+            return Ok(Self {
+                user_id: current_user.id,
+                ticket_scope: None,
+            });
         }
 
-        Ok(CurrentUser {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            role: user.role,
-            must_change_password: user.must_change_password != 0
-                || app_state
-                    .admin_password_reset
-                    .requires_password_change(user.id),
+        let query = parts.uri.query().ok_or_else(|| {
+            AppError::Authentication("Media access ticket is required".to_string())
+        })?;
+        let ticket_query = serde_urlencoded::from_str::<MediaAccessTicketQuery>(query)
+            .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
+        let claims = decode_media_access_ticket(&ticket_query.ticket, &app_state.config)
+            .ok_or_else(|| {
+                AppError::Authentication("Invalid or expired media access ticket".to_string())
+            })?;
+        let user_id = claims
+            .sub
+            .parse::<i64>()
+            .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
+        let current_user = load_current_user(&app_state, user_id)?;
+        if current_user.must_change_password {
+            return Err(AppError::Forbidden("Password change required".to_string()));
+        }
+
+        Ok(Self {
+            user_id,
+            ticket_scope: Some((claims.media_id, claims.resource)),
         })
     }
+}
+
+fn bearer_token(parts: &Parts) -> Result<&str, AppError> {
+    parts
+        .headers
+        .get(AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|authorization| authorization.strip_prefix("Bearer "))
+        .ok_or_else(|| AppError::Authentication("Not authenticated".to_string()))
+}
+
+fn load_current_user(app_state: &AppState, user_id: i64) -> Result<CurrentUser, AppError> {
+    let connection = app_state.pool.get().map_err(AppError::Pool)?;
+    let user = fetch_one(
+        &connection,
+        queries::auth::SELECT_USER_FOR_TOKEN,
+        &[&user_id],
+        |row| {
+            Ok(UserRow {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                email: row.get(2)?,
+                role: row.get(3)?,
+                must_change_password: row.get(4)?,
+                is_active: row.get(5)?,
+            })
+        },
+    )?
+    .ok_or_else(|| AppError::Authentication("User not found".to_string()))?;
+    if user.is_active == 0 {
+        return Err(AppError::Authentication("User is inactive".to_string()));
+    }
+
+    Ok(CurrentUser {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        must_change_password: user.must_change_password != 0
+            || app_state
+                .admin_password_reset
+                .requires_password_change(user.id),
+    })
 }
 
 pub async fn password_change_guard(

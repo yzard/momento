@@ -1,8 +1,8 @@
 use crate::test_utils::{create_test_app, create_test_media, create_test_user};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use axum::http::StatusCode;
 use axum_test::TestServer;
-use momento_api::auth::create_access_token;
+use momento_api::auth::{create_access_token, hash_password};
 use momento_api::config::Config;
 use serde_json::{json, Value};
 
@@ -205,4 +205,85 @@ async fn password_verification_rejects_expired_links() {
         .json(&json!({ "password": "anything" }))
         .await;
     assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn password_protected_public_shares_use_a_path_scoped_secure_session_cookie() {
+    let (app, pool) = create_test_app();
+    let owner_id = create_test_user(&pool, "protected-owner", "protected-owner@example.com");
+    let media_id = create_test_media(&pool, "protected.jpg");
+    let password_hash = hash_password("secret").expect("password hash");
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO share_links (id, user_id, media_id, token, password_hash) VALUES (900, ?, ?, 'protected-token', ?)",
+            rusqlite::params![owner_id, media_id, password_hash],
+        )
+        .expect("share link");
+    let server = TestServer::new(app).expect("server");
+
+    server
+        .get("/api/v1/public/share/protected-token?password=secret")
+        .await
+        .assert_status_unauthorized();
+
+    let invalid = server
+        .post("/api/v1/public/share/protected-token/verify")
+        .json(&json!({"password": "wrong"}))
+        .await;
+    invalid.assert_status_ok();
+    let invalid_body: Value = invalid.json();
+    assert_eq!(invalid_body["valid"], false);
+    assert!(invalid.headers().get(SET_COOKIE).is_none());
+
+    let verified = server
+        .post("/api/v1/public/share/protected-token/verify")
+        .json(&json!({"password": "secret"}))
+        .await;
+    verified.assert_status_ok();
+    let set_cookie = verified
+        .header(SET_COOKIE)
+        .to_str()
+        .expect("set-cookie")
+        .to_string();
+    assert!(set_cookie.contains("Path=/api/v1/public/share/protected-token"));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("Secure"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+    let cookie = set_cookie.split(';').next().expect("session cookie");
+
+    let content = server
+        .get("/api/v1/public/share/protected-token")
+        .add_header(COOKIE, cookie)
+        .await;
+    content.assert_status_ok();
+    content.assert_header("referrer-policy", "no-referrer");
+    server
+        .get("/api/v1/public/share/protected-token")
+        .add_header(COOKIE, "momento_share_session=tampered")
+        .await
+        .assert_status_unauthorized();
+
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO share_links (id, user_id, media_id, token, password_hash) VALUES (901, ?, ?, 'other-token', ?)",
+            rusqlite::params![owner_id, media_id, hash_password("secret").expect("password hash")],
+        )
+        .expect("other share link");
+    server
+        .get("/api/v1/public/share/other-token")
+        .add_header(COOKIE, cookie)
+        .await
+        .assert_status_unauthorized();
+
+    pool.get()
+        .expect("connection")
+        .execute("DELETE FROM share_links WHERE id = 900", [])
+        .expect("delete share link");
+    server
+        .get("/api/v1/public/share/protected-token")
+        .add_header(COOKIE, cookie)
+        .await
+        .assert_status_not_found();
 }

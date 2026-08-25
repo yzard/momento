@@ -10,6 +10,8 @@ pub(crate) const SERVER_API_REQUEST_BODY_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const SERVER_REQUEST_LOG_BODY_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const ACCESS_TOKEN_EXPIRE_MINUTES: i64 = 30;
 pub(crate) const REFRESH_TOKEN_EXPIRE_DAYS: i64 = 7;
+pub(crate) const MEDIA_ACCESS_TICKET_EXPIRE_HOURS: i64 = 24;
+pub(crate) const SHARE_SESSION_EXPIRE_HOURS: i64 = 24;
 pub(crate) const WEBDAV_MOUNT_PATH: &str = "/webdav";
 pub(crate) const WEBDAV_REALM: &str = "Momento WebDAV";
 pub(crate) const WEBDAV_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
@@ -126,6 +128,14 @@ pub(crate) fn access_token_expire_minutes() -> i64 {
 
 pub(crate) fn refresh_token_expire_days() -> i64 {
     REFRESH_TOKEN_EXPIRE_DAYS
+}
+
+pub(crate) fn media_access_ticket_expire_hours() -> i64 {
+    MEDIA_ACCESS_TICKET_EXPIRE_HOURS
+}
+
+pub(crate) fn share_session_expire_hours() -> i64 {
+    SHARE_SESSION_EXPIRE_HOURS
 }
 
 pub(crate) fn webdav_mount_path() -> String {
@@ -322,6 +332,14 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{REFRESH_TOKEN_EXPIRE_DAYS}}",
             REFRESH_TOKEN_EXPIRE_DAYS.to_string(),
+        ),
+        (
+            "{{MEDIA_ACCESS_TICKET_EXPIRE_HOURS}}",
+            MEDIA_ACCESS_TICKET_EXPIRE_HOURS.to_string(),
+        ),
+        (
+            "{{SHARE_SESSION_EXPIRE_HOURS}}",
+            SHARE_SESSION_EXPIRE_HOURS.to_string(),
         ),
         ("{{WEBDAV_MOUNT_PATH}}", WEBDAV_MOUNT_PATH.to_string()),
         ("{{WEBDAV_REALM}}", WEBDAV_REALM.to_string()),

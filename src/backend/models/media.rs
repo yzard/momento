@@ -112,6 +112,34 @@ pub struct MediaDeleteRequest {
     pub media_ids: Vec<i64>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaAccessResource {
+    Original,
+}
+
+impl MediaAccessResource {
+    pub fn path_segment(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAccessTicketRequest {
+    pub media_id: i64,
+    pub resource: MediaAccessResource,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAccessTicketResponse {
+    pub url: String,
+    pub expires_at: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteMediaResponse {

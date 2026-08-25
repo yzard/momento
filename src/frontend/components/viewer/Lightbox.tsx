@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, X, Loader2 } from 'lucide-react'
 import { MediaDetails } from './MediaDetails'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
+import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
 
 interface LightboxProps {
   mediaIds: number[]
@@ -56,6 +57,13 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
   const [isDragging, setIsDragging] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const videoResumeTimeRef = useRef(0)
+  const {
+    streamURL,
+    isStreamLoading,
+    retryStreamOnce,
+  } = useMediaStreamURL(isVideo ? currentMedia.id : null, Boolean(isVideo))
   const dragStart = useRef({ x: 0, y: 0 })
   const offsetStart = useRef({ x: 0, y: 0 })
 
@@ -133,9 +141,11 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
     setPreviewUrl(null)
 
     if (currentMedia.mediaType === 'video') {
-      setPreviewUrl(mediaApi.getFileStreamUrl(currentMedia.id))
+      setPreviewUrl(null)
       setIsLoading(false)
-      return
+      return () => {
+        cancelled = true
+      }
     }
 
     mediaApi.getPreviewBatch([currentMedia.id])
@@ -155,6 +165,20 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
       cancelled = true
     }
   }, [currentMedia])
+
+  const displayedMediaURL = isVideo ? streamURL : previewUrl
+  const isMediaLoading = isVideo ? isStreamLoading : isLoading
+
+  const handleVideoStreamError = () => {
+    videoResumeTimeRef.current = videoRef.current?.currentTime ?? 0
+    retryStreamOnce()
+  }
+
+  const restoreVideoTime = () => {
+    if (!videoRef.current || videoResumeTimeRef.current <= 0) return
+    videoRef.current.currentTime = videoResumeTimeRef.current
+    videoResumeTimeRef.current = 0
+  }
 
   if (!currentMedia && isMetadataLoading) {
     return (
@@ -243,21 +267,24 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
           </button>
         )}
 
-        {isLoading || isMetadataLoading ? (
+        {isMediaLoading || isMetadataLoading ? (
           <div className="flex items-center justify-center">
             <Loader2 className="w-12 h-12 animate-spin text-muted-foreground" />
           </div>
         ) : metadataError ? (
           <div className="text-sm text-muted-foreground">Unable to load media details.</div>
-        ) : previewUrl ? (
+        ) : displayedMediaURL ? (
           isVideo ? (
             <video
-              src={previewUrl}
+              ref={videoRef}
+              src={displayedMediaURL}
               className="max-w-full max-h-full rounded-lg shadow-2xl"
               controls
               loop
               playsInline
               preload="metadata"
+              onError={handleVideoStreamError}
+              onLoadedMetadata={restoreVideoTime}
             >
               <track kind="captions" />
             </video>
@@ -274,7 +301,7 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
               aria-label="Toggle zoom"
             >
               <img
-                src={previewUrl}
+                src={displayedMediaURL}
                 alt={currentMedia.originalFilename}
                 className="max-w-full max-h-full object-contain rounded-lg shadow-2xl select-none"
                 style={imageStyle}

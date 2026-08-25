@@ -2,7 +2,8 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { Play, Plus, Trash2 } from 'lucide-react'
-import { batchLoader, previewBatchLoader } from '../../utils/batcher'
+import { batchLoader } from '../../utils/batcher'
+import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
 
 interface PhotoGridProps {
   media: Media[]
@@ -72,7 +73,6 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => 
     mediaApi.getCachedThumbnailUrl(item.id) || null
   )
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -81,6 +81,10 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
   const isGif = item.mimeType?.toLowerCase().includes('gif') || item.originalFilename.toLowerCase().endsWith('.gif')
   const shouldPreview = isVideo || isGif
   const formatBadge = getFormatBadge(item.mimeType, item.originalFilename, item.mediaType)
+  const {
+    streamURL: previewUrl,
+    retryStreamOnce,
+  } = useMediaStreamURL(shouldPreview ? item.id : null, showVideo)
 
   // Load thumbnail with IntersectionObserver for lazy loading
   useEffect(() => {
@@ -117,24 +121,11 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
   const handleMouseEnter = useCallback(() => {
     setIsHovering(true)
     if (shouldPreview) {
-      hoverTimeoutRef.current = setTimeout(async () => {
-        // Load preview URL if not already loaded
-        if (!previewUrl) {
-          try {
-            if (item.mediaType === 'video' || isGif) {
-              setPreviewUrl(mediaApi.getFileStreamUrl(item.id))
-            } else {
-              const url = await previewBatchLoader.load(item.id)
-              setPreviewUrl(url)
-            }
-          } catch (error) {
-            console.error('Failed to load preview:', error)
-          }
-        }
+      hoverTimeoutRef.current = setTimeout(() => {
         setShowVideo(true)
       }, 500)
     }
-  }, [shouldPreview, previewUrl, item.id, item.mediaType, isGif])
+  }, [shouldPreview])
 
   const handleMouseLeave = useCallback(() => {
     setIsHovering(false)
@@ -189,6 +180,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
             src={previewUrl}
             alt={item.originalFilename}
             className="absolute inset-0 w-full h-full object-cover"
+            onError={retryStreamOnce}
           />
         ) : (
           <video
@@ -201,6 +193,7 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
             playsInline
             onPlay={() => setIsVideoPlaying(true)}
             onTimeUpdate={handleVideoTimeUpdate}
+            onError={retryStreamOnce}
           />
         )
       )}

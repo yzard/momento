@@ -1,26 +1,26 @@
 use axum::{
-    body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
-    response::Response,
+    http::{header, HeaderMap, HeaderValue},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
 use indexmap::IndexMap;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_util::io::ReaderStream;
 
-use crate::auth::{AppState, CurrentUser};
+use crate::auth::{
+    create_media_access_ticket as sign_media_access_ticket, AppState, CurrentUser,
+    MediaAccessAuthorization,
+};
 use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DeleteMediaResponse, MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaResponse,
-    MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse, ThumbnailBatchRequest,
-    ThumbnailBatchResponse, ThumbnailSize, TimelineDirection, TimelineListRequest,
-    TimelineListResponse, TimelineMarker, TimelineMarkersRequest, TimelineMarkersResponse,
+    DeleteMediaResponse, MediaAccessResource, MediaAccessTicketRequest, MediaAccessTicketResponse,
+    MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaResponse, MediaUpdateRequest,
+    PreviewBatchRequest, PreviewBatchResponse, ThumbnailBatchRequest, ThumbnailBatchResponse,
+    ThumbnailSize, TimelineDirection, TimelineListRequest, TimelineListResponse, TimelineMarker,
+    TimelineMarkersRequest, TimelineMarkersResponse,
 };
 use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
 use crate::processor::metadata::reverse_geocoding::reverse_geocode;
@@ -31,6 +31,8 @@ use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use super::file_stream::{serve_file, ContentDisposition};
+
 const TIMELINE_START_DATE: &str = "0000-01-01T00:00:00";
 const TIMELINE_END_DATE: &str = "9999-12-31T23:59:59";
 const MAX_MEDIA_BATCH_SIZE: usize = 500;
@@ -40,6 +42,7 @@ pub fn router() -> Router<AppState> {
         .route("/timeline/list", post(list_timeline))
         .route("/timeline/markers", post(get_timeline_markers))
         .route("/media/get-batch", post(get_media_batch))
+        .route("/media/access-ticket", post(create_media_access_ticket))
         .route("/media/update", post(update_media))
         .route("/media/delete", post(delete_media))
         .route("/media/:media_id/original", get(get_media_original))
@@ -910,11 +913,46 @@ struct BinaryMediaInfo {
 
 async fn get_media_original(
     State(state): State<AppState>,
-    current_user: CurrentUser,
+    authorization: MediaAccessAuthorization,
     Path(media_id): Path<i64>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    serve_original(&state, current_user.id, media_id, &headers).await
+    let user_id = authorization.authorize(media_id, MediaAccessResource::Original)?;
+    serve_original(&state, user_id, media_id, &headers).await
+}
+
+async fn create_media_access_ticket(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<MediaAccessTicketRequest>,
+) -> AppResult<Response> {
+    load_binary_media_info(
+        &state,
+        current_user.id,
+        request.media_id,
+        queries::media::SELECT_BINARY_MEDIA_INFO,
+    )?;
+    let (ticket, expires_at) = sign_media_access_ticket(
+        current_user.id,
+        request.media_id,
+        request.resource,
+        &state.config,
+    )?;
+    let url = format!(
+        "/api/v1/media/{}/{}?ticket={}",
+        request.media_id,
+        request.resource.path_segment(),
+        ticket
+    );
+    let mut response = Json(MediaAccessTicketResponse {
+        url,
+        expires_at: expires_at.to_rfc3339(),
+    })
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn get_media_thumbnail(
@@ -964,7 +1002,15 @@ async fn get_media_preview(
         queries::media::SELECT_BINARY_MEDIA_INFO,
     )?;
     let (path, content_type) = resolve_preview_path(&media, current_user.id).await?;
-    serve_file(path, &content_type, &headers, None, false).await
+    serve_file(
+        path,
+        &content_type,
+        &headers,
+        None,
+        false,
+        ContentDisposition::Inline,
+    )
+    .await
 }
 
 async fn serve_original(
@@ -989,6 +1035,7 @@ async fn serve_original(
         headers,
         Some(&media.original_filename),
         true,
+        ContentDisposition::Inline,
     )
     .await
 }
@@ -1007,7 +1054,15 @@ async fn serve_thumbnail(
         .to_str()
         .ok_or_else(|| AppError::NotFound("Thumbnail path is invalid".to_string()))?;
     let path = resolve_existing_storage_path(thumbnail_base_directory(size), relative_path).await?;
-    serve_file(path, "image/jpeg", headers, None, false).await
+    serve_file(
+        path,
+        "image/jpeg",
+        headers,
+        None,
+        false,
+        ContentDisposition::Inline,
+    )
+    .await
 }
 
 fn load_binary_media_info(
@@ -1255,187 +1310,4 @@ async fn get_media_preview_batch(
     }
 
     Ok(Json(PreviewBatchResponse { previews }))
-}
-
-async fn serve_file(
-    path: std::path::PathBuf,
-    content_type: &str,
-    headers: &HeaderMap,
-    filename: Option<&str>,
-    allow_ranges: bool,
-) -> AppResult<Response> {
-    let metadata = tokio::fs::metadata(&path).await?;
-    let file_size = metadata.len();
-    let etag = file_etag(&metadata);
-    if matches_if_none_match(headers, &etag) {
-        return Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header(header::ETAG, etag)
-            .header(header::CACHE_CONTROL, "private")
-            .body(Body::empty())
-            .map_err(|error| AppError::Internal(error.to_string()));
-    }
-
-    let range_header = allow_ranges
-        .then(|| if_range_allows_range(headers, &etag))
-        .and_then(|allowed| {
-            allowed.then(|| {
-                headers
-                    .get(header::RANGE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            })
-        })
-        .flatten();
-
-    if let Some(range_str) = range_header {
-        let Some((start, end)) = parse_range(&range_str, file_size) else {
-            return range_not_satisfiable(file_size);
-        };
-
-        let mut file = File::open(&path).await?;
-        file.seek(std::io::SeekFrom::Start(start)).await?;
-
-        let length = end - start + 1;
-        let stream = ReaderStream::new(file.take(length));
-        let body = Body::from_stream(stream);
-
-        let mut response = Response::builder()
-            .status(StatusCode::PARTIAL_CONTENT)
-            .header(header::CONTENT_TYPE, content_type)
-            .header(header::ACCEPT_RANGES, "bytes")
-            .header(header::CONTENT_LENGTH, length)
-            .header(header::ETAG, &etag)
-            .header(header::CACHE_CONTROL, "private")
-            .header(
-                header::CONTENT_RANGE,
-                format!("bytes {}-{}/{}", start, end, file_size),
-            );
-
-        if let Some(name) = filename {
-            response = response.header(
-                header::CONTENT_DISPOSITION,
-                format!(
-                    "inline; filename=\"{}\"",
-                    content_disposition_filename(name)
-                ),
-            );
-        }
-
-        response
-            .body(body)
-            .map_err(|e| AppError::Internal(e.to_string()))
-    } else {
-        let file = File::open(&path).await?;
-        let stream = ReaderStream::new(file);
-        let body = Body::from_stream(stream);
-
-        let mut response = Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, content_type)
-            .header(header::CONTENT_LENGTH, file_size)
-            .header(header::ETAG, &etag)
-            .header(header::CACHE_CONTROL, "private");
-
-        if allow_ranges {
-            response = response.header(header::ACCEPT_RANGES, "bytes");
-        }
-
-        if let Some(name) = filename {
-            response = response.header(
-                header::CONTENT_DISPOSITION,
-                format!(
-                    "inline; filename=\"{}\"",
-                    content_disposition_filename(name)
-                ),
-            );
-        }
-
-        response
-            .body(body)
-            .map_err(|e| AppError::Internal(e.to_string()))
-    }
-}
-
-fn file_etag(metadata: &std::fs::Metadata) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("W/\"{}-{modified}\"", metadata.len())
-}
-
-fn matches_if_none_match(headers: &HeaderMap, etag: &str) -> bool {
-    headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|candidate| candidate.trim() == "*" || candidate.trim() == etag)
-        })
-}
-
-fn if_range_allows_range(headers: &HeaderMap, etag: &str) -> bool {
-    match headers
-        .get(header::IF_RANGE)
-        .and_then(|value| value.to_str().ok())
-    {
-        None => true,
-        Some(value) => value == etag,
-    }
-}
-
-fn range_not_satisfiable(file_size: u64) -> AppResult<Response> {
-    Response::builder()
-        .status(StatusCode::RANGE_NOT_SATISFIABLE)
-        .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
-        .header(header::CACHE_CONTROL, "private")
-        .body(Body::empty())
-        .map_err(|error| AppError::Internal(error.to_string()))
-}
-
-fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
-    if file_size == 0 {
-        return None;
-    }
-    let range = range_header.strip_prefix("bytes=")?;
-    if range.contains(',') {
-        return None;
-    }
-    let (start, end) = range.split_once('-')?;
-    if start.is_empty() {
-        let suffix_length = end.parse::<u64>().ok()?;
-        if suffix_length == 0 {
-            return None;
-        }
-        return Some((file_size.saturating_sub(suffix_length), file_size - 1));
-    }
-    let start = start.parse::<u64>().ok()?;
-    if start >= file_size {
-        return None;
-    }
-    if end.is_empty() {
-        return Some((start, file_size - 1));
-    }
-    let end = end.parse::<u64>().ok()?;
-    if end < start {
-        return None;
-    }
-    Some((start, end.min(file_size - 1)))
-}
-
-fn content_disposition_filename(filename: &str) -> String {
-    filename
-        .chars()
-        .map(|character| {
-            if character == '"' || character == '\\' || character.is_control() {
-                '_'
-            } else {
-                character
-            }
-        })
-        .collect()
 }

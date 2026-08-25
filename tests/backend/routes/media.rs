@@ -138,6 +138,48 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
     let authorization = format!("Bearer {}", access_token(user_id));
 
     server
+        .get(&format!(
+            "/api/v1/media/{media_id}/original?token={}",
+            access_token(user_id)
+        ))
+        .await
+        .assert_status_unauthorized();
+
+    let ticket_response = server
+        .post("/api/v1/media/access-ticket")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({"mediaId": media_id, "resource": "original"}))
+        .await;
+    ticket_response.assert_status_ok();
+    ticket_response.assert_header(CACHE_CONTROL, "no-store");
+    let ticket_body: Value = ticket_response.json();
+    let ticket_url = ticket_body["url"].as_str().expect("ticket URL");
+    assert!(ticket_body["expiresAt"].as_str().is_some());
+    let ticket_range = server.get(ticket_url).add_header(RANGE, "bytes=1-3").await;
+    ticket_range.assert_status(StatusCode::PARTIAL_CONTENT);
+    ticket_range.assert_header(CONTENT_RANGE, "bytes 1-3/6");
+    ticket_range.assert_header("referrer-policy", "no-referrer");
+
+    let (ticket_prefix, ticket) = ticket_url.split_once("?ticket=").expect("ticket query");
+    server
+        .get(&format!("{ticket_prefix}?ticket={ticket}tampered"))
+        .await
+        .assert_status_unauthorized();
+    server
+        .get(&format!(
+            "/api/v1/media/{}/original?ticket={ticket}",
+            media_id + 10_000
+        ))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    server
+        .get(&format!(
+            "/api/v1/media/{media_id}/thumbnail?ticket={ticket}"
+        ))
+        .await
+        .assert_status_unauthorized();
+
+    server
         .get(&format!("/api/v1/media/{media_id}/thumbnail"))
         .add_header(AUTHORIZATION, authorization.clone())
         .await
@@ -225,6 +267,21 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
         .await;
     invalid_range.assert_status(StatusCode::RANGE_NOT_SATISFIABLE);
     invalid_range.assert_header(CONTENT_RANGE, "bytes */6");
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE media_access SET deleted_at = datetime('now') WHERE media_id = ? AND user_id = ?",
+            rusqlite::params![media_id, user_id],
+        )
+        .expect("revoke media access");
+    server.get(ticket_url).await.assert_status_not_found();
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE media_access SET deleted_at = NULL WHERE media_id = ? AND user_id = ?",
+            rusqlite::params![media_id, user_id],
+        )
+        .expect("restore media access");
     std::fs::write(&originals, b"").expect("empty original bytes");
     let empty_range = server
         .get(&format!("/api/v1/media/{media_id}/original"))

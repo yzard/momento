@@ -5,6 +5,7 @@ mod backup;
 mod client;
 mod deduplicate;
 mod faces;
+mod file_stream;
 #[path = "import/mod.rs"]
 mod imports;
 mod map;

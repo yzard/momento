@@ -5,6 +5,7 @@ mod backup;
 mod client;
 mod deduplicate;
 mod faces;
+mod file_stream;
 mod map;
 mod media;
 mod metadata;

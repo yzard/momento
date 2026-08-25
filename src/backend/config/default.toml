@@ -21,6 +21,10 @@ request_log_body_max_bytes = {{SERVER_REQUEST_LOG_BODY_MAX_BYTES}}
 secret_key = "${SECRET_KEY}"
 access_token_expire_minutes = {{ACCESS_TOKEN_EXPIRE_MINUTES}}
 refresh_token_expire_days = {{REFRESH_TOKEN_EXPIRE_DAYS}}
+# Resource-scoped browser tickets remain valid long enough for multi-hour video playback.
+media_access_ticket_expire_hours = {{MEDIA_ACCESS_TICKET_EXPIRE_HOURS}}
+# Password-protected public shares use a path-scoped browser session instead of URL passwords.
+share_session_expire_hours = {{SHARE_SESSION_EXPIRE_HOURS}}
 
 [webdav]
 # WebDAV is always available; uploads are staged below data_dir/webdav and imported automatically.

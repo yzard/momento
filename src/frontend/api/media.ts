@@ -29,6 +29,11 @@ interface MediaBatchResponse {
   items: Media[]
 }
 
+interface MediaAccessTicketResponse {
+  url: string
+  expiresAt: string
+}
+
 interface TimelineListResponse {
   groups: TimelineGroup[]
   nextCursor: string | null
@@ -204,12 +209,12 @@ export const mediaApi = {
     await apiClient.post('/media/delete', { mediaIds })
   },
 
-  getFileStreamUrl: (mediaId: number): string => {
-    const token = localStorage.getItem('momento_access_token')
-    if (token) {
-      return `/api/v1/media/${mediaId}/original?token=${encodeURIComponent(token)}`
-    }
-    return `/api/v1/media/${mediaId}/original`
+  getFileStreamURL: async (mediaId: number): Promise<string> => {
+    const response = await apiClient.post<MediaAccessTicketResponse>('/media/access-ticket', {
+      mediaId,
+      resource: 'original',
+    })
+    return response.data.url
   },
 
 

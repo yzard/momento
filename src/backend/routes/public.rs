@@ -1,22 +1,23 @@
 use axum::{
-    body::Body,
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
-    response::Response,
+    extract::{Path, State},
+    http::{header, HeaderMap, HeaderValue},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
 
-use crate::auth::{verify_password, AppState};
+use crate::auth::{
+    create_share_session_token, decode_share_session_token, share_token_hash, verify_password,
+    AppState,
+};
 use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries, DbConn};
 use crate::error::{AppError, AppResult};
-use crate::models::{MediaResponse, ShareVerifyRequest};
+use crate::models::{MediaResponse, ShareVerifyRequest, ShareVerifyResponse};
 use crate::utils::path::resolve_existing_storage_path;
+
+use super::file_stream::{serve_file, ContentDisposition};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -32,10 +33,7 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-#[derive(Deserialize)]
-struct PasswordQuery {
-    password: Option<String>,
-}
+const SHARE_SESSION_COOKIE_NAME: &str = "momento_share_session";
 
 struct ShareRow {
     id: i64,
@@ -45,18 +43,27 @@ struct ShareRow {
     expires_at: Option<String>,
 }
 
-fn validate_share_token(conn: &DbConn, token: &str, password: Option<&str>) -> AppResult<ShareRow> {
+fn validate_share_access(
+    conn: &DbConn,
+    token: &str,
+    headers: &HeaderMap,
+    state: &AppState,
+) -> AppResult<ShareRow> {
     let share = load_active_share(conn, token)?;
-
-    if let Some(password_hash) = &share.password_hash {
-        let Some(pwd) = password else {
-            return Err(AppError::Authentication("Password required".to_string()));
-        };
-        if !verify_password(pwd, password_hash) {
-            return Err(AppError::Authentication("Invalid password".to_string()));
-        }
+    if share.password_hash.is_none() {
+        return Ok(share);
     }
 
+    let session_token = cookie_value(headers, SHARE_SESSION_COOKIE_NAME).ok_or_else(|| {
+        AppError::Authentication("Share password verification is required".to_string())
+    })?;
+    let claims = decode_share_session_token(&session_token, &state.config)
+        .ok_or_else(|| AppError::Authentication("Invalid or expired share session".to_string()))?;
+    if claims.share_id != share.id || claims.share_token_hash != share_token_hash(token) {
+        return Err(AppError::Authentication(
+            "Share session does not match this link".to_string(),
+        ));
+    }
     Ok(share)
 }
 
@@ -126,11 +133,10 @@ fn map_public_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> 
 async fn get_shared_content(
     State(state): State<AppState>,
     Path(token): Path<String>,
-    Query(query): Query<PasswordQuery>,
-) -> AppResult<Json<serde_json::Value>> {
+    headers: HeaderMap,
+) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let share = validate_share_token(&conn, &token, query.password.as_deref())?;
+    let share = validate_share_access(&conn, &token, &headers, &state)?;
 
     // Increment view count
     let _ = execute_query(&conn, queries::share::INCREMENT_VIEW_COUNT, &[&share.id]);
@@ -144,7 +150,7 @@ async fn get_shared_content(
         )?
         .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
-        return Ok(Json(serde_json::json!({
+        return Ok(public_json_response(serde_json::json!({
             "type": "media",
             "media": media
         })));
@@ -172,7 +178,7 @@ async fn get_shared_content(
             map_public_media_row,
         )?;
 
-        return Ok(Json(serde_json::json!({
+        return Ok(public_json_response(serde_json::json!({
             "type": "album",
             "album": {
                 "id": album.id,
@@ -190,38 +196,40 @@ async fn verify_share_password(
     State(state): State<AppState>,
     Path(token): Path<String>,
     Json(request): Json<ShareVerifyRequest>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
     let share = load_active_share(&conn, &token)?;
 
     let Some(password_hash) = share.password_hash else {
-        return Ok(Json(serde_json::json!({
-            "valid": true,
-            "message": "No password required"
-        })));
+        return Ok(share_verify_response(true, "No password required", None)?);
     };
 
-    if verify_password(&request.password, &password_hash) {
-        return Ok(Json(serde_json::json!({
-            "valid": true,
-            "message": "Password correct"
-        })));
+    if !verify_password(&request.password, &password_hash) {
+        return Ok(share_verify_response(false, "Invalid password", None)?);
     }
 
-    Ok(Json(serde_json::json!({
-        "valid": false,
-        "message": "Invalid password"
-    })))
+    let share_expiration = parse_share_expiration(share.expires_at.as_deref())?;
+    let (session_token, expires_at) =
+        create_share_session_token(share.id, &token, share_expiration, &state.config)?;
+    let maximum_age = (expires_at - Utc::now()).num_seconds().max(1);
+    let cookie = format!(
+        "{SHARE_SESSION_COOKIE_NAME}={session_token}; Path=/api/v1/public/share/{token}; Max-Age={maximum_age}; HttpOnly; Secure; SameSite=Strict"
+    );
+    Ok(share_verify_response(
+        true,
+        "Password correct",
+        Some(&cookie),
+    )?)
 }
 
 async fn get_shared_media_file(
     State(state): State<AppState>,
     Path((token, media_id)): Path<(String, i64)>,
-    Query(query): Query<PasswordQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_token(&conn, &token, query.password.as_deref())?;
+    let share = validate_share_access(&conn, &token, &headers, &state)?;
 
     // Verify media is in share
     if let Some(share_media_id) = share.media_id {
@@ -266,7 +274,10 @@ async fn get_shared_media_file(
         &media
             .mime_type
             .unwrap_or_else(|| "application/octet-stream".to_string()),
+        &headers,
         Some(&media.original_filename),
+        true,
+        ContentDisposition::Attachment,
     )
     .await
 }
@@ -280,13 +291,10 @@ struct FileInfo {
 async fn get_shared_thumbnail(
     State(state): State<AppState>,
     Path((token, media_id)): Path<(String, i64)>,
-    Query(query): Query<PasswordQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    // We need password to access thumbnails too
-    let password = query.password.as_deref();
-    let share = validate_share_token(&conn, &token, password)?;
+    let share = validate_share_access(&conn, &token, &headers, &state)?;
 
     // Verify media is in share
     if let Some(share_media_id) = share.media_id {
@@ -323,30 +331,62 @@ async fn get_shared_thumbnail(
 
     let full_path = resolve_existing_storage_path(&paths().thumbnails, &thumbnail_path).await?;
 
-    serve_file(full_path, "image/jpeg", None).await
+    serve_file(
+        full_path,
+        "image/jpeg",
+        &headers,
+        None,
+        false,
+        ContentDisposition::Inline,
+    )
+    .await
 }
 
-async fn serve_file(
-    path: std::path::PathBuf,
-    content_type: &str,
-    filename: Option<&str>,
+fn parse_share_expiration(expires_at: Option<&str>) -> AppResult<Option<DateTime<Utc>>> {
+    expires_at
+        .map(|expiration| {
+            DateTime::parse_from_rfc3339(expiration)
+                .map(|parsed| parsed.with_timezone(&Utc))
+                .map_err(|_| AppError::Internal("Share link has an invalid expiration".to_string()))
+        })
+        .transpose()
+}
+
+fn cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|header_value| header_value.to_str().ok())
+        .flat_map(|cookies| cookies.split(';'))
+        .filter_map(|cookie| cookie.trim().split_once('='))
+        .find_map(|(name, value)| (name == cookie_name).then(|| value.to_string()))
+}
+
+fn share_verify_response(
+    valid: bool,
+    message: &str,
+    set_cookie: Option<&str>,
 ) -> AppResult<Response> {
-    let file = File::open(&path).await?;
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type);
-
-    if let Some(name) = filename {
-        response = response.header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", name),
-        );
-    }
-
+    let mut response = Json(ShareVerifyResponse {
+        valid,
+        message: message.to_string(),
+    })
+    .into_response();
     response
-        .body(body)
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(cookie) = set_cookie {
+        let cookie = HeaderValue::from_str(cookie)
+            .map_err(|_| AppError::Internal("Failed to create share session cookie".to_string()))?;
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    Ok(response)
+}
+
+fn public_json_response(body: serde_json::Value) -> Response {
+    let mut response = Json(body).into_response();
+    response
+        .headers_mut()
+        .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    response
 }
