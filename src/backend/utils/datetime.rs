@@ -23,7 +23,3 @@ pub fn parse_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
 
     None
 }
-
-pub fn format_datetime(dt: &DateTime<Utc>) -> String {
-    dt.to_rfc3339()
-}

@@ -37,7 +37,6 @@ argon2 = "0.5"
 
 # Image processing
 image = "0.25"
-kamadak-exif = "0.5"
 
 # Utils
 num_cpus = "1.16"
@@ -55,7 +54,6 @@ rand = "0.8"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 glob = "0.3"
 filetime = "0.2"
-lazy_static = "1.4"
 serde_urlencoded = "0.7"
 futures = "0.3"
 mime_guess = "2"

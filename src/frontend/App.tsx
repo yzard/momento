@@ -1,23 +1,29 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider } from './context/AuthContext'
 import { ThemeProvider } from './context/ThemeContext'
 import { useAuth } from './hooks/useAuth'
 import Layout from './components/layout/Layout'
-import Login from './pages/Login'
-import Timeline from './pages/Timeline'
-import Albums from './pages/Albums'
-import Map from './pages/Map'
-import Settings from './pages/Settings'
-import Trash from './pages/Trash'
-import Deduplicate from './pages/Deduplicate'
-import Faces from './pages/Faces'
-import Places from './pages/Places'
+
+const Login = lazy(() => import('./pages/Login'))
+const Timeline = lazy(() => import('./pages/Timeline'))
+const Albums = lazy(() => import('./pages/Albums'))
+const Map = lazy(() => import('./pages/Map'))
+const Settings = lazy(() => import('./pages/Settings'))
+const Trash = lazy(() => import('./pages/Trash'))
+const Deduplicate = lazy(() => import('./pages/Deduplicate'))
+const Faces = lazy(() => import('./pages/Faces'))
+const Places = lazy(() => import('./pages/Places'))
+
+function LoadingScreen() {
+  return <div className="flex items-center justify-center h-screen">Loading...</div>
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
 
   if (isLoading) {
-    return <div className="flex items-center justify-center h-screen">Loading...</div>
+    return <LoadingScreen />
   }
 
   if (!isAuthenticated) {
@@ -65,7 +71,9 @@ export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <AppRoutes />
+        <Suspense fallback={<LoadingScreen />}>
+          <AppRoutes />
+        </Suspense>
       </AuthProvider>
     </ThemeProvider>
   )

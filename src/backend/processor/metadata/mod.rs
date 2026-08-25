@@ -195,6 +195,36 @@ pub fn normalize_gps_coordinates(metadata: &mut MediaMetadata) {
 }
 
 pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
+    let mut metadata = extract_exif_metadata(file_path).await;
+
+    if metadata.mime_type.is_none() {
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        metadata.mime_type = Some(
+            match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "png" => "image/png",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "heic" | "heif" => "image/heic",
+                "tiff" | "tif" => "image/tiff",
+                "bmp" => "image/bmp",
+                "avif" => "image/avif",
+                "svg" => "image/svg+xml",
+                _ => "application/octet-stream",
+            }
+            .to_string(),
+        );
+    }
+
+    log_extracted_metadata(file_path, &metadata);
+    metadata
+}
+
+async fn extract_exif_metadata(file_path: &Path) -> MediaMetadata {
     let mut metadata = MediaMetadata::default();
 
     let output = Command::new("exiftool")
@@ -243,31 +273,6 @@ pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
             );
         }
     }
-
-    if metadata.mime_type.is_none() {
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        metadata.mime_type = Some(
-            match ext.as_str() {
-                "jpg" | "jpeg" => "image/jpeg",
-                "png" => "image/png",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                "heic" | "heif" => "image/heic",
-                "tiff" | "tif" => "image/tiff",
-                "bmp" => "image/bmp",
-                "avif" => "image/avif",
-                "svg" => "image/svg+xml",
-                _ => "application/octet-stream",
-            }
-            .to_string(),
-        );
-    }
-
-    log_extracted_metadata(file_path, &metadata);
     metadata
 }
 
@@ -386,54 +391,7 @@ fn parse_exif_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
 }
 
 pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
-    let mut metadata = MediaMetadata::default();
-
-    let exif_output = Command::new("exiftool")
-        .args(["-json", "-n", file_path.to_str().unwrap_or("")])
-        .output()
-        .await;
-
-    match exif_output {
-        Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
-            Ok(json_str) => match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-                Ok(exif_data) => {
-                    if let Some(data) = exif_data.first() {
-                        apply_exif_data(&mut metadata, data);
-                        normalize_gps_coordinates(&mut metadata);
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse exiftool JSON for {:?}: {}",
-                        file_path.file_name().unwrap_or_default(),
-                        e
-                    );
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to read exiftool output for {:?}: {}",
-                    file_path.file_name().unwrap_or_default(),
-                    e
-                );
-            }
-        },
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                "exiftool failed for {:?}: {}",
-                file_path.file_name().unwrap_or_default(),
-                stderr
-            );
-        }
-        Err(e) => {
-            warn!(
-                "Failed to run exiftool for {:?}: {}",
-                file_path.file_name().unwrap_or_default(),
-                e
-            );
-        }
-    }
+    let mut metadata = extract_exif_metadata(file_path).await;
 
     // Run ffprobe
     let output = Command::new("ffprobe")

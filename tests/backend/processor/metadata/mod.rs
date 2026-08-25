@@ -123,6 +123,16 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
             |row| row.get(0),
         )
         .expect("video original hash");
+    let video_dimensions: (i32, i32) = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT width, height FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("video metadata dimensions");
+    assert_eq!(video_dimensions, (64, 32));
 
     momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
         .await

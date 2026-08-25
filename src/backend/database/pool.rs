@@ -45,10 +45,6 @@ pub fn configure_connection(connection: &mut Connection) -> rusqlite::Result<()>
     Ok(())
 }
 
-pub fn get_connection(pool: &DbPool) -> AppResult<DbConn> {
-    pool.get().map_err(AppError::Pool)
-}
-
 pub fn fetch_one<T, F>(
     conn: &DbConn,
     sql: &str,
@@ -101,16 +97,4 @@ pub fn insert_returning_id(
 ) -> AppResult<i64> {
     conn.execute(sql, params)?;
     Ok(conn.last_insert_rowid())
-}
-
-pub fn execute_many(
-    conn: &DbConn,
-    sql: &str,
-    params_list: &[Vec<&(dyn rusqlite::ToSql + '_)>],
-) -> AppResult<()> {
-    let mut stmt = conn.prepare(sql)?;
-    for params in params_list {
-        stmt.execute(params.as_slice())?;
-    }
-    Ok(())
 }

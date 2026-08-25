@@ -17,7 +17,6 @@ umask "$UMASK"
 mkdir -p \
     /data/albums \
     /data/imports \
-    /data/llm \
     /data/logs \
     /data/originals \
     /data/previews \

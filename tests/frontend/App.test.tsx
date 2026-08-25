@@ -41,9 +41,9 @@ afterEach(() => {
 })
 
 describe('App Places routes', () => {
-  it.each(['/places', '/places/paris-france'])('renders Places at %s', (path) => {
+  it.each(['/places', '/places/paris-france'])('renders Places at %s', async (path) => {
     render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
-    expect(screen.getByText('Places route')).toBeTruthy()
+    expect(await screen.findByText('Places route')).toBeTruthy()
   })
 })
 
@@ -52,28 +52,28 @@ describe('App timeline routes', () => {
     ['/timeline/screenshots', 'image', 'screenshot'],
     ['/timeline/documents', 'image', 'document'],
     ['/timeline/photos', 'image', 'all'],
-  ])('renders the timeline filters for %s', (path, mediaType, classification) => {
+  ])('renders the timeline filters for %s', async (path, mediaType, classification) => {
     render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
 
-    const timeline = screen.getByTestId('timeline-route')
+    const timeline = await screen.findByTestId('timeline-route')
     expect(timeline.getAttribute('data-media-type')).toBe(mediaType)
     expect(timeline.getAttribute('data-classification')).toBe(classification)
   })
 
-  it('redirects the retired admin route to account settings', () => {
+  it('redirects the retired admin route to account settings', async () => {
     render(<MemoryRouter initialEntries={['/admin']}><App /></MemoryRouter>)
 
-    expect(screen.getByRole('heading', { name: 'Account Settings' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Account Settings' })).toBeTruthy()
   })
 })
 
 describe('App theme routes', () => {
-  it('applies a stored dark theme to the login route', () => {
+  it('applies a stored dark theme to the login route', async () => {
     localStorage.setItem('momento-theme', 'dark')
 
     render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
 
-    expect(screen.getByRole('heading', { name: 'Sign In' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Sign In' })).toBeTruthy()
     expect(document.documentElement.classList.contains('dark')).toBe(true)
   })
 })

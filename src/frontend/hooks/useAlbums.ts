@@ -47,32 +47,6 @@ export function useDeleteAlbum() {
   })
 }
 
-export function useAddMediaToAlbum() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ albumId, mediaIds }: { albumId: number; mediaIds: number[] }) =>
-      albumsApi.addMedia(albumId, mediaIds),
-    onSuccess: (_, { albumId }) => {
-      queryClient.invalidateQueries({ queryKey: ['album', albumId] })
-      queryClient.invalidateQueries({ queryKey: ['albums'] })
-    },
-  })
-}
-
-export function useRemoveMediaFromAlbum() {
-  const queryClient = useQueryClient()
-
-  return useMutation({
-    mutationFn: ({ albumId, mediaIds }: { albumId: number; mediaIds: number[] }) =>
-      albumsApi.removeMedia(albumId, mediaIds),
-    onSuccess: (_, { albumId }) => {
-      queryClient.invalidateQueries({ queryKey: ['album', albumId] })
-      queryClient.invalidateQueries({ queryKey: ['albums'] })
-    },
-  })
-}
-
 export function useReorderAlbum() {
   const queryClient = useQueryClient()
 

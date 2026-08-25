@@ -275,10 +275,6 @@ fn is_binary_field(key: &str) -> bool {
     ) || normalized.ends_with("base64")
 }
 
-pub fn log_error(context: &str, error: &dyn std::error::Error) {
-    error!("{}: {}", context, error);
-}
-
 pub fn log_panic(info: &std::panic::PanicHookInfo) {
     let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
         s.to_string()

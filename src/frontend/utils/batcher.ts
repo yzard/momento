@@ -80,7 +80,3 @@ export const trashBatchLoader = new AssetBatcher(
   (mediaIds) => trashApi.getThumbnailBatch(mediaIds, 'tiny'),
   (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'tiny'),
 )
-export const previewBatchLoader = new AssetBatcher(
-  mediaApi.getPreviewBatch,
-  () => null,
-)
