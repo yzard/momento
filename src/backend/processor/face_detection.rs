@@ -468,13 +468,13 @@ pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> Ap
     Ok(())
 }
 
-pub fn cancel(pool: &DbPool) -> AppResult<()> {
+pub fn cancel(pool: &DbPool) -> AppResult<bool> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::faces::CANCEL_ACTIVE, [])?;
-    transaction.execute(queries::faces::REQUEST_CANCEL_RUNS, [])?;
+    let cancelled_jobs = transaction.execute(queries::faces::CANCEL_ACTIVE, [])?;
+    let cancelled_runs = transaction.execute(queries::faces::REQUEST_CANCEL_RUNS, [])?;
     transaction.commit()?;
-    Ok(())
+    Ok(cancelled_jobs > 0 || cancelled_runs > 0)
 }
 
 pub fn clean(pool: &DbPool) -> AppResult<()> {

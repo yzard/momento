@@ -32,6 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.core.model.AiStatusResponse
+import io.github.yzard.momento.core.model.AiTaskStatus
 import io.github.yzard.momento.core.model.ImportStatus
 import io.github.yzard.momento.core.model.JobStatus
 import io.github.yzard.momento.core.model.User
@@ -45,6 +47,9 @@ fun statusSummary(status: JobStatus?): String {
     if (status == null) return "Not loaded"
     return "${status.status}: ${status.queuedJobs} queued, ${status.processingJobs} processing, ${status.completedJobs} completed, ${status.failedJobs} failed"
 }
+
+fun aiStatusSummary(status: AiTaskStatus): String =
+    "${status.state}: ${status.jobs.queued} queued, ${status.jobs.submitting} submitting, ${status.jobs.submitted} submitted, ${status.jobs.completed} completed, ${status.jobs.failed} failed"
 
 @Composable
 fun AdminScreen(repository: MomentoRepository) {
@@ -199,7 +204,7 @@ private fun CreateUserDialog(repository: MomentoRepository, complete: () -> Unit
 private fun ProcessingAdministration(repository: MomentoRepository) {
     var importStatus by remember { mutableStateOf<ImportStatus?>(null) }
     var metadataStatus by remember { mutableStateOf<JobStatus?>(null) }
-    var aiStatuses by remember { mutableStateOf<List<Pair<String, JobStatus>>>(emptyList()) }
+    var aiStatus by remember { mutableStateOf<AiStatusResponse?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -208,10 +213,7 @@ private fun ProcessingAdministration(repository: MomentoRepository) {
             try {
                 importStatus = repository.importStatus()
                 metadataStatus = repository.metadataStatus()
-                aiStatuses = listOf(
-                    "OCR" to repository.ocrStatus(),
-                    "Image tagging" to repository.imageTaggingStatus(),
-                )
+                aiStatus = repository.aiStatus()
                 error = null
             } catch (_: IOException) {
                 error = "Could not load processing status"
@@ -245,9 +247,9 @@ private fun ProcessingAdministration(repository: MomentoRepository) {
             TextButton({ runAction { repository.generateMetadata() } }) { Text("Generate metadata") }
             TextButton({ runAction { repository.resetMetadata() } }) { Text("Reset metadata") }
             Text("AI", Modifier.padding(16.dp, 12.dp, 16.dp, 0.dp))
-            if (aiStatuses.isEmpty()) Text("Not loaded", Modifier.padding(horizontal = 16.dp))
-            aiStatuses.forEach { (name, status) ->
-                Text("$name: ${statusSummary(status)}", Modifier.padding(horizontal = 16.dp))
+            if (aiStatus == null) Text("Not loaded", Modifier.padding(horizontal = 16.dp))
+            aiStatus?.tasks?.forEach { status ->
+                Text("${status.task}: ${aiStatusSummary(status)}", Modifier.padding(horizontal = 16.dp))
                 status.errors.forEach { failure -> Text(failure, Modifier.padding(horizontal = 16.dp)) }
             }
             TextButton({ runAction { repository.startAi() } }) { Text("Start AI") }

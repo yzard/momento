@@ -1,5 +1,7 @@
 package io.github.yzard.momento.feature.admin
 
+import io.github.yzard.momento.core.model.AiJobCounts
+import io.github.yzard.momento.core.model.AiTaskStatus
 import io.github.yzard.momento.core.model.JobStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -21,5 +23,28 @@ class AdminScreenTest {
     @Test
     fun formatsUnloadedStatus() {
         assertEquals("Not loaded", statusSummary(null))
+    }
+
+    @Test
+    fun formatsExactAiTransportStates() {
+        val status = AiTaskStatus(
+            task = "ocr",
+            enabled = true,
+            state = "submitting",
+            jobs = AiJobCounts(
+                queued = 3,
+                submitting = 2,
+                submitted = 1,
+                completed = 9,
+                failed = 1,
+                cancelled = 4,
+            ),
+            errors = emptyList(),
+        )
+
+        assertEquals(
+            "submitting: 3 queued, 2 submitting, 1 submitted, 9 completed, 1 failed",
+            aiStatusSummary(status),
+        )
     }
 }

@@ -1,544 +1,105 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::Path, extract::State, routing::post, Json, Router};
 
 use crate::auth::{AppState, RequireAdmin};
-use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
-use crate::database::queries;
-use crate::error::AppResult;
-use crate::models::{AiRequest, MetadataActionResponse, MetadataStatusResponse};
-use crate::processor::ai;
+use crate::error::{AppError, AppResult};
+use crate::models::{AiActionResponse, AiStatusResponse};
 use crate::processor::ai::operation::{
-    start_all_features, start_feature, AiFeature, AiStartSource,
+    action_response, cancel_all_actions, cancel_feature_action, clean_all_actions,
+    clean_feature_action, start_all_actions, start_feature_action, status, AiFeature,
 };
-use crate::processor::deduplicator::{clean, request_cancel};
-use crate::processor::face_detection;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/ai/start", post(start_all))
-        .route("/ai/cancel", post(cancel))
+        .route("/ai/status", post(all_status))
+        .route("/ai/cancel", post(cancel_all))
         .route("/ai/clean", post(clean_all))
-        .route("/ai/ocr/start", post(start_ocr))
-        .route("/ai/ocr/cancel", post(cancel_ocr))
-        .route("/ai/ocr/clean", post(clean_ocr))
-        .route("/ai/ocr/status", post(ocr_status))
-        .route("/ai/ocr/reset", post(reset_ocr))
-        .route("/ai/image_tagging/start", post(start_image_tagging))
-        .route("/ai/image_tagging/cancel", post(cancel_image_tagging))
-        .route("/ai/image_tagging/clean", post(clean_image_tagging))
-        .route("/ai/image_tagging/status", post(image_tagging_status))
-        .route("/ai/image_tagging/reset", post(reset_image_tagging))
-        .route("/ai/image_aesthetics/start", post(start_image_aesthetics))
-        .route("/ai/image_aesthetics/cancel", post(cancel_image_aesthetics))
-        .route("/ai/image_aesthetics/clean", post(clean_image_aesthetics))
-        .route("/ai/image_aesthetics/status", post(image_aesthetics_status))
-        .route("/ai/image_aesthetics/reset", post(reset_image_aesthetics))
-        .route(
-            "/ai/screenshot_detection/start",
-            post(start_screenshot_detection),
-        )
-        .route(
-            "/ai/screenshot_detection/cancel",
-            post(cancel_screenshot_detection),
-        )
-        .route(
-            "/ai/screenshot_detection/clean",
-            post(clean_screenshot_detection),
-        )
-        .route(
-            "/ai/screenshot_detection/status",
-            post(screenshot_detection_status),
-        )
-        .route(
-            "/ai/screenshot_detection/reset",
-            post(reset_screenshot_detection),
-        )
-        .route(
-            "/ai/document_detection/start",
-            post(start_document_detection),
-        )
-        .route(
-            "/ai/document_detection/cancel",
-            post(cancel_document_detection),
-        )
-        .route(
-            "/ai/document_detection/clean",
-            post(clean_document_detection),
-        )
-        .route(
-            "/ai/document_detection/status",
-            post(document_detection_status),
-        )
-        .route(
-            "/ai/document_detection/reset",
-            post(reset_document_detection),
-        )
-        .route("/ai/faces/start", post(start_faces))
-        .route("/ai/faces/cancel", post(cancel_faces))
-        .route("/ai/faces/clean", post(clean_faces))
-        .route("/ai/faces/status", post(faces_status))
-}
-
-async fn cancel_ocr(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state, "ocr").await
-}
-async fn clean_ocr(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    clean_task(&state.pool, "ocr")
-}
-async fn cancel_image_tagging(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state, "image_tagging").await
-}
-async fn clean_image_tagging(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    clean_task(&state.pool, "image_tagging")
-}
-async fn cancel_image_aesthetics(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state, "image_aesthetics").await
-}
-async fn clean_image_aesthetics(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    clean_task(&state.pool, "image_aesthetics")
-}
-
-async fn cancel_screenshot_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state, SCREENSHOT_DETECTION_MODEL_TYPE).await
-}
-
-async fn clean_screenshot_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    clean_task(&state.pool, SCREENSHOT_DETECTION_MODEL_TYPE)
-}
-
-async fn cancel_document_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    cancel_task(&state, DOCUMENT_DETECTION_MODEL_TYPE).await
-}
-
-async fn clean_document_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    clean_task(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)
-}
-async fn start_faces(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    start_feature_response(
-        &state,
-        AiFeature::FaceDetection,
-        "Face detection processing queued",
-    )
-}
-
-async fn cancel_faces(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    ai::cancel_active_jobs(&state.pool, Some("face_detection"))?;
-    face_detection::cancel(&state.pool)?;
-    deliver_cancellations(&state).await;
-    Ok(Json(MetadataActionResponse {
-        message: "Face detection cancelled".to_string(),
-        queued_jobs: 0,
-    }))
-}
-
-async fn clean_faces(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    face_detection::clean(&state.pool)?;
-    Ok(Json(MetadataActionResponse {
-        message: "Face detection data cleaned".to_string(),
-        queued_jobs: 0,
-    }))
-}
-
-async fn faces_status(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    let Json(mut status) = task_status(&state.pool, "face_detection")?;
-    status.face_groups = Some(state.pool.get()?.query_row(
-        queries::faces::COUNT_GROUPS,
-        [],
-        |row| row.get(0),
-    )?);
-    Ok(Json(status))
-}
-
-async fn cancel_task(state: &AppState, task: &str) -> AppResult<Json<MetadataActionResponse>> {
-    let cancelled_jobs = ai::cancel_active_jobs(&state.pool, Some(task))? as i64;
-    deliver_cancellations(state).await;
-    Ok(Json(MetadataActionResponse {
-        message: format!("{task} jobs cancelled"),
-        queued_jobs: cancelled_jobs,
-    }))
-}
-
-fn clean_task(
-    pool: &crate::database::DbPool,
-    task: &str,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let connection = pool.get()?;
-    let transaction = connection.unchecked_transaction()?;
-    clean_task_results(&transaction, task)?;
-    transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
-    transaction.commit()?;
-    Ok(Json(MetadataActionResponse {
-        message: format!("{task} data cleaned"),
-        queued_jobs: 0,
-    }))
-}
-
-fn clean_task_results(transaction: &rusqlite::Transaction<'_>, task: &str) -> AppResult<()> {
-    if task == "image_aesthetics" {
-        transaction.execute(queries::ai_jobs::DELETE_AESTHETICS, [])?;
-        transaction.execute(queries::ai_jobs::DELETE_AESTHETIC_INPUTS, [])?;
-        return Ok(());
-    }
-    if task == SCREENSHOT_DETECTION_MODEL_TYPE {
-        transaction.execute(queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATIONS, [])?;
-        transaction.execute(
-            queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
-            [],
-        )?;
-        return Ok(());
-    }
-    if task == DOCUMENT_DETECTION_MODEL_TYPE {
-        transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
-        transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS, [])?;
-        return Ok(());
-    }
-    transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
-    transaction.execute(queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
-    Ok(())
-}
-
-async fn clean_all(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let _ = clean_task(&state.pool, "ocr")?;
-    let _ = clean_task(&state.pool, "image_tagging")?;
-    let _ = clean_task(&state.pool, "image_aesthetics")?;
-    let _ = clean_task(&state.pool, SCREENSHOT_DETECTION_MODEL_TYPE)?;
-    let _ = clean_task(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)?;
-    face_detection::clean(&state.pool)?;
-    clean(&state.pool)?;
-    Ok(Json(MetadataActionResponse {
-        message: "All AI data cleaned".to_string(),
-        queued_jobs: 0,
-    }))
-}
-
-async fn ocr_status(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    task_status(&state.pool, "ocr")
-}
-
-async fn image_tagging_status(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    task_status(&state.pool, "image_tagging")
-}
-
-async fn image_aesthetics_status(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    task_status(&state.pool, "image_aesthetics")
-}
-
-async fn screenshot_detection_status(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    task_status(&state.pool, SCREENSHOT_DETECTION_MODEL_TYPE)
-}
-
-async fn document_detection_status(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    task_status(&state.pool, DOCUMENT_DETECTION_MODEL_TYPE)
-}
-
-async fn reset_ocr(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(&state, "ocr", true).await
-}
-
-async fn reset_image_tagging(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(
-        &state,
-        "image_tagging",
-        state.config.llm.image_tagging_enabled,
-    )
-    .await
-}
-
-async fn reset_image_aesthetics(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(
-        &state,
-        "image_aesthetics",
-        state.config.llm.image_aesthetics_enabled,
-    )
-    .await
-}
-
-async fn reset_screenshot_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(
-        &state,
-        SCREENSHOT_DETECTION_MODEL_TYPE,
-        state.config.llm.screenshot_detection_enabled,
-    )
-    .await
-}
-
-async fn reset_document_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    reset_task(
-        &state,
-        DOCUMENT_DETECTION_MODEL_TYPE,
-        state.config.llm.document_detection_enabled,
-    )
-    .await
-}
-
-fn task_status(
-    pool: &crate::database::DbPool,
-    task: &str,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    let connection = pool.get()?;
-    let counts = connection
-        .prepare(queries::ai_jobs::SELECT_STATUS_COUNTS)?
-        .query_map([task], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let count_for = |status: &str| {
-        counts
-            .iter()
-            .find(|(job_status, _)| job_status == status)
-            .map(|(_, count)| *count)
-            .unwrap_or(0)
-    };
-    let queued_jobs = count_for("queued");
-    let processing_jobs = count_for("submitting") + count_for("submitted");
-    let failed_jobs = count_for("failed");
-    let status = if processing_jobs > 0 {
-        "processing"
-    } else if queued_jobs > 0 {
-        "queued"
-    } else if failed_jobs > 0 {
-        "failed"
-    } else {
-        "idle"
-    };
-    let errors = connection
-        .prepare(queries::ai_jobs::SELECT_FAILURES)?
-        .query_map([task], |row| row.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
-    Ok(Json(MetadataStatusResponse {
-        status: status.to_string(),
-        queued_jobs,
-        processing_jobs,
-        completed_jobs: count_for("completed"),
-        failed_jobs,
-        errors,
-        face_groups: None,
-    }))
-}
-
-async fn reset_task(
-    state: &AppState,
-    task: &str,
-    task_enabled: bool,
-) -> AppResult<Json<MetadataActionResponse>> {
-    ai::cancel_active_jobs(&state.pool, Some(task))?;
-    deliver_cancellations(state).await;
-    let connection = state.pool.get()?;
-    let transaction = connection.unchecked_transaction()?;
-    clean_task_results(&transaction, task)?;
-    transaction.commit()?;
-    let queued_jobs = ai::queue_task(&state.pool, task, task_enabled)? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: format!("{task} processing reset"),
-        queued_jobs,
-    }))
+        .route("/ai/:feature/start", post(start_feature))
+        .route("/ai/:feature/cancel", post(cancel_feature))
+        .route("/ai/:feature/clean", post(clean_feature))
 }
 
 async fn start_all(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = start_all_features(&state.config, &state.pool, AiStartSource::Manual)? as i64;
-    if queued_jobs > 0 {
+) -> AppResult<Json<AiActionResponse>> {
+    let results = start_all_actions(&state.config, &state.pool);
+    if results.iter().any(|result| result.affected_jobs > 0) {
         state.llm_transport.wake_submissions();
     }
-    Ok(Json(MetadataActionResponse {
-        message: "AI processing queued".to_string(),
-        queued_jobs,
-    }))
+    Ok(Json(action_response("start", results)))
 }
 
-async fn cancel(
+async fn all_status(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let cancelled_jobs = ai::cancel_active_jobs(&state.pool, None)? as i64;
-    let clustering_cancelled = request_cancel(&state.pool)?;
-    face_detection::cancel(&state.pool)?;
-    deliver_cancellations(&state).await;
-    Ok(Json(MetadataActionResponse {
-        message: if clustering_cancelled {
-            "AI jobs cancelled and image clustering cancellation requested".to_string()
-        } else {
-            "AI jobs cancelled".to_string()
-        },
-        queued_jobs: cancelled_jobs,
-    }))
+) -> AppResult<Json<AiStatusResponse>> {
+    Ok(Json(status(&state.config, &state.pool)?))
 }
 
-async fn deliver_cancellations(state: &AppState) {
-    state.llm_transport.wake_cancellations();
-}
-
-async fn start_ocr(
+async fn cancel_all(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    start_feature_response(&state, AiFeature::Ocr, "OCR processing queued")
+) -> AppResult<Json<AiActionResponse>> {
+    let results = cancel_all_actions(&state.pool);
+    if results
+        .iter()
+        .any(|result| result.outcome == "cancellationRequested")
+    {
+        state.llm_transport.wake_cancellations();
+    }
+    Ok(Json(action_response("cancel", results)))
 }
 
-async fn start_image_tagging(
+async fn clean_all(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    start_feature_response(
-        &state,
-        AiFeature::ImageTagging,
-        "Image tagging processing queued",
-    )
+) -> AppResult<Json<AiActionResponse>> {
+    Ok(Json(action_response(
+        "clean",
+        clean_all_actions(&state.pool),
+    )))
 }
 
-async fn start_image_aesthetics(
+async fn start_feature(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    start_feature_response(
-        &state,
-        AiFeature::ImageAesthetics,
-        "Image aesthetics processing queued",
-    )
-}
-
-async fn start_screenshot_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    start_feature_response(
-        &state,
-        AiFeature::ScreenshotDetection,
-        "Screenshot detection processing queued",
-    )
-}
-
-async fn start_document_detection(
-    State(state): State<AppState>,
-    RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<AiRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    start_feature_response(
-        &state,
-        AiFeature::DocumentDetection,
-        "Document detection processing queued",
-    )
-}
-
-fn start_feature_response(
-    state: &AppState,
-    feature: AiFeature,
-    message: &str,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs =
-        start_feature(&state.config, &state.pool, feature, AiStartSource::Manual)? as i64;
-    if queued_jobs > 0 {
+    Path(feature_name): Path<String>,
+) -> AppResult<Json<AiActionResponse>> {
+    let feature = parse_feature(&feature_name)?;
+    let result = start_feature_action(&state.config, &state.pool, feature)?;
+    if result.affected_jobs > 0 {
         state.llm_transport.wake_submissions();
     }
-    Ok(Json(MetadataActionResponse {
-        message: message.to_string(),
-        queued_jobs,
-    }))
+    Ok(Json(action_response("start", vec![result])))
+}
+
+async fn cancel_feature(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Path(feature_name): Path<String>,
+) -> AppResult<Json<AiActionResponse>> {
+    let feature = parse_feature(&feature_name)?;
+    let result = cancel_feature_action(&state.pool, feature)?;
+    if result.outcome == "cancellationRequested" {
+        state.llm_transport.wake_cancellations();
+    }
+    Ok(Json(action_response("cancel", vec![result])))
+}
+
+async fn clean_feature(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    Path(feature_name): Path<String>,
+) -> AppResult<Json<AiActionResponse>> {
+    let feature = parse_feature(&feature_name)?;
+    Ok(Json(action_response(
+        "clean",
+        vec![clean_feature_action(&state.pool, feature)?],
+    )))
+}
+
+fn parse_feature(feature_name: &str) -> AppResult<AiFeature> {
+    AiFeature::from_control_name(feature_name)
+        .ok_or_else(|| AppError::NotFound(format!("Unknown AI feature: {feature_name}")))
 }

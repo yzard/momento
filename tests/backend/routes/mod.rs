@@ -3,7 +3,7 @@ mod albums;
 mod auth;
 mod backup;
 mod client;
-mod deduplicate;
+mod duplicates;
 mod faces;
 mod file_stream;
 mod map;

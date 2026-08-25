@@ -3,7 +3,7 @@ mod albums;
 mod auth;
 mod backup;
 mod client;
-mod deduplicate;
+mod duplicates;
 mod faces;
 mod file_stream;
 #[path = "import/mod.rs"]
@@ -28,7 +28,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(client::router())
         .merge(backup::router())
         .merge(ai::router())
-        .merge(deduplicate::router())
+        .merge(duplicates::router())
         .merge(faces::router())
         .merge(users::router())
         .merge(media::router())

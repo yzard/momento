@@ -6,51 +6,35 @@ vi.mock('../../../src/frontend/api/client', () => ({ apiClient: { post } }))
 
 import { aiApi } from '../../../src/frontend/api/ai'
 
-describe('aiApi image aesthetics', () => {
+describe('aiApi', () => {
   beforeEach(() => {
     post.mockReset()
-    post.mockResolvedValue({ data: { message: 'ok', queuedJobs: 0 } })
+    post.mockResolvedValue({ data: { action: 'start', results: [] } })
   })
 
-  it('uses the image aesthetics control and status endpoints', async () => {
-    await aiApi.startImageAesthetics()
-    await aiApi.cancelImageAesthetics()
-    await aiApi.cleanImageAesthetics()
-    await aiApi.getImageAestheticsStatus()
+  it('uses bodyless aggregate control and status endpoints', async () => {
+    await aiApi.start()
+    await aiApi.status()
+    await aiApi.cancel()
+    await aiApi.clean()
 
     expect(post.mock.calls).toEqual([
-      ['/ai/image_aesthetics/start', {}],
-      ['/ai/image_aesthetics/cancel', {}],
-      ['/ai/image_aesthetics/clean', {}],
-      ['/ai/image_aesthetics/status', {}],
+      ['/ai/start'],
+      ['/ai/status'],
+      ['/ai/cancel'],
+      ['/ai/clean'],
     ])
   })
 
-  it('uses the screenshot detection control and status endpoints', async () => {
-    await aiApi.startScreenshotDetection()
-    await aiApi.cancelScreenshotDetection()
-    await aiApi.cleanScreenshotDetection()
-    await aiApi.getScreenshotDetectionStatus()
+  it('uses exact task identifiers for feature controls', async () => {
+    await aiApi.startFeature('face_detection')
+    await aiApi.cancelFeature('image_aesthetics')
+    await aiApi.cleanFeature('deduplicate')
 
     expect(post.mock.calls).toEqual([
-      ['/ai/screenshot_detection/start', {}],
-      ['/ai/screenshot_detection/cancel', {}],
-      ['/ai/screenshot_detection/clean', {}],
-      ['/ai/screenshot_detection/status', {}],
-    ])
-  })
-
-  it('uses the document detection control and status endpoints', async () => {
-    await aiApi.startDocumentDetection()
-    await aiApi.cancelDocumentDetection()
-    await aiApi.cleanDocumentDetection()
-    await aiApi.getDocumentDetectionStatus()
-
-    expect(post.mock.calls).toEqual([
-      ['/ai/document_detection/start', {}],
-      ['/ai/document_detection/cancel', {}],
-      ['/ai/document_detection/clean', {}],
-      ['/ai/document_detection/status', {}],
+      ['/ai/face_detection/start'],
+      ['/ai/image_aesthetics/cancel'],
+      ['/ai/deduplicate/clean'],
     ])
   })
 })

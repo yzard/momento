@@ -35,11 +35,7 @@ interface MomentoApi {
     @POST("api/v1/faces/groups/get") suspend fun face(@Body request: FaceGroupRequest): FaceGroupMediaResponse
     @POST("api/v1/faces/groups/merge") suspend fun mergeFaces(@Body request: FaceMergeRequest): FaceMergeResponse
     @POST("api/v1/faces/thumbnails/get") suspend fun faceThumbnail(@Body request: FaceGroupRequest): ResponseBody
-    @POST("api/v1/ai/deduplicate/groups") suspend fun duplicates(@Body request: PageRequest): DeduplicateGroupsResponse
-    @POST("api/v1/ai/deduplicate/start") suspend fun startDuplicates(): DeduplicateActionResponse
-    @POST("api/v1/ai/deduplicate/status") suspend fun duplicateStatus(): DeduplicateStatusResponse
-    @POST("api/v1/ai/deduplicate/cancel") suspend fun cancelDuplicates(): DeduplicateActionResponse
-    @POST("api/v1/ai/deduplicate/clean") suspend fun cleanDuplicates(): DeduplicateActionResponse
+    @POST("api/v1/duplicates/list") suspend fun duplicates(@Body request: PageRequest): DeduplicateGroupsResponse
     @POST("api/v1/media/delete") suspend fun moveToTrash(@Body request: MediaIdsRequest): MessageResponse
     @POST("api/v1/trash/list") suspend fun trash(): TrashResponse
     @POST("api/v1/trash/restore") suspend fun restore(@Body request: MediaIdsRequest): MessageResponse
@@ -56,11 +52,13 @@ interface MomentoApi {
     @POST("api/v1/metadata/generate") suspend fun generateMetadata(@Body request: EmptyRequest): JobActionResponse
     @POST("api/v1/metadata/status") suspend fun metadataStatus(@Body request: EmptyRequest): JobStatus
     @POST("api/v1/metadata/reset") suspend fun resetMetadata(@Body request: EmptyRequest): JobActionResponse
-    @POST("api/v1/ai/start") suspend fun startAi(@Body request: EmptyRequest): JobActionResponse
-    @POST("api/v1/ai/cancel") suspend fun cancelAi(@Body request: EmptyRequest): JobActionResponse
-    @POST("api/v1/ai/clean") suspend fun cleanAi(@Body request: EmptyRequest): JobActionResponse
-    @POST("api/v1/ai/ocr/status") suspend fun ocrStatus(@Body request: EmptyRequest): JobStatus
-    @POST("api/v1/ai/image_tagging/status") suspend fun imageTaggingStatus(@Body request: EmptyRequest): JobStatus
+    @POST("api/v1/ai/start") suspend fun startAi(): AiActionResponse
+    @POST("api/v1/ai/status") suspend fun aiStatus(): AiStatusResponse
+    @POST("api/v1/ai/cancel") suspend fun cancelAi(): AiActionResponse
+    @POST("api/v1/ai/clean") suspend fun cleanAi(): AiActionResponse
+    @POST("api/v1/ai/{feature}/start") suspend fun startAiFeature(@Path("feature") feature: String): AiActionResponse
+    @POST("api/v1/ai/{feature}/cancel") suspend fun cancelAiFeature(@Path("feature") feature: String): AiActionResponse
+    @POST("api/v1/ai/{feature}/clean") suspend fun cleanAiFeature(@Path("feature") feature: String): AiActionResponse
     @POST("api/v1/backup/device/register") suspend fun registerDevice(@Body request: BackupDeviceRegisterRequest): BackupDeviceRegisterResponse
     @POST("api/v1/backup/upload/create") suspend fun createUpload(@Body request: BackupUploadCreateRequest): BackupUploadResponse
     @POST("api/v1/backup/upload/status") suspend fun uploadStatus(@Body request: BackupUploadIdRequest): BackupUploadResponse

@@ -1,7 +1,49 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
-pub struct AiRequest {}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiActionResponse {
+    pub action: String,
+    pub results: Vec<AiFeatureActionResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFeatureActionResult {
+    pub feature: String,
+    pub outcome: String,
+    pub affected_jobs: i64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobCounts {
+    pub queued: i64,
+    pub submitting: i64,
+    pub submitted: i64,
+    pub completed: i64,
+    pub failed: i64,
+    pub cancelled: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTaskStatusResponse {
+    pub task: String,
+    pub enabled: bool,
+    pub state: String,
+    pub jobs: AiJobCounts,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiStatusResponse {
+    pub tasks: Vec<AiTaskStatusResponse>,
+    pub deduplicate: crate::models::DeduplicateStatusResponse,
+    pub face_groups: i64,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

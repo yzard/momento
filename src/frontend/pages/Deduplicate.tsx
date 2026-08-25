@@ -9,7 +9,7 @@ import {
   Square,
   Trash2,
 } from 'lucide-react'
-import { deduplicateApi, type DeduplicateGroup } from '../api/deduplicate'
+import { duplicatesApi, type DuplicateGroup } from '../api/duplicates'
 import { mediaApi } from '../api/media'
 import type { Media } from '../api/types'
 import Lightbox from '../components/viewer/Lightbox'
@@ -53,8 +53,8 @@ export default function Deduplicate() {
   }, [])
 
   const groupsQuery = useInfiniteQuery({
-    queryKey: ['deduplicate', 'groups', user?.id],
-    queryFn: ({ pageParam }) => deduplicateApi.groups({ cursor: pageParam, limit: GROUP_PAGE_SIZE }),
+    queryKey: ['duplicates', 'list', user?.id],
+    queryFn: ({ pageParam }) => duplicatesApi.list({ cursor: pageParam, limit: GROUP_PAGE_SIZE }),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.hasMore && lastPage.nextCursor
       ? lastPage.nextCursor
@@ -89,7 +89,7 @@ export default function Deduplicate() {
     mutationFn: (mediaIds: number[]) => mediaApi.delete(mediaIds),
     onSuccess: () => {
       setSelectedIds(new Set())
-      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
+      queryClient.invalidateQueries({ queryKey: ['duplicates', 'list'] })
       queryClient.invalidateQueries({ queryKey: ['timeline'] })
       queryClient.invalidateQueries({ queryKey: ['media'] })
       queryClient.invalidateQueries({ queryKey: ['mapMedia'] })
@@ -248,7 +248,7 @@ export default function Deduplicate() {
 }
 
 interface DuplicateGroupSectionProps {
-  group: DeduplicateGroup
+  group: DuplicateGroup
   selectedIds: Set<number>
   onToggle: (mediaId: number) => void
   onInspect: (media: Media, groupItems: Media[]) => void

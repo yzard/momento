@@ -6,8 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Media } from '../../../src/frontend/api/types'
 
 const mocks = vi.hoisted(() => ({
-  groups: vi.fn(),
-  status: vi.fn(),
+  list: vi.fn(),
   lightbox: vi.fn(),
   loadThumbnail: vi.fn(),
   observers: [] as Array<{
@@ -18,13 +17,9 @@ const mocks = vi.hoisted(() => ({
   role: 'user' as 'admin' | 'user',
 }))
 
-vi.mock('../../../src/frontend/api/deduplicate', () => ({
-  deduplicateApi: {
-    groups: mocks.groups,
-    status: mocks.status,
-    start: vi.fn(),
-    cancel: vi.fn(),
-    clean: vi.fn(),
+vi.mock('../../../src/frontend/api/duplicates', () => ({
+  duplicatesApi: {
+    list: mocks.list,
   },
 }))
 
@@ -93,8 +88,7 @@ function renderPage() {
 describe('Deduplicate page', () => {
   beforeEach(() => {
     mocks.role = 'user'
-    mocks.groups.mockReset()
-    mocks.status.mockReset()
+    mocks.list.mockReset()
     mocks.lightbox.mockReset()
     mocks.loadThumbnail.mockReset()
     mocks.loadThumbnail.mockResolvedValue(null)
@@ -119,14 +113,13 @@ describe('Deduplicate page', () => {
       takeRecords(): IntersectionObserverEntry[] { return [] }
     }
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
-    mocks.groups.mockResolvedValue({
+    mocks.list.mockResolvedValue({
       groups: [],
       nextCursor: null,
       hasMore: false,
       totalGroups: 0,
       totalMedia: 0,
     })
-    mocks.status.mockResolvedValue({ status: 'idle', runId: null })
   })
 
   afterEach(() => {
@@ -142,7 +135,6 @@ describe('Deduplicate page', () => {
     expect(screen.getByText('Total 0 Media')).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Deduplicate' })).toBeNull()
     expect(screen.queryByText('Start scan')).toBeNull()
-    expect(mocks.status).not.toHaveBeenCalled()
   })
 
   it('does not expose scan controls to administrators on the utility page', async () => {
@@ -151,13 +143,12 @@ describe('Deduplicate page', () => {
 
     expect(await screen.findByText('No duplicate groups')).toBeTruthy()
     expect(screen.queryByText('Start scan')).toBeNull()
-    expect(mocks.status).not.toHaveBeenCalled()
   })
 
   it('automatically loads the next page near the end of the scroll container', async () => {
     const firstGroup = { clusterId: 10, items: [createMedia(1, 'one.jpg'), createMedia(2, 'two.jpg')] }
     const secondGroup = { clusterId: 20, items: [createMedia(3, 'three.jpg'), createMedia(4, 'four.jpg')] }
-    mocks.groups
+    mocks.list
       .mockResolvedValueOnce({
         groups: [firstGroup],
         nextCursor: '10',
@@ -185,14 +176,14 @@ describe('Deduplicate page', () => {
     })
 
     expect(await screen.findByText('Similar group 20')).toBeTruthy()
-    expect(mocks.groups).toHaveBeenNthCalledWith(2, { cursor: '10', limit: 20 })
+    expect(mocks.list).toHaveBeenNthCalledWith(2, { cursor: '10', limit: 20 })
     expect(screen.getByText('Total 2 Similar Groups')).toBeTruthy()
     expect(screen.getByText('Total 4 Media')).toBeTruthy()
   })
 
   it('opens media for inspection while selection remains a separate action', async () => {
     const user = userEvent.setup()
-    mocks.groups.mockResolvedValue({
+    mocks.list.mockResolvedValue({
       groups: [{
         clusterId: 10,
         items: [createMedia(1, 'two.jpg'), createMedia(2, 'one.jpg')],

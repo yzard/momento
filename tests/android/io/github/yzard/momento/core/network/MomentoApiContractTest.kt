@@ -42,11 +42,21 @@ class MomentoApiContractTest {
         assertEquals("api/v1/map/clusters", requireNotNull(map.getAnnotation(POST::class.java)).value)
     }
 
-    @Test fun aiAndMetadataActionsSendTheRequiredEmptyJsonBody() {
-        val ai = MomentoApi::class.java.getMethod("startAi", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
+    @Test fun aiActionsUseBodylessAggregateAndExactFeatureRoutes() {
+        val startAi = MomentoApi::class.java.getMethod("startAi", kotlin.coroutines.Continuation::class.java)
+        val aiStatus = MomentoApi::class.java.getMethod("aiStatus", kotlin.coroutines.Continuation::class.java)
+        val startFeature = MomentoApi::class.java.getMethod("startAiFeature", String::class.java, kotlin.coroutines.Continuation::class.java)
+        val duplicates = MomentoApi::class.java.getMethod("duplicates", io.github.yzard.momento.core.model.PageRequest::class.java, kotlin.coroutines.Continuation::class.java)
+
+        assertEquals("api/v1/ai/start", requireNotNull(startAi.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/ai/status", requireNotNull(aiStatus.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/ai/{feature}/start", requireNotNull(startFeature.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/duplicates/list", requireNotNull(duplicates.getAnnotation(POST::class.java)).value)
+    }
+
+    @Test fun metadataActionsStillSendTheirRequiredEmptyJsonBody() {
         val metadata = MomentoApi::class.java.getMethod("metadataStatus", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
 
-        assertEquals("api/v1/ai/start", requireNotNull(ai.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/metadata/status", requireNotNull(metadata.getAnnotation(POST::class.java)).value)
         assertEquals("{}", Json.encodeToString(EmptyRequest()))
     }

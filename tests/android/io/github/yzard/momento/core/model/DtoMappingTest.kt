@@ -44,7 +44,7 @@ class DtoMappingTest {
     }
 
     @Test fun decodesDeduplicateAndImportContracts() {
-        val duplicate = Json.decodeFromString<DeduplicateStatusResponse>("{\"status\":\"running\",\"runId\":1,\"trigger\":\"manual\",\"scheduledFor\":null,\"startedAt\":null,\"completedAt\":null,\"ensembledMedia\":1,\"processedMedia\":0,\"candidateComparisons\":0,\"clustersCreated\":0,\"error\":null,\"nextScheduledAt\":null}")
+        val duplicate = Json.decodeFromString<DeduplicateStatusResponse>("{\"status\":\"running\",\"runId\":1,\"trigger\":\"manual\",\"scheduledFor\":null,\"startedAt\":null,\"completedAt\":null,\"ensembledMedia\":1,\"processedMedia\":0,\"candidateComparisons\":0,\"clustersCreated\":0,\"error\":null,\"jobs\":{\"queued\":1,\"submitting\":0,\"submitted\":0,\"completed\":0,\"failed\":0,\"cancelled\":0}}")
         assertEquals("running", duplicate.status)
     }
 

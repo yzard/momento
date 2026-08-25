@@ -78,12 +78,11 @@ import kotlinx.serialization.Serializable
 @Serializable data class MapClustersResponse(val clusters: List<MapCluster>, val totalCount: Long)
 @Serializable data class MapMediaResponse(val items: List<Media>)
 
-@Serializable data class DeduplicateActionResponse(val message: String, val status: String)
 @Serializable data class DeduplicateStatusResponse(
     val status: String, val runId: Long?, val trigger: String?, val scheduledFor: String?,
     val startedAt: String?, val completedAt: String?, val ensembledMedia: Long,
     val processedMedia: Long, val candidateComparisons: Long, val clustersCreated: Long,
-    val error: String?, val nextScheduledAt: String?,
+    val error: String?, val jobs: AiJobCounts,
 )
 @Serializable data class AdminUserCreateRequest(val username: String, val email: String, val password: String, val role: String?)
 @Serializable data class AdminUserUpdateRequest(val userId: Long, val role: String?, val isActive: Boolean?)
@@ -91,6 +90,11 @@ import kotlinx.serialization.Serializable
 @Serializable data class JobActionResponse(val message: String, val queuedJobs: Long)
 @Serializable class EmptyRequest
 @Serializable data class JobStatus(val status: String, val queuedJobs: Long, val processingJobs: Long, val completedJobs: Long, val failedJobs: Long, val errors: List<String>)
+@Serializable data class AiFeatureActionResult(val feature: String, val outcome: String, val affectedJobs: Long, val error: String?)
+@Serializable data class AiActionResponse(val action: String, val results: List<AiFeatureActionResult>)
+@Serializable data class AiJobCounts(val queued: Long, val submitting: Long, val submitted: Long, val completed: Long, val failed: Long, val cancelled: Long)
+@Serializable data class AiTaskStatus(val task: String, val enabled: Boolean, val state: String, val jobs: AiJobCounts, val errors: List<String>)
+@Serializable data class AiStatusResponse(val tasks: List<AiTaskStatus>, val deduplicate: DeduplicateStatusResponse, val faceGroups: Long)
 @Serializable data class ImportStatus(val status: String, val totalFiles: Long, val processedFiles: Long, val successfulImports: Long, val failedImports: Long, val startedAt: String?, val completedAt: String?, val errors: List<String>)
 
 @Serializable data class FeatureFlags(val llm: Boolean, val imageTagging: Boolean, val deduplicate: Boolean, val faceDetection: Boolean, val imageAesthetics: Boolean, val screenshotDetection: Boolean, val documentDetection: Boolean)

@@ -1,25 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertCircle, Bot, Eraser, Loader2, Play, X } from 'lucide-react'
 
-import { aiApi } from '../../api/ai'
-import { deduplicateApi } from '../../api/deduplicate'
+import { aiApi, type AiActionResponse, type AiFeature } from '../../api/ai'
 import { cn } from '../../lib/utils'
 
 export default function AiPanel() {
-  const ocrQuery = useQuery({ queryKey: ['ai', 'ocr', 'status'], queryFn: aiApi.getOcrStatus, refetchInterval: 1000 })
-  const taggingQuery = useQuery({ queryKey: ['ai', 'image-tagging', 'status'], queryFn: aiApi.getImageTaggingStatus, refetchInterval: 1000 })
-  const screenshotDetectionQuery = useQuery({ queryKey: ['ai', 'screenshot-detection', 'status'], queryFn: aiApi.getScreenshotDetectionStatus, refetchInterval: 1000 })
-  const documentDetectionQuery = useQuery({ queryKey: ['ai', 'document-detection', 'status'], queryFn: aiApi.getDocumentDetectionStatus, refetchInterval: 1000 })
-  const aestheticsQuery = useQuery({ queryKey: ['ai', 'image-aesthetics', 'status'], queryFn: aiApi.getImageAestheticsStatus, refetchInterval: 1000 })
-  const deduplicationQuery = useQuery({ queryKey: ['deduplicate', 'status'], queryFn: deduplicateApi.status, refetchInterval: 1000 })
-  const facesQuery = useQuery({ queryKey: ['ai', 'faces', 'status'], queryFn: aiApi.getFacesStatus, refetchInterval: 1000 })
-  const ocrRunning = isActive(ocrQuery.data?.status)
-  const taggingRunning = isActive(taggingQuery.data?.status)
-  const screenshotDetectionRunning = isActive(screenshotDetectionQuery.data?.status)
-  const documentDetectionRunning = isActive(documentDetectionQuery.data?.status)
-  const aestheticsRunning = isActive(aestheticsQuery.data?.status)
-  const clusteringRunning = isActive(deduplicationQuery.data?.status)
-  const facesRunning = isActive(facesQuery.data?.status)
+  const statusQuery = useQuery({ queryKey: ['ai', 'status'], queryFn: aiApi.status, refetchInterval: 1000 })
+  const taskStatus = (task: Exclude<AiFeature, 'deduplicate'>) => statusQuery.data?.tasks.find((status) => status.task === task)
+  const ocrStatus = taskStatus('ocr')
+  const taggingStatus = taskStatus('image_tagging')
+  const screenshotDetectionStatus = taskStatus('screenshot_detection')
+  const documentDetectionStatus = taskStatus('document_detection')
+  const aestheticsStatus = taskStatus('image_aesthetics')
+  const faceDetectionStatus = taskStatus('face_detection')
+  const deduplicateStatus = statusQuery.data?.deduplicate
+  const ocrRunning = isActive(ocrStatus?.state)
+  const taggingRunning = isActive(taggingStatus?.state)
+  const screenshotDetectionRunning = isActive(screenshotDetectionStatus?.state)
+  const documentDetectionRunning = isActive(documentDetectionStatus?.state)
+  const aestheticsRunning = isActive(aestheticsStatus?.state)
+  const clusteringRunning = isActive(deduplicateStatus?.status)
+  const facesRunning = isActive(faceDetectionStatus?.state)
   const allRunning = ocrRunning || taggingRunning || screenshotDetectionRunning || documentDetectionRunning || aestheticsRunning || clusteringRunning || facesRunning
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
@@ -35,28 +36,28 @@ export default function AiPanel() {
         </div>
       </div>
       <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-5 xl:grid-cols-10">
-        <Metric label="Processed OCR" value={ocrQuery.data?.completedJobs} loading={ocrQuery.isLoading} />
-        <Metric label="Processed image tagging" value={taggingQuery.data?.completedJobs} loading={taggingQuery.isLoading} />
-        <Metric label="Processed screenshot detection" value={screenshotDetectionQuery.data?.completedJobs} loading={screenshotDetectionQuery.isLoading} />
-        <Metric label="Processed document detection" value={documentDetectionQuery.data?.completedJobs} loading={documentDetectionQuery.isLoading} />
-        <Metric label="Scored image aesthetics" value={aestheticsQuery.data?.completedJobs} loading={aestheticsQuery.isLoading} />
-        <Metric label="Image clustering embeddings" value={deduplicationQuery.data?.ensembledMedia} loading={deduplicationQuery.isLoading} />
-        <Metric label="Deduplication comparisons" value={deduplicationQuery.data?.candidateComparisons} loading={deduplicationQuery.isLoading} />
-        <Metric label="Duplicate groups" value={deduplicationQuery.data?.clustersCreated} loading={deduplicationQuery.isLoading} />
-        <Metric label="Processed face detection" value={facesQuery.data?.completedJobs} loading={facesQuery.isLoading} />
-        <Metric label="Face groups" value={facesQuery.data?.faceGroups} loading={facesQuery.isLoading} />
+        <Metric label="Processed OCR" value={ocrStatus?.jobs.completed} loading={statusQuery.isLoading} />
+        <Metric label="Processed image tagging" value={taggingStatus?.jobs.completed} loading={statusQuery.isLoading} />
+        <Metric label="Processed screenshot detection" value={screenshotDetectionStatus?.jobs.completed} loading={statusQuery.isLoading} />
+        <Metric label="Processed document detection" value={documentDetectionStatus?.jobs.completed} loading={statusQuery.isLoading} />
+        <Metric label="Scored image aesthetics" value={aestheticsStatus?.jobs.completed} loading={statusQuery.isLoading} />
+        <Metric label="Image clustering embeddings" value={deduplicateStatus?.ensembledMedia} loading={statusQuery.isLoading} />
+        <Metric label="Deduplication comparisons" value={deduplicateStatus?.candidateComparisons} loading={statusQuery.isLoading} />
+        <Metric label="Duplicate groups" value={deduplicateStatus?.clustersCreated} loading={statusQuery.isLoading} />
+        <Metric label="Processed face detection" value={faceDetectionStatus?.jobs.completed} loading={statusQuery.isLoading} />
+        <Metric label="Face groups" value={statusQuery.data?.faceGroups} loading={statusQuery.isLoading} />
       </div>
       <div className="border-t border-border px-8 py-6">
         <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-muted-foreground">AI job controls</h3>
         <div className="space-y-3">
           <ControlRow label="All AI Jobs" running={allRunning} start={() => aiApi.start()} cancel={() => aiApi.cancel()} clean={() => aiApi.clean()} />
-          <ControlRow label="OCR" running={ocrRunning} start={() => aiApi.startOcr()} cancel={() => aiApi.cancelOcr()} clean={() => aiApi.cleanOcr()} />
-          <ControlRow label="Image Tagging" running={taggingRunning} start={() => aiApi.startImageTagging()} cancel={() => aiApi.cancelImageTagging()} clean={() => aiApi.cleanImageTagging()} />
-          <ControlRow label="Screenshot Detection" running={screenshotDetectionRunning} start={() => aiApi.startScreenshotDetection()} cancel={() => aiApi.cancelScreenshotDetection()} clean={() => aiApi.cleanScreenshotDetection()} />
-          <ControlRow label="Document Detection" running={documentDetectionRunning} start={() => aiApi.startDocumentDetection()} cancel={() => aiApi.cancelDocumentDetection()} clean={() => aiApi.cleanDocumentDetection()} />
-          <ControlRow label="Image Aesthetics" running={aestheticsRunning} start={() => aiApi.startImageAesthetics()} cancel={() => aiApi.cancelImageAesthetics()} clean={() => aiApi.cleanImageAesthetics()} />
-          <ControlRow label="Deduplicate" running={clusteringRunning} start={() => deduplicateApi.start()} cancel={() => deduplicateApi.cancel()} clean={() => deduplicateApi.clean()} />
-          <ControlRow label="Face Detection" running={facesRunning} start={() => aiApi.startFaces()} cancel={() => aiApi.cancelFaces()} clean={() => aiApi.cleanFaces()} />
+          <ControlRow label="OCR" running={ocrRunning} start={() => aiApi.startFeature('ocr')} cancel={() => aiApi.cancelFeature('ocr')} clean={() => aiApi.cleanFeature('ocr')} />
+          <ControlRow label="Image Tagging" running={taggingRunning} start={() => aiApi.startFeature('image_tagging')} cancel={() => aiApi.cancelFeature('image_tagging')} clean={() => aiApi.cleanFeature('image_tagging')} />
+          <ControlRow label="Screenshot Detection" running={screenshotDetectionRunning} start={() => aiApi.startFeature('screenshot_detection')} cancel={() => aiApi.cancelFeature('screenshot_detection')} clean={() => aiApi.cleanFeature('screenshot_detection')} />
+          <ControlRow label="Document Detection" running={documentDetectionRunning} start={() => aiApi.startFeature('document_detection')} cancel={() => aiApi.cancelFeature('document_detection')} clean={() => aiApi.cleanFeature('document_detection')} />
+          <ControlRow label="Image Aesthetics" running={aestheticsRunning} start={() => aiApi.startFeature('image_aesthetics')} cancel={() => aiApi.cancelFeature('image_aesthetics')} clean={() => aiApi.cleanFeature('image_aesthetics')} />
+          <ControlRow label="Deduplicate" running={clusteringRunning} start={() => aiApi.startFeature('deduplicate')} cancel={() => aiApi.cancelFeature('deduplicate')} clean={() => aiApi.cleanFeature('deduplicate')} />
+          <ControlRow label="Face Detection" running={facesRunning} start={() => aiApi.startFeature('face_detection')} cancel={() => aiApi.cancelFeature('face_detection')} clean={() => aiApi.cleanFeature('face_detection')} />
         </div>
       </div>
     </section>
@@ -64,17 +65,16 @@ export default function AiPanel() {
 }
 
 function isActive(status: string | undefined): boolean {
-  return status === 'queued' || status === 'processing' || status === 'running' || status === 'cancelling'
+  return status === 'queued' || status === 'submitting' || status === 'submitted' || status === 'running' || status === 'cancelling'
 }
 
-function ControlRow({ label, running, start, cancel, clean }: { label: string; running: boolean; start: () => Promise<{ message: string }>; cancel: () => Promise<{ message: string }>; clean: () => Promise<{ message: string }> }) {
+function ControlRow({ label, running, start, cancel, clean }: { label: string; running: boolean; start: () => Promise<AiActionResponse>; cancel: () => Promise<AiActionResponse>; clean: () => Promise<AiActionResponse> }) {
   const queryClient = useQueryClient()
   const mutation = useMutation({
-    mutationFn: (action: () => Promise<{ message: string }>) => action(),
+    mutationFn: (action: () => Promise<AiActionResponse>) => action(),
     onSuccess: () => void Promise.all([
       queryClient.invalidateQueries({ queryKey: ['ai'] }),
-      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'status'] }),
-      queryClient.invalidateQueries({ queryKey: ['faces'] }),
+      queryClient.invalidateQueries({ queryKey: ['duplicates'] }),
     ]),
   })
   return (

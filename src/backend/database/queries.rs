@@ -410,9 +410,28 @@ pub mod ai_jobs {
     pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND claimed_at < datetime('now', '-5 minutes')";
     pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
-    pub const SELECT_STATUS_COUNTS: &str =
-        "SELECT status, COUNT(*) FROM llm_jobs WHERE task = ? GROUP BY status";
-    pub const SELECT_FAILURES: &str = "SELECT last_error FROM llm_jobs WHERE task = ? AND status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
+    pub const SELECT_ALL_STATUS_COUNTS: &str = r#"
+    SELECT task
+         , status
+         , COUNT(*)
+      FROM llm_jobs
+     GROUP BY task
+            , status
+     ORDER BY task
+            , status
+    "#;
+    pub const SELECT_ALL_FAILURES: &str = r#"
+    SELECT task
+         , last_error
+      FROM llm_jobs
+     WHERE status = 'failed'
+       AND last_error IS NOT NULL
+     ORDER BY task
+            , updated_at DESC
+    "#;
+    pub const COUNT_ACTIVE_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_jobs WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const COUNT_JOBS_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_jobs WHERE task = ?";
+    pub const COUNT_PENDING_CANCELLATION_SCOPE_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_cancellation_scopes WHERE scope = 'all' OR (scope = 'task' AND task = ?)";
     pub const DELETE_TEXT_FOR_TASK: &str = "DELETE FROM media_text WHERE model_type = ?";
     pub const DELETE_TEXT_INPUTS_FOR_TASK: &str =
         "DELETE FROM media_text_inputs WHERE model_type = ?";
@@ -426,8 +445,8 @@ pub mod ai_jobs {
     pub const DELETE_DOCUMENT_CLASSIFICATION_INPUTS: &str =
         "DELETE FROM media_document_classification_inputs";
     pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
-    pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted', 'failed')";
-    pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted', 'failed')";
+    pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted')";
     pub const QUEUE_CANCELLATION_SCOPE_FOR_TASK: &str =
         "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) VALUES ('task', ?)";
     pub const QUEUE_ALL_CANCELLATION_SCOPE: &str =

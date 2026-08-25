@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::models::MediaResponse;
+use crate::models::{AiJobCounts, MediaResponse};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,13 +28,6 @@ pub struct DeduplicateGroupsResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeduplicateActionResponse {
-    pub message: String,
-    pub status: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DeduplicateStatusResponse {
     pub status: String,
     pub run_id: Option<i64>,
@@ -47,5 +40,5 @@ pub struct DeduplicateStatusResponse {
     pub candidate_comparisons: i64,
     pub clusters_created: i64,
     pub error: Option<String>,
-    pub next_scheduled_at: Option<String>,
+    pub jobs: AiJobCounts,
 }
