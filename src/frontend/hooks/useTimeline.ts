@@ -157,8 +157,10 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
         setError(requestError instanceof Error ? requestError : new Error('Timeline preload failed'))
       }
     } finally {
-      loadingRef.current = false
-      setLoading(false)
+      if (generation === generationRef.current) {
+        loadingRef.current = false
+        setLoading(false)
+      }
     }
   }, [appendPage, classification, fetchPage, groupBy, mediaType, normalizedSearch])
 
@@ -170,7 +172,11 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     const generation = generationRef.current + 1
     generationRef.current = generation
     entriesRef.current = []
+    loadingOlderRef.current = false
+    loadingNewerRef.current = false
     setEntries([])
+    setIsLoadingOlder(false)
+    setIsLoadingNewer(false)
     setError(null)
 
     if (!marker) {
@@ -209,6 +215,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     const oldest = entriesRef.current.at(-1)
     if (!oldest?.response.hasOlder || !oldest.response.nextCursor) return
 
+    const generation = generationRef.current
     loadingOlderRef.current = true
     setIsLoadingOlder(true)
     const request: TimelineListRequest = {
@@ -222,12 +229,16 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     }
     try {
       const response = await fetchPage(request)
+      if (generation !== generationRef.current) return
       appendPage(response, 'older')
     } catch (requestError: unknown) {
+      if (generation !== generationRef.current) return
       setError(requestError instanceof Error ? requestError : new Error('Timeline request failed'))
     } finally {
-      loadingOlderRef.current = false
-      setIsLoadingOlder(false)
+      if (generation === generationRef.current) {
+        loadingOlderRef.current = false
+        setIsLoadingOlder(false)
+      }
     }
   }, [appendPage, classification, fetchPage, groupBy, mediaType, normalizedSearch])
 
@@ -236,6 +247,7 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     const newest = entriesRef.current[0]
     if (!newest?.response.hasNewer || !newest.response.previousCursor) return
 
+    const generation = generationRef.current
     loadingNewerRef.current = true
     setIsLoadingNewer(true)
     const request: TimelineListRequest = {
@@ -249,12 +261,16 @@ export function useTimelineWindow(options: TimelineWindowOptions) {
     }
     try {
       const response = await fetchPage(request)
+      if (generation !== generationRef.current) return
       appendPage(response, 'newer')
     } catch (requestError: unknown) {
+      if (generation !== generationRef.current) return
       setError(requestError instanceof Error ? requestError : new Error('Timeline request failed'))
     } finally {
-      loadingNewerRef.current = false
-      setIsLoadingNewer(false)
+      if (generation === generationRef.current) {
+        loadingNewerRef.current = false
+        setIsLoadingNewer(false)
+      }
     }
   }, [appendPage, classification, fetchPage, groupBy, mediaType, normalizedSearch])
 

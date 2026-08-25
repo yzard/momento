@@ -1,28 +1,34 @@
-import { mediaApi, type ThumbnailSize } from '../api/media'
+import { mediaApi } from '../api/media'
+import { trashApi } from '../api/trash'
 
-class ThumbnailBatcher {
+type AssetBatchLoader = (mediaIds: number[]) => Promise<Map<number, string>>
+type CachedAssetLoader = (mediaId: number) => string | null | undefined
+
+class AssetBatcher {
   private queue: Set<number> = new Set()
   private pending: Map<number, ((url: string | null) => void)[]> = new Map()
-  private missing: Set<number> = new Set()
   private timeout: ReturnType<typeof setTimeout> | null = null
   private batchDelayMs = 100
-  private size: ThumbnailSize
+  private loadBatch: AssetBatchLoader
+  private getCached: CachedAssetLoader
 
-  constructor(size: ThumbnailSize = 'normal') {
-    this.size = size
+  constructor(loadBatch: AssetBatchLoader, getCached: CachedAssetLoader) {
+    this.loadBatch = loadBatch
+    this.getCached = getCached
   }
 
   load(id: number): Promise<string | null> {
-    if (this.missing.has(id)) return Promise.resolve(null)
-
-    const cached = mediaApi.getCachedThumbnailUrl(id, this.size)
+    const cached = this.getCached(id)
     if (cached) return Promise.resolve(cached)
 
     return new Promise((resolve) => {
-      if (!this.pending.has(id)) {
-        this.pending.set(id, [])
+      const resolvers = this.pending.get(id)
+      if (resolvers) {
+        resolvers.push(resolve)
+        return
       }
-      this.pending.get(id)!.push(resolve)
+
+      this.pending.set(id, [resolve])
       this.queue.add(id)
 
       if (!this.timeout) {
@@ -39,21 +45,14 @@ class ThumbnailBatcher {
     if (idsToFetch.length === 0) return
 
     try {
-      const results = await mediaApi.getThumbnailBatch(idsToFetch, this.size)
+      const results = await this.loadBatch(idsToFetch)
 
       idsToFetch.forEach((id) => {
         const resolvers = this.pending.get(id)
         if (!resolvers) return
 
         const url = results.get(id)
-        if (url) {
-          resolvers.forEach((r) => r(url))
-          this.pending.delete(id)
-          return
-        }
-
-        this.missing.add(id)
-        resolvers.forEach((r) => r(null))
+        resolvers.forEach((resolve) => resolve(url ?? null))
         this.pending.delete(id)
       })
     } catch (error) {
@@ -61,7 +60,7 @@ class ThumbnailBatcher {
       idsToFetch.forEach((id) => {
         const resolvers = this.pending.get(id)
         if (resolvers) {
-          resolvers.forEach((r) => r(null))
+          resolvers.forEach((resolve) => resolve(null))
           this.pending.delete(id)
         }
       })
@@ -69,57 +68,19 @@ class ThumbnailBatcher {
   }
 }
 
-class PreviewBatcher {
-  private queue: Set<number> = new Set()
-  private pending: Map<number, ((url: string | null) => void)[]> = new Map()
-  private timeout: ReturnType<typeof setTimeout> | null = null
-  private batchDelayMs = 100
-
-  load(id: number): Promise<string | null> {
-    return new Promise((resolve) => {
-      if (!this.pending.has(id)) {
-        this.pending.set(id, [])
-      }
-      this.pending.get(id)!.push(resolve)
-      this.queue.add(id)
-
-      if (!this.timeout) {
-        this.timeout = setTimeout(() => this.flush(), this.batchDelayMs)
-      }
-    })
-  }
-
-  private async flush() {
-    const idsToFetch = Array.from(this.queue)
-    this.queue.clear()
-    this.timeout = null
-
-    if (idsToFetch.length === 0) return
-
-    try {
-      const results = await mediaApi.getPreviewBatch(idsToFetch)
-
-      idsToFetch.forEach((id) => {
-        const resolvers = this.pending.get(id)
-        if (resolvers) {
-          const url = results.get(id) ?? null
-          resolvers.forEach((r) => r(url))
-          this.pending.delete(id)
-        }
-      })
-    } catch (error) {
-      console.error('Batch preview load failed', error)
-      idsToFetch.forEach((id) => {
-        const resolvers = this.pending.get(id)
-        if (resolvers) {
-          resolvers.forEach((r) => r(null))
-          this.pending.delete(id)
-        }
-      })
-    }
-  }
-}
-
-export const batchLoader = new ThumbnailBatcher('normal')
-export const tinyBatchLoader = new ThumbnailBatcher('tiny')
-export const previewBatchLoader = new PreviewBatcher()
+export const batchLoader = new AssetBatcher(
+  (mediaIds) => mediaApi.getThumbnailBatch(mediaIds, 'normal'),
+  (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'normal'),
+)
+export const tinyBatchLoader = new AssetBatcher(
+  (mediaIds) => mediaApi.getThumbnailBatch(mediaIds, 'tiny'),
+  (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'tiny'),
+)
+export const trashBatchLoader = new AssetBatcher(
+  (mediaIds) => trashApi.getThumbnailBatch(mediaIds, 'tiny'),
+  (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'tiny'),
+)
+export const previewBatchLoader = new AssetBatcher(
+  mediaApi.getPreviewBatch,
+  () => null,
+)

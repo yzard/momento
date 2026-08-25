@@ -14,6 +14,7 @@ use crate::processor::thumbnails::{
     generate_video_thumbnail,
 };
 use crate::utils::hash::calculate_file_hash;
+use crate::utils::path::resolve_existing_storage_path;
 
 const CLASSIFICATION_PREVIEW_MAXIMUM_SIZE: u32 = 2048;
 const CLASSIFICATION_PREVIEW_QUALITY: u8 = 95;
@@ -33,13 +34,9 @@ pub async fn generate_media_metadata(
             )
             .map_err(|error| error.to_string())?
     };
-    let original_path = paths().originals.join(&file_path);
-    if !original_path.is_file() {
-        return Err(format!(
-            "original file is missing: {}",
-            original_path.display()
-        ));
-    }
+    let original_path = resolve_existing_storage_path(&paths().originals, &file_path)
+        .await
+        .map_err(|error| error.to_string())?;
     let content_hash = match stored_content_hash {
         Some(content_hash) => content_hash,
         None => calculate_file_hash(&original_path)

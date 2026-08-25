@@ -16,9 +16,10 @@ use crate::constants::{paths, IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, VIDEO_EXTE
 use crate::database::queries;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BackupDeviceRegisterRequest, BackupDeviceRegisterResponse, BackupStatusResponse,
-    BackupUploadCreateRequest, BackupUploadIdRequest, BackupUploadResponse,
+    BackupDeviceRegisterRequest, BackupDeviceRegisterResponse, BackupUploadCreateRequest,
+    BackupUploadIdRequest, BackupUploadResponse,
 };
+use crate::utils::path::resolve_storage_path;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -28,7 +29,6 @@ pub fn router() -> Router<AppState> {
         .route("/backup/upload/chunk/:upload_id", put(upload_chunk))
         .route("/backup/upload/complete", post(complete_upload))
         .route("/backup/upload/cancel", post(cancel_upload))
-        .route("/backup/status", post(status))
 }
 
 async fn register_device(
@@ -259,19 +259,6 @@ async fn cancel_upload(
     )?))
 }
 
-async fn status(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-) -> AppResult<Json<BackupStatusResponse>> {
-    let connection = state.pool.get().map_err(AppError::Pool)?;
-    let mut statement = connection.prepare(queries::backup::SELECT_STATUS)?;
-    let assets = statement
-        .query_map([current_user.id], upload_response_from_row)?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(Json(BackupStatusResponse { assets }))
-}
-
 async fn upload_chunk(
     State(state): State<AppState>,
     current_user: CurrentUser,
@@ -349,7 +336,7 @@ async fn write_chunk(
     declared_length: u64,
     body: Body,
 ) -> AppResult<()> {
-    let path = paths().backups.join(staged_path);
+    let path = resolve_storage_path(&paths().backups, staged_path)?;
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Internal("backup staging path has no parent".to_string()))?;
@@ -630,7 +617,11 @@ fn lookup_upload(
 }
 
 async fn remove_staged_file(staged_path: &str) {
-    match tokio::fs::remove_file(paths().backups.join(staged_path)).await {
+    let Ok(path) = resolve_storage_path(&paths().backups, staged_path) else {
+        tracing::warn!(staged_path, "invalid backup staging cleanup path");
+        return;
+    };
+    match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => tracing::warn!(staged_path, "backup staging cleanup failed: {error}"),

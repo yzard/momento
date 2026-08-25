@@ -162,7 +162,7 @@ CREATE INDEX IF NOT EXISTS idx_backup_assets_claim
 CREATE TABLE IF NOT EXISTS media_access (
     media_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    access_level INTEGER NOT NULL,
+    access_level INTEGER NOT NULL CHECK (access_level IN (1, 2)),
     created_at TEXT DEFAULT (datetime('now')),
     deleted_at TEXT DEFAULT NULL,
     PRIMARY KEY (media_id, user_id),
@@ -173,7 +173,7 @@ CREATE TABLE IF NOT EXISTS media_access (
 CREATE TABLE IF NOT EXISTS album_access (
     album_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    access_level INTEGER NOT NULL,
+    access_level INTEGER NOT NULL CHECK (access_level IN (1, 2)),
     created_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (album_id, user_id),
     FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE,

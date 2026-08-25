@@ -13,6 +13,7 @@ use crate::models::{
     PlaceGetRequest, PlaceGetResponse, PlaceSummary, PlaceThumbnailRequest, PlaceThumbnailResponse,
     PlacesListRequest, PlacesListResponse,
 };
+use crate::utils::path::resolve_existing_storage_path;
 
 use super::media::map_media_row;
 
@@ -62,7 +63,14 @@ async fn get_place_thumbnail(
     .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
     drop(connection);
     let thumbnail_relative = super::media::thumbnail_relative_path(cover.0.as_deref(), &cover.1);
-    let thumbnail_path = paths().thumbnails_places.join(thumbnail_relative);
+    let Some(thumbnail_path) = thumbnail_relative.to_str() else {
+        return Ok(Json(PlaceThumbnailResponse { thumbnail: None }));
+    };
+    let Ok(thumbnail_path) =
+        resolve_existing_storage_path(&paths().thumbnails_places, thumbnail_path).await
+    else {
+        return Ok(Json(PlaceThumbnailResponse { thumbnail: None }));
+    };
     let thumbnail = match tokio::fs::read(thumbnail_path).await {
         Ok(bytes) => Some(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

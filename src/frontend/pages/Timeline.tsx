@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import TimelineView from '../components/timeline/TimelineView'
 import Lightbox from '../components/viewer/Lightbox'
 import AddToAlbumModal from '../components/albums/AddToAlbumModal'
@@ -27,16 +28,33 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
   const [addToAlbumMedia, setAddToAlbumMedia] = useState<Media | null>(null)
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
   const [showGroupByMenu, setShowGroupByMenu] = useState(false)
-  const [searchInput, setSearchInput] = useState('')
-  const [search, setSearch] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const searchParameter = searchParams.get('search') ?? ''
+  const [searchInput, setSearchInput] = useState(searchParameter)
+  const [search, setSearch] = useState(searchParameter)
+
+  useEffect(() => {
+    setSearchInput(searchParameter)
+    setSearch(searchParameter)
+  }, [searchParameter])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
-      setSearch(searchInput.trim())
+      const normalizedSearch = searchInput.trim()
+      setSearch(normalizedSearch)
+      setSearchParams((currentParams) => {
+        const nextParams = new URLSearchParams(currentParams)
+        if (normalizedSearch) {
+          nextParams.set('search', normalizedSearch)
+        } else {
+          nextParams.delete('search')
+        }
+        return nextParams
+      }, { replace: true })
     }, 250)
 
     return () => window.clearTimeout(timeoutId)
-  }, [searchInput])
+  }, [searchInput, setSearchParams])
 
   const deleteMutation = useMutation({
     mutationFn: mediaApi.delete,

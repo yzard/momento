@@ -459,7 +459,17 @@ async fn absorb_existing_media(
         )));
     }
 
-    let existing_original_path = paths().originals.join(&existing_media.file_path);
+    let existing_original_path = crate::utils::path::resolve_existing_storage_path(
+        &paths().originals,
+        &existing_media.file_path,
+    )
+    .await
+    .map_err(|_| {
+        AppError::Conflict(format!(
+            "matching media {} has no canonical original",
+            existing_media.id
+        ))
+    })?;
     if !existing_original_path.is_file() {
         return Err(AppError::Conflict(format!(
             "matching media {} has no canonical original",

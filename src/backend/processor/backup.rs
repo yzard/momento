@@ -12,6 +12,7 @@ use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::processor::import::{import_staged_file, ImportSource};
 use crate::utils::hash::calculate_file_hash;
+use crate::utils::path::resolve_storage_path;
 
 struct ClaimedAsset {
     id: i64,
@@ -61,7 +62,7 @@ pub async fn recover(pool: &DbPool) -> AppResult<()> {
     };
 
     for (asset_id, staged_path, uploaded_size) in resumable_files {
-        let path = paths().backups.join(staged_path);
+        let path = resolve_storage_path(&paths().backups, &staged_path)?;
         match truncate_to_durable_offset(&path, uploaded_size as u64).await {
             Ok(()) => {}
             Err(AppError::Internal(_)) if uploaded_size > 0 => {
@@ -106,11 +107,12 @@ async fn recover_processing_assets(pool: &DbPool) -> AppResult<()> {
         };
         if let Some(media_id) = recovered_media_id {
             complete_recovered_asset(pool, asset.id, media_id)?;
-            cleanup_staged_file(&paths().backups.join(&asset.staged_path)).await;
+            let staged_path = resolve_storage_path(&paths().backups, &asset.staged_path)?;
+            cleanup_staged_file(&staged_path).await;
             continue;
         }
 
-        if !paths().backups.join(&asset.staged_path).is_file() {
+        if !resolve_storage_path(&paths().backups, &asset.staged_path)?.is_file() {
             fail_processing_asset(pool, asset.id, "backup staging file is missing")?;
             continue;
         }
@@ -178,7 +180,7 @@ fn claim_queued_asset(pool: &DbPool) -> AppResult<Option<ClaimedAsset>> {
 }
 
 async fn process_claimed_asset(pool: &DbPool, asset: ClaimedAsset) -> AppResult<()> {
-    let source_path = paths().backups.join(&asset.staged_path);
+    let source_path = resolve_storage_path(&paths().backups, &asset.staged_path)?;
     let result = async {
         set_source_modified_time(&source_path, &asset.source_modified_at)?;
         let content_hash = calculate_file_hash(&source_path).await?;

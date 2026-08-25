@@ -10,6 +10,7 @@ use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
+use crate::utils::path::{resolve_existing_storage_path_sync, resolve_storage_path};
 use momento_common::llm::JobInputResult;
 
 const EMBEDDING_DIMENSIONS: usize = 512;
@@ -116,7 +117,7 @@ pub fn persist_result(
         .query_map([media_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|path| paths().previews.join(path))
+        .filter_map(|path| resolve_storage_path(&paths().previews, &path).ok())
         .collect();
     let mut changes = FaceFileChanges {
         new_paths: Vec::new(),
@@ -297,7 +298,8 @@ fn write_crop(
         rusqlite::params![job_id, face.sequence],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    let input_bytes = std::fs::read(paths().previews.join(input_path))?;
+    let input_path = resolve_existing_storage_path_sync(&paths().previews, &input_path)?;
+    let input_bytes = std::fs::read(input_path)?;
     if input_bytes.len() as i64 != expected_size
         || format!("{:x}", Sha256::digest(&input_bytes)) != expected_hash
     {
@@ -324,7 +326,7 @@ fn write_crop(
     let relative = PathBuf::from("faces")
         .join(media_id.to_string())
         .join(format!("{job_id}-{}-{}.jpg", face.sequence, face.index));
-    let output = paths().previews.join(&relative);
+    let output = resolve_storage_path(&paths().previews, &relative.to_string_lossy())?;
     let parent = output
         .parent()
         .ok_or_else(|| AppError::Internal("face crop path has no parent".to_string()))?;

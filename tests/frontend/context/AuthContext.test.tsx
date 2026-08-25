@@ -8,12 +8,14 @@ const mocks = vi.hoisted(() => ({
   clearQueryCache: vi.fn(),
   getMe: vi.fn(),
   changePassword: vi.fn(),
+  logout: vi.fn(),
 }))
 
 vi.mock('../../../src/frontend/api/auth', () => ({
   authApi: {
     getMe: mocks.getMe,
     changePassword: mocks.changePassword,
+    logout: mocks.logout,
   },
 }))
 
@@ -42,7 +44,7 @@ const testLocalStorage = {
 }
 
 function SessionState() {
-  const { changePassword, isAuthenticated, isLoading } = useAuth()
+  const { changePassword, isAuthenticated, isLoading, logout } = useAuth()
   const location = useLocation()
 
   return (
@@ -52,6 +54,7 @@ function SessionState() {
       <button type="button" onClick={() => void changePassword('old-password', 'new-password')}>
         Change password
       </button>
+      <button type="button" onClick={() => void logout()}>Log out</button>
     </div>
   )
 }
@@ -81,6 +84,7 @@ beforeEach(() => {
     role: 'admin',
     mustChangePassword: false,
   })
+  mocks.logout.mockResolvedValue(undefined)
 })
 
 afterEach(() => {
@@ -140,5 +144,35 @@ describe('AuthProvider', () => {
     expect(localStorage.getItem('momento_refresh_token')).toBeNull()
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
     expect(mocks.clearMediaCache).toHaveBeenCalledOnce()
+  })
+
+  it('does not restore a bootstrap user after logout', async () => {
+    let resolveUser!: (user: unknown) => void
+    mocks.getMe.mockReturnValue(new Promise((resolve) => {
+      resolveUser = resolve
+    }))
+    render(
+      <MemoryRouter initialEntries={['/timeline']}>
+        <AuthProvider>
+          <SessionState />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(mocks.getMe).toHaveBeenCalledOnce())
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'Log out' }).click()
+    })
+    await screen.findByText('logged-out')
+    await act(async () => resolveUser({
+      id: 2,
+      username: 'stale',
+      email: 'stale@example.com',
+      role: 'user',
+      mustChangePassword: false,
+    }))
+
+    expect(screen.getByText('logged-out')).toBeTruthy()
+    expect(localStorage.getItem('momento_access_token')).toBeNull()
   })
 })

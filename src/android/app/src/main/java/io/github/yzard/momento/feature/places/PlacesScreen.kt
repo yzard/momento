@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -83,14 +84,27 @@ fun placeRegion(place: Place): String = listOfNotNull(place.state, place.country
 
 @Composable
 fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
-    var places by remember { mutableStateOf<List<Place>?>(null) }
-    var selected by remember { mutableStateOf<Place?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var places by remember(repository) { mutableStateOf<List<Place>?>(null) }
+    var nextCursor by remember(repository) { mutableStateOf<String?>(null) }
+    var hasMore by remember(repository) { mutableStateOf(false) }
+    var loading by remember(repository) { mutableStateOf(false) }
+    var selected by remember(repository) { mutableStateOf<Place?>(null) }
+    var error by remember(repository) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    suspend fun loadPlaces() {
+    suspend fun loadPlaces(reset: Boolean) {
+        if (loading || (!reset && (!hasMore || nextCursor == null))) return
+        loading = true
+        if (reset) {
+            places = null
+            nextCursor = null
+            hasMore = false
+        }
         try {
-            places = repository.places()
+            val response = repository.places(if (reset) null else nextCursor)
+            places = if (reset) response.places else appendPlaces(places.orEmpty(), response.places)
+            nextCursor = response.nextCursor
+            hasMore = response.hasMore
             error = null
         } catch (_: IOException) {
             error = "Could not load places"
@@ -98,10 +112,12 @@ fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
             error = "Could not load places"
         } catch (_: SerializationException) {
             error = "Could not load places"
+        } finally {
+            loading = false
         }
     }
 
-    LaunchedEffect(repository) { loadPlaces() }
+    LaunchedEffect(repository) { loadPlaces(true) }
     BackHandler(enabled = selected != null) { selected = null }
 
     val selectedPlace = selected
@@ -111,15 +127,29 @@ fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
     }
 
     when {
-        places == null && error != null -> ErrorState(error!!) { scope.launch { loadPlaces() } }
+        places == null && error != null -> ErrorState(error!!) { scope.launch { loadPlaces(true) } }
         places == null -> LoadingState()
         places!!.isEmpty() -> EmptyState("No places yet")
-        else -> PlaceTiles(places!!, repository) { selected = it }
+        else -> PlaceTiles(
+            places = places!!,
+            repository = repository,
+            hasMore = hasMore,
+            loading = loading,
+            loadMore = { scope.launch { loadPlaces(false) } },
+            select = { selected = it },
+        )
     }
 }
 
 @Composable
-private fun PlaceTiles(places: List<Place>, repository: MomentoRepository, select: (Place) -> Unit) {
+private fun PlaceTiles(
+    places: List<Place>,
+    repository: MomentoRepository,
+    hasMore: Boolean,
+    loading: Boolean,
+    loadMore: () -> Unit,
+    select: (Place) -> Unit,
+) {
     val configuration = LocalConfiguration.current
     BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val columns = placeGridColumns(
@@ -134,6 +164,18 @@ private fun PlaceTiles(places: List<Place>, repository: MomentoRepository, selec
         ) {
             items(places, key = { it.placeId }) { place ->
                 PlaceTile(place, repository) { select(place) }
+            }
+            if (hasMore) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Text(
+                        text = if (loading) "Loading more..." else "Load more",
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !loading, onClick = loadMore)
+                            .padding(16.dp),
+                    )
+                }
             }
         }
     }
@@ -240,14 +282,16 @@ private fun PlaceDetailScreen(
     placeId: String,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
-    var media by remember { mutableStateOf<List<Media>?>(null) }
-    var nextCursor by remember { mutableStateOf<String?>(null) }
-    var more by remember { mutableStateOf(true) }
-    var requestCursor by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var retryVersion by remember { mutableIntStateOf(0) }
+    var media by remember(placeId) { mutableStateOf<List<Media>?>(null) }
+    var nextCursor by remember(placeId) { mutableStateOf<String?>(null) }
+    var more by remember(placeId) { mutableStateOf(true) }
+    var requestCursor by remember(placeId) { mutableStateOf<String?>(null) }
+    var error by remember(placeId) { mutableStateOf<String?>(null) }
+    var loading by remember(placeId) { mutableStateOf(false) }
+    var retryVersion by remember(placeId) { mutableIntStateOf(0) }
 
     LaunchedEffect(placeId, requestCursor, retryVersion) {
+        loading = true
         try {
             val response = repository.place(placeId, requestCursor)
             media = appendPlaceMedia(media.orEmpty(), response.media)
@@ -260,6 +304,8 @@ private fun PlaceDetailScreen(
             error = "Could not load this place"
         } catch (_: SerializationException) {
             error = "Could not load this place"
+        } finally {
+            loading = false
         }
     }
 
@@ -270,11 +316,11 @@ private fun PlaceDetailScreen(
             MediaGrid(media!!, repository) { item -> openMedia(media!!, media!!.indexOf(item)) }
             if (more && nextCursor != null) {
                 Text(
-                    if (error == null) "Load more" else "Retry loading more",
+                    if (loading) "Loading more..." else if (error == null) "Load more" else "Retry loading more",
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
-                        .clickable {
+                        .clickable(enabled = !loading) {
                             if (error == null) requestCursor = nextCursor else retryVersion += 1
                         }
                         .padding(16.dp),
@@ -286,3 +332,6 @@ private fun PlaceDetailScreen(
 
 fun appendPlaceMedia(existing: List<Media>, page: List<Media>): List<Media> =
     existing + page.filter { candidate -> existing.none { it.id == candidate.id } }
+
+fun appendPlaces(existing: List<Place>, page: List<Place>): List<Place> =
+    existing + page.filter { candidate -> existing.none { it.placeId == candidate.placeId } }

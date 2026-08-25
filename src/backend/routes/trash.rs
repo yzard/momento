@@ -12,13 +12,15 @@ use crate::constants::TRASH_RETENTION_DAYS;
 use crate::database::{execute_query, fetch_all, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    TrashDeleteRequest, TrashListResponse, TrashMediaResponse, TrashResponse, TrashRestoreRequest,
+    ThumbnailBatchRequest, ThumbnailBatchResponse, TrashDeleteRequest, TrashListResponse,
+    TrashMediaResponse, TrashResponse, TrashRestoreRequest,
 };
 use crate::processor::media_deletion::permanently_delete_for_user;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/trash/list", post(list_trash))
+        .route("/trash/thumbnails/get", post(get_deleted_thumbnail_batch))
         .route(
             "/trash/:media_id/thumbnail/tiny",
             get(get_deleted_tiny_thumbnail),
@@ -26,6 +28,38 @@ pub fn router() -> Router<AppState> {
         .route("/trash/restore", post(restore_from_trash))
         .route("/trash/delete", post(permanently_delete))
         .route("/trash/empty", post(empty_trash))
+}
+
+async fn get_deleted_thumbnail_batch(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(request): Json<ThumbnailBatchRequest>,
+) -> AppResult<Json<ThumbnailBatchResponse>> {
+    let media_ids = crate::routes::media::unique_batch_ids(request.media_ids)?;
+    if media_ids.is_empty() {
+        return Ok(Json(ThumbnailBatchResponse {
+            thumbnails: std::collections::HashMap::new(),
+        }));
+    }
+
+    let rows: Vec<crate::routes::media::ThumbnailBatchRow> = {
+        let connection = state.pool.get().map_err(AppError::Pool)?;
+        let query = queries::trash::build_thumbnail_batch_query(media_ids.len());
+        let parameters =
+            crate::routes::media::user_media_id_parameters(&current_user.id, &media_ids);
+        fetch_all(&connection, &query, &parameters, |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+    };
+    Ok(Json(
+        crate::routes::media::encode_thumbnail_batch(rows, request.size).await,
+    ))
 }
 
 async fn get_deleted_tiny_thumbnail(

@@ -6,12 +6,14 @@ export interface TokenResponse {
   tokenType: string
 }
 
-interface User {
+export interface User {
   id: number
   username: string
   email: string
   role: 'admin' | 'user'
   mustChangePassword: boolean
+  isActive: boolean
+  createdAt: string
 }
 
 export const authApi = {

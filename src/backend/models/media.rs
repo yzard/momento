@@ -36,26 +36,8 @@ pub struct MediaResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MediaListRequest {
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub limit: Option<i32>,
-    pub search: Option<String>,
-    pub media_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MediaBatchRequest {
     pub ids: Vec<i64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaListResponse {
-    pub items: Vec<MediaResponse>,
-    pub next_cursor: Option<String>,
-    pub has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,25 +95,6 @@ pub struct TimelineListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MediaBatchResponse {
     pub items: Vec<MediaResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageTextSearchRequest {
-    pub search: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageTextSearchResult {
-    pub image_id: i64,
-    pub models: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageTextSearchResponse {
-    pub results: Vec<ImageTextSearchResult>,
 }
 
 #[derive(Debug, Deserialize)]

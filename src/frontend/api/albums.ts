@@ -1,7 +1,7 @@
 import { apiClient } from './client'
 import type { Album, Media } from './types'
 
-interface AlbumDetail {
+export interface AlbumDetail {
   id: number
   name: string
   description: string | null
@@ -33,8 +33,8 @@ export const albumsApi = {
     return response.data
   },
 
-  create: async (data: AlbumCreateRequest): Promise<Album> => {
-    const response = await apiClient.post<Album>('/album/create', data)
+  create: async (data: AlbumCreateRequest): Promise<AlbumDetail> => {
+    const response = await apiClient.post<AlbumDetail>('/album/create', data)
     return response.data
   },
 

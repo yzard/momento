@@ -1,4 +1,5 @@
 import { apiClient } from './client'
+import { thumbnailResponseMap, type ThumbnailSize } from './media'
 
 export interface TrashMedia {
   id: number
@@ -29,6 +30,14 @@ export const trashApi = {
   list: async (): Promise<TrashListResponse> => {
     const response = await apiClient.post<TrashListResponse>('/trash/list')
     return response.data
+  },
+
+  getThumbnailBatch: async (mediaIds: number[], size: ThumbnailSize): Promise<Map<number, string>> => {
+    const response = await apiClient.post<{ thumbnails: Record<string, string | null> }>(
+      '/trash/thumbnails/get',
+      { mediaIds, size },
+    )
+    return thumbnailResponseMap(response.data.thumbnails)
   },
 
   restore: async (mediaIds: number[]): Promise<TrashResponse> => {

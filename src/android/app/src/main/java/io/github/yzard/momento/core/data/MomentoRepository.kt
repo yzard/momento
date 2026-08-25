@@ -54,17 +54,13 @@ class MomentoRepository(
     suspend fun timelinePage(
         cursor: String?,
         groupBy: String,
+        search: String,
         mediaType: String?,
         classification: String?,
         anchorDate: String,
     ): TimelineResponse = api().timeline(
-        timelineRequest(cursor, groupBy, mediaType, classification, anchorDate),
+        timelineRequest(cursor, groupBy, search, mediaType, classification, anchorDate),
     )
-    suspend fun search(query: String): List<Media> {
-        val ids = api().search(SearchRequest(query)).results.map { it.imageId }
-        if (ids.isEmpty()) return emptyList()
-        return api().mediaBatch(MediaBatchRequest(ids)).items
-    }
     suspend fun albums(): List<Album> = api().albums().albums
     suspend fun createAlbum(name: String, description: String?): AlbumDetail = api().createAlbum(AlbumCreateRequest(name, description))
     suspend fun deleteAlbum(id: Long): MessageResponse = api().deleteAlbum(AlbumIdRequest(id))
@@ -73,10 +69,10 @@ class MomentoRepository(
     suspend fun addAlbumMedia(id: Long, mediaIds: List<Long>): MessageResponse = api().addAlbumMedia(AlbumMediaRequest(id, mediaIds))
     suspend fun removeAlbumMedia(id: Long, mediaIds: List<Long>): MessageResponse = api().removeAlbumMedia(AlbumMediaRequest(id, mediaIds))
     suspend fun reorderAlbumMedia(id: Long, mediaIds: List<Long>): MessageResponse = api().reorderAlbumMedia(AlbumMediaRequest(id, mediaIds))
-    suspend fun places(): List<Place> = api().places(PageRequest(null, 100)).places
+    suspend fun places(cursor: String?): PlacesResponse = api().places(pagedListRequest(cursor))
     suspend fun place(placeId: String, cursor: String?): PlaceResponse = api().place(PlaceRequest(placeId, cursor, 100))
     suspend fun placeThumbnail(placeId: String): String? = api().placeThumbnail(PlaceThumbnailRequest(placeId)).thumbnail
-    suspend fun faces(): List<FaceGroup> = api().faces(PageRequest(null, 100)).groups
+    suspend fun faces(cursor: String?): FacesResponse = api().faces(pagedListRequest(cursor))
     suspend fun faceGroup(id: Long): FaceGroupMediaResponse = api().face(FaceGroupRequest(id))
     suspend fun faceThumbnail(id: Long): ByteArray = api().faceThumbnail(FaceGroupRequest(id)).bytes()
     suspend fun mergeFaces(ids: List<Long>): FaceMergeResponse = api().mergeFaces(FaceMergeRequest(ids))
@@ -96,20 +92,14 @@ class MomentoRepository(
     suspend fun deleteUser(id: Long): MessageResponse = api().deleteUser(AdminUserIdRequest(id))
     suspend fun localImport(): MessageResponse = api().triggerLocalImport()
     suspend fun importStatus(): ImportStatus = api().importStatus()
-    suspend fun generateMetadata(): JobActionResponse = api().generateMetadata()
-    suspend fun metadataStatus(): JobStatus = api().metadataStatus()
-    suspend fun resetMetadata(): JobActionResponse = api().resetMetadata()
-    suspend fun triggerAi(): JobActionResponse = api().triggerAi()
-    suspend fun cancelAi(): JobActionResponse = api().cancelAi()
-    suspend fun cleanAi(): JobActionResponse = api().cleanAi()
-    suspend fun triggerOcr(): JobActionResponse = api().triggerOcr()
-    suspend fun cancelOcr(): JobActionResponse = api().cancelOcr()
-    suspend fun cleanOcr(): JobActionResponse = api().cleanOcr()
-    suspend fun ocrStatus(): JobStatus = api().ocrStatus()
-    suspend fun triggerImageTagging(): JobActionResponse = api().triggerImageTagging()
-    suspend fun cancelImageTagging(): JobActionResponse = api().cancelImageTagging()
-    suspend fun cleanImageTagging(): JobActionResponse = api().cleanImageTagging()
-    suspend fun imageTaggingStatus(): JobStatus = api().imageTaggingStatus()
+    suspend fun generateMetadata(): JobActionResponse = api().generateMetadata(EmptyRequest())
+    suspend fun metadataStatus(): JobStatus = api().metadataStatus(EmptyRequest())
+    suspend fun resetMetadata(): JobActionResponse = api().resetMetadata(EmptyRequest())
+    suspend fun triggerAi(): JobActionResponse = api().triggerAi(EmptyRequest())
+    suspend fun cancelAi(): JobActionResponse = api().cancelAi(EmptyRequest())
+    suspend fun cleanAi(): JobActionResponse = api().cleanAi(EmptyRequest())
+    suspend fun ocrStatus(): JobStatus = api().ocrStatus(EmptyRequest())
+    suspend fun imageTaggingStatus(): JobStatus = api().imageTaggingStatus(EmptyRequest())
     suspend fun mapClusters(bounds: BoundingBox, zoom: Int): MapClustersResponse = api().mapClusters(MapClustersRequest(bounds, zoom))
     suspend fun mapMedia(bounds: BoundingBox, prefixes: List<String>): List<Media> = api().mapMedia(MapMediaRequest(bounds, prefixes)).items
     suspend fun changePassword(current: String, updated: String): MessageResponse = api().changePassword(ChangePasswordRequest(current, updated))
@@ -153,6 +143,7 @@ class MomentoRepository(
 fun timelineRequest(
     cursor: String?,
     groupBy: String,
+    search: String,
     mediaType: String?,
     classification: String?,
     anchorDate: String,
@@ -160,9 +151,11 @@ fun timelineRequest(
     cursor,
     100,
     groupBy,
-    "",
+    search,
     mediaType,
     classification,
     "older",
     anchorDate,
 )
+
+fun pagedListRequest(cursor: String?): PageRequest = PageRequest(cursor, 100)

@@ -13,20 +13,19 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::{media_text_model_name, paths};
+use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DeleteMediaResponse, ImageTextSearchRequest, ImageTextSearchResponse, ImageTextSearchResult,
-    MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaListRequest, MediaListResponse,
-    MediaResponse, MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse,
-    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize, TimelineDirection,
-    TimelineListRequest, TimelineListResponse, TimelineMarker, TimelineMarkersRequest,
-    TimelineMarkersResponse,
+    DeleteMediaResponse, MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaResponse,
+    MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse, ThumbnailBatchRequest,
+    ThumbnailBatchResponse, ThumbnailSize, TimelineDirection, TimelineListRequest,
+    TimelineListResponse, TimelineMarker, TimelineMarkersRequest, TimelineMarkersResponse,
 };
 use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
 use crate::processor::metadata::reverse_geocoding::reverse_geocode;
 use crate::processor::thumbnails::generate_image_preview;
+use crate::utils::path::{resolve_existing_storage_path, resolve_storage_path};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use std::collections::{HashMap, HashSet};
@@ -34,17 +33,15 @@ use std::path::PathBuf;
 
 const TIMELINE_START_DATE: &str = "0000-01-01T00:00:00";
 const TIMELINE_END_DATE: &str = "9999-12-31T23:59:59";
+const MAX_MEDIA_BATCH_SIZE: usize = 500;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/media/list", post(list_media))
         .route("/timeline/list", post(list_timeline))
         .route("/timeline/markers", post(get_timeline_markers))
-        .route("/media/search", post(search_media))
         .route("/media/get-batch", post(get_media_batch))
         .route("/media/update", post(update_media))
         .route("/media/delete", post(delete_media))
-        .route("/media/file/:media_id", get(get_media_file))
         .route("/media/:media_id/original", get(get_media_original))
         .route("/media/:media_id/thumbnail", get(get_media_thumbnail))
         .route(
@@ -190,75 +187,6 @@ fn row_to_media_response(row: MediaRowData) -> MediaResponse {
         created_at,
         content_hash: None,
     }
-}
-
-async fn list_media(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-    Json(request): Json<MediaListRequest>,
-) -> AppResult<Json<MediaListResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let search = normalize_media_text_search(request.search.as_deref());
-
-    if request.limit.is_none() && request.cursor.is_none() {
-        let items = fetch_all(
-            &conn,
-            queries::media::SELECT_ALL_FOR_USER,
-            &[&current_user.id, &search, &search],
-            map_media_row,
-        )?;
-
-        return Ok(Json(MediaListResponse {
-            items,
-            next_cursor: None,
-            has_more: false,
-        }));
-    }
-
-    let limit = request.limit.unwrap_or(100);
-    let rows = if let Some(ref cursor) = request.cursor {
-        let parts: Vec<&str> = cursor.split('_').collect();
-        if parts.len() == 2 {
-            let cursor_date = parts[0];
-            let cursor_id: i64 = parts[1].parse().unwrap_or(0);
-            fetch_all(
-                &conn,
-                queries::media::SELECT_PAGINATED_FOR_USER,
-                &[
-                    &current_user.id,
-                    &search,
-                    &search,
-                    &cursor_date,
-                    &cursor_date,
-                    &cursor_id,
-                    &(limit + 1),
-                ],
-                map_media_row,
-            )?
-        } else {
-            fetch_default_media(&conn, current_user.id, limit, &search)?
-        }
-    } else {
-        fetch_default_media(&conn, current_user.id, limit, &search)?
-    };
-
-    let has_more = rows.len() > limit as usize;
-    let items: Vec<MediaResponse> = rows.into_iter().take(limit as usize).collect();
-
-    let next_cursor = if has_more && !items.is_empty() {
-        let last = items.last().unwrap();
-        last.date_taken
-            .as_ref()
-            .map(|dt| format!("{}_{}", dt, last.id))
-    } else {
-        None
-    };
-
-    Ok(Json(MediaListResponse {
-        items,
-        next_cursor,
-        has_more,
-    }))
 }
 
 async fn list_timeline(
@@ -465,50 +393,6 @@ fn timeline_period_bounds(date_taken: &str, group_by: &str) -> AppResult<(String
     ))
 }
 
-async fn search_media(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-    Json(request): Json<ImageTextSearchRequest>,
-) -> AppResult<Json<ImageTextSearchResponse>> {
-    let search = normalize_media_text_search(Some(request.search.as_str()));
-    if search.is_empty() {
-        return Ok(Json(ImageTextSearchResponse {
-            results: Vec::new(),
-        }));
-    }
-
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let matches: Vec<(i64, String)> = fetch_all(
-        &conn,
-        queries::media_text::SEARCH_FOR_USER,
-        &[&search, &current_user.id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-
-    let mut results: HashMap<i64, Vec<String>> = HashMap::new();
-    for (image_id, model_type) in matches {
-        let Some(model_name) = media_text_model_name(&model_type) else {
-            continue;
-        };
-
-        let models = results.entry(image_id).or_default();
-        if !models.iter().any(|name| name == model_name) {
-            models.push(model_name.to_string());
-        }
-    }
-
-    let mut results: Vec<ImageTextSearchResult> = results
-        .into_iter()
-        .map(|(image_id, mut models)| {
-            models.sort();
-            ImageTextSearchResult { image_id, models }
-        })
-        .collect();
-    results.sort_by_key(|result| result.image_id);
-
-    Ok(Json(ImageTextSearchResponse { results }))
-}
-
 fn normalize_media_text_search(search: Option<&str>) -> String {
     let search = search.unwrap_or_default().trim();
     if search.is_empty() {
@@ -667,54 +551,6 @@ async fn delete_media(
     Ok(Json(DeleteMediaResponse {
         message: format!("{} media moved to trash", deleted_count),
     }))
-}
-
-async fn get_media_file(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-    Path(media_id): Path<i64>,
-    headers: HeaderMap,
-) -> AppResult<Response> {
-    serve_original(&state, current_user.id, media_id, &headers).await
-}
-
-fn fetch_default_media(
-    conn: &crate::database::DbConn,
-    user_id: i64,
-    limit: i32,
-    search: &str,
-) -> AppResult<Vec<MediaResponse>> {
-    fetch_all(
-        conn,
-        queries::media::SELECT_PAGINATED_FOR_USER,
-        &[
-            &user_id,
-            &search,
-            &search,
-            &Utc::now().to_rfc3339(),
-            &Utc::now().to_rfc3339(),
-            &i64::MAX,
-            &(limit + 1),
-        ],
-        map_media_row,
-    )
-    .or_else(|_| {
-        let future_date = "9999-12-31T23:59:59";
-        fetch_all(
-            conn,
-            queries::media::SELECT_PAGINATED_FOR_USER,
-            &[
-                &user_id,
-                &search,
-                &search,
-                &future_date,
-                &future_date,
-                &i64::MAX,
-                &(limit + 1),
-            ],
-            map_media_row,
-        )
-    })
 }
 
 pub(crate) fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
@@ -1143,10 +979,7 @@ async fn serve_original(
         media_id,
         queries::media::SELECT_BINARY_MEDIA_INFO,
     )?;
-    let path = paths().originals.join(&media.file_path);
-    if !path.is_file() {
-        return Err(AppError::NotFound("File not found".to_string()));
-    }
+    let path = resolve_existing_storage_path(&paths().originals, &media.file_path).await?;
     let content_type = media
         .mime_type
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -1169,10 +1002,11 @@ async fn serve_thumbnail(
     query: &str,
 ) -> AppResult<Response> {
     let media = load_binary_media_info(state, user_id, media_id, query)?;
-    let path = thumbnail_path(&media, size);
-    if !path.is_file() {
-        return Err(AppError::NotFound("Thumbnail not found".to_string()));
-    }
+    let relative_path = thumbnail_relative_path(media.thumbnail_path.as_deref(), &media.file_path);
+    let relative_path = relative_path
+        .to_str()
+        .ok_or_else(|| AppError::NotFound("Thumbnail path is invalid".to_string()))?;
+    let path = resolve_existing_storage_path(thumbnail_base_directory(size), relative_path).await?;
     serve_file(path, "image/jpeg", headers, None, false).await
 }
 
@@ -1212,30 +1046,30 @@ pub(crate) async fn serve_deleted_tiny_thumbnail(
     .await
 }
 
-fn thumbnail_path(media: &BinaryMediaInfo, size: ThumbnailSize) -> PathBuf {
-    resolve_thumbnail_path(media.thumbnail_path.as_deref(), &media.file_path, size)
-}
-
 fn resolve_thumbnail_path(
     thumbnail_path: Option<&str>,
     file_path: &str,
     size: ThumbnailSize,
-) -> PathBuf {
-    let base_dir = match size {
+) -> AppResult<PathBuf> {
+    let relative_path = thumbnail_relative_path(thumbnail_path, file_path);
+    let relative_path = relative_path
+        .to_str()
+        .ok_or_else(|| AppError::NotFound("Thumbnail path is invalid".to_string()))?;
+    resolve_storage_path(thumbnail_base_directory(size), relative_path)
+}
+
+fn thumbnail_base_directory(size: ThumbnailSize) -> &'static std::path::Path {
+    match size {
         ThumbnailSize::Normal => &paths().thumbnails,
         ThumbnailSize::Tiny => &paths().thumbnails_tiny,
-    };
-    base_dir.join(thumbnail_relative_path(thumbnail_path, file_path))
+    }
 }
 
 async fn resolve_preview_path(
     media: &BinaryMediaInfo,
     user_id: i64,
 ) -> AppResult<(PathBuf, String)> {
-    let original_path = paths().originals.join(&media.file_path);
-    if !original_path.is_file() {
-        return Err(AppError::NotFound("File not found".to_string()));
-    }
+    let original_path = resolve_existing_storage_path(&paths().originals, &media.file_path).await?;
     if media.media_type == "video" {
         return Err(AppError::NotFound("Preview not found".to_string()));
     }
@@ -1276,18 +1110,18 @@ async fn get_media_thumbnail_batch(
     current_user: CurrentUser,
     Json(request): Json<ThumbnailBatchRequest>,
 ) -> AppResult<Json<ThumbnailBatchResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    if request.media_ids.is_empty() {
+    let media_ids = unique_batch_ids(request.media_ids)?;
+    if media_ids.is_empty() {
         return Ok(Json(ThumbnailBatchResponse {
             thumbnails: HashMap::new(),
         }));
     }
 
-    let rows: Vec<(i64, Option<String>, String, String, i64)> = fetch_all(
-        &conn,
-        queries::media::SELECT_THUMBNAIL_BATCH,
-        &[&current_user.id],
-        |row| {
+    let rows: Vec<ThumbnailBatchRow> = {
+        let conn = state.pool.get().map_err(AppError::Pool)?;
+        let query = queries::media::build_thumbnail_batch_query(media_ids.len());
+        let parameters = user_media_id_parameters(&current_user.id, &media_ids);
+        fetch_all(&conn, &query, &parameters, |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -1295,19 +1129,53 @@ async fn get_media_thumbnail_batch(
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
             ))
-        },
-    )?;
+        })?
+    };
 
-    let requested_ids: std::collections::HashSet<i64> = request.media_ids.into_iter().collect();
-    let rows = rows
+    Ok(Json(encode_thumbnail_batch(rows, request.size).await))
+}
+
+pub(super) fn unique_batch_ids(media_ids: Vec<i64>) -> AppResult<Vec<i64>> {
+    let mut seen = HashSet::new();
+    let media_ids = media_ids
         .into_iter()
-        .filter(|(id, _, _, _, _)| requested_ids.contains(id))
+        .filter(|media_id| seen.insert(*media_id))
         .collect::<Vec<_>>();
+    if media_ids.len() > MAX_MEDIA_BATCH_SIZE {
+        return Err(AppError::BadRequest(format!(
+            "mediaIds must contain at most {MAX_MEDIA_BATCH_SIZE} unique IDs"
+        )));
+    }
+    Ok(media_ids)
+}
 
-    let mut thumbnails: HashMap<i64, Option<String>> = HashMap::new();
+pub(super) fn user_media_id_parameters<'a>(
+    user_id: &'a i64,
+    media_ids: &'a [i64],
+) -> Vec<&'a dyn rusqlite::ToSql> {
+    let mut parameters = Vec::with_capacity(media_ids.len() + 1);
+    parameters.push(user_id as &dyn rusqlite::ToSql);
+    parameters.extend(
+        media_ids
+            .iter()
+            .map(|media_id| media_id as &dyn rusqlite::ToSql),
+    );
+    parameters
+}
 
+pub(super) type ThumbnailBatchRow = (i64, Option<String>, String, String, i64);
+
+pub(super) async fn encode_thumbnail_batch(
+    rows: Vec<ThumbnailBatchRow>,
+    size: ThumbnailSize,
+) -> ThumbnailBatchResponse {
+    let mut thumbnails = HashMap::new();
     for (media_id, thumbnail_path, file_path, _media_type, _user_id) in rows {
-        let full_path = resolve_thumbnail_path(thumbnail_path.as_deref(), &file_path, request.size);
+        let Ok(full_path) = resolve_thumbnail_path(thumbnail_path.as_deref(), &file_path, size)
+        else {
+            thumbnails.insert(media_id, None);
+            continue;
+        };
 
         if full_path.exists() {
             if let Ok(data) = tokio::fs::read(&full_path).await {
@@ -1323,7 +1191,7 @@ async fn get_media_thumbnail_batch(
         thumbnails.insert(media_id, None);
     }
 
-    Ok(Json(ThumbnailBatchResponse { thumbnails }))
+    ThumbnailBatchResponse { thumbnails }
 }
 
 pub(super) fn thumbnail_relative_path(thumbnail_path: Option<&str>, file_path: &str) -> PathBuf {
@@ -1348,25 +1216,21 @@ async fn get_media_preview_batch(
     current_user: CurrentUser,
     Json(request): Json<PreviewBatchRequest>,
 ) -> AppResult<Json<PreviewBatchResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    if request.ids.is_empty() {
+    let media_ids = unique_batch_ids(request.ids)?;
+    if media_ids.is_empty() {
         return Ok(Json(PreviewBatchResponse {
             previews: HashMap::new(),
         }));
     }
 
-    let rows: Vec<(i64, String, String, Option<String>)> = fetch_all(
-        &conn,
-        queries::media::SELECT_PREVIEW_BATCH,
-        &[&current_user.id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    )?;
-
-    let requested_ids: std::collections::HashSet<i64> = request.ids.into_iter().collect();
-    let rows = rows
-        .into_iter()
-        .filter(|(id, _, _, _)| requested_ids.contains(id))
-        .collect::<Vec<_>>();
+    let rows: Vec<(i64, String, String, Option<String>)> = {
+        let conn = state.pool.get().map_err(AppError::Pool)?;
+        let query = queries::media::build_preview_batch_query(media_ids.len());
+        let parameters = user_media_id_parameters(&current_user.id, &media_ids);
+        fetch_all(&conn, &query, &parameters, |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+    };
 
     let mut previews: HashMap<i64, Option<String>> = HashMap::new();
 

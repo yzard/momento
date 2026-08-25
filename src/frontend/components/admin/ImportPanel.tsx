@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { importApi } from '../../api/import'
+import { usePollingStatus } from '../../hooks/usePollingStatus'
 
 interface ImportStatus {
   status: string
@@ -13,31 +14,18 @@ interface ImportStatus {
 }
 
 export default function ImportPanel() {
-  const [status, setStatus] = useState<ImportStatus | null>(null)
   const [isTriggering, setIsTriggering] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-
-  const loadStatus = async () => {
-    try {
-      const data = await importApi.getStatus()
-      setStatus(data)
-      setErrorMessage(null)
-    } catch {
-      setErrorMessage('Could not load import status.')
-    }
-  }
-
-  useEffect(() => {
-    loadStatus()
-    const interval = setInterval(loadStatus, 2000)
-    return () => clearInterval(interval)
-  }, [])
+  const { status, errorMessage, setErrorMessage, refresh } = usePollingStatus<ImportStatus>(
+    importApi.getStatus,
+    'Could not load import status.',
+    2000,
+  )
 
   const handleTriggerImport = async () => {
     setIsTriggering(true)
     try {
       await importApi.triggerLocal()
-      loadStatus()
+      await refresh()
     } catch {
       setErrorMessage('Could not start import. An import may already be running.')
     } finally {

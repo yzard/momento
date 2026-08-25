@@ -5,6 +5,10 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,13 +16,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -56,6 +61,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
@@ -80,6 +86,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -89,11 +96,14 @@ import androidx.compose.ui.platform.LocalAutofillTree
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
@@ -118,14 +128,13 @@ import io.github.yzard.momento.feature.faces.FacesScreen
 import io.github.yzard.momento.feature.map.NativeMapScreen
 import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.places.PlacesScreen
-import io.github.yzard.momento.feature.search.SearchScreen
 import io.github.yzard.momento.feature.settings.SettingsScreen
 import io.github.yzard.momento.feature.timeline.TimelinePage
 import io.github.yzard.momento.feature.timeline.TimelinePeriod
 import io.github.yzard.momento.feature.timeline.TimelineScreen
+import io.github.yzard.momento.feature.timeline.normalizedTimelineSearchQuery
 import io.github.yzard.momento.feature.trash.TrashScreen
 import io.github.yzard.momento.feature.viewer.ViewerScreen
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -364,6 +373,7 @@ private fun MainShell(
     var viewerChanged by remember { mutableStateOf(false) }
     var user by remember { mutableStateOf(initialUser) }
     var timelinePeriod by remember { mutableStateOf(TimelinePeriod.DAY) }
+    var timelineSearchQuery by rememberSaveable { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
@@ -410,6 +420,7 @@ private fun MainShell(
                     ShellDestination(
                         destination = destination,
                         timelinePeriod = timelinePeriod,
+                        timelineSearchQuery = timelineSearchQuery,
                         repository = repository,
                         settingsStore = settingsStore,
                         user = user,
@@ -427,7 +438,9 @@ private fun MainShell(
                     timelinePeriod = timelinePeriod,
                     selectTimelinePeriod = { timelinePeriod = it },
                     openMenu = { scope.launch { drawerState.open() } },
-                    search = { destination = Destination.SEARCH },
+                    search = { query ->
+                        timelineSearchQuery = query
+                    },
                 )
             }
         }
@@ -591,41 +604,78 @@ private fun ShellOverlay(
     timelinePeriod: TimelinePeriod,
     selectTimelinePeriod: (TimelinePeriod) -> Unit,
     openMenu: () -> Unit,
-    search: () -> Unit,
+    search: (String) -> Unit,
 ) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing),
-    ) {
-        if (destination.hasFloatingTitle()) {
-            Text(
-                destination.label,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
+    var searchExpanded by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    fun changeSearchExpanded(expanded: Boolean) {
+        searchExpanded = expanded
+        if (expanded) return
+
+        focusManager.clearFocus()
+        keyboard?.hide()
+    }
+
+    BackHandler(enabled = searchExpanded) { changeSearchExpanded(false) }
+
+    Box(Modifier.fillMaxSize()) {
+        if (searchExpanded) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable { changeSearchExpanded(false) },
             )
         }
 
-        MomentoFloatingButton(
-            modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
-            onClick = openMenu,
+        // Only controls move for the IME; the dismiss surface must cover the whole window.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .imePadding(),
         ) {
-            Icon(Icons.Default.Menu, "Open navigation menu")
-        }
+            if (destination.hasFloatingTitle()) {
+                Text(
+                    destination.label,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
+                )
+            }
 
-        if (destination.isTimelinePage()) {
-            TimelinePeriodDock(
-                selected = timelinePeriod,
-                select = selectTimelinePeriod,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
-            )
             MomentoFloatingButton(
-                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
-                onClick = search,
+                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
+                onClick = {
+                    changeSearchExpanded(false)
+                    openMenu()
+                },
             ) {
-                Icon(Icons.Default.Search, "Search")
+                Icon(Icons.Default.Menu, "Open navigation menu")
+            }
+
+            if (destination.isTimelinePage() && !searchExpanded) {
+                TimelinePeriodDock(
+                    selected = timelinePeriod,
+                    select = selectTimelinePeriod,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                )
+            }
+            if (destination.isTimelinePage()) {
+                TimelineSearchControl(
+                    query = searchQuery,
+                    changeQuery = { searchQuery = it },
+                    expanded = searchExpanded,
+                    changeExpanded = ::changeSearchExpanded,
+                    submit = search,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .fillMaxWidth()
+                        .padding(start = 80.dp, end = 12.dp, bottom = 12.dp),
+                )
             }
         }
     }
@@ -643,29 +693,127 @@ private fun TimelinePeriodDock(
         shape = MaterialTheme.shapes.extraLarge,
         color = floatingColors.container,
         contentColor = floatingColors.content,
-        shadowElevation = 5.dp,
-        tonalElevation = 2.dp,
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp,
     ) {
-        Row(Modifier.padding(4.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            Modifier.padding(4.dp).selectableGroup(),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
             TimelinePeriod.entries.forEach { period ->
-                Surface(
+                Box(
                     modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .clickable { select(period) },
-                    color = if (selected == period) {
-                        floatingColors.selected
-                    } else {
-                        Color.Transparent
-                    },
-                    shape = MaterialTheme.shapes.large,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            period.label,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = floatingColors.content,
-                            modifier = Modifier.padding(horizontal = 8.dp),
+                        .size(48.dp)
+                        .background(
+                            color = if (selected == period) floatingColors.selected else Color.Transparent,
+                            shape = CircleShape,
                         )
+                        .selectable(
+                            selected = selected == period,
+                            onClick = { select(period) },
+                            role = Role.RadioButton,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        period.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = floatingColors.content,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TimelineSearchControl(
+    query: String,
+    changeQuery: (String) -> Unit,
+    expanded: Boolean,
+    changeExpanded: (Boolean) -> Unit,
+    submit: (String) -> Unit,
+    modifier: Modifier,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    var searchFieldValue by remember { mutableStateOf(TextFieldValue(query)) }
+    val shape = CircleShape
+    val floatingColors = momentoFloatingControlColors()
+
+    fun runSearch() {
+        submit(normalizedTimelineSearchQuery(query))
+        changeExpanded(false)
+    }
+
+    LaunchedEffect(expanded) {
+        if (!expanded) return@LaunchedEffect
+
+        focusRequester.requestFocus()
+        keyboard?.show()
+    }
+    LaunchedEffect(query) {
+        if (searchFieldValue.text != query) {
+            searchFieldValue = TextFieldValue(query)
+        }
+    }
+    Box(modifier = modifier, contentAlignment = Alignment.CenterEnd) {
+        Surface(
+            modifier = Modifier
+                .animateContentSize()
+                .then(if (expanded) Modifier.fillMaxWidth() else Modifier.width(56.dp))
+                .height(56.dp),
+            shape = shape,
+            color = floatingColors.container,
+            contentColor = floatingColors.content,
+            shadowElevation = 0.dp,
+            tonalElevation = 0.dp,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (expanded) {
+                    BasicTextField(
+                        value = searchFieldValue,
+                        onValueChange = { updatedValue ->
+                            searchFieldValue = updatedValue
+                            changeQuery(updatedValue.text)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 18.dp)
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focusState ->
+                                if (focusState.isFocused && searchFieldValue.text.isNotEmpty()) {
+                                    searchFieldValue = searchFieldValue.copy(
+                                        selection = TextRange(0, searchFieldValue.text.length),
+                                    )
+                                }
+                            },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = floatingColors.content),
+                        cursorBrush = SolidColor(floatingColors.content),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Search,
+                        ),
+                        keyboardActions = KeyboardActions(onSearch = { runSearch() }),
+                        decorationBox = { innerTextField ->
+                            Box {
+                                if (query.isEmpty()) {
+                                    Text(
+                                        "Search photos",
+                                        color = floatingColors.content.copy(alpha = 0.7f),
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        },
+                    )
+                    IconButton(onClick = { runSearch() }, modifier = Modifier.size(56.dp)) {
+                        Icon(Icons.Default.Search, "Search")
+                    }
+                } else {
+                    IconButton(onClick = { changeExpanded(true) }, modifier = Modifier.size(56.dp)) {
+                        Icon(Icons.Default.Search, "Open search")
                     }
                 }
             }
@@ -691,6 +839,7 @@ private fun drawerIcon(destination: Destination) = when (destination) {
 private fun ShellDestination(
     destination: Destination,
     timelinePeriod: TimelinePeriod,
+    timelineSearchQuery: String,
     repository: MomentoRepository,
     settingsStore: SettingsStore,
     user: User?,
@@ -707,11 +856,10 @@ private fun ShellDestination(
             repository = repository,
             page = timelinePage(destination),
             period = timelinePeriod,
+            search = timelineSearchQuery,
             openMedia = openMedia,
         )
         Destination.COLLECTIONS -> CollectionsScreen(openDestination)
-        Destination.CREATE -> CreateAlbumScreen(repository) { openDestination(Destination.ALBUMS) }
-        Destination.SEARCH -> SearchScreen(repository, openMedia)
         Destination.SETTINGS -> SettingsScreen(repository, settingsStore, user, { openDestination(Destination.ADMIN) }, logout)
         Destination.ALBUMS -> AlbumsScreen(repository, openMedia)
         Destination.MAP -> NativeMapScreen(repository) { media -> openMedia(media, 0) }
@@ -752,73 +900,6 @@ private fun CollectionsScreen(open: (Destination) -> Unit) {
                 modifier = Modifier.clickable { open(collection) },
             )
             HorizontalDivider()
-        }
-    }
-}
-
-@Composable
-private fun CreateAlbumScreen(repository: MomentoRepository, complete: () -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var description by remember { mutableStateOf("") }
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<Media>>(emptyList()) }
-    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-
-    LaunchedEffect(query) {
-        if (query.isBlank()) {
-            results = emptyList()
-            return@LaunchedEffect
-        }
-        delay(300)
-        try {
-            results = repository.search(query)
-            error = null
-        } catch (_: IOException) {
-            error = "Could not search the library"
-        } catch (_: HttpException) {
-            error = "Could not search the library"
-        }
-    }
-    LazyColumn(Modifier.fillMaxSize().padding(24.dp), contentPadding = PaddingValues(bottom = 100.dp)) {
-        item {
-            Text("New album", style = MaterialTheme.typography.headlineMedium)
-            OutlinedTextField(name, { name = it }, label = { Text("Album name") }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp))
-            OutlinedTextField(description, { description = it }, label = { Text("Description") }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-            OutlinedTextField(query, { query = it }, label = { Text("Optionally add photos") }, modifier = Modifier.fillMaxWidth().padding(top = 16.dp))
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        }
-        items(results, key = { it.id }) { media ->
-            ListItem(
-                headlineContent = { Text(media.originalFilename) },
-                supportingContent = { Text(if (media.id in selectedIds) "Selected" else "Tap to select") },
-                modifier = Modifier.clickable {
-                    selectedIds = if (media.id in selectedIds) selectedIds - media.id else selectedIds + media.id
-                },
-            )
-        }
-        item {
-            Button(
-                onClick = {
-                    if (name.isBlank()) {
-                        error = "Album name is required"
-                        return@Button
-                    }
-                    scope.launch {
-                        try {
-                            val album = repository.createAlbum(name, description.ifBlank { null })
-                            if (selectedIds.isNotEmpty()) repository.addAlbumMedia(album.id, selectedIds.toList())
-                            complete()
-                        } catch (_: IOException) {
-                            error = "Could not create album"
-                        } catch (_: HttpException) {
-                            error = "Could not create album"
-                        }
-                    }
-                },
-                modifier = Modifier.padding(top = 12.dp),
-            ) { Text("Create album") }
         }
     }
 }

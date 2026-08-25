@@ -12,6 +12,8 @@ class RoutesTest {
 
         assertTrue(timelinePages.all { it.isTimelinePage() })
         assertTrue(Destination.ALBUMS.isTimelinePage().not())
+        assertTrue(Destination.entries.none { it.name == "SEARCH" })
+        assertTrue(Destination.entries.none { it.name == "CREATE" })
     }
 
     @Test fun drawerMatchesWebNavigationOrder() {

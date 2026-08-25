@@ -10,6 +10,9 @@ use crate::models::{
     ShareListResponse, ShareMediaRequest,
 };
 
+const MIN_ACCESS_LEVEL: i32 = 1;
+const MAX_ACCESS_LEVEL: i32 = 2;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/share/create", post(create_share_link))
@@ -47,6 +50,20 @@ async fn create_share_link(
     if request.media_id.is_some() && request.album_id.is_some() {
         return Err(AppError::BadRequest(
             "Cannot specify both media_id and album_id".to_string(),
+        ));
+    }
+
+    if request
+        .password
+        .as_ref()
+        .is_some_and(|password| password.trim().is_empty())
+    {
+        return Err(AppError::BadRequest("Password cannot be empty".to_string()));
+    }
+
+    if request.expires_in_days.is_some_and(|days| days <= 0) {
+        return Err(AppError::BadRequest(
+            "Expiration must be at least one day".to_string(),
         ));
     }
 
@@ -165,7 +182,14 @@ async fn share_media_with_user(
     current_user: CurrentUser,
     Json(request): Json<ShareMediaRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    validate_access_grant(
+        &request.access_level,
+        current_user.id,
+        request.target_user_id,
+    )?;
     let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    ensure_active_target_user(&conn, request.target_user_id)?;
 
     let access_level: i32 = fetch_one(
         &conn,
@@ -183,7 +207,7 @@ async fn share_media_with_user(
 
     execute_query(
         &conn,
-        queries::access::INSERT_MEDIA_ACCESS,
+        queries::access::UPSERT_SHARED_MEDIA_ACCESS,
         &[
             &request.media_id,
             &request.target_user_id,
@@ -201,7 +225,14 @@ async fn share_album_with_user(
     current_user: CurrentUser,
     Json(request): Json<ShareAlbumRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    validate_access_grant(
+        &request.access_level,
+        current_user.id,
+        request.target_user_id,
+    )?;
     let conn = state.pool.get().map_err(AppError::Pool)?;
+
+    ensure_active_target_user(&conn, request.target_user_id)?;
 
     let exists = fetch_one(
         &conn,
@@ -216,7 +247,7 @@ async fn share_album_with_user(
 
     execute_query(
         &conn,
-        queries::access::INSERT_ALBUM_ACCESS,
+        queries::access::UPSERT_SHARED_ALBUM_ACCESS,
         &[
             &request.album_id,
             &request.target_user_id,
@@ -227,4 +258,35 @@ async fn share_album_with_user(
     Ok(Json(
         serde_json::json!({"message": "Album shared successfully"}),
     ))
+}
+
+fn validate_access_grant(access_level: &i32, user_id: i64, target_user_id: i64) -> AppResult<()> {
+    if !(MIN_ACCESS_LEVEL..=MAX_ACCESS_LEVEL).contains(access_level) {
+        return Err(AppError::BadRequest(
+            "Access level must be 1 or 2".to_string(),
+        ));
+    }
+
+    if user_id == target_user_id {
+        return Err(AppError::BadRequest(
+            "Cannot share with yourself".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_active_target_user(conn: &crate::database::DbConn, target_user_id: i64) -> AppResult<()> {
+    let active = fetch_one(
+        conn,
+        queries::users::SELECT_BY_ID,
+        &[&target_user_id],
+        |row| row.get::<_, bool>(5),
+    )?;
+
+    if active != Some(true) {
+        return Err(AppError::NotFound("Target user not found".to_string()));
+    }
+
+    Ok(())
 }

@@ -16,6 +16,7 @@ use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries, DbConn};
 use crate::error::{AppError, AppResult};
 use crate::models::{MediaResponse, ShareVerifyRequest};
+use crate::utils::path::resolve_existing_storage_path;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -45,6 +46,21 @@ struct ShareRow {
 }
 
 fn validate_share_token(conn: &DbConn, token: &str, password: Option<&str>) -> AppResult<ShareRow> {
+    let share = load_active_share(conn, token)?;
+
+    if let Some(password_hash) = &share.password_hash {
+        let Some(pwd) = password else {
+            return Err(AppError::Authentication("Password required".to_string()));
+        };
+        if !verify_password(pwd, password_hash) {
+            return Err(AppError::Authentication("Invalid password".to_string()));
+        }
+    }
+
+    Ok(share)
+}
+
+fn load_active_share(conn: &DbConn, token: &str) -> AppResult<ShareRow> {
     let share = fetch_one(conn, queries::share::SELECT_BY_TOKEN, &[&token], |row| {
         Ok(ShareRow {
             id: row.get(0)?,
@@ -56,22 +72,11 @@ fn validate_share_token(conn: &DbConn, token: &str, password: Option<&str>) -> A
     })?
     .ok_or_else(|| AppError::NotFound("Share link not found".to_string()))?;
 
-    // Check expiration
     if let Some(expires_at) = &share.expires_at {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(expires_at) {
-            if dt.with_timezone(&Utc) < Utc::now() {
-                return Err(AppError::NotFound("Share link expired".to_string()));
-            }
-        }
-    }
-
-    // Check password
-    if let Some(password_hash) = &share.password_hash {
-        let Some(pwd) = password else {
-            return Err(AppError::Authentication("Password required".to_string()));
-        };
-        if !verify_password(pwd, password_hash) {
-            return Err(AppError::Authentication("Invalid password".to_string()));
+        let expires_at = DateTime::parse_from_rfc3339(expires_at)
+            .map_err(|_| AppError::Internal("Share link has an invalid expiration".to_string()))?;
+        if expires_at.with_timezone(&Utc) <= Utc::now() {
+            return Err(AppError::NotFound("Share link expired".to_string()));
         }
     }
 
@@ -188,23 +193,16 @@ async fn verify_share_password(
 ) -> AppResult<Json<serde_json::Value>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let share = fetch_one(
-        &conn,
-        queries::share::SELECT_PASSWORD_HASH,
-        &[&token],
-        |row| row.get::<_, Option<String>>(0),
-    )?
-    .ok_or_else(|| AppError::NotFound("Share link not found".to_string()))?;
+    let share = load_active_share(&conn, &token)?;
 
-    if share.is_none() {
+    let Some(password_hash) = share.password_hash else {
         return Ok(Json(serde_json::json!({
             "valid": true,
             "message": "No password required"
         })));
-    }
+    };
 
-    let password = request.password.clone();
-    if verify_password(&password, share.as_ref().unwrap()) {
+    if verify_password(&request.password, &password_hash) {
         return Ok(Json(serde_json::json!({
             "valid": true,
             "message": "Password correct"
@@ -261,10 +259,7 @@ async fn get_shared_media_file(
     )?
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
-    let full_path = paths().originals.join(&media.file_path);
-    if !full_path.exists() {
-        return Err(AppError::NotFound("File not found".to_string()));
-    }
+    let full_path = resolve_existing_storage_path(&paths().originals, &media.file_path).await?;
 
     serve_file(
         full_path,
@@ -326,10 +321,7 @@ async fn get_shared_thumbnail(
     let thumbnail_path =
         thumbnail_path.ok_or_else(|| AppError::NotFound("Thumbnail not available".to_string()))?;
 
-    let full_path = paths().thumbnails.join(&thumbnail_path);
-    if !full_path.exists() {
-        return Err(AppError::NotFound("Thumbnail file not found".to_string()));
-    }
+    let full_path = resolve_existing_storage_path(&paths().thumbnails, &thumbnail_path).await?;
 
     serve_file(full_path, "image/jpeg", None).await
 }

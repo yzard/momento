@@ -1,6 +1,14 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from '../../src/frontend/node_modules/react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const storedValues = new Map<string, string>()
+const testLocalStorage = {
+  clear: () => storedValues.clear(),
+  getItem: (key: string) => storedValues.get(key) ?? null,
+  removeItem: (key: string) => storedValues.delete(key),
+  setItem: (key: string, value: string) => storedValues.set(key, value),
+}
 
 vi.mock('../../src/frontend/context/AuthContext', () => ({ AuthProvider: ({ children }: { children: React.ReactNode }) => children }))
 vi.mock('../../src/frontend/hooks/useAuth', () => ({
@@ -20,9 +28,19 @@ vi.mock('../../src/frontend/pages/Timeline', () => ({
 
 import App from '../../src/frontend/App'
 
-describe('App Places routes', () => {
-  afterEach(cleanup)
+beforeEach(() => {
+  vi.stubGlobal('localStorage', testLocalStorage)
+  localStorage.clear()
+  document.documentElement.classList.remove('dark')
+})
 
+afterEach(() => {
+  cleanup()
+  document.documentElement.classList.remove('dark')
+  vi.unstubAllGlobals()
+})
+
+describe('App Places routes', () => {
   it.each(['/places', '/places/paris-france'])('renders Places at %s', (path) => {
     render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
     expect(screen.getByText('Places route')).toBeTruthy()
@@ -30,8 +48,6 @@ describe('App Places routes', () => {
 })
 
 describe('App timeline routes', () => {
-  afterEach(cleanup)
-
   it.each([
     ['/timeline/screenshots', 'image', 'screenshot'],
     ['/timeline/documents', 'image', 'document'],
@@ -48,5 +64,16 @@ describe('App timeline routes', () => {
     render(<MemoryRouter initialEntries={['/admin']}><App /></MemoryRouter>)
 
     expect(screen.getByRole('heading', { name: 'Account Settings' })).toBeTruthy()
+  })
+})
+
+describe('App theme routes', () => {
+  it('applies a stored dark theme to the login route', () => {
+    localStorage.setItem('momento-theme', 'dark')
+
+    render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
+
+    expect(screen.getByRole('heading', { name: 'Sign In' })).toBeTruthy()
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
   })
 })

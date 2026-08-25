@@ -8,12 +8,6 @@ export interface BoundingBox {
   west: number
 }
 
-export interface MapClusterRequest {
-  bounds: BoundingBox
-  zoom: number
-  filters?: Record<string, unknown>
-}
-
 export interface MapMediaRequest {
   bounds: BoundingBox
   geohashPrefixes?: string[]

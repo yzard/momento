@@ -339,7 +339,15 @@ async fn submit_claimed_job(
     let mut descriptors = Vec::new();
     let mut prepared_inputs = Vec::new();
     for input in inputs {
-        let input_path = paths().previews.join(&input.file_path);
+        let input_path = match crate::utils::path::resolve_existing_storage_path(
+            &paths().previews,
+            &input.file_path,
+        )
+        .await
+        {
+            Ok(input_path) => input_path,
+            Err(error) => return mark_failed(pool, &job_id, &error.to_string()),
+        };
         let input_size = match u64::try_from(input.byte_size) {
             Ok(input_size) => input_size,
             Err(_) => {

@@ -14,8 +14,13 @@ import kotlinx.serialization.Serializable
     val id: Long, val filename: String, val originalFilename: String, val mediaType: String,
     val mimeType: String? = null, val width: Int? = null, val height: Int? = null,
     val fileSize: Long? = null, val durationSeconds: Double? = null, val dateTaken: String? = null,
-    val gpsLatitude: Double? = null, val gpsLongitude: Double? = null, val locationCity: String? = null,
-    val locationState: String? = null, val locationCountry: String? = null, val createdAt: String,
+    val gpsLatitude: Double? = null, val gpsLongitude: Double? = null, val cameraMake: String? = null,
+    val cameraModel: String? = null, val lensMake: String? = null, val lensModel: String? = null,
+    val iso: Int? = null, val exposureTime: String? = null, val fNumber: Double? = null,
+    val focalLength: Double? = null, val focalLength35mm: Double? = null, val gpsAltitude: Double? = null,
+    val locationCity: String? = null, val locationState: String? = null, val locationCountry: String? = null,
+    val videoCodec: String? = null, val keywords: String? = null, val contentHash: String? = null,
+    val createdAt: String,
 )
 @Serializable data class TimelineGroup(val date: String, val media: List<Media>)
 @Serializable data class TimelineRequest(
@@ -23,11 +28,6 @@ import kotlinx.serialization.Serializable
     val mediaType: String?, val classification: String?, val direction: String, val anchorDate: String?,
 )
 @Serializable data class TimelineResponse(val groups: List<TimelineGroup>, val nextCursor: String?, val previousCursor: String?, val hasOlder: Boolean, val hasNewer: Boolean)
-@Serializable data class SearchRequest(val search: String)
-@Serializable data class SearchResult(val imageId: Long, val models: List<String>)
-@Serializable data class SearchResponse(val results: List<SearchResult>)
-@Serializable data class MediaBatchRequest(val ids: List<Long>)
-@Serializable data class MediaListResponse(val items: List<Media>, val nextCursor: String?, val hasMore: Boolean)
 
 @Serializable data class Album(val id: Long, val name: String, val description: String?, val coverMediaId: Long?, val mediaCount: Long, val createdAt: String)
 @Serializable data class AlbumDetail(val id: Long, val name: String, val description: String?, val coverMediaId: Long?, val media: List<Media>, val createdAt: String)
@@ -85,13 +85,12 @@ import kotlinx.serialization.Serializable
     val processedMedia: Long, val candidateComparisons: Long, val clustersCreated: Long,
     val error: String?, val nextScheduledAt: String?,
 )
-@Serializable data class AffectedResponse(val message: String, val affectedCount: Long)
 @Serializable data class AdminUserCreateRequest(val username: String, val email: String, val password: String, val role: String?)
 @Serializable data class AdminUserUpdateRequest(val userId: Long, val role: String?, val isActive: Boolean?)
 @Serializable data class AdminUserIdRequest(val userId: Long)
 @Serializable data class JobActionResponse(val message: String, val queuedJobs: Long)
+@Serializable class EmptyRequest
 @Serializable data class JobStatus(val status: String, val queuedJobs: Long, val processingJobs: Long, val completedJobs: Long, val failedJobs: Long, val errors: List<String>)
-@Serializable data class FaceJobStatus(val status: String, val queuedJobs: Long, val processingJobs: Long, val completedJobs: Long, val failedJobs: Long, val errors: List<String>, val faceGroups: Long)
 @Serializable data class ImportStatus(val status: String, val totalFiles: Long, val processedFiles: Long, val successfulImports: Long, val failedImports: Long, val startedAt: String?, val completedAt: String?, val errors: List<String>)
 
 @Serializable data class FeatureFlags(val llm: Boolean, val imageTagging: Boolean, val deduplicate: Boolean, val faceDetection: Boolean, val imageAesthetics: Boolean, val screenshotDetection: Boolean, val documentDetection: Boolean)
@@ -102,6 +101,5 @@ import kotlinx.serialization.Serializable
 @Serializable data class BackupUploadCreateRequest(val deviceId: String, val clientAssetId: String, val operationId: String, val originalFilename: String, val mimeType: String, val byteSize: Long, val sourceModifiedAt: String)
 @Serializable data class BackupUploadIdRequest(val uploadId: String)
 @Serializable data class BackupUploadResponse(val uploadId: String, val status: String, val uploadedSize: Long, val expectedSize: Long, val mediaId: Long?, val error: String?)
-@Serializable data class BackupStatusResponse(val assets: List<BackupUploadResponse>)
 
 enum class BackupState { QUEUED, UPLOADING, COMPLETING, SERVER_PROCESSING, COMPLETED, FAILED, TERMINAL_FAILED, CANCELLED }

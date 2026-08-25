@@ -273,18 +273,6 @@ pub mod backup {
     pub const FAIL_MISSING_STAGED_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'failed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'uploading'";
     pub const EXPIRE_SESSIONS: &str = "UPDATE backup_upload_sessions SET status = 'expired', updated_at = datetime('now') WHERE status IN ('uploading', 'writing') AND expires_at <= datetime('now')";
     pub const EXPIRE_ASSETS: &str = "UPDATE backup_assets SET status = 'expired', updated_at = datetime('now') WHERE id IN (SELECT asset_id FROM backup_upload_sessions WHERE status = 'expired') AND status = 'uploading'";
-    pub const SELECT_STATUS: &str = r#"
-    SELECT backup_upload_sessions.upload_id
-         , backup_assets.status
-         , backup_upload_sessions.uploaded_size
-         , backup_upload_sessions.expected_size
-         , backup_assets.media_id
-         , backup_assets.error
-      FROM backup_assets
-      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
-     WHERE backup_assets.user_id = ?
-     ORDER BY backup_assets.id DESC
-    "#;
 }
 
 pub mod webdav_ready {
@@ -755,98 +743,6 @@ pub mod media {
     ON CONFLICT DO NOTHING
     "#;
 
-    pub const SELECT_ALL_FOR_USER: &str = r#"
-    SELECT m.id
-         , m.filename
-         , m.original_filename
-         , m.media_type
-         , m.mime_type
-         , mm.width
-         , mm.height
-         , m.file_size
-         , mm.duration_seconds
-         , mm.date_taken
-         , mm.gps_latitude
-         , mm.gps_longitude
-         , mm.camera_make
-         , mm.camera_model
-         , mm.lens_make
-         , mm.lens_model
-         , mm.iso
-         , mm.exposure_time
-         , mm.f_number
-         , mm.focal_length
-         , mm.focal_length_35mm
-         , mm.gps_altitude
-         , mm.location_city
-         , mm.location_state
-         , mm.location_country
-         , mm.video_codec
-         , mm.keywords
-         , m.created_at
-      FROM media AS m
-      JOIN media_access AS ma ON m.id = ma.media_id
-      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
-     WHERE ma.user_id = ?
-       AND ma.deleted_at IS NULL
-       AND (
-            ? = ''
-         OR m.id IN (
-                SELECT media_text.media_id
-                  FROM media_text
-                  WHERE media_text.string LIKE ? ESCAPE '\'
-             )
-       )
-      ORDER BY mm.date_taken DESC, m.id DESC
-    "#;
-
-    pub const SELECT_PAGINATED_FOR_USER: &str = r#"
-    SELECT m.id
-         , m.filename
-         , m.original_filename
-         , m.media_type
-         , m.mime_type
-         , mm.width
-         , mm.height
-         , m.file_size
-         , mm.duration_seconds
-         , mm.date_taken
-         , mm.gps_latitude
-         , mm.gps_longitude
-         , mm.camera_make
-         , mm.camera_model
-         , mm.lens_make
-         , mm.lens_model
-         , mm.iso
-         , mm.exposure_time
-         , mm.f_number
-         , mm.focal_length
-         , mm.focal_length_35mm
-         , mm.gps_altitude
-         , mm.location_city
-         , mm.location_state
-         , mm.location_country
-         , mm.video_codec
-         , mm.keywords
-         , m.created_at
-      FROM media AS m
-      JOIN media_access AS ma ON m.id = ma.media_id
-      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
-     WHERE ma.user_id = ?
-       AND ma.deleted_at IS NULL
-       AND (
-            ? = ''
-         OR m.id IN (
-                SELECT media_text.media_id
-                  FROM media_text
-                  WHERE media_text.string LIKE ? ESCAPE '\'
-             )
-       )
-       AND (mm.date_taken < ? OR (mm.date_taken = ? AND m.id < ?))
-      ORDER BY mm.date_taken DESC, m.id DESC
-      LIMIT ?
-    "#;
-
     pub const SELECT_BY_ID: &str = r#"
     SELECT m.id
          , m.filename
@@ -1012,7 +908,7 @@ pub mod media {
        AND mm.gps_longitude IS NOT NULL
     "#;
 
-    pub const SELECT_THUMBNAIL_BATCH: &str = r#"
+    const SELECT_THUMBNAIL_BATCH: &str = r#"
     SELECT m.id
          , mm.thumbnail_path
          , m.file_path
@@ -1023,9 +919,10 @@ pub mod media {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND m.id IN (%s)
     "#;
 
-    pub const SELECT_PREVIEW_BATCH: &str = r#"
+    const SELECT_PREVIEW_BATCH: &str = r#"
     SELECT m.id
          , m.file_path
          , m.media_type
@@ -1034,7 +931,16 @@ pub mod media {
       JOIN media_access AS ma ON m.id = ma.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND m.id IN (%s)
     "#;
+
+    pub fn build_thumbnail_batch_query(count: usize) -> String {
+        SELECT_THUMBNAIL_BATCH.replace("%s", &placeholders(count))
+    }
+
+    pub fn build_preview_batch_query(count: usize) -> String {
+        SELECT_PREVIEW_BATCH.replace("%s", &placeholders(count))
+    }
 
     pub const UPDATE_CONTENT_HASH: &str = r#"
     UPDATE media
@@ -1049,7 +955,7 @@ pub mod media {
     "#;
 
     pub fn build_select_by_ids(count: usize) -> String {
-        let placeholders = (0..count).map(|_| "?").collect::<Vec<_>>().join(", ");
+        let placeholders = placeholders(count);
 
         format!(
             r#"
@@ -1090,6 +996,12 @@ pub mod media {
             "#,
             placeholders = placeholders
         )
+    }
+
+    fn placeholders(count: usize) -> String {
+        std::iter::repeat_n("?", count)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -1353,23 +1265,6 @@ pub mod media_text {
        )
      ORDER BY m.id
     "#;
-
-    pub const SEARCH_FOR_USER: &str = r#"
-    SELECT media_text.media_id
-         , media_text.model_type
-      FROM media_text
-     WHERE media_text.string LIKE ? ESCAPE '\'
-       AND EXISTS (
-            SELECT 1
-              FROM media_access AS ma
-             WHERE ma.media_id = media_text.media_id
-               AND ma.user_id = ?
-               AND ma.deleted_at IS NULL
-       )
-     GROUP BY media_text.media_id
-             , media_text.model_type
-     ORDER BY media_text.media_id
-    "#;
 }
 
 pub mod metadata {
@@ -1539,6 +1434,7 @@ pub mod albums {
       JOIN album_access AS aa ON a.id = aa.album_id
      WHERE a.id = ?
        AND aa.user_id = ?
+       AND aa.access_level = 2
     "#;
 
     pub const DELETE: &str = r#"
@@ -1546,19 +1442,38 @@ pub mod albums {
      WHERE id = ?
     "#;
 
-    pub const SELECT_MAX_POSITION: &str = r#"
-    SELECT COALESCE(MAX(position), -1)
-      FROM album_media
-     WHERE album_id = ?
-    "#;
-
-    pub const ADD_MEDIA: &str = r#"
+    const ADD_MEDIA_BATCH: &str = r#"
+    WITH requested(media_id, requested_position) AS (
+        VALUES %s
+    ), accessible AS (
+        SELECT requested.media_id
+             , requested.requested_position
+             , ROW_NUMBER() OVER (ORDER BY requested.requested_position) - 1 AS position_offset
+          FROM requested
+          JOIN media_access ON media_access.media_id = requested.media_id
+         WHERE media_access.user_id = ?
+           AND media_access.deleted_at IS NULL
+    )
     INSERT OR IGNORE INTO album_media (
         album_id
       , media_id
       , position
-    ) VALUES (?, ?, ?)
+    )
+    SELECT ?
+         , accessible.media_id
+         , COALESCE((SELECT MAX(position) FROM album_media WHERE album_id = ?), -1)
+           + 1
+           + accessible.position_offset
+      FROM accessible
+     ORDER BY accessible.requested_position
     "#;
+
+    pub fn build_add_media_batch_query(count: usize) -> String {
+        let values = std::iter::repeat_n("(?, ?)", count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        ADD_MEDIA_BATCH.replace("%s", &values)
+    }
 
     pub const REMOVE_MEDIA: &str = r#"
     DELETE FROM album_media
@@ -1571,6 +1486,14 @@ pub mod albums {
        SET position = ?
      WHERE album_id = ?
        AND media_id = ?
+    "#;
+
+    pub const SELECT_MEDIA_IDS: &str = r#"
+    SELECT media_id
+      FROM album_media
+     WHERE album_id = ?
+     ORDER BY position
+            , media_id
     "#;
 
     pub const SELECT_MEDIA: &str = r#"
@@ -1607,6 +1530,7 @@ pub mod albums {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE am.album_id = ?
      ORDER BY am.position
+            , m.id
     "#;
 
     pub const DELETE_ACCESS: &str = r#"
@@ -1927,6 +1851,7 @@ pub mod share {
      WHERE m.id = ?
        AND ma.user_id = ?
        AND ma.deleted_at IS NULL
+       AND ma.access_level = 2
     "#;
 
     pub const CHECK_ALBUM_OWNERSHIP: &str = r#"
@@ -1935,6 +1860,7 @@ pub mod share {
       JOIN album_access AS aa ON a.id = aa.album_id
      WHERE a.id = ?
        AND aa.user_id = ?
+       AND aa.access_level = 2
     "#;
 
     pub const INSERT: &str = r#"
@@ -2001,12 +1927,6 @@ pub mod share {
     UPDATE share_links
        SET view_count = view_count + 1
      WHERE id = ?
-    "#;
-
-    pub const SELECT_PASSWORD_HASH: &str = r#"
-    SELECT password_hash
-      FROM share_links
-     WHERE token = ?
     "#;
 }
 
@@ -2078,6 +1998,27 @@ pub mod public {
 }
 
 pub mod trash {
+    const SELECT_THUMBNAIL_BATCH: &str = r#"
+    SELECT m.id
+         , mm.thumbnail_path
+         , m.file_path
+         , m.media_type
+         , ma.user_id
+      FROM media AS m
+      JOIN media_access AS ma ON m.id = ma.media_id
+      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NOT NULL
+       AND m.id IN (%s)
+    "#;
+
+    pub fn build_thumbnail_batch_query(count: usize) -> String {
+        let placeholders = std::iter::repeat_n("?", count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        SELECT_THUMBNAIL_BATCH.replace("%s", &placeholders)
+    }
+
     pub const DELETE_EMPTY_FACE_GROUPS: &str = "DELETE FROM face_groups WHERE NOT EXISTS (SELECT 1 FROM face_group_members WHERE face_group_members.face_group_id = face_groups.id)";
     pub const SELECT_DELETED: &str = r#"
     SELECT m.id
@@ -2166,6 +2107,14 @@ pub mod access {
     VALUES (?, ?, ?, NULL)
     "#;
 
+    pub const UPSERT_SHARED_MEDIA_ACCESS: &str = r#"
+    INSERT INTO media_access (media_id, user_id, access_level, deleted_at)
+    VALUES (?, ?, ?, NULL)
+    ON CONFLICT (media_id, user_id) DO UPDATE SET
+        access_level = excluded.access_level
+      , deleted_at = NULL
+    "#;
+
     pub const RESTORE_MEDIA_ACCESS: &str = r#"
     UPDATE media_access
        SET deleted_at = NULL
@@ -2178,8 +2127,19 @@ pub mod access {
     VALUES (?, ?, ?)
     "#;
 
+    pub const UPSERT_SHARED_ALBUM_ACCESS: &str = r#"
+    INSERT INTO album_access (album_id, user_id, access_level)
+    VALUES (?, ?, ?)
+    ON CONFLICT (album_id, user_id) DO UPDATE SET
+        access_level = excluded.access_level
+    "#;
+
     pub const CHECK_MEDIA_ACCESS: &str = r#"
-    SELECT access_level FROM media_access WHERE media_id = ? AND user_id = ?
+    SELECT access_level
+      FROM media_access
+     WHERE media_id = ?
+       AND user_id = ?
+       AND deleted_at IS NULL
     "#;
 
     pub const REMOVE_MEDIA_ACCESS: &str = r#"
@@ -2546,7 +2506,7 @@ pub mod deduplicate {
      ORDER BY cluster_page.cluster_id
     "#;
 
-    pub const SELECT_VISIBLE_CLUSTER_MEDIA: &str = r#"
+    const SELECT_VISIBLE_CLUSTER_MEDIA_BATCH: &str = r#"
     SELECT media.id
          , media.filename
          , media.original_filename
@@ -2575,15 +2535,24 @@ pub mod deduplicate {
          , media_metadata.video_codec
          , media_metadata.keywords
          , media.created_at
-      FROM media_similarity_cluster_members AS members
+         , members.cluster_id
+       FROM media_similarity_cluster_members AS members
       JOIN media ON media.id = members.media_id
       JOIN media_access ON media_access.media_id = media.id
       LEFT JOIN media_metadata ON media_metadata.media_id = media.id
-     WHERE members.cluster_id = ?
+     WHERE members.cluster_id IN (%s)
        AND media_access.user_id = ?
        AND media_access.deleted_at IS NULL
-     ORDER BY media.id
+     ORDER BY members.cluster_id
+            , media.id
     "#;
+
+    pub fn build_visible_cluster_media_query(cluster_count: usize) -> String {
+        let placeholders = std::iter::repeat_n("?", cluster_count)
+            .collect::<Vec<_>>()
+            .join(",");
+        SELECT_VISIBLE_CLUSTER_MEDIA_BATCH.replace("%s", &placeholders)
+    }
 
     pub const CLEAN_CLUSTERS: &str = "DELETE FROM media_similarity_clusters";
     pub const CLEAN_BANDS: &str = "DELETE FROM media_similarity_hash_bands";

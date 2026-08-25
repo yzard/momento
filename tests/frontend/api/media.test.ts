@@ -4,12 +4,16 @@ const { post } = vi.hoisted(() => ({ post: vi.fn() }))
 
 vi.mock('../../../src/frontend/api/client', () => ({ apiClient: { post } }))
 
-import { mediaApi } from '../../../src/frontend/api/media'
+import { mediaApi, thumbnailResponseMap } from '../../../src/frontend/api/media'
 
 describe('mediaApi timeline classification', () => {
   beforeEach(() => {
     post.mockReset()
     post.mockResolvedValue({ data: { groups: [], markers: [] } })
+  })
+
+  it('decodes only valid thumbnail payloads', () => {
+    expect(thumbnailResponseMap({ '7': 'thumbnail', invalid: 'ignored', '8': null })).toEqual(new Map([[7, 'thumbnail']]))
   })
 
   it('posts classification with timeline page requests', async () => {

@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { mediaApi } from '../../api/media'
 import { useAlbums, useCreateAlbum, useDeleteAlbum } from '../../hooks/useAlbums'
 import AlbumCard from './AlbumCard'
 import { Plus, FolderPlus, Loader2 } from 'lucide-react'
@@ -14,6 +15,31 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
   const deleteAlbum = useDeleteAlbum()
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [newAlbumName, setNewAlbumName] = useState('')
+  const [coverUrls, setCoverUrls] = useState<Map<number, string>>(new Map())
+
+  useEffect(() => {
+    const coverIds = albums
+      ?.map((album) => album.coverMediaId)
+      .filter((mediaId): mediaId is number => mediaId !== null) ?? []
+    if (coverIds.length === 0) {
+      setCoverUrls(new Map())
+      return
+    }
+
+    let cancelled = false
+    mediaApi.getThumbnailBatch(coverIds).then((thumbnails) => {
+      if (cancelled) return
+      setCoverUrls(new Map(
+        [...thumbnails].filter((entry): entry is [number, string] => entry[1] !== null),
+      ))
+    }).catch((error: unknown) => {
+      console.error('Failed to load album covers:', error)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [albums])
 
   const handleCreate = async () => {
     if (!newAlbumName.trim()) return
@@ -62,7 +88,7 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
 
       {albums?.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-80 text-muted-foreground border border-dashed border-border rounded-xl bg-muted/10">
-          <div className="p-6 bg-white rounded-full border border-border mb-4 shadow-sm">
+          <div className="p-6 bg-card rounded-full border border-border mb-4 shadow-sm">
             <FolderPlus className="w-10 h-10 text-primary/80" strokeWidth={1.5} />
           </div>
           <p className="text-xl font-display font-medium text-foreground mb-1">No albums yet</p>
@@ -80,6 +106,7 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
             <AlbumCard
               key={album.id}
               album={album}
+              coverUrl={album.coverMediaId === null ? null : coverUrls.get(album.coverMediaId) ?? null}
               onClick={() => onAlbumClick(album)}
               onDelete={() => handleDelete(album.id)}
             />

@@ -5,7 +5,7 @@ use axum::http::header::AUTHORIZATION;
 use axum_test::TestServer;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn access_token(user_id: i64) -> String {
     create_access_token(user_id, "testuser", "user", &Config::default(), None)
@@ -48,6 +48,19 @@ async fn trash_thumbnail_requires_matching_deleted_media_access() {
         .json(&json!({"mediaIds": [media_id]}))
         .await
         .assert_status_ok();
+    let batch = server
+        .post("/api/v1/trash/thumbnails/get")
+        .add_header(AUTHORIZATION, owner_authorization.clone())
+        .json(&json!({"mediaIds": [media_id, 999999], "size": "tiny"}))
+        .await;
+    batch.assert_status_ok();
+    let body: Value = batch.json();
+    assert_eq!(
+        body["thumbnails"][media_id.to_string()],
+        "data:image/jpeg;base64,dGlueQ=="
+    );
+    assert_eq!(body["thumbnails"].as_object().expect("thumbnails").len(), 1);
+
     server
         .get(&format!("/api/v1/trash/{media_id}/thumbnail/tiny"))
         .add_header(AUTHORIZATION, owner_authorization)

@@ -22,10 +22,10 @@ export default function AiPanel() {
   const facesRunning = isActive(facesQuery.data?.status)
   const allRunning = ocrRunning || taggingRunning || screenshotDetectionRunning || documentDetectionRunning || aestheticsRunning || clusteringRunning || facesRunning
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-white shadow-sm">
+    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <div className="border-b border-border bg-muted/30 px-8 py-6">
         <div className="flex items-center gap-4">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-white text-primary shadow-sm">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-primary shadow-sm">
             <Bot className="h-5 w-5" />
           </div>
           <div>

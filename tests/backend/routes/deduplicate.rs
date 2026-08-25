@@ -123,6 +123,26 @@ async fn groups_canonicalize_identical_sets_before_cursor_pagination() {
     drop(connection);
     let server = TestServer::new(app).expect("Failed to create server");
 
+    let complete_page = server
+        .post("/api/v1/ai/deduplicate/groups")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))
+        .json(&json!({"cursor": null, "limit": 10}))
+        .await;
+    complete_page.assert_status_ok();
+    let complete_body: Value = complete_page.json();
+    let returned_cluster_ids = complete_body["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .map(|group| group["clusterId"].as_i64().expect("cluster ID"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        returned_cluster_ids,
+        vec![cluster_ids[0], cluster_ids[2], cluster_ids[3]]
+    );
+    assert_eq!(complete_body["groups"][0]["items"][0]["id"], first);
+    assert_eq!(complete_body["groups"][0]["items"][1]["id"], second);
+
     let first_page = server
         .post("/api/v1/ai/deduplicate/groups")
         .add_header(AUTHORIZATION, format!("Bearer {}", token(user_id, "user")))

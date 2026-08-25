@@ -3,14 +3,15 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Request, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
     Json, Router,
 };
 use serde::Serialize;
-use std::path::PathBuf;
 use std::sync::Arc;
+use tower::ServiceExt;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{password_change_guard, AdminPasswordReset, AppState};
 use crate::config::Config;
@@ -73,61 +74,30 @@ pub fn create_app(
     let static_dir = config.server.static_dir.clone();
 
     if static_dir.exists() {
+        let static_service = ServeDir::new(&static_dir)
+            .not_found_service(ServeFile::new(static_dir.join("index.html")));
+        let webdav_mount_path = config.webdav.mount_path.trim_start_matches('/').to_string();
         app = app.fallback(move |req: Request<Body>| {
-            let static_dir = static_dir.clone();
+            let static_service = static_service.clone();
+            let webdav_mount_path = webdav_mount_path.clone();
             async move {
                 let path = req.uri().path().trim_start_matches('/');
-                let webdav_path = config.webdav.mount_path.trim_start_matches('/');
 
-                if path == webdav_path
+                if path == webdav_mount_path
                     || path
-                        .strip_prefix(webdav_path)
+                        .strip_prefix(&webdav_mount_path)
                         .is_some_and(|suffix| suffix.starts_with('/'))
                 {
                     return (StatusCode::NOT_FOUND, "Not Found").into_response();
                 }
 
-                // Try to serve static file
-                let file_path = static_dir.join(path);
-                if file_path.exists() && file_path.is_file() {
-                    return serve_static_file(file_path).await;
+                match static_service.oneshot(req).await {
+                    Ok(response) => response.into_response(),
+                    Err(error) => match error {},
                 }
-
-                // Try assets directory
-                if path.starts_with("assets/") {
-                    let asset_path = static_dir.join(path);
-                    if asset_path.exists() && asset_path.is_file() {
-                        return serve_static_file(asset_path).await;
-                    }
-                }
-
-                // Fall back to index.html for SPA routing
-                let index_path = static_dir.join("index.html");
-                if index_path.exists() {
-                    return serve_static_file(index_path).await;
-                }
-
-                (StatusCode::NOT_FOUND, "Not Found").into_response()
             }
         });
     }
 
     app
-}
-
-async fn serve_static_file(path: PathBuf) -> Response {
-    match tokio::fs::read(&path).await {
-        Ok(contents) => {
-            let mime_type = mime_guess::from_path(&path)
-                .first_or_octet_stream()
-                .to_string();
-
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", mime_type)
-                .body(Body::from(contents))
-                .unwrap()
-        }
-        Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    }
 }

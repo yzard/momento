@@ -1,14 +1,5 @@
 import { apiClient } from './client'
-
-interface User {
-  id: number
-  username: string
-  email: string
-  role: 'admin' | 'user'
-  mustChangePassword: boolean
-  isActive: boolean
-  createdAt: string
-}
+import type { User } from './auth'
 
 export const adminApi = {
   listUsers: async (): Promise<User[]> => {

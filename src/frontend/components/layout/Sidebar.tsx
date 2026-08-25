@@ -70,16 +70,17 @@ interface NavSectionProps {
 }
 
 function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
-  const location = useLocation()
+    const location = useLocation()
   const [manuallyCollapsed, setManuallyCollapsed] = useState(false)
   const isFocused = location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
-  const isExpanded = Boolean(item.children?.length) && isFocused && !manuallyCollapsed
+    const isExpanded = Boolean(item.children?.length) && isFocused && !manuallyCollapsed
+    const timelineSearch = item.to.startsWith('/timeline') ? location.search : ''
 
   return (
     <div>
       <div className="flex items-center">
         <NavLink
-          to={item.to}
+          to={`${item.to}${timelineSearch}`}
           onClick={onNavigate}
           className={({ isActive }) =>
             cn(
@@ -129,7 +130,7 @@ function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
           {item.children.map((child) => (
             <NavLink
               key={child.to}
-              to={child.to}
+              to={`${child.to}${timelineSearch}`}
               onClick={onNavigate}
               title={child.label}
               className={({ isActive }) =>

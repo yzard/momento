@@ -13,6 +13,7 @@ use crate::models::{
     FaceGroupsListResponse, FaceGroupsMergeRequest,
 };
 use crate::routes::media::map_media_row;
+use crate::utils::path::resolve_existing_storage_path;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -106,7 +107,9 @@ async fn get_thumbnail(
         |row| row.get(0),
     )?
     .ok_or_else(|| AppError::NotFound("Face group thumbnail not found".to_string()))?;
-    let bytes = tokio::fs::read(crate::constants::paths().previews.join(crop_path))
+    let path =
+        resolve_existing_storage_path(&crate::constants::paths().previews, &crop_path).await?;
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|_| AppError::NotFound("Face group thumbnail not found".to_string()))?;
     Response::builder()

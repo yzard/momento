@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,6 +56,7 @@ import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.media.SelectableMediaThumbnail
 import io.github.yzard.momento.feature.media.adaptiveGridColumns
 import io.github.yzard.momento.feature.media.toggleMediaSelection
+import io.github.yzard.momento.feature.albums.AlbumAddMediaSheet
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
@@ -68,8 +71,8 @@ enum class TimelinePage(
     TIMELINE(null, null),
     PHOTOS("image", null),
     VIDEOS("video", null),
-    SCREENSHOTS(null, "screenshot"),
-    DOCUMENTS(null, "document"),
+    SCREENSHOTS("image", "screenshot"),
+    DOCUMENTS("image", "document"),
 }
 
 enum class TimelinePeriod(val label: String, val groupBy: String) {
@@ -80,6 +83,8 @@ enum class TimelinePeriod(val label: String, val groupBy: String) {
 }
 
 data class TimelineMediaItem(val period: String, val media: Media)
+
+fun normalizedTimelineSearchQuery(value: String): String = value.trim()
 
 fun shouldAppendTimeline(
     lastVisibleItemIndex: Int,
@@ -94,19 +99,22 @@ fun TimelineScreen(
     repository: MomentoRepository,
     page: TimelinePage,
     period: TimelinePeriod,
+    search: String,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
-    key(page, period) {
-        TimelinePageContent(repository, page, period, openMedia)
+    val normalizedSearch = normalizedTimelineSearchQuery(search)
+    key(page, period, normalizedSearch) {
+        TimelinePageContent(repository, page, period, normalizedSearch, openMedia)
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun TimelinePageContent(
     repository: MomentoRepository,
     page: TimelinePage,
     period: TimelinePeriod,
+    search: String,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     var groups by remember { mutableStateOf<List<TimelineGroup>?>(null) }
@@ -117,10 +125,11 @@ private fun TimelinePageContent(
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var confirmTrash by remember { mutableStateOf(false) }
+    var addingToAlbum by remember { mutableStateOf(false) }
     var selectionError by remember { mutableStateOf<String?>(null) }
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
-    val anchorDate = remember(page, period) { Instant.now().toString() }
+    val anchorDate = remember(page, period, search) { Instant.now().toString() }
 
     suspend fun load(reset: Boolean) {
         if (!reset && (appending || !hasOlder || cursor == null)) return
@@ -136,6 +145,7 @@ private fun TimelinePageContent(
             val timelineResponse = repository.timelinePage(
                 cursor = if (reset) null else cursor,
                 groupBy = period.groupBy,
+                search = search,
                 mediaType = page.mediaType,
                 classification = page.classification,
                 anchorDate = anchorDate,
@@ -176,7 +186,7 @@ private fun TimelinePageContent(
         }
     }
 
-    LaunchedEffect(repository, page, period, anchorDate) {
+    LaunchedEffect(repository, page, period, search, anchorDate) {
         load(true)
     }
 
@@ -211,6 +221,7 @@ private fun TimelinePageContent(
             },
             toggleSelection = { mediaId -> selectedIds = toggleMediaSelection(selectedIds, mediaId) },
             requestTrash = { confirmTrash = true },
+            requestAddToAlbum = { addingToAlbum = true },
             retry = { scope.launch { error = null; load(false) } },
             openMedia = openMedia,
         )
@@ -227,6 +238,19 @@ private fun TimelinePageContent(
             },
             dismissButton = { TextButton(onClick = { confirmTrash = false }) { Text("Cancel") } },
         )
+    }
+    if (addingToAlbum) {
+        ModalBottomSheet(onDismissRequest = { addingToAlbum = false }) {
+            AlbumAddMediaSheet(
+                repository = repository,
+                mediaIds = selectedIds.toList(),
+                close = {
+                    addingToAlbum = false
+                    selectedIds = emptySet()
+                    selecting = false
+                },
+            )
+        }
     }
     selectionError?.let { message ->
         AlertDialog(
@@ -251,6 +275,7 @@ private fun ContinuousTimelineGrid(
     cancelSelecting: () -> Unit,
     toggleSelection: (Long) -> Unit,
     requestTrash: () -> Unit,
+    requestAddToAlbum: () -> Unit,
     retry: () -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
@@ -324,6 +349,7 @@ private fun ContinuousTimelineGrid(
             startSelecting = startSelecting,
             cancelSelecting = cancelSelecting,
             requestTrash = requestTrash,
+            requestAddToAlbum = requestAddToAlbum,
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
         )
     }
@@ -357,6 +383,7 @@ private fun TimelineSelectionControl(
     startSelecting: () -> Unit,
     cancelSelecting: () -> Unit,
     requestTrash: () -> Unit,
+    requestAddToAlbum: () -> Unit,
     modifier: Modifier,
 ) {
     val floatingColors = momentoFloatingControlColors()
@@ -369,6 +396,10 @@ private fun TimelineSelectionControl(
     ) {
         Row {
             if (selecting && selectedCount > 0) {
+                TextButton(
+                    onClick = requestAddToAlbum,
+                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+                ) { Text("Album $selectedCount") }
                 TextButton(
                     onClick = requestTrash,
                     colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),

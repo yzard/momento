@@ -4,6 +4,7 @@ import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { cn } from '../../lib/utils'
+import { batchLoader } from '../../utils/batcher'
 
 interface AlbumViewProps {
   albumId: number
@@ -17,12 +18,17 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
 
   const [items, setItems] = useState<Media[]>([])
   const [draggedId, setDraggedId] = useState<number | null>(null)
+  const [reorderError, setReorderError] = useState<string | null>(null)
+  const itemsRef = useRef<Media[]>([])
+  const confirmedItemsRef = useRef<Media[]>([])
+  const reorderInFlightRef = useRef(false)
 
   useEffect(() => {
-    if (album) {
-      setItems(album.media)
-    }
-  }, [album])
+    if (!album || draggedId !== null || reorderInFlightRef.current) return
+    itemsRef.current = album.media
+    confirmedItemsRef.current = album.media
+    setItems(album.media)
+  }, [album, draggedId])
 
   const handleDragStart = (e: React.DragEvent, id: number) => {
     setDraggedId(id)
@@ -31,32 +37,34 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
 
   const handleDragOver = (e: React.DragEvent, targetId: number) => {
     e.preventDefault()
-    if (!draggedId || draggedId === targetId) return
-
-    const draggedIndex = items.findIndex((item) => item.id === draggedId)
-    const targetIndex = items.findIndex((item) => item.id === targetId)
-
-    if (draggedIndex === -1 || targetIndex === -1) return
-
-    const newItems = [...items]
-    const [draggedItem] = newItems.splice(draggedIndex, 1)
-    if (!draggedItem) {
-      return
-    }
-    newItems.splice(targetIndex, 0, draggedItem)
-
-    setItems(newItems)
+    if (draggedId === null || draggedId === targetId) return
+    const nextItems = moveAlbumMedia(itemsRef.current, draggedId, targetId)
+    itemsRef.current = nextItems
+    setItems(nextItems)
   }
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
-    if (draggedId && items.length > 0) {
-      reorderAlbum.mutate({
-        albumId,
-        mediaIds: items.map((item) => item.id),
-      })
-    }
+    if (draggedId === null || itemsRef.current.length === 0 || reorderInFlightRef.current) return
+    const desiredItems = itemsRef.current
+    const confirmedItems = confirmedItemsRef.current
     setDraggedId(null)
+    if (desiredItems.every((item, index) => item.id === confirmedItems[index]?.id)) return
+
+    reorderInFlightRef.current = true
+    setReorderError(null)
+    void reorderAlbum.mutateAsync({
+      albumId,
+      mediaIds: desiredItems.map((item) => item.id),
+    }).then(() => {
+      confirmedItemsRef.current = desiredItems
+    }).catch(() => {
+      itemsRef.current = confirmedItems
+      setItems(confirmedItems)
+      setReorderError('Could not save the album order.')
+    }).finally(() => {
+      reorderInFlightRef.current = false
+    })
   }
 
   if (isLoading) {
@@ -120,8 +128,21 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
           ))}
         </div>
       )}
+      {reorderError && <p role="alert" className="mt-4 text-sm text-destructive">{reorderError}</p>}
     </div>
   )
+}
+
+function moveAlbumMedia(items: Media[], draggedId: number, targetId: number): Media[] {
+  const draggedIndex = items.findIndex((item) => item.id === draggedId)
+  const targetIndex = items.findIndex((item) => item.id === targetId)
+  if (draggedIndex === -1 || targetIndex === -1 || draggedIndex === targetIndex) return items
+
+  const nextItems = [...items]
+  const [draggedItem] = nextItems.splice(draggedIndex, 1)
+  if (!draggedItem) return items
+  nextItems.splice(targetIndex, 0, draggedItem)
+  return nextItems
 }
 
 interface AlbumMediaItemProps {
@@ -145,8 +166,7 @@ function AlbumMediaItem({ item, isDragged, onDragStart, onDragOver, onDrop, onCl
 
     const loadThumbnail = async () => {
       try {
-        const batch = await mediaApi.getThumbnailBatch([item.id])
-        const url = batch.get(item.id) ?? null
+        const url = await batchLoader.load(item.id)
         if (!cancelled) setThumbnailUrl(url)
       } catch (err) {
         console.error('Failed to load thumbnail:', err)

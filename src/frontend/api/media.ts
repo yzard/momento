@@ -1,13 +1,6 @@
 import { apiClient } from './client'
 import type { Media, TimelineGroup } from './types'
 
-interface MediaListRequest {
-  cursor?: string
-  limit?: number
-  search?: string
-  mediaType?: MediaTypeFilter
-}
-
 interface TimelineListRequest {
   cursor?: string
   limit: number
@@ -32,12 +25,6 @@ type ThumbnailSize = 'normal' | 'tiny'
 export type { MediaTypeFilter, ThumbnailSize, TimelineClassification }
 
 
-interface MediaListResponse {
-  items: Media[]
-  nextCursor: string | null
-  hasMore: boolean
-}
-
 interface MediaBatchResponse {
   items: Media[]
 }
@@ -59,69 +46,24 @@ interface TimelineMarkersResponse {
   markers: TimelineMarker[]
 }
 
-interface ImageTextSearchResult {
-  imageId: number
-  models: string[]
-}
-
-interface ImageTextSearchResponse {
-  results: ImageTextSearchResult[]
-}
-
 export type { GroupBy, TimelineDirection, TimelineListRequest, TimelineListResponse, TimelineMarker, TimelineMarkersResponse }
+
+export function thumbnailResponseMap(thumbnails: Record<string, string | null>): Map<number, string> {
+  const decoded = new Map<number, string>()
+  Object.entries(thumbnails).forEach(([id, thumbnail]) => {
+    const mediaId = Number(id)
+    if (!Number.isNaN(mediaId) && thumbnail) decoded.set(mediaId, thumbnail)
+  })
+  return decoded
+}
 
 // Cache for blob URLs to avoid re-fetching
 const blobUrlCache = new Map<string, string>()
-// Cache for in-flight requests to avoid duplicate fetches
-const pendingRequests = new Map<string, Promise<string>>()
 const pendingThumbnailBatch = new Map<string, Promise<Map<number, string>>>()
 const pendingPreviewBatch = new Map<string, Promise<Map<number, string>>>()
 
-// Helper to fetch media with Authorization header and return blob URL
-async function fetchMediaAsBlob(url: string, cacheKey: string): Promise<string> {
-  const cached = blobUrlCache.get(cacheKey)
-  if (cached) {
-    return cached
-  }
-
-  const pending = pendingRequests.get(cacheKey)
-  if (pending) {
-    return pending
-  }
-
-  const fetchPromise = (async () => {
-    try {
-      const token = localStorage.getItem('momento_access_token')
-      const response = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch media: ${response.status}`)
-      }
-
-      const blob = await response.blob()
-      const blobUrl = URL.createObjectURL(blob)
-
-      blobUrlCache.set(cacheKey, blobUrl)
-      return blobUrl
-    } finally {
-      pendingRequests.delete(cacheKey)
-    }
-  })()
-
-  pendingRequests.set(cacheKey, fetchPromise)
-  return fetchPromise
-}
-
 
 export const mediaApi = {
-  isThumbnailCached: (mediaId: number, size: ThumbnailSize = 'normal'): boolean => {
-    return blobUrlCache.has(`thumbnail-${size}-${mediaId}`)
-  },
-
   getCachedThumbnailUrl: (mediaId: number, size: ThumbnailSize = 'normal'): string | undefined => {
     return blobUrlCache.get(`thumbnail-${size}-${mediaId}`)
   },
@@ -163,13 +105,9 @@ export const mediaApi = {
           '/thumbnail/get',
           { mediaIds: missingIds, size }
         )
-        const result = new Map<number, string>()
-        Object.entries(response.data.thumbnails).forEach(([id, data]) => {
-          const numericId = Number(id)
-          if (!Number.isNaN(numericId) && data) {
-            blobUrlCache.set(`thumbnail-${size}-${numericId}`, data)
-            result.set(numericId, data)
-          }
+        const result = thumbnailResponseMap(response.data.thumbnails)
+        result.forEach((thumbnail, mediaId) => {
+          blobUrlCache.set(`thumbnail-${size}-${mediaId}`, thumbnail)
         })
         return result
       } finally {
@@ -242,11 +180,6 @@ export const mediaApi = {
     return cached
   },
 
-  list: async (params: MediaListRequest = {}): Promise<MediaListResponse> => {
-    const response = await apiClient.post<MediaListResponse>('/media/list', params)
-    return response.data
-  },
-
   listTimeline: async (params: TimelineListRequest): Promise<TimelineListResponse> => {
     const response = await apiClient.post<TimelineListResponse>('/timeline/list', params)
     return response.data
@@ -261,29 +194,14 @@ export const mediaApi = {
     return response.data
   },
 
-  search: async (search: string): Promise<ImageTextSearchResponse> => {
-    const response = await apiClient.post<ImageTextSearchResponse>('/media/search', { search })
-    return response.data
-  },
-
   getBatch: async (mediaIds: number[]): Promise<Media[]> => {
     if (mediaIds.length === 0) return []
     const response = await apiClient.post<MediaBatchResponse>('/media/get-batch', { ids: mediaIds } as MediaBatchRequest)
     return response.data.items
   },
 
-  listMapMedia: async (): Promise<Media[]> => {
-    const response = await apiClient.post<MediaListResponse>('/media/list', {})
-    return response.data.items
-  },
-
-
   delete: async (mediaIds: number[]): Promise<void> => {
     await apiClient.post('/media/delete', { mediaIds })
-  },
-
-  getFileUrl: async (mediaId: number): Promise<string> => {
-    return fetchMediaAsBlob(`/api/v1/media/${mediaId}/original`, `file-${mediaId}`)
   },
 
   getFileStreamUrl: (mediaId: number): string => {

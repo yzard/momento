@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -81,4 +81,55 @@ describe('timeline classification queries', () => {
       { limit: 100, groupBy: 'day', search: 'receipt', mediaType: 'image', classification: 'screenshot', direction: 'older', anchorDate: '2026-08-01' },
     ])
   })
+
+  it('ignores an older-page response after the timeline context changes', async () => {
+    let resolveOlder!: (response: ReturnType<typeof timelineResponse>) => void
+    const olderPage = new Promise<ReturnType<typeof timelineResponse>>((resolve) => {
+      resolveOlder = resolve
+    })
+    mocks.listTimeline.mockImplementation((request: { classification: string; cursor?: string }) => {
+      if (request.cursor) return olderPage
+      if (request.classification === 'document') {
+        return Promise.resolve(timelineResponse(2, false))
+      }
+      return Promise.resolve(timelineResponse(1, true))
+    })
+    const marker = { label: '2026-08', anchorDate: '2026-08-01' }
+    const hook = renderHook(
+      ({ classification }: { classification: 'screenshot' | 'document' }) => useTimelineWindow({
+        groupBy: 'day',
+        search: '',
+        mediaType: 'image',
+        classification,
+        marker,
+        preloadKey: 0,
+        refreshKey: 1,
+      }),
+      { initialProps: { classification: 'screenshot' as const } },
+    )
+    await waitFor(() => expect(hook.result.current.groups[0]?.media[0]?.id).toBe(1))
+
+    act(() => {
+      void hook.result.current.loadOlder()
+    })
+    await waitFor(() => expect(mocks.listTimeline).toHaveBeenCalledTimes(2))
+    hook.rerender({ classification: 'document' })
+    await waitFor(() => expect(hook.result.current.groups[0]?.media[0]?.id).toBe(2))
+
+    await act(async () => resolveOlder(timelineResponse(3, false)))
+    expect(hook.result.current.groups.flatMap((group) => group.media.map((media) => media.id))).toEqual([2])
+  })
 })
+
+function timelineResponse(mediaId: number, hasOlder: boolean) {
+  return {
+    groups: [{
+      date: '2026-08-01',
+      media: [{ id: mediaId, dateTaken: '2026-08-01T12:00:00' }],
+    }],
+    nextCursor: hasOlder ? 'older-cursor' : null,
+    previousCursor: null,
+    hasOlder,
+    hasNewer: false,
+  }
+}

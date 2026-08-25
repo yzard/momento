@@ -102,7 +102,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import io.github.yzard.momento.core.data.MomentoRepository
-import io.github.yzard.momento.core.model.Album
+import io.github.yzard.momento.feature.albums.AlbumAddMediaSheet
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
@@ -347,9 +347,9 @@ fun ViewerScreen(
             contentColor = MaterialTheme.colorScheme.onBackground,
         ) {
             when (activeSheet) {
-                ViewerSheet.ALBUMS -> ViewerAlbumsSheet(
-                    media = item,
+                ViewerSheet.ALBUMS -> AlbumAddMediaSheet(
                     repository = repository,
+                    mediaIds = listOf(item.id),
                     close = { activeSheet = null },
                 )
                 ViewerSheet.INFORMATION -> MediaInformationSheet(item)
@@ -766,77 +766,6 @@ private fun Modifier.viewerChromeToggle(toggle: () -> Unit): Modifier = pointerI
             }
         } while (event.changes.any { it.pressed })
         if (shouldToggleViewerChrome(maxPointerCount, movedBeyondTouchSlop)) toggle()
-    }
-}
-
-@Composable
-private fun ViewerAlbumsSheet(media: Media, repository: MomentoRepository, close: () -> Unit) {
-    var albums by remember(media.id) { mutableStateOf<List<Album>?>(null) }
-    var error by remember(media.id) { mutableStateOf<String?>(null) }
-    var addingAlbumId by remember(media.id) { mutableStateOf<Long?>(null) }
-    val scope = rememberCoroutineScope()
-
-    fun addToAlbum(album: Album) {
-        scope.launch {
-            addingAlbumId = album.id
-            try {
-                repository.addAlbumMedia(album.id, listOf(media.id))
-                close()
-            } catch (_: IOException) {
-                error = "Could not add this media to ${album.name}"
-            } catch (_: HttpException) {
-                error = "Could not add this media to ${album.name}"
-            } catch (_: SerializationException) {
-                error = "Could not add this media to ${album.name}"
-            } finally {
-                addingAlbumId = null
-            }
-        }
-    }
-
-    LaunchedEffect(media.id) {
-        try {
-            albums = repository.albums()
-        } catch (_: IOException) {
-            error = "Could not load albums"
-        } catch (_: HttpException) {
-            error = "Could not load albums"
-        } catch (_: SerializationException) {
-            error = "Could not load albums"
-        }
-    }
-
-    Column(Modifier.fillMaxWidth().fillMaxHeight(0.72f)) {
-        Text(
-            "Add to album",
-            style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-        )
-        when {
-            error != null -> Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(20.dp))
-            albums == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            albums!!.isEmpty() -> Text("No albums yet", modifier = Modifier.padding(20.dp))
-            else -> LazyColumn {
-                items(albums!!, key = { it.id }) { album ->
-                    ListItem(
-                        headlineContent = { Text(album.name) },
-                        supportingContent = { Text("${album.mediaCount} items") },
-                        trailingContent = {
-                            if (addingAlbumId == album.id) {
-                                CircularProgressIndicator(modifier = Modifier.width(20.dp))
-                            } else {
-                                Text("Add")
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp)
-                            .clickable(enabled = addingAlbumId == null) { addToAlbum(album) },
-                    )
-                    HorizontalDivider()
-                }
-            }
-        }
     }
 }
 

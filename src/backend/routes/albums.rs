@@ -1,4 +1,7 @@
 use axum::{extract::State, routing::post, Json, Router};
+use std::collections::HashSet;
+
+use rusqlite::OptionalExtension;
 
 use crate::auth::{AppState, CurrentUser};
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
@@ -250,33 +253,27 @@ async fn add_media_to_album(
         return Err(AppError::NotFound("Album not found".to_string()));
     }
 
-    let max_pos: i64 = fetch_one(
-        &conn,
-        queries::albums::SELECT_MAX_POSITION,
-        &[&request.album_id],
-        |row| row.get(0),
-    )?
-    .unwrap_or(-1);
-
-    let mut next_pos = max_pos + 1;
-
-    for media_id in &request.media_ids {
-        let media_exists = fetch_one(
-            &conn,
-            queries::media::CHECK_EXISTS,
-            &[media_id, &current_user.id],
-            |row| row.get::<_, i64>(0),
-        )?;
-
-        if media_exists.is_none() {
-            continue;
+    if request.media_ids.len() > 500 {
+        return Err(AppError::BadRequest(
+            "mediaIds must contain at most 500 IDs".to_string(),
+        ));
+    }
+    if !request.media_ids.is_empty() {
+        let query = queries::albums::build_add_media_batch_query(request.media_ids.len());
+        let mut parameters: Vec<Box<dyn rusqlite::ToSql>> =
+            Vec::with_capacity(request.media_ids.len() * 2 + 3);
+        for (position, media_id) in request.media_ids.iter().enumerate() {
+            parameters.push(Box::new(*media_id));
+            parameters.push(Box::new(position as i64));
         }
-
-        let _ = conn.execute(
-            queries::albums::ADD_MEDIA,
-            rusqlite::params![request.album_id, media_id, next_pos],
-        );
-        next_pos += 1;
+        parameters.push(Box::new(current_user.id));
+        parameters.push(Box::new(request.album_id));
+        parameters.push(Box::new(request.album_id));
+        let parameter_refs = parameters
+            .iter()
+            .map(|parameter| parameter.as_ref())
+            .collect::<Vec<_>>();
+        conn.execute(&query, parameter_refs.as_slice())?;
     }
 
     Ok(Json(serde_json::json!({"message": "Media added to album"})))
@@ -385,24 +382,40 @@ async fn reorder_album_media(
     Json(request): Json<AlbumReorderRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let exists = fetch_one(
-        &conn,
-        queries::albums::CHECK_OWNERSHIP,
-        &[&request.album_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
-    )?;
-
+    let transaction = conn.unchecked_transaction()?;
+    let exists = transaction
+        .query_row(
+            queries::albums::CHECK_OWNERSHIP,
+            rusqlite::params![request.album_id, current_user.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
     if exists.is_none() {
         return Err(AppError::NotFound("Album not found".to_string()));
     }
 
+    let current_ids = transaction
+        .prepare(queries::albums::SELECT_MEDIA_IDS)?
+        .query_map([request.album_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let requested_ids = request.media_ids.iter().copied().collect::<HashSet<_>>();
+    let current_id_set = current_ids.iter().copied().collect::<HashSet<_>>();
+    if request.media_ids.len() != current_ids.len()
+        || requested_ids.len() != request.media_ids.len()
+        || requested_ids != current_id_set
+    {
+        return Err(AppError::BadRequest(
+            "mediaIds must be an exact permutation of the album media".to_string(),
+        ));
+    }
+
     for (i, media_id) in request.media_ids.iter().enumerate() {
-        conn.execute(
+        transaction.execute(
             queries::albums::UPDATE_POSITION,
             rusqlite::params![i as i64, request.album_id, media_id],
         )?;
     }
+    transaction.commit()?;
 
     Ok(Json(
         serde_json::json!({"message": "Album reordered successfully"}),

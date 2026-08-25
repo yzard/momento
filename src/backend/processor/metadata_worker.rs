@@ -6,6 +6,7 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::database::{queries, DbPool};
+use crate::utils::path::resolve_existing_storage_path_sync;
 
 pub async fn run(config: Arc<Config>, pool: DbPool) {
     let interval = std::time::Duration::from_secs(config.metadata_worker.poll_interval_seconds);
@@ -179,10 +180,10 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
         if inputs.is_empty() {
             return Err(format!("missing prepared {task} AI inputs"));
         }
-        if inputs
-            .iter()
-            .any(|file_path| !crate::constants::paths().previews.join(file_path).is_file())
-        {
+        if inputs.iter().any(|file_path| {
+            resolve_existing_storage_path_sync(&crate::constants::paths().previews, file_path)
+                .is_err()
+        }) {
             return Err(format!("prepared {task} AI input file is missing"));
         }
     }

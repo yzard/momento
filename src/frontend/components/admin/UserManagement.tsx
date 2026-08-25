@@ -1,17 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { AxiosError } from 'axios'
 import { adminApi } from '../../api/admin'
+import type { User } from '../../api/auth'
 import { AlertCircle } from 'lucide-react'
-
-interface User {
-  id: number
-  username: string
-  email: string
-  role: 'admin' | 'user'
-  mustChangePassword: boolean
-  isActive: boolean
-  createdAt: string
-}
 
 export default function UserManagement() {
   const [users, setUsers] = useState<User[]>([])
@@ -118,7 +109,7 @@ export default function UserManagement() {
   }
 
   if (isLoading) {
-    return <div className="text-gray-500">Loading users...</div>
+    return <div className="text-muted-foreground">Loading users...</div>
   }
 
   return (

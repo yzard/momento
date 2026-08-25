@@ -40,7 +40,7 @@ export default function Login() {
       {/* Visual Section */}
       <div className="hidden lg:flex lg:w-1/2 relative items-center justify-center p-12 bg-muted/20 border-r border-border">
         <div className="relative z-10 max-w-lg">
-          <div className="mb-12 inline-flex p-4 rounded-full bg-white shadow-sm border border-border">
+          <div className="mb-12 inline-flex p-4 rounded-full bg-card shadow-sm border border-border">
             <Aperture className="w-10 h-10 text-primary" strokeWidth={1.5} />
           </div>
           <h1 className="text-7xl font-display font-semibold mb-8 tracking-tighter leading-[0.9] text-foreground">
@@ -78,7 +78,7 @@ export default function Login() {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="w-full px-4 py-3 bg-white border border-input focus:border-primary outline-none transition-all text-base rounded-lg focus:ring-4 focus:ring-primary/10 shadow-sm"
+                  className="w-full px-4 py-3 bg-card text-foreground border border-input focus:border-primary outline-none transition-all text-base rounded-lg focus:ring-4 focus:ring-primary/10 shadow-sm"
                   placeholder="Enter your username"
                   required
                 />
@@ -93,7 +93,7 @@ export default function Login() {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-white border border-input focus:border-primary outline-none transition-all text-base rounded-lg focus:ring-4 focus:ring-primary/10 shadow-sm"
+                  className="w-full px-4 py-3 bg-card text-foreground border border-input focus:border-primary outline-none transition-all text-base rounded-lg focus:ring-4 focus:ring-primary/10 shadow-sm"
                   placeholder="••••••••"
                   required
                 />
@@ -131,7 +131,7 @@ export default function Login() {
 
       {showChangePassword && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
-          <div className="bg-white shadow-2xl border border-border w-full max-w-md p-8 rounded-2xl animate-scale-in">
+          <div className="bg-card text-card-foreground shadow-2xl border border-border w-full max-w-md p-8 rounded-2xl animate-scale-in">
             <h2 className="text-2xl font-bold font-display mb-2 text-foreground">Change Password</h2>
             <p className="text-sm text-muted-foreground mb-8 pb-4 border-b border-border">
               Security check. Please update your password to continue.

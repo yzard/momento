@@ -236,6 +236,104 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
 }
 
 #[tokio::test]
+async fn individual_media_endpoints_reject_traversal_in_stored_paths() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "unsafe-paths", "unsafe-paths@example.com");
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "unsafe-paths.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    let connection = pool.get().expect("database");
+    connection
+        .execute(
+            "UPDATE media SET file_path = '../database.sqlite' WHERE id = ?",
+            [media_id],
+        )
+        .expect("unsafe original path");
+    connection
+        .execute(
+            "UPDATE media_metadata SET thumbnail_path = '../database.sqlite' WHERE media_id = ?",
+            [media_id],
+        )
+        .expect("unsafe thumbnail path");
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_not_found();
+    server
+        .get(&format!("/api/v1/media/{media_id}/thumbnail"))
+        .add_header(AUTHORIZATION, authorization)
+        .await
+        .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn media_asset_batches_only_return_requested_accessible_media_and_bound_input_size() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "batch-assets", "batch-assets@example.com");
+    let visible_id = create_test_media_with_gps_and_date(
+        &pool,
+        "visible-asset.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    let hidden_id = create_test_media_with_gps_and_date(
+        &pool,
+        "hidden-asset.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:31:00",
+    );
+    grant_media_access(&pool, visible_id, user_id);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    for (path, body) in [
+        (
+            "/api/v1/thumbnail/get",
+            json!({"mediaIds": [visible_id, hidden_id, visible_id]}),
+        ),
+        (
+            "/api/v1/preview/get",
+            json!({"ids": [visible_id, hidden_id, visible_id]}),
+        ),
+    ] {
+        let response = server
+            .post(path)
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&body)
+            .await;
+        response.assert_status_ok();
+        let response_body: Value = response.json();
+        let assets = response_body
+            .as_object()
+            .and_then(|body| body.values().next())
+            .and_then(Value::as_object)
+            .expect("asset map");
+        assert_eq!(assets.len(), 1);
+        assert!(assets.contains_key(&visible_id.to_string()));
+    }
+
+    let too_many_ids = (1..=501).collect::<Vec<_>>();
+    server
+        .post("/api/v1/thumbnail/get")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({"mediaIds": too_many_ids}))
+        .await
+        .assert_status_bad_request();
+}
+
+#[tokio::test]
 async fn manual_gps_update_recomputes_or_clears_place_fields() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "gps-update", "gps-update@example.com");
@@ -289,85 +387,6 @@ async fn manual_gps_update_recomputes_or_clears_place_fields() {
 }
 
 #[tokio::test]
-async fn test_search_returns_accessible_image_and_model_names() {
-    let (app, pool) = create_test_app();
-    let user_id = create_test_user(&pool, "testuser", "test@example.com");
-    let visible_media = create_test_media_with_gps_and_date(
-        &pool,
-        "visible.jpg",
-        40.7128,
-        -74.0060,
-        "2024-01-15T10:30:00",
-    );
-    let hidden_media = create_test_media_with_gps_and_date(
-        &pool,
-        "hidden.jpg",
-        40.7128,
-        -74.0060,
-        "2024-01-15T10:30:00",
-    );
-    grant_media_access(&pool, visible_media, user_id);
-    insert_media_text(&pool, visible_media, OCR_MODEL_TYPE, "beach sunset");
-    insert_media_text(
-        &pool,
-        visible_media,
-        IMAGE_TAGGING_MODEL_TYPE,
-        "beach person",
-    );
-    insert_media_text(&pool, hidden_media, OCR_MODEL_TYPE, "beach hidden");
-
-    let server = TestServer::new(app).expect("Failed to create test server");
-    let token = access_token(user_id);
-    let response = server
-        .post("/api/v1/media/search")
-        .add_header(AUTHORIZATION, format!("Bearer {}", token))
-        .json(&json!({ "search": "beach" }))
-        .await;
-    response.assert_status_ok();
-
-    let body: Value = response.json();
-    assert_eq!(body["results"].as_array().unwrap().len(), 1);
-    assert_eq!(body["results"][0]["imageId"], json!(visible_media));
-    assert_eq!(body["results"][0]["models"], json!(["Image Tags", "OCR"]));
-
-    let partial_response = server
-        .post("/api/v1/media/search")
-        .add_header(AUTHORIZATION, format!("Bearer {}", token))
-        .json(&json!({ "search": "unset" }))
-        .await;
-    partial_response.assert_status_ok();
-    let partial_body: Value = partial_response.json();
-    assert_eq!(partial_body["results"][0]["imageId"], json!(visible_media));
-}
-
-#[tokio::test]
-async fn test_search_matches_chinese_prefixes() {
-    let (app, pool) = create_test_app();
-    let user_id = create_test_user(&pool, "testuser", "chinese@example.com");
-    let media_id = create_test_media_with_gps_and_date(
-        &pool,
-        "negotiation.jpg",
-        40.7128,
-        -74.0060,
-        "2024-01-15T10:30:00",
-    );
-    grant_media_access(&pool, media_id, user_id);
-    insert_media_text(&pool, media_id, OCR_MODEL_TYPE, "谈判思考的技术");
-
-    let server = TestServer::new(app).expect("Failed to create test server");
-    let token = access_token(user_id);
-    let response = server
-        .post("/api/v1/media/search")
-        .add_header(AUTHORIZATION, format!("Bearer {}", token))
-        .json(&json!({ "search": "判" }))
-        .await;
-    response.assert_status_ok();
-
-    let body: Value = response.json();
-    assert_eq!(body["results"][0]["imageId"], json!(media_id));
-}
-
-#[tokio::test]
 async fn test_timeline_search_filters_before_grouping_and_pagination() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "testuser", "timeline@example.com");
@@ -388,6 +407,12 @@ async fn test_timeline_search_filters_before_grouping_and_pagination() {
     grant_media_access(&pool, matching_media, user_id);
     grant_media_access(&pool, non_matching_media, user_id);
     insert_media_text(&pool, matching_media, OCR_MODEL_TYPE, "mountain lake");
+    insert_media_text(
+        &pool,
+        matching_media,
+        IMAGE_TAGGING_MODEL_TYPE,
+        "mountain reflection",
+    );
     insert_media_text(&pool, non_matching_media, OCR_MODEL_TYPE, "city street");
 
     let server = TestServer::new(app).expect("Failed to create test server");

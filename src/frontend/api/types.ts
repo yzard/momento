@@ -39,23 +39,6 @@ export interface Album {
   createdAt: string
 }
 
-export interface ShareLink {
-  id: number
-  token: string
-  mediaId: number | null
-  albumId: number | null
-  hasPassword: boolean
-  expiresAt: string | null
-  viewCount: number
-  createdAt: string
-}
-
-export interface PaginatedResponse<T> {
-  items: T[]
-  nextCursor: string | null
-  hasMore: boolean
-}
-
 export interface TimelineGroup {
   date: string
   media: Media[]

@@ -15,6 +15,7 @@ export default defineConfig({
       '@tanstack/react-query': fileURLToPath(new URL('./node_modules/@tanstack/react-query', import.meta.url)),
       '@testing-library/react': fileURLToPath(new URL('./node_modules/@testing-library/react', import.meta.url)),
       '@testing-library/user-event': fileURLToPath(new URL('./node_modules/@testing-library/user-event', import.meta.url)),
+      'axios': fileURLToPath(new URL('./node_modules/axios/index.js', import.meta.url)),
       'react-router-dom': fileURLToPath(new URL('./node_modules/react-router-dom', import.meta.url)),
     },
   },

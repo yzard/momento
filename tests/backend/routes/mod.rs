@@ -1,4 +1,5 @@
 mod ai;
+mod albums;
 mod auth;
 mod backup;
 mod client;
@@ -8,5 +9,6 @@ mod map;
 mod media;
 mod metadata;
 mod places;
+mod share;
 mod trash;
 mod users;

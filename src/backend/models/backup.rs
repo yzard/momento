@@ -41,9 +41,3 @@ pub struct BackupUploadResponse {
     pub media_id: Option<i64>,
     pub error: Option<String>,
 }
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackupStatusResponse {
-    pub assets: Vec<BackupUploadResponse>,
-}

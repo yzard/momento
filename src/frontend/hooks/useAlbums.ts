@@ -1,5 +1,14 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { albumsApi } from '../api/albums'
+import type { AlbumDetail } from '../api/albums'
+
+export function reorderAlbumMedia<T extends { id: number }>(media: T[], mediaIds: number[]): T[] {
+  const mediaById = new Map(media.map((item) => [item.id, item]))
+  return mediaIds.flatMap((mediaId) => {
+    const item = mediaById.get(mediaId)
+    return item ? [item] : []
+  })
+}
 
 export function useAlbums() {
   return useQuery({
@@ -70,8 +79,11 @@ export function useReorderAlbum() {
   return useMutation({
     mutationFn: ({ albumId, mediaIds }: { albumId: number; mediaIds: number[] }) =>
       albumsApi.reorder(albumId, mediaIds),
-    onSuccess: (_, { albumId }) => {
-      queryClient.invalidateQueries({ queryKey: ['album', albumId] })
+    onSuccess: (_, { albumId, mediaIds }) => {
+      queryClient.setQueryData<AlbumDetail>(['album', albumId], (album) => (
+        album ? { ...album, media: reorderAlbumMedia(album.media, mediaIds) } : album
+      ))
+      return queryClient.invalidateQueries({ queryKey: ['album', albumId] })
     },
   })
 }

@@ -13,6 +13,8 @@ class TimelineScreenTest {
         assertEquals(null, TimelinePage.TIMELINE.mediaType)
         assertEquals("image", TimelinePage.PHOTOS.mediaType)
         assertEquals("video", TimelinePage.VIDEOS.mediaType)
+        assertEquals("image", TimelinePage.SCREENSHOTS.mediaType)
+        assertEquals("image", TimelinePage.DOCUMENTS.mediaType)
         assertEquals("screenshot", TimelinePage.SCREENSHOTS.classification)
         assertEquals("document", TimelinePage.DOCUMENTS.classification)
     }
@@ -20,6 +22,15 @@ class TimelineScreenTest {
     @Test
     fun timelinePeriodsMapToBackendGrouping() {
         assertEquals(listOf("day", "week", "month", "year"), TimelinePeriod.entries.map { it.groupBy })
+    }
+
+    @Test
+    fun normalizesTimelineSearchWithoutChangingPageFilters() {
+        assertEquals("receipt", normalizedTimelineSearchQuery(" receipt "))
+        assertEquals("image", TimelinePage.PHOTOS.mediaType)
+        assertEquals("video", TimelinePage.VIDEOS.mediaType)
+        assertEquals("screenshot", TimelinePage.SCREENSHOTS.classification)
+        assertEquals("document", TimelinePage.DOCUMENTS.classification)
     }
 
     @Test

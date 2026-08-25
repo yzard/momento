@@ -20,8 +20,6 @@ interface MomentoApi {
     @POST("api/v1/user/list") suspend fun users(): UsersResponse
 
     @POST("api/v1/timeline/list") suspend fun timeline(@Body request: TimelineRequest): TimelineResponse
-    @POST("api/v1/media/search") suspend fun search(@Body request: SearchRequest): SearchResponse
-    @POST("api/v1/media/get-batch") suspend fun mediaBatch(@Body request: MediaBatchRequest): MediaListResponse
     @POST("api/v1/album/list") suspend fun albums(): AlbumsResponse
     @POST("api/v1/album/get") suspend fun album(@Body request: AlbumIdRequest): AlbumDetail
     @POST("api/v1/album/create") suspend fun createAlbum(@Body request: AlbumCreateRequest): AlbumDetail
@@ -55,29 +53,17 @@ interface MomentoApi {
     @POST("api/v1/user/delete") suspend fun deleteUser(@Body request: AdminUserIdRequest): MessageResponse
     @POST("api/v1/import/local") suspend fun triggerLocalImport(): MessageResponse
     @POST("api/v1/import/status") suspend fun importStatus(): ImportStatus
-    @POST("api/v1/metadata/generate") suspend fun generateMetadata(): JobActionResponse
-    @POST("api/v1/metadata/status") suspend fun metadataStatus(): JobStatus
-    @POST("api/v1/metadata/reset") suspend fun resetMetadata(): JobActionResponse
-    @POST("api/v1/ai/trigger") suspend fun triggerAi(): JobActionResponse
-    @POST("api/v1/ai/cancel") suspend fun cancelAi(): JobActionResponse
-    @POST("api/v1/ai/clean") suspend fun cleanAi(): JobActionResponse
-    @POST("api/v1/ai/ocr/trigger") suspend fun triggerOcr(): JobActionResponse
-    @POST("api/v1/ai/ocr/cancel") suspend fun cancelOcr(): JobActionResponse
-    @POST("api/v1/ai/ocr/clean") suspend fun cleanOcr(): JobActionResponse
-    @POST("api/v1/ai/ocr/status") suspend fun ocrStatus(): JobStatus
-    @POST("api/v1/ai/image_tagging/trigger") suspend fun triggerImageTagging(): JobActionResponse
-    @POST("api/v1/ai/image_tagging/cancel") suspend fun cancelImageTagging(): JobActionResponse
-    @POST("api/v1/ai/image_tagging/clean") suspend fun cleanImageTagging(): JobActionResponse
-    @POST("api/v1/ai/image_tagging/status") suspend fun imageTaggingStatus(): JobStatus
-    @POST("api/v1/ai/screenshot_detection/status") suspend fun screenshotStatus(): JobStatus
-    @POST("api/v1/ai/document_detection/status") suspend fun documentStatus(): JobStatus
-    @POST("api/v1/ai/image_aesthetics/status") suspend fun aestheticsStatus(): JobStatus
-    @POST("api/v1/ai/faces/status") suspend fun facesStatus(): FaceJobStatus
-
+    @POST("api/v1/metadata/generate") suspend fun generateMetadata(@Body request: EmptyRequest): JobActionResponse
+    @POST("api/v1/metadata/status") suspend fun metadataStatus(@Body request: EmptyRequest): JobStatus
+    @POST("api/v1/metadata/reset") suspend fun resetMetadata(@Body request: EmptyRequest): JobActionResponse
+    @POST("api/v1/ai/trigger") suspend fun triggerAi(@Body request: EmptyRequest): JobActionResponse
+    @POST("api/v1/ai/cancel") suspend fun cancelAi(@Body request: EmptyRequest): JobActionResponse
+    @POST("api/v1/ai/clean") suspend fun cleanAi(@Body request: EmptyRequest): JobActionResponse
+    @POST("api/v1/ai/ocr/status") suspend fun ocrStatus(@Body request: EmptyRequest): JobStatus
+    @POST("api/v1/ai/image_tagging/status") suspend fun imageTaggingStatus(@Body request: EmptyRequest): JobStatus
     @POST("api/v1/backup/device/register") suspend fun registerDevice(@Body request: BackupDeviceRegisterRequest): BackupDeviceRegisterResponse
     @POST("api/v1/backup/upload/create") suspend fun createUpload(@Body request: BackupUploadCreateRequest): BackupUploadResponse
     @POST("api/v1/backup/upload/status") suspend fun uploadStatus(@Body request: BackupUploadIdRequest): BackupUploadResponse
     @PUT("api/v1/backup/upload/chunk/{uploadId}") suspend fun uploadChunk(@Path("uploadId") uploadId: String, @Header("Content-Range") range: String, @Body bytes: RequestBody): BackupUploadResponse
     @POST("api/v1/backup/upload/complete") suspend fun completeUpload(@Body request: BackupUploadIdRequest): BackupUploadResponse
-    @POST("api/v1/backup/upload/cancel") suspend fun cancelUpload(@Body request: BackupUploadIdRequest): BackupUploadResponse
 }

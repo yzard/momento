@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from 'react'
 import { useAuth } from '../hooks/useAuth'
+import { useTheme } from '../hooks/useTheme'
+import type { ThemePreference } from '../lib/theme'
 import { cn } from '../lib/utils'
-import { AlertTriangle, Database, FileText, Loader2, ShieldCheck, Users } from 'lucide-react'
+import { AlertTriangle, Database, FileText, Loader2, Monitor, Moon, Palette, ShieldCheck, Sun, Users } from 'lucide-react'
 import ImportPanel from '../components/admin/ImportPanel'
 import MetadataPanel from '../components/admin/MetadataPanel'
 import UserManagement from '../components/admin/UserManagement'
@@ -9,12 +11,18 @@ import AiPanel from '../components/admin/AiPanel'
 
 export default function Settings() {
   const { user, changePassword } = useAuth()
+  const { preference, setPreference } = useTheme()
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const webdavUrl = new URL('/webdav/', window.location.origin).toString()
+  const themeOptions: Array<{ value: ThemePreference; label: string; icon: typeof Sun }> = [
+    { value: 'light', label: 'Light', icon: Sun },
+    { value: 'dark', label: 'Dark', icon: Moon },
+    { value: 'system', label: 'System', icon: Monitor },
+  ]
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -50,9 +58,44 @@ export default function Settings() {
         <p className="mt-1 text-muted-foreground font-medium">Manage your security and preferences.</p>
       </div>
 
-      <div className="bg-white border border-border rounded-xl shadow-sm overflow-hidden">
+      <section className="mb-8 overflow-hidden rounded-xl border border-border bg-card shadow-sm" aria-labelledby="appearance-title">
+        <div className="flex items-center gap-4 border-b border-border bg-muted/30 px-8 py-6">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-primary shadow-sm">
+            <Palette className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 id="appearance-title" className="text-xl font-display font-semibold text-foreground">Appearance</h2>
+            <p className="text-sm text-muted-foreground">Choose a light, dark, or system-matched theme.</p>
+          </div>
+        </div>
+        <div className="grid gap-3 p-6 sm:grid-cols-3 sm:p-8">
+          {themeOptions.map((option) => {
+            const Icon = option.icon
+            const selected = preference === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setPreference(option.value)}
+                className={cn(
+                  'flex items-center justify-center gap-3 rounded-lg border px-4 py-3 text-sm font-semibold transition-colors',
+                  selected
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground',
+                )}
+              >
+                <Icon className="h-4 w-4" />
+                {option.label}
+              </button>
+            )
+          })}
+        </div>
+      </section>
+
+      <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
         <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">
-            <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
+            <div className="w-10 h-10 bg-card border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
                 <ShieldCheck className="w-5 h-5" />
             </div>
              <div>
@@ -92,7 +135,7 @@ export default function Settings() {
                   type="password"
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-muted/20 border border-input focus:border-primary focus:bg-white outline-none transition-all font-medium rounded-lg focus:ring-4 focus:ring-primary/10 text-foreground"
+                  className="w-full px-4 py-3 bg-muted/20 border border-input focus:border-primary focus:bg-card outline-none transition-all font-medium rounded-lg focus:ring-4 focus:ring-primary/10 text-foreground"
                   required
                 />
               </div>
@@ -106,7 +149,7 @@ export default function Settings() {
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-muted/20 border border-input focus:border-primary focus:bg-white outline-none transition-all font-medium rounded-lg focus:ring-4 focus:ring-primary/10 text-foreground"
+                  className="w-full px-4 py-3 bg-muted/20 border border-input focus:border-primary focus:bg-card outline-none transition-all font-medium rounded-lg focus:ring-4 focus:ring-primary/10 text-foreground"
                   required
                   minLength={8}
                 />
@@ -122,7 +165,7 @@ export default function Settings() {
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-muted/20 border border-input focus:border-primary focus:bg-white outline-none transition-all font-medium rounded-lg focus:ring-4 focus:ring-primary/10 text-foreground"
+                  className="w-full px-4 py-3 bg-muted/20 border border-input focus:border-primary focus:bg-card outline-none transition-all font-medium rounded-lg focus:ring-4 focus:ring-primary/10 text-foreground"
                   required
                 />
               </div>
@@ -165,9 +208,9 @@ export default function Settings() {
 
           <div className="space-y-12">
             <div className="grid gap-6 md:grid-cols-[minmax(15rem,0.72fr)_minmax(0,1.5fr)] md:items-start">
-              <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden">
+              <section className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
                 <div className="px-6 py-5 border-b border-border bg-muted/30 flex items-center gap-3">
-                  <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
+                  <div className="w-10 h-10 bg-card border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
                     <Database className="w-5 h-5" />
                   </div>
                   <h3 className="text-lg font-display font-semibold text-foreground">Local Import</h3>
@@ -181,9 +224,9 @@ export default function Settings() {
                 </div>
               </section>
 
-              <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden">
+              <section className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
                 <div className="px-6 py-5 border-b border-border bg-muted/30 flex items-center gap-3">
-                  <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
+                  <div className="w-10 h-10 bg-card border border-border rounded-lg flex items-center justify-center text-primary shadow-sm">
                     <FileText className="w-5 h-5" />
                   </div>
                   <div>
@@ -199,9 +242,9 @@ export default function Settings() {
 
             <AiPanel />
 
-            <section className="bg-white border border-border rounded-xl shadow-sm overflow-hidden group">
+            <section className="bg-card border border-border rounded-xl shadow-sm overflow-hidden group">
               <div className="px-8 py-6 border-b border-border bg-muted/30 flex items-center gap-4">
-                <div className="w-10 h-10 bg-white border border-border rounded-lg flex items-center justify-center text-secondary shadow-sm">
+                <div className="w-10 h-10 bg-card border border-border rounded-lg flex items-center justify-center text-secondary shadow-sm">
                   <Users className="w-5 h-5" />
                 </div>
                 <div>

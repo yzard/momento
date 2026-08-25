@@ -1,33 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Loader2, RefreshCw } from 'lucide-react'
 
 import { metadataApi, type MetadataStatus } from '../../api/metadata'
+import { usePollingStatus } from '../../hooks/usePollingStatus'
 
 export default function MetadataPanel() {
-  const [status, setStatus] = useState<MetadataStatus | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-
-  const loadStatus = async () => {
-    try {
-      setStatus(await metadataApi.getStatus())
-      setErrorMessage(null)
-    } catch {
-      setErrorMessage('Could not load metadata status.')
-    }
-  }
-
-  useEffect(() => {
-    void loadStatus()
-    const timer = setInterval(() => void loadStatus(), 2000)
-    return () => clearInterval(timer)
-  }, [])
+  const { status, errorMessage, setErrorMessage, refresh } = usePollingStatus<MetadataStatus>(
+    metadataApi.getStatus,
+    'Could not load metadata status.',
+    2000,
+  )
 
   const runAction = async (action: () => Promise<unknown>) => {
     setIsSubmitting(true)
     try {
       await action()
-      await loadStatus()
+      await refresh()
     } catch {
       setErrorMessage('Could not complete the metadata action.')
     } finally {

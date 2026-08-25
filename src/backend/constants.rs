@@ -68,14 +68,6 @@ pub const SCREENSHOT_DETECTION_MODEL_TYPE: &str = "screenshot_detection";
 pub const DOCUMENT_DETECTION_MODEL_TYPE: &str = "document_detection";
 pub const FACE_DETECTION_MODEL_TYPE: &str = "face_detection";
 
-pub fn media_text_model_name(model_type: &str) -> Option<&'static str> {
-    match model_type {
-        OCR_MODEL_TYPE => Some("OCR"),
-        IMAGE_TAGGING_MODEL_TYPE => Some("Image Tags"),
-        _ => None,
-    }
-}
-
 pub static IMAGE_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".heif",

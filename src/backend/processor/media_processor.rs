@@ -11,6 +11,7 @@ use crate::processor::metadata::{
     load_supplemental_metadata, normalize_gps_coordinates, reverse_geocoding::reverse_geocode,
     supplemental_metadata_path, MediaMetadata,
 };
+use crate::utils::path::resolve_storage_path;
 
 #[derive(Clone, Copy)]
 pub struct SourceFileTimes {
@@ -96,7 +97,10 @@ pub async fn generate_complete_metadata(source_path: &Path, media_type: &str) ->
 }
 
 pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option<&str>) {
-    let raw_file = paths().originals.join(file_path);
+    let Ok(raw_file) = resolve_storage_path(&paths().originals, file_path) else {
+        tracing::warn!(file_path, "refusing to delete an invalid stored media path");
+        return;
+    };
     if let Some(sidecar_path) = supplemental_metadata_path(&raw_file) {
         let _ = fs::remove_file(sidecar_path);
     }
@@ -105,17 +109,16 @@ pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option
     }
 
     if let Some(thumb_path) = thumbnail_path {
-        let thumb_file = paths().thumbnails.join(thumb_path);
-        if thumb_file.exists() {
-            let _ = fs::remove_file(&thumb_file);
-        }
-        let tiny_thumbnail_file = paths().thumbnails_tiny.join(thumb_path);
-        if tiny_thumbnail_file.exists() {
-            let _ = fs::remove_file(&tiny_thumbnail_file);
-        }
-        let place_thumbnail_file = paths().thumbnails_places.join(thumb_path);
-        if place_thumbnail_file.exists() {
-            let _ = fs::remove_file(&place_thumbnail_file);
+        for root in [
+            &paths().thumbnails,
+            &paths().thumbnails_tiny,
+            &paths().thumbnails_places,
+        ] {
+            if let Ok(thumbnail_file) = resolve_storage_path(root, thumb_path) {
+                if thumbnail_file.exists() {
+                    let _ = fs::remove_file(thumbnail_file);
+                }
+            }
         }
     }
 

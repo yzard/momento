@@ -127,6 +127,7 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
   // Load preview URL when media changes
   useEffect(() => {
     if (!currentMedia) return
+    let cancelled = false
 
     setIsLoading(true)
     setPreviewUrl(null)
@@ -139,14 +140,20 @@ export default function Lightbox({ mediaIds, currentIndex, onClose, onIndexChang
 
     mediaApi.getPreviewBatch([currentMedia.id])
       .then((batch) => {
+        if (cancelled) return
         const url = batch.get(currentMedia.id) ?? null
         setPreviewUrl(url)
         setIsLoading(false)
       })
       .catch(() => {
+        if (cancelled) return
         console.error('Failed to load preview')
         setIsLoading(false)
       })
+
+    return () => {
+      cancelled = true
+    }
   }, [currentMedia])
 
   if (!currentMedia && isMetadataLoading) {

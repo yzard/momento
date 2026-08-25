@@ -7,8 +7,18 @@ import org.junit.Test
 
 class DtoMappingTest {
     @Test fun decodesBackendCamelCaseMediaDto() {
-        val media = Json.decodeFromString<Media>("{\"id\":7,\"filename\":\"stored.jpg\",\"originalFilename\":\"IMG_0007.jpg\",\"mediaType\":\"image\",\"createdAt\":\"2026-01-01T00:00:00Z\"}")
+        val media = Json.decodeFromString<Media>("{\"id\":7,\"filename\":\"stored.jpg\",\"originalFilename\":\"IMG_0007.jpg\",\"mediaType\":\"image\",\"cameraMake\":\"Fuji\",\"focalLength35mm\":35.0,\"keywords\":\"coast, sunset\",\"contentHash\":\"abc123\",\"createdAt\":\"2026-01-01T00:00:00Z\"}")
         assertEquals("IMG_0007.jpg", media.originalFilename)
+        assertEquals("Fuji", media.cameraMake)
+        assertEquals(35.0, media.focalLength35mm)
+        assertEquals("coast, sunset", media.keywords)
+        assertEquals("abc123", media.contentHash)
+    }
+
+    @Test fun decodesTimelineSearchContract() {
+        val response = Json.decodeFromString<TimelineResponse>("{\"groups\":[{\"date\":\"2026-01-01\",\"media\":[{\"id\":7,\"filename\":\"stored.jpg\",\"originalFilename\":\"IMG_0007.jpg\",\"mediaType\":\"image\",\"createdAt\":\"2026-01-01T00:00:00Z\"}]}],\"nextCursor\":null,\"previousCursor\":null,\"hasOlder\":false,\"hasNewer\":false}")
+
+        assertEquals(listOf(7L), response.groups.single().media.map { it.id })
     }
 
     @Test fun decodesBackupUploadContract() {

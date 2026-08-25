@@ -1,7 +1,7 @@
 package io.github.yzard.momento.app.navigation
 
 enum class Destination(val label: String) {
-    TIMELINE("Timeline"), PHOTOS("Photos"), VIDEOS("Videos"), SCREENSHOTS("Screenshots"), DOCUMENTS("Documents"), COLLECTIONS("Collections"), CREATE("Create"), SEARCH("Search"), SETTINGS("Settings"), ALBUMS("Albums"), MAP("Map"), PLACES("Places"), FACES("Faces"), DEDUPLICATE("Deduplicate"), TRASH("Trash"), ADMIN("Admin"), VIEWER("Viewer")
+    TIMELINE("Timeline"), PHOTOS("Photos"), VIDEOS("Videos"), SCREENSHOTS("Screenshots"), DOCUMENTS("Documents"), COLLECTIONS("Collections"), SETTINGS("Settings"), ALBUMS("Albums"), MAP("Map"), PLACES("Places"), FACES("Faces"), DEDUPLICATE("Deduplicate"), TRASH("Trash"), ADMIN("Admin"), VIEWER("Viewer")
 }
 
 val timelineSubpageDestinations = listOf(

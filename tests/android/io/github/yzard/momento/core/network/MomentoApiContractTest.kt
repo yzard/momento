@@ -2,7 +2,13 @@ package io.github.yzard.momento.core.network
 
 import io.github.yzard.momento.core.model.BackupUploadIdRequest
 import io.github.yzard.momento.core.model.AlbumMediaRequest
+import io.github.yzard.momento.core.model.AlbumCreateRequest
+import io.github.yzard.momento.core.model.AlbumIdRequest
+import io.github.yzard.momento.core.model.AlbumUpdateRequest
 import io.github.yzard.momento.core.model.MapClustersRequest
+import io.github.yzard.momento.core.model.EmptyRequest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import retrofit2.http.POST
@@ -14,9 +20,32 @@ class MomentoApiContractTest {
     }
 
     @Test fun albumAndMapUseTheServerContracts() {
-        val album = MomentoApi::class.java.getMethod("reorderAlbumMedia", AlbumMediaRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val create = MomentoApi::class.java.getMethod("createAlbum", AlbumCreateRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val list = MomentoApi::class.java.getMethod("albums", kotlin.coroutines.Continuation::class.java)
+        val get = MomentoApi::class.java.getMethod("album", AlbumIdRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val update = MomentoApi::class.java.getMethod("updateAlbum", AlbumUpdateRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val delete = MomentoApi::class.java.getMethod("deleteAlbum", AlbumIdRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val add = MomentoApi::class.java.getMethod("addAlbumMedia", AlbumMediaRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val remove = MomentoApi::class.java.getMethod("removeAlbumMedia", AlbumMediaRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val reorder = MomentoApi::class.java.getMethod("reorderAlbumMedia", AlbumMediaRequest::class.java, kotlin.coroutines.Continuation::class.java)
         val map = MomentoApi::class.java.getMethod("mapClusters", MapClustersRequest::class.java, kotlin.coroutines.Continuation::class.java)
-        assertEquals("api/v1/album/reorder", requireNotNull(album.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/create", requireNotNull(create.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/list", requireNotNull(list.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/get", requireNotNull(get.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/update", requireNotNull(update.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/delete", requireNotNull(delete.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/add-media", requireNotNull(add.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/remove-media", requireNotNull(remove.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/album/reorder", requireNotNull(reorder.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/map/clusters", requireNotNull(map.getAnnotation(POST::class.java)).value)
+    }
+
+    @Test fun aiAndMetadataActionsSendTheRequiredEmptyJsonBody() {
+        val ai = MomentoApi::class.java.getMethod("triggerAi", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val metadata = MomentoApi::class.java.getMethod("metadataStatus", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
+
+        assertEquals("api/v1/ai/trigger", requireNotNull(ai.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/metadata/status", requireNotNull(metadata.getAnnotation(POST::class.java)).value)
+        assertEquals("{}", Json.encodeToString(EmptyRequest()))
     }
 }

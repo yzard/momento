@@ -1,23 +1,5 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { mediaApi } from '../api/media'
-
-export function useMediaList(limit = 50) {
-  return useInfiniteQuery({
-    queryKey: ['media'],
-    queryFn: ({ pageParam }) => mediaApi.list({ cursor: pageParam, limit }),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => (lastPage.hasMore ? lastPage.nextCursor : undefined),
-  })
-}
-
-export function useMapMedia() {
-  return useInfiniteQuery({
-    queryKey: ['mapMedia'],
-    queryFn: () => mediaApi.listMapMedia(),
-    initialPageParam: undefined,
-    getNextPageParam: () => undefined,
-  })
-}
 
 export function useDeleteMedia() {
   const queryClient = useQueryClient()
@@ -26,8 +8,6 @@ export function useDeleteMedia() {
     mutationFn: (mediaIds: number[]) => mediaApi.delete(mediaIds),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['timeline'] })
-      queryClient.invalidateQueries({ queryKey: ['media'] })
-      queryClient.invalidateQueries({ queryKey: ['mapMedia'] })
       queryClient.invalidateQueries({ queryKey: ['trash'] })
       queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
     },

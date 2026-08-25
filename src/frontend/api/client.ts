@@ -73,6 +73,11 @@ apiClient.interceptors.response.use(
         const response = await axios.post('/api/v1/user/refresh', {
           refreshToken: refreshToken,
         })
+        if (localStorage.getItem(REFRESH_TOKEN_KEY) !== refreshToken) {
+          const sessionChangedError = new Error('Authentication session changed during refresh')
+          processQueue(sessionChangedError)
+          return Promise.reject(sessionChangedError)
+        }
         const { accessToken, refreshToken: newRefreshToken } = response.data
         localStorage.setItem(ACCESS_TOKEN_KEY, accessToken)
         localStorage.setItem(REFRESH_TOKEN_KEY, newRefreshToken)
@@ -80,9 +85,11 @@ apiClient.interceptors.response.use(
         return apiClient(originalRequest)
       } catch (refreshError) {
         processQueue(refreshError as Error)
-        localStorage.removeItem(ACCESS_TOKEN_KEY)
-        localStorage.removeItem(REFRESH_TOKEN_KEY)
-        window.location.href = '/login'
+        if (localStorage.getItem(REFRESH_TOKEN_KEY) === refreshToken) {
+          localStorage.removeItem(ACCESS_TOKEN_KEY)
+          localStorage.removeItem(REFRESH_TOKEN_KEY)
+          window.location.href = '/login'
+        }
         return Promise.reject(refreshError)
       } finally {
         isRefreshing = false
