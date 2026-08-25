@@ -463,6 +463,8 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.server.data_dir, PathBuf::from("/data"));
     assert_eq!(config.server.static_dir, PathBuf::from("/app/static"));
     assert_eq!(config.server.port, 8000);
+    assert_eq!(config.server.api_request_body_max_bytes, 8_388_608);
+    assert_eq!(config.server.request_log_body_max_bytes, 1_048_576);
     assert!(!config.server.reset_admin_password);
     assert!(config.llm.enabled);
     assert_eq!(config.metadata.thumbnails_max_size, 1200);
@@ -476,7 +478,7 @@ fn test_save_default_config_round_trips() {
     assert_eq!(generated["server"]["data_dir"].as_str(), Some("/data"));
     assert_eq!(
         generated["webdav"]["max_upload_bytes"].as_integer(),
-        Some(10_737_418_240)
+        Some(53_687_091_200)
     );
     assert!(generated["webdav"].get("limits").is_none());
     assert!(generated["webdav"].get("processing").is_none());
@@ -489,6 +491,26 @@ fn test_save_default_config_round_trips() {
     assert!(generated["metadata"]
         .get("reverse_geocoding_enabled")
         .is_none());
+}
+
+#[test]
+fn test_load_config_reads_and_validates_server_body_limits() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[server]\napi_request_body_max_bytes = 4096\nrequest_log_body_max_bytes = 1024\n",
+    );
+
+    let config = load_config(&path).expect("Failed to load server body limits");
+    assert_eq!(config.server.api_request_body_max_bytes, 4096);
+    assert_eq!(config.server.request_log_body_max_bytes, 1024);
+
+    for field in ["api_request_body_max_bytes", "request_log_body_max_bytes"] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(&dir, &format!("[server]\n{field} = 0\n"));
+        let error = load_config(&path).expect_err("Zero body limit must fail");
+        assert!(error.to_string().contains("server"), "{error}");
+    }
 }
 
 #[test]

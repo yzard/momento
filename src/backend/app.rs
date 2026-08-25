@@ -57,6 +57,9 @@ pub fn create_app(
     let api_routes = Router::new()
         .route("/healthcheck", get(healthcheck))
         .merge(api_router())
+        .layer(DefaultBodyLimit::max(
+            config.server.api_request_body_max_bytes,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             password_change_guard,
@@ -66,8 +69,10 @@ pub fn create_app(
     let mut app = Router::new()
         .nest("/api/v1", api_routes)
         .merge(webdav_router(state.clone()))
-        .layer(DefaultBodyLimit::disable())
-        .layer(middleware::from_fn(request_logger))
+        .layer(middleware::from_fn_with_state(
+            config.server.request_log_body_max_bytes,
+            request_logger,
+        ))
         .with_state(state);
 
     // Serve static files if frontend exists

@@ -1,15 +1,33 @@
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::{body::Body, extract::Request, middleware::Next, response::Response};
+use axum::{
+    body::Body,
+    extract::{Request, State},
+    http::{header, Method},
+    middleware::Next,
+    response::Response,
+};
+use futures::StreamExt;
 use tracing::{error, info, warn};
 
-pub async fn request_logger(mut request: Request<Body>, next: Next) -> Response {
+const MULTIPART_BODY_OMITTED: &str = "[multipart body omitted]";
+const BINARY_BODY_OMITTED: &str = "[binary body omitted]";
+const BINARY_PAYLOAD_OMITTED: &str = "[binary payload omitted]";
+const BASE64_VALUE_OMITTED: &str = "[base64 omitted]";
+const SENSITIVE_VALUE_REDACTED: &str = "[redacted]";
+
+pub async fn request_logger(
+    State(maximum_capture_bytes): State<usize>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let path = uri.path().to_string();
 
     let is_static = path.starts_with("/assets/") || path.ends_with(".js") || path.ends_with(".css");
-    let payload = extract_compact_payload(&mut request).await;
+    let payload_capture = begin_payload_capture(&mut request, maximum_capture_bytes);
 
     let start = Instant::now();
     let response = next.run(request).await;
@@ -19,7 +37,9 @@ pub async fn request_logger(mut request: Request<Body>, next: Next) -> Response 
     if !is_static {
         let duration_ms = duration.as_secs_f64() * 1000.0;
         let duration_text = format!("{:05.2}", duration_ms);
-        let payload_text = payload.unwrap_or_else(|| "{}".to_string());
+        let payload_text = payload_capture
+            .map(|capture| capture.render())
+            .unwrap_or_else(|| "{}".to_string());
         let log_line = format!(
             "{} {} {} {}ms {}",
             method,
@@ -48,74 +68,211 @@ pub async fn request_logger(mut request: Request<Body>, next: Next) -> Response 
     response
 }
 
-pub async fn extract_compact_payload(request: &mut Request<Body>) -> Option<String> {
-    if request.method() != axum::http::Method::POST {
-        return None;
-    }
-    if request
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|content_type| content_type.starts_with("multipart/"))
-    {
-        return Some("[multipart body omitted]".to_string());
-    }
-
-    let body = std::mem::replace(request.body_mut(), Body::empty());
-    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(b) => b,
-        Err(_) => return None,
-    };
-
-    let body_str = match String::from_utf8(bytes.to_vec()) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-
-    let compact = match serde_json::from_str::<serde_json::Value>(&body_str) {
-        Ok(mut value) => {
-            redact_binary_values(&mut value);
-            value.to_string()
-        }
-        Err(_) if body_str.contains("base64") => "[binary payload omitted]".to_string(),
-        Err(_) => body_str.trim().to_string(),
-    };
-
-    let restored = Body::from(bytes);
-    *request.body_mut() = restored;
-
-    Some(compact)
+#[derive(Clone)]
+pub struct PayloadCapture {
+    content: PayloadCaptureContent,
 }
 
-pub fn redact_binary_values(value: &mut serde_json::Value) {
+#[derive(Clone)]
+enum PayloadCaptureContent {
+    Fixed(&'static str),
+    Streaming(Arc<Mutex<CapturedBody>>),
+}
+
+#[derive(Debug)]
+struct CapturedBody {
+    bytes: Vec<u8>,
+    maximum_bytes: usize,
+    truncated: bool,
+}
+
+impl CapturedBody {
+    fn new(maximum_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(maximum_bytes.min(16 * 1024)),
+            maximum_bytes,
+            truncated: false,
+        }
+    }
+
+    fn record(&mut self, chunk: &[u8]) {
+        let remaining = self.maximum_bytes.saturating_sub(self.bytes.len());
+        let captured_length = remaining.min(chunk.len());
+        self.bytes.extend_from_slice(&chunk[..captured_length]);
+        if captured_length < chunk.len() {
+            self.truncated = true;
+        }
+    }
+
+    fn render(&self) -> String {
+        if self.truncated {
+            return format!(
+                "[request body omitted: exceeded logging limit of {} bytes]",
+                self.maximum_bytes
+            );
+        }
+        if self.bytes.is_empty() {
+            return "{}".to_string();
+        }
+
+        compact_and_redact_payload(&self.bytes)
+    }
+}
+
+impl PayloadCapture {
+    fn fixed(value: &'static str) -> Self {
+        Self {
+            content: PayloadCaptureContent::Fixed(value),
+        }
+    }
+
+    fn streaming(state: Arc<Mutex<CapturedBody>>) -> Self {
+        Self {
+            content: PayloadCaptureContent::Streaming(state),
+        }
+    }
+
+    pub fn render(&self) -> String {
+        match &self.content {
+            PayloadCaptureContent::Fixed(value) => (*value).to_string(),
+            PayloadCaptureContent::Streaming(state) => {
+                let state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.render()
+            }
+        }
+    }
+}
+
+pub fn begin_payload_capture(
+    request: &mut Request<Body>,
+    maximum_capture_bytes: usize,
+) -> Option<PayloadCapture> {
+    if request.method() != Method::POST {
+        return None;
+    }
+
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if content_type.is_some_and(is_multipart_content_type) {
+        return Some(PayloadCapture::fixed(MULTIPART_BODY_OMITTED));
+    }
+    if content_type.is_some_and(is_binary_content_type) {
+        return Some(PayloadCapture::fixed(BINARY_BODY_OMITTED));
+    }
+
+    let state = Arc::new(Mutex::new(CapturedBody::new(maximum_capture_bytes)));
+    let capture_state = Arc::clone(&state);
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    let stream = body.into_data_stream().map(move |result| {
+        if let Ok(bytes) = &result {
+            let mut state = capture_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.record(bytes);
+        }
+        result
+    });
+    *request.body_mut() = Body::from_stream(stream);
+
+    Some(PayloadCapture::streaming(state))
+}
+
+fn is_multipart_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|mime_type| mime_type.trim().eq_ignore_ascii_case("multipart/form-data"))
+}
+
+fn is_binary_content_type(content_type: &str) -> bool {
+    let mime_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    mime_type == "application/octet-stream"
+        || mime_type.starts_with("image/")
+        || mime_type.starts_with("video/")
+        || mime_type.starts_with("audio/")
+}
+
+fn compact_and_redact_payload(bytes: &[u8]) -> String {
+    let Ok(body) = std::str::from_utf8(bytes) else {
+        return BINARY_PAYLOAD_OMITTED.to_string();
+    };
+
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(mut value) => {
+            redact_request_values(&mut value);
+            value.to_string()
+        }
+        Err(_) if body.to_ascii_lowercase().contains("base64") => {
+            BINARY_PAYLOAD_OMITTED.to_string()
+        }
+        Err(_) => body.trim().to_string(),
+    }
+}
+
+pub fn redact_request_values(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(fields) => {
             for (key, value) in fields {
-                if is_binary_field(key) && value.is_string() {
-                    *value = serde_json::Value::String("[base64 omitted]".to_string());
+                if is_sensitive_field(key) {
+                    *value = serde_json::Value::String(SENSITIVE_VALUE_REDACTED.to_string());
                     continue;
                 }
-                redact_binary_values(value);
+                if is_binary_field(key) && value.is_string() {
+                    *value = serde_json::Value::String(BASE64_VALUE_OMITTED.to_string());
+                    continue;
+                }
+                redact_request_values(value);
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_binary_values(value);
+                redact_request_values(value);
             }
         }
         serde_json::Value::String(text) if text.contains(";base64,") => {
-            *text = "[base64 omitted]".to_string();
+            *text = BASE64_VALUE_OMITTED.to_string();
         }
         _ => {}
     }
 }
 
-fn is_binary_field(key: &str) -> bool {
+fn normalized_field_name(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_sensitive_field(key: &str) -> bool {
     matches!(
-        key,
-        "image" | "imageBase64" | "image_base64" | "data" | "bytes" | "embedding"
-    ) || key.ends_with("Base64")
-        || key.ends_with("_base64")
+        normalized_field_name(key).as_str(),
+        "password"
+            | "currentpassword"
+            | "newpassword"
+            | "accesstoken"
+            | "refreshtoken"
+            | "apikey"
+            | "secret"
+            | "authorization"
+            | "token"
+    )
+}
+
+fn is_binary_field(key: &str) -> bool {
+    let normalized = normalized_field_name(key);
+    matches!(
+        normalized.as_str(),
+        "image" | "imagebase64" | "data" | "bytes" | "embedding"
+    ) || normalized.ends_with("base64")
 }
 
 pub fn log_error(context: &str, error: &dyn std::error::Error) {

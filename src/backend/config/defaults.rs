@@ -6,16 +6,18 @@ pub(crate) const SERVER_DEBUG: bool = false;
 pub(crate) const SERVER_RESET_ADMIN_PASSWORD: bool = false;
 pub(crate) const SERVER_DATA_DIR: &str = "/data";
 pub(crate) const SERVER_STATIC_DIR: &str = "/app/static";
+pub(crate) const SERVER_API_REQUEST_BODY_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const SERVER_REQUEST_LOG_BODY_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const ACCESS_TOKEN_EXPIRE_MINUTES: i64 = 30;
 pub(crate) const REFRESH_TOKEN_EXPIRE_DAYS: i64 = 7;
 pub(crate) const WEBDAV_MOUNT_PATH: &str = "/webdav";
 pub(crate) const WEBDAV_REALM: &str = "Momento WebDAV";
-pub(crate) const WEBDAV_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub(crate) const WEBDAV_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 pub(crate) const WEBDAV_MAX_CONCURRENT_REQUESTS: usize = 16;
 pub(crate) const WEBDAV_POLL_INTERVAL_SECONDS: u64 = 1;
 pub(crate) const WEBDAV_STABLE_FILE_AGE_SECONDS: u64 = 2;
 pub(crate) const WEBDAV_MAX_CONCURRENT_PROCESSING: usize = 4;
-pub(crate) const BACKUP_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub(crate) const BACKUP_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 pub(crate) const BACKUP_MAX_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const BACKUP_MAX_ACTIVE_UPLOADS_PER_USER: usize = 4;
 pub(crate) const BACKUP_SESSION_EXPIRY_HOURS: u64 = 24;
@@ -104,6 +106,14 @@ pub(crate) fn server_data_dir() -> PathBuf {
 
 pub(crate) fn server_static_dir() -> PathBuf {
     PathBuf::from(SERVER_STATIC_DIR)
+}
+
+pub(crate) fn server_api_request_body_max_bytes() -> usize {
+    SERVER_API_REQUEST_BODY_MAX_BYTES
+}
+
+pub(crate) fn server_request_log_body_max_bytes() -> usize {
+    SERVER_REQUEST_LOG_BODY_MAX_BYTES
 }
 
 pub(crate) fn security_secret_key() -> String {
@@ -293,6 +303,14 @@ pub(crate) fn render_template(source: &str) -> String {
         ),
         ("{{SERVER_DATA_DIR}}", SERVER_DATA_DIR.to_string()),
         ("{{SERVER_STATIC_DIR}}", SERVER_STATIC_DIR.to_string()),
+        (
+            "{{SERVER_API_REQUEST_BODY_MAX_BYTES}}",
+            SERVER_API_REQUEST_BODY_MAX_BYTES.to_string(),
+        ),
+        (
+            "{{SERVER_REQUEST_LOG_BODY_MAX_BYTES}}",
+            SERVER_REQUEST_LOG_BODY_MAX_BYTES.to_string(),
+        ),
         (
             "{{SECURITY_SECRET_KEY}}",
             template::SECURITY_SECRET_KEY.to_string(),

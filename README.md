@@ -35,11 +35,23 @@ trusted local network. The current client permits HTTP for trusted local-network
 HTTP exposes credentials and media traffic to the network and should not be used on untrusted
 networks.
 
-Development commands require Java 17 and an Android SDK with API 36:
+All Android compilation, debugging, and tests run in Docker. The host needs only Docker:
 
 ```bash
-cd src/android
-./gradlew test lint assembleDebug
+./build_android_client.sh verify
+./build_android_client.sh assemble-debug
+./build_android_client.sh shell
+```
+
+`verify` compiles the debug variant, runs JVM unit tests, and runs Android lint. `shell` opens the
+containerized Java 17, Gradle, Android SDK 36, and ADB environment. A debug APK is written to
+`dist/mobile/android/debug/`.
+
+Instrumented tests use a headless Android emulator inside a separate Docker target. They require a
+Linux Docker host with KVM exposed as `/dev/kvm`:
+
+```bash
+./build_android_client.sh instrumented-test
 ```
 
 Create a signed release with a directory containing exactly one direct `.jks` file and a
@@ -47,7 +59,7 @@ Create a signed release with a directory containing exactly one direct `.jks` fi
 keystore and key, and the keystore must contain exactly one private-key alias:
 
 ```bash
-./build_mobile_clients.sh /secure/path/to/keystore-directory
+./build_android_client.sh release --keystore-dir /secure/path/to/keystore-directory
 ```
 
 The release script requires Docker only; Java, Gradle, and Android SDK 36 run inside the pinned
@@ -57,6 +69,7 @@ The script stages Gradle state below `build/android/` and writes the final signe
 `dist/mobile/android/<keystore-stem>-<android-version>.apk` and
 `dist/mobile/android/<keystore-stem>-<android-version>.aab`. The Android version is owned by
 `src/android/version.txt`; it starts at `1.0.0` and is independent from the Momento server version.
+Run `./build_android_client.sh --help` for every command, option, requirement, and output path.
 
 ## Docker Compose
 
@@ -136,7 +149,8 @@ Build both images locally with the tags used by Compose, or explicitly publish t
 ./build_docker.sh publish docker zhuoyin /secure/path/to/keystore-directory
 ```
 
-The build creates the signed Android release first and embeds its APK in the Momento image. Signed-in
+The build calls `build_android_client.sh release`, creates the signed Android release first, and
+embeds its APK in the Momento image. It does not run Android development or test commands. Signed-in
 users can download that APK from the `Android` link beside the web sidebar version, which serves
 `/momento-android.apk` from the same Momento instance.
 

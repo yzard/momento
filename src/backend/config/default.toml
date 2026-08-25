@@ -11,6 +11,10 @@ reset_admin_password = "${RESET_ADMIN_PASSWORD}"
 # All database, media, preview, import, and log paths derive from this directory.
 data_dir = "{{SERVER_DATA_DIR}}"
 static_dir = "{{SERVER_STATIC_DIR}}"
+# Buffered API extractors such as JSON are bounded independently from streaming media uploads.
+api_request_body_max_bytes = {{SERVER_API_REQUEST_BODY_MAX_BYTES}}
+# Request logging retains at most this many POST body bytes; larger bodies still reach handlers.
+request_log_body_max_bytes = {{SERVER_REQUEST_LOG_BODY_MAX_BYTES}}
 
 [security]
 # Use a long random value, for example: openssl rand -hex 32

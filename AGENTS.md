@@ -531,10 +531,18 @@ pnpm test                 # Run all tests
 ./run_playground.sh /path/to/keystore                         # Build and run the playground stack
 ./build_docker.sh /path/to/keystore                           # Build both images locally
 ./build_docker.sh publish github yzard /path/to/keystore      # Build and publish both images to GHCR
+./build_android_client.sh verify                              # Android compile, JVM tests, and lint in Docker
+./build_android_client.sh assemble-debug                      # Android debug APK in Docker
+./build_android_client.sh instrumented-test                   # Containerized emulator tests; requires /dev/kvm
+./build_android_client.sh shell                               # Containerized Java/Gradle/SDK/ADB shell
+./build_android_client.sh release --keystore-dir /path/to/keystore
 ```
 
-`run_playground.sh` and `build_docker.sh` are the only scripts at the git root. Both
-resolve paths from their own location, so they work from any working directory.
+`run_playground.sh`, `build_docker.sh`, and the explicitly separate Android entrypoint
+`build_android_client.sh` are the supported scripts at the git root. They resolve paths from their
+own location, so they work from any working directory. Android compilation, debugging, lint, and
+tests must use `build_android_client.sh`; direct host Gradle, Java, Android SDK, emulator, or ADB
+commands are unsupported.
 
 ### Playground containers
 
@@ -553,24 +561,40 @@ inference never creates additional containers.
 `playground/llm/`, while its config remains at `playground/config_llm.toml`. Build artifacts do not
 belong in either directory.
 
+### Android client
+
+`build_android_client.sh` is the only Android build, debug, and test entrypoint. Its `verify`,
+`assemble-debug`, `instrumented-test`, `shell`, and `release` commands all run in Docker. Only
+`release` accepts `--keystore-dir`; only `instrumented-test` uses the emulator image and `/dev/kvm`.
+Intermediate state belongs below `build/android/`, debug APKs below
+`dist/mobile/android/debug/`, and the single release APK plus AAB directly below
+`dist/mobile/android/`. Run `./build_android_client.sh --help` for the complete option contract.
+
+`build_docker.sh` calls only `build_android_client.sh release`, then verifies and embeds the one
+release APK into the momento-api image as `/app/static/momento-android.apk`. It separately builds
+llm-service and never routes Android development or test commands.
+
 ### Backend (src/backend)
 ```bash
 cd src/backend
 
-# Build
-cargo build                # Debug build
-cargo build --release      # Release build
+# Build (release/no-debug is the default project workflow)
+CARGO_TARGET_DIR=../../build/backend/target cargo build --release
 
 # Run development server
-cargo run                  # Starts server on 0.0.0.0:8000
+CARGO_TARGET_DIR=../../build/backend/target cargo run --release -- -c ../../playground/config.toml
 
 # Linting & formatting
 cargo fmt                  # Format code
-cargo clippy               # Lint code
+CARGO_TARGET_DIR=../../build/backend/target cargo clippy --release --all-targets
 
 # Testing (integration tests live in tests/backend/, not #[cfg(test)] modules)
-cargo test                 # Run all tests
-cargo test auth            # Run tests matching "auth"
+CARGO_TARGET_DIR=../../build/backend/target cargo test --release --all-targets
+CARGO_TARGET_DIR=../../build/backend/target cargo test --release auth
+
+# Troubleshooting only: explicitly enable debug symbols in an isolated directory.
+CARGO_PROFILE_DEV_DEBUG=2 CARGO_TARGET_DIR=../../build/backend/debug-target cargo build
+CARGO_PROFILE_TEST_DEBUG=2 CARGO_TARGET_DIR=../../build/backend/debug-target cargo test auth
 ```
 
 ### Frontend (src/frontend)
@@ -735,8 +759,11 @@ tests/                      # Mirrors src/ 1:1 — see below
 docker/
 ├── Dockerfile
 ├── Dockerfile.dockerignore # NOT .dockerignore — context is the git root
+├── Dockerfile.android
+├── Dockerfile.android.dockerignore
 ├── Dockerfile.llm
 ├── Dockerfile.llm.dockerignore
+├── entrypoint_android.sh
 ├── entrypoint.sh
 └── entrypoint_llm.sh
 
@@ -758,6 +785,7 @@ playground/                 # End-to-end config and data
 build/                      # Optional local intermediate build artifacts
 dist/                       # Optional local final build artifacts
 
+build_android_client.sh     # All Android build, debug, lint, and test operations in Docker
 build_docker.sh             # Builds locally or explicitly publishes both images
 run_playground.sh           # Builds and starts the two-container playground stack
 docker-compose.yaml         # Canonical two-container deployment

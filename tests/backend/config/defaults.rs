@@ -6,6 +6,23 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         toml::from_str(default_config_template()).expect("rendered template must be valid TOML");
     let runtime_defaults = Config::default();
 
+    assert_eq!(
+        template["server"]["api_request_body_max_bytes"].as_integer(),
+        Some(runtime_defaults.server.api_request_body_max_bytes as i64)
+    );
+    assert_eq!(
+        template["server"]["request_log_body_max_bytes"].as_integer(),
+        Some(runtime_defaults.server.request_log_body_max_bytes as i64)
+    );
+    assert_eq!(
+        template["webdav"]["max_upload_bytes"].as_integer(),
+        Some(50 * 1024 * 1024 * 1024)
+    );
+    assert_eq!(
+        template["backup"]["max_upload_bytes"].as_integer(),
+        Some(50 * 1024 * 1024 * 1024)
+    );
+
     let template_threshold = template["llm"]["face_group_similarity_threshold"]
         .as_float()
         .expect("template threshold");

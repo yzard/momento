@@ -32,6 +32,7 @@ async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload()
     let _ = std::fs::remove_dir_all(&user_root);
 
     let mut config = Config::default();
+    config.server.api_request_body_max_bytes = 1;
     config.webdav.mount_path = "/photos".to_string();
     config.webdav.max_upload_bytes = 11;
     config.webdav.max_concurrent_requests = 1;

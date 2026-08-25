@@ -45,6 +45,29 @@ fn create_server(pool: momento_api::database::DbPool, reset_user_id: Option<i64>
 }
 
 #[tokio::test]
+async fn buffered_json_routes_enforce_the_configured_body_limit() {
+    init_test_paths();
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.server.api_request_body_max_bytes = 16;
+    config.server.request_log_body_max_bytes = 8;
+    let app = create_app(
+        Arc::new(config),
+        pool,
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let server = TestServer::new(app).expect("server");
+
+    server
+        .post("/api/v1/user/refresh")
+        .json(&json!({"refreshToken": "request larger than sixteen bytes"}))
+        .await
+        .assert_status(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn temporary_admin_credentials_apply_only_to_the_reset_process() {
     let (pool, admin_id) = create_admin_fixture();
     prepare_admin_password_reset(&pool, admin_id).expect("prepare reset");

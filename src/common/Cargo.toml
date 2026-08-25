@@ -24,3 +24,11 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 [[test]]
 name = "integration"
 path = "../../tests/common/main.rs"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

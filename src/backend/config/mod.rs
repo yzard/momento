@@ -39,6 +39,12 @@ pub struct ServerConfig {
     /// Built frontend served as the HTTP fallback.
     #[serde(default = "defaults::server_static_dir")]
     pub static_dir: PathBuf,
+    /// Maximum body accepted by buffered API extractors such as JSON.
+    #[serde(default = "defaults::server_api_request_body_max_bytes")]
+    pub api_request_body_max_bytes: usize,
+    /// Maximum POST body bytes retained by request logging before omission.
+    #[serde(default = "defaults::server_request_log_body_max_bytes")]
+    pub request_log_body_max_bytes: usize,
 }
 
 impl Default for ServerConfig {
@@ -50,7 +56,20 @@ impl Default for ServerConfig {
             reset_admin_password: defaults::SERVER_RESET_ADMIN_PASSWORD,
             data_dir: defaults::server_data_dir(),
             static_dir: defaults::server_static_dir(),
+            api_request_body_max_bytes: defaults::SERVER_API_REQUEST_BODY_MAX_BYTES,
+            request_log_body_max_bytes: defaults::SERVER_REQUEST_LOG_BODY_MAX_BYTES,
         }
+    }
+}
+
+impl ServerConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.api_request_body_max_bytes == 0 || self.request_log_body_max_bytes == 0 {
+            return Err(std::io::Error::other(
+                "server API request and request-log body limits must be positive",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -489,6 +508,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
         secret_key.as_deref(),
         api_key.as_deref(),
     )?;
+    config.server.validate()?;
     config.webdav.validate()?;
     config.backup.validate()?;
     config.llm.validate()?;

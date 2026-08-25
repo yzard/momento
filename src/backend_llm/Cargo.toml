@@ -40,3 +40,11 @@ tower = { version = "0.5", features = ["util"] }
 [[test]]
 name = "integration"
 path = "../../tests/backend_llm/main.rs"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

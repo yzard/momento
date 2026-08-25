@@ -79,3 +79,11 @@ tempfile = "3"
 [[test]]
 name = "integration"
 path = "../../tests/backend/main.rs"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

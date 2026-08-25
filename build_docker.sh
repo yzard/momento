@@ -2,13 +2,52 @@
 set -euo pipefail
 
 ROOT_DIR=$(dirname "$(realpath "$0")")
-VERSION=$(<"$ROOT_DIR/src/backend/version.txt")
 LOCAL_NAMESPACE=zhuoyin
 
 usage() {
-    printf 'Usage: %s <keystore directory>\n' "$(basename "$0")" >&2
-    printf '       %s publish <github|docker> <namespace> <keystore directory>\n' "$(basename "$0")" >&2
+    local script_name
+    script_name=$(basename "$0")
+    cat <<EOF
+Usage:
+  $script_name <keystore-directory>
+  $script_name publish <github|docker> <namespace> <keystore-directory>
+  $script_name --help
+
+Commands:
+  local (default)  Call build_android_client.sh release, then build momento-api
+                   and llm-service images and load them into the Docker daemon.
+  publish          Build the same Android release and service images, then push
+                   both service images. Android development and tests are not run.
+
+Arguments:
+  github           Publish to ghcr.io.
+  docker           Publish to docker.io.
+  namespace        Registry account or organization used in image names.
+  keystore-directory
+                   Directory containing exactly one Android .jks file and a
+                   password.txt file with one non-empty line.
+
+Environment:
+  TAG              Image tag. Defaults to src/backend/version.txt.
+  SOURCE_REPOSITORY
+                   OCI source label. Defaults to https://github.com/yzard/momento.
+
+Behavior:
+  build_android_client.sh is the only Android build/test/debug entrypoint. This
+  script calls only its release command, verifies that exactly one release APK is
+  available to Docker, embeds it as /app/static/momento-android.apk in momento-api,
+  and builds the separate llm-service image.
+  Both Rust services use Cargo's release profile without debug symbols by default
+  to limit disk usage.
+EOF
 }
+
+if [[ $# -eq 1 && ( $1 == -h || $1 == --help ) ]]; then
+    usage
+    exit 0
+fi
+
+VERSION=$(<"$ROOT_DIR/src/backend/version.txt")
 
 PUBLISH=false
 REGISTRY=
@@ -30,14 +69,14 @@ elif [[ $# -eq 4 && $1 == publish ]]; then
             ;;
         *)
             printf 'Unsupported registry: %s\n' "$2" >&2
-            usage
+            usage >&2
             exit 2
             ;;
     esac
     NAMESPACE=$3
     KEYSTORE_DIR=$4
 else
-    usage
+    usage >&2
     exit 2
 fi
 
@@ -51,7 +90,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
     exit 1
 fi
 
-"$ROOT_DIR/build_mobile_clients.sh" "$KEYSTORE_DIR"
+"$ROOT_DIR/build_android_client.sh" release --keystore-dir "$KEYSTORE_DIR"
 
 TAG=${TAG:-$VERSION}
 SOURCE_REPOSITORY=${SOURCE_REPOSITORY:-https://github.com/yzard/momento}
