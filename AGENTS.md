@@ -115,6 +115,10 @@ The primary implementation points are:
 - `src/backend_llm/transport.rs`: active-client registry and durable-receipt acknowledgements.
 - `src/backend_llm/scheduler.rs`: durable queue, batching, result retries, and recovery.
 - `src/backend_llm/provider.rs`: task registry, local runtime lifecycle, and inference dispatch.
+- `src/backend_llm/screenshot_document_common.py`: shared image analysis and HTTP runtime used by
+  screenshot and document detection.
+- `src/backend_llm/screenshot_detection_server.py`: exact `screenshot_detection` runtime entrypoint.
+- `src/backend_llm/document_detection_server.py`: exact `document_detection` runtime entrypoint.
 
 New source and test paths must follow the repository's resource hierarchy and test-mirroring
 convention; existing flat route, query, and frontend API modules are layout debt, not templates to

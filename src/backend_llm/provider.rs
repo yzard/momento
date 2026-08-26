@@ -301,13 +301,15 @@ impl RuntimeCatalog {
                 model_version: "clip-vit-b-32-laion-aesthetic-v1".to_string(),
                 embedding_dimensions: 0,
             },
-            classifier_runtime_spec(
+            detection_runtime_spec(
                 ServiceType::ScreenshotDetection,
+                "/app/runtimes/screenshot_detection_server.py",
                 "8700",
                 "screenshot-heuristics-v1",
             ),
-            classifier_runtime_spec(
+            detection_runtime_spec(
                 ServiceType::DocumentDetection,
+                "/app/runtimes/document_detection_server.py",
                 "8800",
                 "document-heuristics-v1",
             ),
@@ -1548,8 +1550,9 @@ impl ClassifierProvider {
     }
 }
 
-fn classifier_runtime_spec(
+fn detection_runtime_spec(
     service_type: ServiceType,
+    runtime_script: &str,
     port: &str,
     model_version: &str,
 ) -> RuntimeSpec {
@@ -1557,9 +1560,7 @@ fn classifier_runtime_spec(
         service_type,
         executable: PathBuf::from("/opt/venvs/classifier/bin/python"),
         arguments: vec![
-            "/app/runtimes/classifier_server.py",
-            "--classifier",
-            service_type.as_str(),
+            runtime_script,
             "--host",
             RUNTIME_HOST,
             "--port",
@@ -1974,19 +1975,25 @@ mod tests {
             .iter()
             .any(|argument| { argument == "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" }));
 
-        for service_type in [
-            ServiceType::ScreenshotDetection,
-            ServiceType::DocumentDetection,
+        for (service_type, runtime_script) in [
+            (
+                ServiceType::ScreenshotDetection,
+                "/app/runtimes/screenshot_detection_server.py",
+            ),
+            (
+                ServiceType::DocumentDetection,
+                "/app/runtimes/document_detection_server.py",
+            ),
         ] {
-            let classifier = runtimes.get(service_type).expect("classifier runtime");
+            let detection_runtime = runtimes.get(service_type).expect("detection runtime");
             assert_eq!(
-                classifier.executable,
+                detection_runtime.executable,
                 PathBuf::from("/opt/venvs/classifier/bin/python")
             );
-            assert!(classifier
-                .arguments
-                .iter()
-                .any(|argument| argument == service_type.as_str()));
+            assert_eq!(
+                &detection_runtime.arguments[..2],
+                [runtime_script, "--host"]
+            );
         }
     }
 }

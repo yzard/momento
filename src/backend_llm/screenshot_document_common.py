@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""Shared CPU runtime for screenshot and document classification."""
+"""Shared image analysis and HTTP runtime for screenshot and document detection."""
 
 import argparse
 import io
 import json
 import math
-import re
 import subprocess
 import tempfile
 from http.server import BaseHTTPRequestHandler
@@ -22,10 +20,6 @@ from image_runtime import (
 from runtime_input import read_runtime_input
 
 
-CLASSIFIERS = ("screenshot_detection", "document_detection")
-SCREENSHOT_THRESHOLD = 0.58
-DOCUMENT_THRESHOLD = 0.58
-TIME_PATTERN = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
 TESSERACT_TSV_COLUMNS = (
     "level",
     "page_num",
@@ -53,7 +47,7 @@ def bounded_score(score, score_name):
     return max(0.0, min(1.0, score))
 
 
-def classifier_response(score, threshold):
+def detection_response(score, threshold):
     confidence = round(bounded_score(score, "classifier confidence"), 6)
     return {"detected": confidence >= threshold, "confidence": confidence}
 
@@ -66,7 +60,7 @@ def analysis_pixels(image):
     resized.thumbnail((512, 512), Image.Resampling.LANCZOS)
     pixels = numpy.asarray(resized, dtype=numpy.float32) / 255.0
     if pixels.ndim != 3 or pixels.shape[2] != 3:
-        raise RuntimeError("classifier image must contain three color channels")
+        raise RuntimeError("detection image must contain three color channels")
     return pixels
 
 
@@ -278,119 +272,14 @@ def parse_text_regions(tsv_output, image_width, image_height):
     return regions
 
 
-def mobile_aspect_score(image):
-    if image.width <= 0 or image.height <= 0:
-        raise RuntimeError("decoded image has invalid dimensions")
-    if image.height < image.width:
-        return 0.0
-    aspect_ratio = image.height / image.width
-    rise = bounded_score((aspect_ratio - 1.25) / 0.35, "mobile aspect rise")
-    fall = bounded_score((2.65 - aspect_ratio) / 0.25, "mobile aspect fall")
-    return min(rise, fall)
-
-
-def status_region_score(text_regions):
-    top_regions = [
-        region
-        for region in text_regions
-        if region["y"] + region["height"] / 2.0 <= 0.13
-    ]
-    bottom_regions = [
-        region
-        for region in text_regions
-        if region["y"] + region["height"] / 2.0 >= 0.87
-    ]
-    contains_time = any(TIME_PATTERN.search(region["text"]) for region in top_regions)
-    return bounded_score(
-        0.55 * float(contains_time)
-        + 0.30 * min(len(top_regions) / 3.0, 1.0)
-        + 0.15 * min(len(bottom_regions) / 2.0, 1.0),
-        "status region score",
-    )
-
-
-def classify_screenshot(image, text_regions):
-    metrics = visual_metrics(image)
-    score = (
-        0.27 * status_region_score(text_regions)
-        + 0.13 * metrics["compact_components"]
-        + 0.20 * mobile_aspect_score(image)
-        + 0.22 * metrics["geometry"]
-        + 0.18 * metrics["flat_color"]
-    )
-    return classifier_response(score, SCREENSHOT_THRESHOLD)
-
-
-def text_layout_metrics(text_regions):
-    if not text_regions:
-        return 0.0, 0.0
-    occupied_area = sum(
-        region["width"] * region["height"] * region["confidence"]
-        for region in text_regions
-    )
-    occupancy_score = bounded_score(occupied_area / 0.16, "text occupancy score")
-
-    centers = sorted(
-        region["y"] + region["height"] / 2.0 for region in text_regions
-    )
-    line_centers = []
-    for center in centers:
-        if not line_centers or center - line_centers[-1][-1] > 0.025:
-            line_centers.append([center])
-        else:
-            line_centers[-1].append(center)
-    averaged_lines = [sum(line) / len(line) for line in line_centers]
-    line_count_score = min(len(averaged_lines) / 6.0, 1.0)
-    if len(averaged_lines) < 3:
-        return occupancy_score, 0.35 * line_count_score
-    gaps = [
-        current - previous
-        for previous, current in zip(averaged_lines, averaged_lines[1:])
-    ]
-    mean_gap = sum(gaps) / len(gaps)
-    gap_variance = sum((gap - mean_gap) ** 2 for gap in gaps) / len(gaps)
-    regular_spacing = bounded_score(
-        1.0 - math.sqrt(gap_variance) / max(mean_gap, 0.001),
-        "line spacing score",
-    )
-    left_positions = [region["x"] for region in text_regions]
-    mean_left = sum(left_positions) / len(left_positions)
-    left_variance = sum(
-        (position - mean_left) ** 2 for position in left_positions
-    ) / len(left_positions)
-    left_alignment = bounded_score(
-        1.0 - math.sqrt(left_variance) / 0.20, "left alignment score"
-    )
-    regularity_score = line_count_score * (
-        0.60 * regular_spacing + 0.40 * left_alignment
-    )
-    return occupancy_score, bounded_score(regularity_score, "line regularity score")
-
-
-def classify_document(image, text_regions):
-    metrics = visual_metrics(image)
-    occupancy_score, regularity_score = text_layout_metrics(text_regions)
-    score = (
-        0.38 * occupancy_score
-        + 0.25 * regularity_score
-        + 0.25 * metrics["paper"]
-        + 0.12 * (1.0 - metrics["photo_likelihood"])
-    )
-    return classifier_response(score, DOCUMENT_THRESHOLD)
-
-
-class ClassifierRuntime:
-    def __init__(self, classifier):
-        if classifier not in CLASSIFIERS:
-            raise ValueError(f"unsupported classifier: {classifier}")
-        self.classifier = classifier
+class DetectionRuntime:
+    def __init__(self, detector):
+        self.detector = detector
 
     def infer(self, image_bytes):
         image = decode_image(image_bytes)
         text_regions = extract_text_regions(image)
-        if self.classifier == "screenshot_detection":
-            return classify_screenshot(image, text_regions)
-        return classify_document(image, text_regions)
+        return self.detector(image, text_regions)
 
 
 def run_bounded_inference(handler):
@@ -398,7 +287,7 @@ def run_bounded_inference(handler):
         handler.handle_inference()
 
 
-class Handler(BaseHTTPRequestHandler):
+class DetectionHandler(BaseHTTPRequestHandler):
     runtime = None
     inference_slots = None
     input_root = None
@@ -445,9 +334,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def main():
+def serve_detection(detector):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--classifier", choices=CLASSIFIERS, required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--max-concurrent-jobs", type=int, required=True)
@@ -457,11 +345,11 @@ def main():
         parser.error("--max-concurrent-jobs must be positive")
 
     register_image_decoders()
-    Handler.runtime = ClassifierRuntime(arguments.classifier)
-    Handler.inference_slots = create_inference_slots(arguments.max_concurrent_jobs)
-    Handler.input_root = Path(arguments.input_root)
-    serve_until_stopped(ModelHTTPServer((arguments.host, arguments.port), Handler))
-
-
-if __name__ == "__main__":
-    main()
+    DetectionHandler.runtime = DetectionRuntime(detector)
+    DetectionHandler.inference_slots = create_inference_slots(
+        arguments.max_concurrent_jobs
+    )
+    DetectionHandler.input_root = Path(arguments.input_root)
+    serve_until_stopped(
+        ModelHTTPServer((arguments.host, arguments.port), DetectionHandler)
+    )
