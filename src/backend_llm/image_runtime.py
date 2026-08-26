@@ -22,6 +22,12 @@ def select_cuda_device(requested_device, torch_module, task_name):
     return torch_module.device(requested_device)
 
 
+def register_image_decoders():
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener(thumbnails=False)
+
+
 def decode_image(image_source):
     from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 

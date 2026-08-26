@@ -95,7 +95,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class AiJobCounts(val queued: Long, val submitting: Long, val submitted: Long, val completed: Long, val failed: Long, val cancelled: Long)
 @Serializable data class AiTaskStatus(val task: String, val enabled: Boolean, val state: String, val jobs: AiJobCounts, val errors: List<String>)
 @Serializable data class AiStatusResponse(val tasks: List<AiTaskStatus>, val deduplicate: DeduplicateStatusResponse, val faceGroups: Long)
-@Serializable data class ImportStatus(val status: String, val totalFiles: Long, val processedFiles: Long, val successfulImports: Long, val failedImports: Long, val startedAt: String?, val completedAt: String?, val errors: List<String>)
+@Serializable data class ImportStatus(val status: String, val totalFiles: Long, val processedFiles: Long, val totalMedia: Long, val successfulImports: Long, val failedImports: Long, val startedAt: String?, val completedAt: String?, val errors: List<String>)
 
 @Serializable data class FeatureFlags(val llm: Boolean, val imageTagging: Boolean, val deduplicate: Boolean, val faceDetection: Boolean, val imageAesthetics: Boolean, val screenshotDetection: Boolean, val documentDetection: Boolean)
 @Serializable data class BackupCapabilities(val enabled: Boolean, val maxUploadBytes: Long, val maxChunkBytes: Long, val maxActiveUploadsPerUser: Int, val sessionExpiryHours: Long)

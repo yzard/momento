@@ -48,6 +48,11 @@ fun statusSummary(status: JobStatus?): String {
     return "${status.status}: ${status.queuedJobs} queued, ${status.processingJobs} processing, ${status.completedJobs} completed, ${status.failedJobs} failed"
 }
 
+fun importStatusSummary(status: ImportStatus?): String {
+    if (status == null) return "Not loaded"
+    return "${status.status}: ${status.processedFiles}/${status.totalFiles} processed, ${status.successfulImports} imported, ${status.failedImports} failed, ${status.totalMedia} total media"
+}
+
 fun aiStatusSummary(status: AiTaskStatus): String =
     "${status.state}: ${status.jobs.queued} queued, ${status.jobs.submitting} submitting, ${status.jobs.submitted} submitted, ${status.jobs.completed} completed, ${status.jobs.failed} failed"
 
@@ -240,7 +245,7 @@ private fun ProcessingAdministration(repository: MomentoRepository) {
             TextButton({ refresh() }) { Text("Refresh status") }
             error?.let { Text(it, Modifier.padding(horizontal = 16.dp)) }
             Text("Local import", Modifier.padding(16.dp, 12.dp, 16.dp, 0.dp))
-            Text(importStatus?.let { "${it.status}: ${it.processedFiles}/${it.totalFiles} processed, ${it.successfulImports} imported, ${it.failedImports} failed" } ?: "Not loaded", Modifier.padding(horizontal = 16.dp))
+            Text(importStatusSummary(importStatus), Modifier.padding(horizontal = 16.dp))
             TextButton({ runAction { repository.localImport() } }) { Text("Start local import") }
             Text("Metadata", Modifier.padding(16.dp, 12.dp, 16.dp, 0.dp))
             Text(statusSummary(metadataStatus), Modifier.padding(horizontal = 16.dp))

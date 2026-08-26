@@ -154,7 +154,7 @@ async fn merge_groups(
         .query_map(parameters.as_slice(), |row| row.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for face_id in members {
-        transaction.execute(queries::faces::INSERT_MEMBER, [target_id, face_id])?;
+        transaction.execute(queries::faces::INSERT_MANUAL_MEMBER, [target_id, face_id])?;
     }
     transaction.execute(queries::faces::UPDATE_MANUAL_GROUP, [target_id])?;
     transaction.execute(queries::faces::UPDATE_GROUP_REPRESENTATIVE, [target_id])?;

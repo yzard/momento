@@ -21,7 +21,7 @@ fn completed_result() -> JobResult {
 }
 
 #[tokio::test]
-async fn result_delivery_waits_for_matching_client_acknowledgement() {
+async fn result_delivery_waits_for_matching_momento_receipt() {
     let registry = Arc::new(ConnectionRegistry::default());
     let mut connection = registry.register("client_a").await.expect("connection");
     let delivery_registry = Arc::clone(&registry);
@@ -43,7 +43,7 @@ async fn result_delivery_waits_for_matching_client_acknowledgement() {
     let message = serde_json::from_str::<ServiceControlMessage>(&message).expect("result control");
     assert!(matches!(message, ServiceControlMessage::Result { .. }));
     registry
-        .acknowledge_result(
+            .complete_result_delivery(
             "client_a",
             connection.generation,
             "018f36e77c917cc89f7054252a33eaf0",
@@ -51,7 +51,7 @@ async fn result_delivery_waits_for_matching_client_acknowledgement() {
             Ok(()),
         )
         .await
-        .expect("acknowledgement");
+        .expect("Momento receipt");
 
     assert!(delivery.await.expect("delivery task").is_ok());
 }

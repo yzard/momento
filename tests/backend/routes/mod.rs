@@ -6,6 +6,7 @@ mod client;
 mod duplicates;
 mod faces;
 mod file_stream;
+mod import;
 mod map;
 mod media;
 mod metadata;

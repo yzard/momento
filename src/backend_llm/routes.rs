@@ -221,20 +221,20 @@ async fn handle_control(
                 .await
                 .map_err(ServiceError::Internal)
         }
-        ClientControlMessage::ResultAcknowledged { job_id, attempt } => {
+        ClientControlMessage::ResultReceived { job_id, attempt } => {
             state
                 .connections
-                .acknowledge_result(client_id, generation, &job_id, attempt, Ok(()))
+                .complete_result_delivery(client_id, generation, &job_id, attempt, Ok(()))
                 .await
         }
-        ClientControlMessage::ResultRejected {
+        ClientControlMessage::ResultReceiptRejected {
             job_id,
             attempt,
             error,
         } => {
             state
                 .connections
-                .acknowledge_result(client_id, generation, &job_id, attempt, Err(error))
+                .complete_result_delivery(client_id, generation, &job_id, attempt, Err(error))
                 .await
         }
     }

@@ -45,7 +45,9 @@ class DtoMappingTest {
 
     @Test fun decodesDeduplicateAndImportContracts() {
         val duplicate = Json.decodeFromString<DeduplicateStatusResponse>("{\"status\":\"running\",\"runId\":1,\"trigger\":\"manual\",\"scheduledFor\":null,\"startedAt\":null,\"completedAt\":null,\"ensembledMedia\":1,\"processedMedia\":0,\"candidateComparisons\":0,\"clustersCreated\":0,\"error\":null,\"jobs\":{\"queued\":1,\"submitting\":0,\"submitted\":0,\"completed\":0,\"failed\":0,\"cancelled\":0}}")
+        val importStatus = Json.decodeFromString<ImportStatus>("{\"status\":\"completed\",\"totalFiles\":5324,\"processedFiles\":5324,\"totalMedia\":5103,\"successfulImports\":5324,\"failedImports\":0,\"startedAt\":null,\"completedAt\":null,\"errors\":[]}")
         assertEquals("running", duplicate.status)
+        assertEquals(5103, importStatus.totalMedia)
     }
 
     @Test fun decodesTrashMediaMetadataContract() {

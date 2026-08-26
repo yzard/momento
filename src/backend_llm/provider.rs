@@ -152,8 +152,7 @@ impl RuntimeCatalog {
                 service_type: ServiceType::Ocr,
                 executable: PathBuf::from("/opt/venvs/ocr/bin/python"),
                 arguments: vec![
-                    "-m",
-                    "vllm.entrypoints.openai.api_server",
+                    "/app/runtimes/ocr_server.py",
                     "--model",
                     "/opt/models/unlimited-ocr",
                     "--served-model-name",
@@ -1949,6 +1948,10 @@ mod tests {
         }
 
         let ocr = runtimes.get(ServiceType::Ocr).expect("OCR runtime");
+        assert_eq!(
+            ocr.arguments.first().map(String::as_str),
+            Some("/app/runtimes/ocr_server.py")
+        );
         assert!(ocr
             .environment
             .iter()

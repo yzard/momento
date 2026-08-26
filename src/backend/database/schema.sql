@@ -384,6 +384,7 @@ CREATE TABLE IF NOT EXISTS face_groups (
 CREATE TABLE IF NOT EXISTS face_group_members (
     face_group_id INTEGER NOT NULL,
     face_id INTEGER NOT NULL,
+    manual_anchor INTEGER NOT NULL CHECK(manual_anchor IN (0, 1)),
     PRIMARY KEY (face_group_id, face_id),
     FOREIGN KEY (face_group_id) REFERENCES face_groups(id) ON DELETE CASCADE,
     FOREIGN KEY (face_id) REFERENCES media_faces(id) ON DELETE CASCADE
@@ -426,6 +427,19 @@ CREATE TABLE IF NOT EXISTS llm_job_inputs (
     content_hash TEXT NOT NULL,
     frame_timestamp_ms INTEGER,
     PRIMARY KEY (job_id, sequence),
+    FOREIGN KEY (job_id) REFERENCES llm_jobs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS llm_job_results (
+    job_id TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'processing')) DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL DEFAULT (datetime('now')),
+    claimed_at TEXT,
+    last_error TEXT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (job_id) REFERENCES llm_jobs(id) ON DELETE CASCADE
 );
 
@@ -604,6 +618,9 @@ CREATE INDEX IF NOT EXISTS idx_llm_jobs_claim
 
 CREATE INDEX IF NOT EXISTS idx_llm_job_inputs_job
     ON llm_job_inputs (job_id, sequence);
+
+CREATE INDEX IF NOT EXISTS idx_llm_job_results_claim
+    ON llm_job_results (status, available_at, received_at);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_media_task
     ON llm_jobs (media_id, task)

@@ -6,11 +6,18 @@ import base64
 import json
 import math
 import sys
-import threading
 from array import array
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from image_runtime import (
+    InvalidImageError,
+    ModelHTTPServer,
+    create_inference_slots,
+    decode_image,
+    register_image_decoders,
+    serve_until_stopped,
+)
 from runtime_input import read_runtime_input
 
 
@@ -26,16 +33,6 @@ def require_model_directory(cache_directory, model_name):
     return model_directory
 
 
-class InvalidImageError(ValueError):
-    """The request body is not a readable image."""
-
-
-def create_inference_slots(max_concurrent_jobs):
-    if max_concurrent_jobs <= 0:
-        raise ValueError("max_concurrent_jobs must be positive")
-    return threading.BoundedSemaphore(max_concurrent_jobs)
-
-
 def encode_float32_le(values):
     embedding = array("f", values)
     if embedding.itemsize != 4:
@@ -49,18 +46,6 @@ def select_providers(onnxruntime_module):
     if "CUDAExecutionProvider" not in onnxruntime_module.get_available_providers():
         raise RuntimeError("face detection requires an available NVIDIA CUDA GPU")
     return ["CUDAExecutionProvider"]
-
-
-def decode_image(image_source):
-    from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
-
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-    try:
-        with Image.open(image_source) as source:
-            source.load()
-            return ImageOps.exif_transpose(source).convert("RGB")
-    except (OSError, UnidentifiedImageError, ValueError) as error:
-        raise InvalidImageError(f"could not decode image: {error}") from error
 
 
 def normalized_bounding_box(bounding_box, image_width, image_height):
@@ -271,20 +256,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class ModelHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-    request_queue_size = 1024
-
-
-def serve_until_stopped(server):
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -302,6 +273,7 @@ def main():
         parser.error("--minimum-face-likelihood must be within (0, 1]")
     if arguments.minimum_face_resolution_pixels <= 0:
         parser.error("--minimum-face-resolution-pixels must be positive")
+    register_image_decoders()
     Handler.runtime = FaceDetectionRuntime(
         arguments.model,
         arguments.cache_dir,

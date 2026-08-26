@@ -75,6 +75,14 @@ fn start_background_tasks(
         ai::run(ai_config, ai_pool, ai_transport).await;
     });
 
+    let ai_result_pool = pool.clone();
+    let ai_result_interval =
+        std::time::Duration::from_secs(config.llm_submission_worker.poll_interval_seconds);
+    let ai_result_batch_size = config.llm_submission_worker.max_in_flight;
+    tokio::spawn(async move {
+        ai::result::run(ai_result_pool, ai_result_interval, ai_result_batch_size).await;
+    });
+
     let deduplicate_pool = pool.clone();
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(5);

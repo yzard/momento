@@ -15,6 +15,7 @@ ARG FAIRSCALE_VERSION=0.4.4
 ARG NUMPY_VERSION=1.26.4
 ARG SCIPY_VERSION=1.15.3
 ARG PILLOW_VERSION=11.2.1
+ARG PILLOW_HEIF_VERSION=1.5.0
 ARG CYTHON_VERSION=3.1.2
 ARG INSIGHTFACE_VERSION=0.7.3
 ARG ONNXRUNTIME_GPU_VERSION=1.22.0
@@ -90,6 +91,8 @@ FROM build-tools AS ocr-builder
 ARG VLLM_VERSION
 ARG VLLM_CUDA_VERSION
 ARG OCR_PYTHON_VERSION
+ARG PILLOW_VERSION
+ARG PILLOW_HEIF_VERSION
 
 RUN uv python install "${OCR_PYTHON_VERSION}" \
     && uv venv --python "${OCR_PYTHON_VERSION}" /opt/venvs/ocr
@@ -98,8 +101,10 @@ RUN uv pip install --python /opt/venvs/ocr/bin/python \
     --extra-index-url "https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}" \
     --index-strategy unsafe-best-match \
     "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_28_x86_64.whl" \
+    "Pillow==${PILLOW_VERSION}" \
+    "pillow-heif==${PILLOW_HEIF_VERSION}" \
     && uv pip check --python /opt/venvs/ocr/bin/python \
-    && /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert vllm.__version__ == '${VLLM_VERSION}'"
+    && /opt/venvs/ocr/bin/python -c "import pillow_heif, sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert vllm.__version__ == '${VLLM_VERSION}'; assert pillow_heif.__version__ == '${PILLOW_HEIF_VERSION}'"
 
 # The complete OCR environment is larger than GHCR's layer limit. The final image copies
 # its CUDA Python packages and the remainder from separate build-stage snapshots.
@@ -132,6 +137,7 @@ ARG FAIRSCALE_VERSION
 ARG NUMPY_VERSION
 ARG SCIPY_VERSION
 ARG PILLOW_VERSION
+ARG PILLOW_HEIF_VERSION
 ARG CYTHON_VERSION
 ARG INSIGHTFACE_VERSION
 ARG ONNXRUNTIME_GPU_VERSION
@@ -155,6 +161,7 @@ RUN uv pip install --python /opt/venvs/ram/bin/python \
     "numpy==${NUMPY_VERSION}" \
     "scipy==${SCIPY_VERSION}" \
     "Pillow==${PILLOW_VERSION}" \
+    "pillow-heif==${PILLOW_HEIF_VERSION}" \
     ftfy \
     packaging \
     regex \
@@ -168,6 +175,7 @@ RUN uv pip install --python /opt/venvs/ram/bin/python \
 RUN uv pip install --python /opt/venvs/dinov2/bin/python \
     "transformers==${TRANSFORMERS_DINOV2_VERSION}" \
     "Pillow==${PILLOW_VERSION}" \
+    "pillow-heif==${PILLOW_HEIF_VERSION}" \
     ftfy \
     packaging \
     regex \
@@ -180,19 +188,25 @@ RUN uv pip install --python /opt/venvs/insightface/bin/python \
     "Cython==${CYTHON_VERSION}" \
     "insightface==${INSIGHTFACE_VERSION}" \
     "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
-    "Pillow==${PILLOW_VERSION}"
+    "Pillow==${PILLOW_VERSION}" \
+    "pillow-heif==${PILLOW_HEIF_VERSION}"
 
 RUN uv pip install --python /opt/venvs/classifier/bin/python \
     "numpy==${NUMPY_VERSION}" \
-    "Pillow==${PILLOW_VERSION}"
+    "Pillow==${PILLOW_VERSION}" \
+    "pillow-heif==${PILLOW_HEIF_VERSION}"
 
-RUN uv pip check --system --python /usr/bin/python3 \
+RUN set -e; \
+    uv pip check --system --python /usr/bin/python3 \
     && uv pip check --python /opt/venvs/insightface/bin/python \
     && uv pip check --python /opt/venvs/classifier/bin/python \
     && /opt/venvs/ram/bin/python -c "import clip, fairscale, ram, timm, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
     && /opt/venvs/dinov2/bin/python -c "import clip, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert 'ViT-B/32' in clip.available_models()" \
     && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime" \
-    && /opt/venvs/classifier/bin/python -c "import numpy; from PIL import Image"
+    && /opt/venvs/classifier/bin/python -c "import numpy; from PIL import Image" \
+    && for python in /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/classifier/bin/python; do \
+        "$python" -c "import pillow_heif; assert pillow_heif.__version__ == '${PILLOW_HEIF_VERSION}'"; \
+    done
 
 FROM ocr-builder AS unlimited-ocr-model
 
@@ -308,7 +322,11 @@ COPY --from=rust-builder /app/build/target/release/llm-service /app/llm-service
 COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
-RUN chmod +x /entrypoint_llm.sh \
+RUN set -e; \
+    for python in /opt/venvs/ocr/bin/python /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/classifier/bin/python; do \
+        PYTHONPATH=/app/runtimes "$python" -c "import io; from PIL import Image; import pillow_heif; from image_runtime import register_image_decoders; output = io.BytesIO(); pillow_heif.from_pillow(Image.new('RGB', (3, 2), color=(10, 20, 30))).save(output); assert output.getvalue()[4:12] == b'ftypheic'; register_image_decoders(); output.seek(0); decoded = Image.open(output); decoded.load(); assert decoded.format == 'HEIF'; assert decoded.size == (3, 2)"; \
+    done \
+    && chmod +x /entrypoint_llm.sh \
     && mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
 
 EXPOSE 8100

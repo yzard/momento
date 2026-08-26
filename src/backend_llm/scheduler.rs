@@ -938,12 +938,12 @@ impl Scheduler {
                 if let Err(error) = transition_directory(&path, &deleting_path) {
                     self.fail(
                         path,
-                        format!("result acknowledged but cleanup transition failed: {error}"),
+                        format!("result received by Momento but cleanup transition failed: {error}"),
                     );
                     return;
                 }
                 if let Err(error) = tokio::fs::remove_dir_all(&deleting_path).await {
-                    warn!("result acknowledged but queue cleanup will resume at startup: {error}");
+                    warn!("result received by Momento but queue cleanup will resume at startup: {error}");
                 }
             }
             Err(delivery_error) => {

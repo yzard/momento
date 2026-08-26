@@ -1,10 +1,13 @@
+use std::process::Command;
 use std::time::Duration;
 
 use base64::Engine;
 use momento_api::constants::paths;
 use momento_api::database::{create_pool_at, init_database, DbPool};
 use momento_api::error::AppError;
-use momento_api::processor::ai::result::process_result;
+use momento_api::processor::ai::result::{
+    process_received_results, process_result, receive_result,
+};
 use momento_common::llm::{JobInputResult, JobResult};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -54,6 +57,101 @@ fn insert_job_input(pool: &DbPool, job_id: &str, sequence: u32, frame_timestamp_
         .expect("job input");
 }
 
+#[test]
+fn received_result_is_durable_before_momento_processing() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "durable-result.jpg");
+    insert_submitted_job(&pool, "durable-result", media_id, "ocr", 1);
+
+    receive_result(&pool, completed_result("durable-result", media_id, 1))
+        .expect("durable result receipt");
+
+    let connection = pool.get().expect("connection");
+    let state: (String, i64, i64) = connection
+        .query_row(
+            "SELECT llm_jobs.status, (SELECT COUNT(*) FROM llm_job_results WHERE job_id = llm_jobs.id), (SELECT COUNT(*) FROM media_text WHERE media_id = llm_jobs.media_id) FROM llm_jobs WHERE id = 'durable-result'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("received result state");
+    assert_eq!(state, ("submitted".to_string(), 1, 0));
+    drop(connection);
+
+    assert_eq!(
+        process_received_results(&pool, 1).expect("process durable result"),
+        1
+    );
+    let connection = pool.get().expect("connection");
+    let state: (String, i64, String) = connection
+        .query_row(
+            "SELECT llm_jobs.status, (SELECT COUNT(*) FROM llm_job_results WHERE job_id = llm_jobs.id), media_text.string FROM llm_jobs JOIN media_text ON media_text.media_id = llm_jobs.media_id WHERE llm_jobs.id = 'durable-result' AND media_text.model_type = 'ocr'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("processed result state");
+    assert_eq!(
+        state,
+        ("completed".to_string(), 0, "recognized".to_string())
+    );
+}
+
+#[test]
+fn invalid_received_result_fails_only_the_momento_job() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "invalid-received-result.jpg");
+    insert_submitted_job(&pool, "invalid-received-result", media_id, "ocr", 1);
+    let mut result = completed_result("invalid-received-result", media_id, 1);
+    result.status = "running".to_string();
+
+    receive_result(&pool, result).expect("durable invalid result receipt");
+    assert_eq!(
+        process_received_results(&pool, 1).expect("process invalid result"),
+        1
+    );
+
+    let connection = pool.get().expect("connection");
+    let state: (String, String, i64) = connection
+        .query_row(
+            "SELECT status, last_error, (SELECT COUNT(*) FROM llm_job_results WHERE job_id = llm_jobs.id) FROM llm_jobs WHERE id = 'invalid-received-result'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("failed result state");
+    assert_eq!(state.0, "failed");
+    assert!(state.1.contains("status must be completed or failed"));
+    assert_eq!(state.2, 0);
+}
+
+#[test]
+fn result_receipt_recovers_an_unacknowledged_submission() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "unacknowledged-result.jpg");
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('unacknowledged-result', ?, 'ocr', 'queued', 0)",
+            [media_id],
+        )
+        .expect("queued job");
+
+    receive_result(
+        &pool,
+        completed_result("unacknowledged-result", media_id, 1),
+    )
+    .expect("recover unacknowledged result");
+
+    let state: (String, i64, i64) = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT status, attempts, (SELECT COUNT(*) FROM llm_job_results WHERE job_id = llm_jobs.id) FROM llm_jobs WHERE id = 'unacknowledged-result'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("recovered job state");
+    assert_eq!(state, ("submitted".to_string(), 1, 1));
+}
+
 fn classification_result(
     job_id: &str,
     media_id: i64,
@@ -81,6 +179,67 @@ fn classification_result(
         }]),
         error: None,
     }
+}
+
+fn face_result(job_id: &str, media_id: i64) -> JobResult {
+    let embedding = base64::engine::general_purpose::STANDARD.encode(
+        (0..512)
+            .flat_map(|index| (if index == 0 { 1.0_f32 } else { 0.0_f32 }).to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    let input_result = serde_json::json!({
+        "task": "face_detection",
+        "modelType": "face_detection",
+        "modelVersion": "buffalo_l",
+        "faces": [{
+            "index": 0,
+            "boundingBox": {"x": 0.9, "y": 0.8, "width": 0.10000003, "height": 0.20000003},
+            "eyeCenter": {"x": 0.95, "y": 0.86},
+            "confidence": 0.95,
+            "qualityScore": 0.8,
+            "frontalityScore": 0.9,
+            "embedding": embedding,
+            "embeddingEncoding": "float32_le",
+            "embeddingDimensions": 512
+        }]
+    });
+    JobResult {
+        job_id: job_id.to_string(),
+        media_id,
+        task: "face_detection".to_string(),
+        attempt: 1,
+        status: "completed".to_string(),
+        model_type: Some("face_detection".to_string()),
+        model_version: Some("buffalo_l".to_string()),
+        result: Some(input_result.clone()),
+        input_results: Some(vec![JobInputResult {
+            sequence: 0,
+            frame_timestamp_ms: None,
+            result: input_result,
+        }]),
+        error: None,
+    }
+}
+
+fn insert_face_job(
+    pool: &DbPool,
+    job_id: &str,
+    media_id: i64,
+    storage_root: &str,
+    input_relative: &str,
+    mime_type: &str,
+    input_bytes: &[u8],
+) {
+    let input_hash = format!("{:x}", Sha256::digest(input_bytes));
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO face_grouping_runs (id, status) VALUES (1, 'running')",
+            [],
+        )
+        .expect("run");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status, attempts) VALUES (?, ?, 1, 'face_detection', 'submitted', 1)", rusqlite::params![job_id, media_id]).expect("job");
+    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 0, 'image', ?, ?, 'input', ?, ?, ?)", rusqlite::params![job_id, storage_root, input_relative, mime_type, input_bytes.len() as i64, input_hash]).expect("job input");
 }
 
 #[test]
@@ -523,56 +682,17 @@ fn face_result_persists_crop_and_success_marker() {
         .save(&input_path)
         .expect("prepared input");
     let input_bytes = std::fs::read(&input_path).expect("input bytes");
-    let input_hash = format!("{:x}", Sha256::digest(&input_bytes));
-    let connection = pool.get().expect("connection");
-    connection
-        .execute(
-            "INSERT INTO face_grouping_runs (id, status) VALUES (1, 'running')",
-            [],
-        )
-        .expect("run");
-    connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status, attempts) VALUES ('result-face', ?, 1, 'face_detection', 'submitted', 1)", [media_id]).expect("job");
-    connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('result-face', 0, 'image', 'previews', ?, 'input.jpg', 'image/jpeg', ?, ?)", rusqlite::params![input_relative, input_bytes.len() as i64, input_hash]).expect("job input");
-    drop(connection);
-    let embedding = base64::engine::general_purpose::STANDARD.encode(
-        (0..512)
-            .flat_map(|index| (if index == 0 { 1.0_f32 } else { 0.0_f32 }).to_le_bytes())
-            .collect::<Vec<_>>(),
-    );
-    let input_result = serde_json::json!({
-        "task": "face_detection",
-        "modelType": "face_detection",
-        "modelVersion": "buffalo_l",
-        "faces": [{
-            "index": 0,
-            "boundingBox": {"x": 0.9, "y": 0.8, "width": 0.10000003, "height": 0.20000003},
-            "eyeCenter": {"x": 0.95, "y": 0.86},
-            "confidence": 0.95,
-            "qualityScore": 0.8,
-            "frontalityScore": 0.9,
-            "embedding": embedding,
-            "embeddingEncoding": "float32_le",
-            "embeddingDimensions": 512
-        }]
-    });
-    let result = JobResult {
-        job_id: "result-face".to_string(),
+    insert_face_job(
+        &pool,
+        "result-face",
         media_id,
-        task: "face_detection".to_string(),
-        attempt: 1,
-        status: "completed".to_string(),
-        model_type: Some("face_detection".to_string()),
-        model_version: Some("buffalo_l".to_string()),
-        result: Some(input_result.clone()),
-        input_results: Some(vec![JobInputResult {
-            sequence: 0,
-            frame_timestamp_ms: None,
-            result: input_result,
-        }]),
-        error: None,
-    };
+        "previews",
+        &input_relative,
+        "image/jpeg",
+        &input_bytes,
+    );
 
-    process_result(&pool, result).expect("face result");
+    process_result(&pool, face_result("result-face", media_id)).expect("face result");
 
     let connection = pool.get().expect("connection");
     let (crop_path, box_x, box_width, frontality): (String, f64, f64, f64) = connection
@@ -594,6 +714,99 @@ fn face_result_persists_crop_and_success_marker() {
     assert_eq!(frontality, 0.9);
     let crop = image::open(paths().previews.join(crop_path)).expect("face crop image");
     assert_eq!((crop.width(), crop.height()), (256, 256));
+}
+
+#[test]
+fn face_result_normalizes_a_heic_original_before_cropping() {
+    init_test_paths();
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "result-face-heic.heic");
+    let source_path = paths()
+        .originals
+        .join(format!("result-face-heic-{media_id}.png"));
+    let input_relative = format!("result-face-heic-{media_id}.heic");
+    let input_path = paths().originals.join(&input_relative);
+    std::fs::create_dir_all(&paths().originals).expect("originals directory");
+    image::RgbImage::from_pixel(64, 48, image::Rgb([30, 140, 220]))
+        .save(&source_path)
+        .expect("HEIC source image");
+    let conversion = Command::new("magick")
+        .arg(&source_path)
+        .arg(&input_path)
+        .output()
+        .expect("ImageMagick must be installed for face input normalization");
+    std::fs::remove_file(&source_path).expect("remove HEIC source image");
+    assert!(
+        conversion.status.success(),
+        "HEIC fixture conversion failed: {}",
+        String::from_utf8_lossy(&conversion.stderr)
+    );
+    let input_bytes = std::fs::read(&input_path).expect("HEIC input bytes");
+    insert_face_job(
+        &pool,
+        "result-face-heic",
+        media_id,
+        "originals",
+        &input_relative,
+        "image/heic",
+        &input_bytes,
+    );
+
+    process_result(&pool, face_result("result-face-heic", media_id)).expect("HEIC face result");
+
+    let crop_path: String = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT crop_path FROM media_faces WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("face crop path");
+    let crop = image::open(paths().previews.join(crop_path)).expect("HEIC face crop image");
+    assert_eq!((crop.width(), crop.height()), (256, 256));
+}
+
+#[test]
+fn face_normalization_failure_marks_the_momento_job_failed_after_receipt() {
+    init_test_paths();
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "result-face-invalid.heic");
+    let input_relative = format!("result-face-invalid-{media_id}.heic");
+    let input_path = paths().originals.join(&input_relative);
+    std::fs::create_dir_all(&paths().originals).expect("originals directory");
+    let input_bytes = b"not an image";
+    std::fs::write(&input_path, input_bytes).expect("invalid original");
+    insert_face_job(
+        &pool,
+        "result-face-invalid",
+        media_id,
+        "originals",
+        &input_relative,
+        "image/heic",
+        input_bytes,
+    );
+
+    receive_result(&pool, face_result("result-face-invalid", media_id))
+        .expect("durable face result receipt");
+    assert_eq!(
+        process_received_results(&pool, 1).expect("process invalid face input"),
+        1
+    );
+
+    let state: (String, String, i64, i64) = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT status, last_error, (SELECT COUNT(*) FROM llm_job_results WHERE job_id = llm_jobs.id), (SELECT COUNT(*) FROM media_faces WHERE media_id = llm_jobs.media_id) FROM llm_jobs WHERE id = 'result-face-invalid'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("failed face job state");
+    assert_eq!(state.0, "failed");
+    assert!(state.1.contains("could not be normalized"));
+    assert_eq!(state.2, 0);
+    assert_eq!(state.3, 0);
 }
 
 #[test]

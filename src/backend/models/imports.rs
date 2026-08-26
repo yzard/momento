@@ -6,6 +6,7 @@ pub struct ImportStatusResponse {
     pub status: String,
     pub total_files: i64,
     pub processed_files: i64,
+    pub total_media: i64,
     pub successful_imports: i64,
     pub failed_imports: i64,
     pub started_at: Option<String>,

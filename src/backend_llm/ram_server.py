@@ -3,31 +3,25 @@
 
 import argparse
 import json
-import threading
 import warnings
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import torch
-from PIL import Image, ImageFile
 
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"fairscale\..*")
 
 from ram import get_transform, inference_ram
 from ram.models import ram_plus
+from image_runtime import (
+    InvalidImageError,
+    ModelHTTPServer,
+    create_inference_slots,
+    decode_image,
+    register_image_decoders,
+    serve_until_stopped,
+)
 from runtime_input import read_runtime_input
-
-ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-
-class InvalidImageError(ValueError):
-    """The request body is not a readable image."""
-
-
-def create_inference_slots(max_concurrent_jobs):
-    if max_concurrent_jobs <= 0:
-        raise ValueError("max_concurrent_jobs must be positive")
-    return threading.BoundedSemaphore(max_concurrent_jobs)
 
 
 def parse_tags(raw_tags):
@@ -49,12 +43,7 @@ class TaggingRuntime:
         self.model.eval().to(self.device)
 
     def infer(self, image_source):
-        try:
-            with Image.open(image_source) as source:
-                source.load()
-                image = source.convert("RGB")
-        except (OSError, ValueError) as error:
-            raise InvalidImageError(f"could not decode image: {error}") from error
+        image = decode_image(image_source)
         tensor = self.transform(image).unsqueeze(0).to(self.device)
         tags, _ = inference_ram(tensor, self.model)
         return parse_tags(tags)
@@ -110,11 +99,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class ModelHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-    request_queue_size = 1024
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -128,12 +112,13 @@ def main():
     if args.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
 
+    register_image_decoders()
     require_checkpoint(args.checkpoint)
     Handler.runtime = TaggingRuntime(args.checkpoint, args.image_size, args.device)
     Handler.inference_slots = create_inference_slots(args.max_concurrent_jobs)
     Handler.input_root = Path(args.input_root)
     server = ModelHTTPServer((args.host, args.port), Handler)
-    server.serve_forever()
+    serve_until_stopped(server)
 
 
 if __name__ == "__main__":

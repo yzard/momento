@@ -40,7 +40,7 @@ fn inaccessible_representative_uses_weighted_visible_face_score() {
     for face_id in face_ids {
         connection
             .execute(
-                "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+                "INSERT INTO face_group_members (face_group_id, face_id, manual_anchor) VALUES (?, ?, 0)",
                 [group_id, face_id],
             )
             .expect("group member");
@@ -86,7 +86,7 @@ async fn face_groups_are_paginated_by_descending_media_count() {
         for face_id in face_ids {
             connection
                 .execute(
-                    "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+                    "INSERT INTO face_group_members (face_group_id, face_id, manual_anchor) VALUES (?, ?, 0)",
                     [group_id, face_id],
                 )
                 .expect("group member");
@@ -159,7 +159,7 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
             .expect("group");
         connection
             .execute(
-                "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+                "INSERT INTO face_group_members (face_group_id, face_id, manual_anchor) VALUES (?, ?, 0)",
                 [connection.last_insert_rowid(), face_id],
             )
             .expect("member");
@@ -198,14 +198,16 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
     merge.assert_status_ok();
     assert_eq!(merge.json::<serde_json::Value>()["group"]["mediaCount"], 2);
     let connection = pool.get().expect("connection");
-    let (manual_curated, member_count, representative_face_id): (i64, i64, i64) = connection
+    let (manual_curated, manual_anchor_count, member_count, representative_face_id):
+        (i64, i64, i64, i64) = connection
         .query_row(
-            "SELECT face_groups.manual_curated, COUNT(face_group_members.face_id), face_groups.representative_face_id FROM face_groups JOIN face_group_members ON face_group_members.face_group_id = face_groups.id WHERE face_groups.id = 1 GROUP BY face_groups.id",
+            "SELECT face_groups.manual_curated, SUM(face_group_members.manual_anchor), COUNT(face_group_members.face_id), face_groups.representative_face_id FROM face_groups JOIN face_group_members ON face_group_members.face_group_id = face_groups.id WHERE face_groups.id = 1 GROUP BY face_groups.id",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("merged group");
     assert_eq!(manual_curated, 1);
+    assert_eq!(manual_anchor_count, 2);
     assert_eq!(member_count, 2);
     assert_eq!(representative_face_id, face_ids[1]);
     let viewer_crop: String = connection

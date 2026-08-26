@@ -1,5 +1,7 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use base64::Engine;
 use image::imageops::FilterType;
@@ -31,6 +33,8 @@ struct FaceResult {
     frontality: f64,
     embedding: Vec<u8>,
 }
+
+type ManualGroupAnchors = BTreeMap<i64, Vec<Vec<f32>>>;
 
 pub struct FaceFileChanges {
     new_paths: Vec<PathBuf>,
@@ -304,7 +308,7 @@ fn write_crop(
     let input_path = storage
         .resolve_existing_sync(&input_path)
         .map_err(AppError::Internal)?;
-    let input_bytes = std::fs::read(input_path)?;
+    let input_bytes = std::fs::read(&input_path)?;
     if input_bytes.len() as i64 != expected_size
         || format!("{:x}", Sha256::digest(&input_bytes)) != expected_hash
     {
@@ -312,9 +316,8 @@ fn write_crop(
             "prepared face input changed after the job was queued".to_string(),
         ));
     }
-    let input = image::load_from_memory(&input_bytes).map_err(|error| {
-        AppError::BadRequest(format!("prepared face input cannot be decoded: {error}"))
-    })?;
+    drop(input_bytes);
+    let input = normalize_face_input(&input_path, job_id, media_id)?;
     let width = input.width();
     let height = input.height();
     let (crop_x, crop_y, crop_width, crop_height) = portrait_crop_box(
@@ -339,6 +342,61 @@ fn write_crop(
     crop.save_with_format(&output, image::ImageFormat::Jpeg)
         .map_err(|error| AppError::Internal(error.to_string()))?;
     Ok((relative.to_string_lossy().into_owned(), output))
+}
+
+fn normalize_face_input(
+    input_path: &Path,
+    job_id: &str,
+    media_id: i64,
+) -> AppResult<image::DynamicImage> {
+    let mut source = OsString::from(input_path.as_os_str());
+    source.push("[0]");
+    let output = Command::new("magick")
+        .arg(source)
+        .args(["-auto-orient", "png:-"])
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::error!(
+                job_id,
+                media_id,
+                input_path = %input_path.display(),
+                error = %error,
+                "ImageMagick failed to start while normalizing a face input"
+            );
+            return Err(AppError::BadRequest(
+                "prepared face input could not be normalized".to_string(),
+            ));
+        }
+    };
+    if !output.status.success() || output.stdout.is_empty() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(4096)
+            .collect::<String>();
+        tracing::error!(
+            job_id,
+            media_id,
+            input_path = %input_path.display(),
+            status = %output.status,
+            error = %detail,
+            "ImageMagick failed to normalize a face input"
+        );
+        return Err(AppError::BadRequest(
+            "prepared face input could not be normalized".to_string(),
+        ));
+    }
+    image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png).map_err(|error| {
+        tracing::error!(
+            job_id,
+            media_id,
+            input_path = %input_path.display(),
+            error = %error,
+            "Rust failed to decode the normalized face input"
+        );
+        AppError::BadRequest("normalized face input could not be decoded".to_string())
+    })
 }
 
 pub fn portrait_crop_box(
@@ -424,53 +482,113 @@ pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> Ap
     if pending != 0 {
         return Ok(());
     }
-    let failed: i64 = connection.query_row(queries::faces::COUNT_FAILED_JOBS, [run_id], |row| {
-        row.get(0)
-    })?;
-    if failed > 0 {
-        connection.execute(
-            queries::faces::MARK_RUN,
-            rusqlite::params!["failed", "face detection job failed", run_id],
-        )?;
-        return Ok(());
-    }
+    let failed_jobs: i64 =
+        connection.query_row(queries::faces::COUNT_FAILED_JOBS, [run_id], |row| {
+            row.get(0)
+        })?;
     let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+    transaction.execute(queries::faces::DELETE_AUTOMATIC_GROUPS, [])?;
+    transaction.execute(queries::faces::DELETE_AUTOMATIC_MANUAL_GROUP_MEMBERS, [])?;
+    let manual_group_anchors = load_manual_group_anchors(&transaction)?;
     let faces = transaction
-        .prepare(queries::faces::SELECT_FACES)?
+        .prepare(queries::faces::SELECT_FACES_FOR_GROUPING)?
         .query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 blob_to_embedding(&row.get::<_, Vec<u8>>(1)?),
-                row.get::<_, f64>(2)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    transaction.execute(queries::faces::DELETE_AUTOMATIC_GROUPS, [])?;
-    let mut groups: Vec<(i64, Vec<f32>)> = Vec::new();
-    for (face_id, embedding, _quality) in faces {
-        let matching = groups.iter().position(|(_, representative)| {
+    let mut automatic_groups: Vec<(i64, Vec<f32>)> = Vec::new();
+    for (face_id, embedding) in faces {
+        if let Some(group_id) = matching_manual_group(
+            &manual_group_anchors,
+            &embedding,
+            group_similarity_threshold,
+        ) {
+            transaction.execute(queries::faces::INSERT_AUTOMATIC_MEMBER, [group_id, face_id])?;
+            continue;
+        }
+        let matching = automatic_groups.iter().position(|(_, representative)| {
             cosine_similarity(&embedding, representative)
                 .is_some_and(|score| score >= group_similarity_threshold)
         });
         let group_id = if let Some(index) = matching {
-            groups[index].0
+            automatic_groups[index].0
         } else {
             transaction.execute(queries::faces::INSERT_GROUP, [])?;
             let group_id = transaction.last_insert_rowid();
-            groups.push((group_id, embedding));
+            automatic_groups.push((group_id, embedding));
             group_id
         };
-        transaction.execute(queries::faces::INSERT_MEMBER, [group_id, face_id])?;
+        transaction.execute(queries::faces::INSERT_AUTOMATIC_MEMBER, [group_id, face_id])?;
     }
-    for (group_id, _) in &groups {
+    for group_id in manual_group_anchors
+        .keys()
+        .copied()
+        .chain(automatic_groups.iter().map(|(group_id, _)| *group_id))
+    {
         transaction.execute(queries::faces::UPDATE_GROUP_REPRESENTATIVE, [group_id])?;
     }
+    let completion_error = (failed_jobs > 0).then(|| {
+        format!(
+            "{failed_jobs} face detection jobs failed; groups generated from successful results"
+        )
+    });
     transaction.execute(
         queries::faces::MARK_RUN,
-        rusqlite::params!["completed", Option::<String>::None, run_id],
+        rusqlite::params!["completed", completion_error, run_id],
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+fn load_manual_group_anchors(transaction: &Transaction<'_>) -> AppResult<ManualGroupAnchors> {
+    let anchor_rows = transaction
+        .prepare(queries::faces::SELECT_MANUAL_GROUP_ANCHORS)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                blob_to_embedding(&row.get::<_, Vec<u8>>(1)?),
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut manual_group_anchors = ManualGroupAnchors::new();
+    for (group_id, embedding) in anchor_rows {
+        manual_group_anchors
+            .entry(group_id)
+            .or_default()
+            .push(embedding);
+    }
+    Ok(manual_group_anchors)
+}
+
+fn matching_manual_group(
+    manual_group_anchors: &ManualGroupAnchors,
+    embedding: &[f32],
+    group_similarity_threshold: f32,
+) -> Option<i64> {
+    let mut best_match: Option<(i64, f32)> = None;
+    for (group_id, anchors) in manual_group_anchors {
+        let best_anchor_similarity = anchors
+            .iter()
+            .filter_map(|anchor| cosine_similarity(embedding, anchor))
+            .max_by(f32::total_cmp);
+        let Some(similarity) = best_anchor_similarity else {
+            continue;
+        };
+        if similarity < group_similarity_threshold {
+            continue;
+        }
+        let should_replace = best_match.is_none_or(|(best_group_id, best_similarity)| {
+            similarity > best_similarity
+                || (similarity == best_similarity && *group_id < best_group_id)
+        });
+        if should_replace {
+            best_match = Some((*group_id, similarity));
+        }
+    }
+    best_match.map(|(group_id, _)| group_id)
 }
 
 pub fn cancel(pool: &DbPool) -> AppResult<bool> {

@@ -1,17 +1,6 @@
 import { useState } from 'react'
-import { importApi } from '../../api/import'
+import { importApi, type ImportStatus } from '../../api/import'
 import { usePollingStatus } from '../../hooks/usePollingStatus'
-
-interface ImportStatus {
-  status: string
-  totalFiles: number
-  processedFiles: number
-  successfulImports: number
-  failedImports: number
-  startedAt: string | null
-  completedAt: string | null
-  errors: string[]
-}
 
 export default function ImportPanel() {
   const [isTriggering, setIsTriggering] = useState(false)
@@ -75,6 +64,7 @@ export default function ImportPanel() {
           <div className="flex items-center gap-4 text-xs font-medium text-muted-foreground">
             <span>Imported <strong className="text-foreground">{status.successfulImports}</strong></span>
             <span>Failed <strong className={status.failedImports > 0 ? 'text-destructive' : 'text-foreground'}>{status.failedImports}</strong></span>
+            <span>Total Media <strong className="text-foreground">{status.totalMedia}</strong></span>
           </div>
 
           {status.errors.length > 0 && (

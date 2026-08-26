@@ -4,6 +4,7 @@ export interface ImportStatus {
   status: string
   totalFiles: number
   processedFiles: number
+  totalMedia: number
   successfulImports: number
   failedImports: number
   startedAt: string | null

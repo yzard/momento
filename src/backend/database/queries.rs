@@ -1,4 +1,10 @@
 pub mod import {
+    pub const COUNT_IMPORTED_MEDIA: &str = r#"
+    SELECT COUNT(*)
+      FROM media
+     WHERE import_state = 'imported'
+    "#;
+
     pub const INSERT_IMPORTING_MEDIA: &str = r#"
     INSERT INTO media (
         user_id
@@ -476,11 +482,60 @@ pub mod faces {
         "SELECT COUNT(*) FROM llm_jobs WHERE face_grouping_run_id = ? AND task = 'face_detection' AND status = 'failed'";
     pub const MARK_RUN: &str = "UPDATE face_grouping_runs SET status = ?, completed_at = datetime('now'), error = ? WHERE id = ? AND status IN ('running', 'cancelling')";
     pub const CANCEL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted')";
-    pub const SELECT_FACES: &str = "SELECT media_faces.id, media_faces.embedding, media_faces.quality FROM media_faces WHERE NOT EXISTS (SELECT 1 FROM face_group_members JOIN face_groups ON face_groups.id = face_group_members.face_group_id WHERE face_group_members.face_id = media_faces.id AND face_groups.manual_curated = 1) ORDER BY media_faces.id";
+    pub const SELECT_FACES_FOR_GROUPING: &str = r#"
+    SELECT media_faces.id
+         , media_faces.embedding
+      FROM media_faces
+     WHERE NOT EXISTS (
+               SELECT 1
+                 FROM face_group_members
+                WHERE face_group_members.face_id = media_faces.id
+                  AND face_group_members.manual_anchor = 1
+           )
+     ORDER BY media_faces.id
+    "#;
+    pub const SELECT_MANUAL_GROUP_ANCHORS: &str = r#"
+    SELECT face_groups.id
+         , media_faces.embedding
+      FROM face_groups
+      JOIN face_group_members
+        ON face_group_members.face_group_id = face_groups.id
+      JOIN media_faces
+        ON media_faces.id = face_group_members.face_id
+     WHERE face_groups.manual_curated = 1
+       AND face_group_members.manual_anchor = 1
+     ORDER BY face_groups.id
+            , media_faces.id
+    "#;
     pub const DELETE_AUTOMATIC_GROUPS: &str = "DELETE FROM face_groups WHERE manual_curated = 0";
+    pub const DELETE_AUTOMATIC_MANUAL_GROUP_MEMBERS: &str = r#"
+    DELETE FROM face_group_members
+     WHERE manual_anchor = 0
+       AND face_group_id IN (
+               SELECT id
+                 FROM face_groups
+                WHERE manual_curated = 1
+           )
+    "#;
     pub const INSERT_GROUP: &str = "INSERT INTO face_groups (manual_curated) VALUES (0)";
-    pub const INSERT_MEMBER: &str =
-        "INSERT OR IGNORE INTO face_group_members (face_group_id, face_id) VALUES (?, ?)";
+    pub const INSERT_AUTOMATIC_MEMBER: &str = r#"
+    INSERT INTO face_group_members
+      ( face_group_id
+      , face_id
+      , manual_anchor
+    ) VALUES (?, ?, 0)
+    ON CONFLICT(face_group_id, face_id) DO UPDATE SET
+        manual_anchor = 0
+    "#;
+    pub const INSERT_MANUAL_MEMBER: &str = r#"
+    INSERT INTO face_group_members
+      ( face_group_id
+      , face_id
+      , manual_anchor
+    ) VALUES (?, ?, 1)
+    ON CONFLICT(face_group_id, face_id) DO UPDATE SET
+        manual_anchor = 1
+    "#;
     pub const INSERT_FACE: &str = "INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     // Squared center distance is at most 0.5, so 1 - (2 * distance) normalizes
     // center proximity to the same [0, 1] range as frontality.
@@ -580,6 +635,15 @@ pub mod llm_callback {
         "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
     pub const MARK_COMPLETED: &str = "UPDATE llm_jobs SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
+    pub const INSERT_RECEIVED_RESULT: &str =
+        "INSERT OR IGNORE INTO llm_job_results (job_id, payload) VALUES (?, ?)";
+    pub const MARK_UNACKNOWLEDGED_RESULT_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = ?, submitted_at = COALESCE(submitted_at, datetime('now')), claimed_at = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting') AND attempts + 1 = ?";
+    pub const MARK_RESULT_CORRELATION_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const RECLAIM_RESULTS: &str = "UPDATE llm_job_results SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), last_error = 'Momento result worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', '-5 minutes')";
+    pub const CLAIM_RESULT: &str = "UPDATE llm_job_results SET status = 'processing', attempts = attempts + 1, claimed_at = datetime('now'), updated_at = datetime('now') WHERE job_id = (SELECT job_id FROM llm_job_results WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY received_at, job_id LIMIT 1) AND status = 'queued' RETURNING job_id, payload, attempts";
+    pub const RETRY_RESULT: &str = "UPDATE llm_job_results SET status = 'queued', available_at = datetime('now', '+30 seconds'), claimed_at = NULL, last_error = ?, updated_at = datetime('now') WHERE job_id = ? AND status = 'processing'";
+    pub const DELETE_RESULT: &str = "DELETE FROM llm_job_results WHERE job_id = ?";
+    pub const MARK_RECEIVED_RESULT_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted'";
     pub const UPSERT_TEXT: &str = "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, ?, ?) ON CONFLICT(media_id, model_type) DO UPDATE SET model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_INPUT_TEXT: &str = "INSERT INTO media_text_inputs (media_id, model_type, sequence, frame_timestamp_ms, model_version, string) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, model_type, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_AESTHETICS: &str = "INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', ?, ?, ?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET model_version = excluded.model_version, aesthetic_score = excluded.aesthetic_score, scenic_score = excluded.scenic_score, simplicity_score = excluded.simplicity_score, landscape_score = excluded.landscape_score, technical_quality_score = excluded.technical_quality_score, completed_at = datetime('now')";
@@ -2189,8 +2253,6 @@ pub mod deduplicate {
     pub const COUNT_PENDING_JOBS: &str = "SELECT COUNT(*) FROM llm_jobs WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting', 'submitted')";
     pub const COUNT_FAILED_JOBS: &str =
         "SELECT COUNT(*) FROM llm_jobs WHERE deduplicate_run_id = ? AND status = 'failed'";
-    pub const MARK_RUN_FAILED: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'one or more clustering jobs failed' WHERE id = ?";
-    pub const MARK_RUN_COMPLETED: &str = "UPDATE media_similarity_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ? AND status = 'running'";
     pub const INTERRUPT_RUNNING: &str = r#"
     UPDATE media_similarity_runs
        SET status = 'interrupted'

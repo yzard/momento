@@ -577,7 +577,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     let face_group_id = connection.last_insert_rowid();
     connection
         .execute(
-            "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+            "INSERT INTO face_group_members (face_group_id, face_id, manual_anchor) VALUES (?, ?, 0)",
             [face_group_id, face_id],
         )
         .expect("face group member");

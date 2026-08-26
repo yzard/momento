@@ -1,5 +1,7 @@
 import importlib.util
 import io
+import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -14,6 +16,7 @@ InvalidImageError = IMAGE_RUNTIME.InvalidImageError
 ModelHTTPServer = IMAGE_RUNTIME.ModelHTTPServer
 create_inference_slots = IMAGE_RUNTIME.create_inference_slots
 decode_image = IMAGE_RUNTIME.decode_image
+register_image_decoders = IMAGE_RUNTIME.register_image_decoders
 select_cuda_device = IMAGE_RUNTIME.select_cuda_device
 serve_until_stopped = IMAGE_RUNTIME.serve_until_stopped
 
@@ -54,6 +57,43 @@ class ImageRuntimeTests(unittest.TestCase):
 
         self.assertEqual(decoded.mode, "RGB")
         self.assertEqual(decoded.size, (120, 40))
+
+    def test_registers_heif_without_embedded_thumbnails(self):
+        calls = []
+        pillow_heif = types.ModuleType("pillow_heif")
+        pillow_heif.register_heif_opener = lambda **options: calls.append(options)
+
+        previous_module = sys.modules.get("pillow_heif")
+        sys.modules["pillow_heif"] = pillow_heif
+        try:
+            IMAGE_RUNTIME.register_image_decoders()
+        finally:
+            if previous_module is None:
+                del sys.modules["pillow_heif"]
+            else:
+                sys.modules["pillow_heif"] = previous_module
+
+        self.assertEqual(calls, [{"thumbnails": False}])
+
+    def test_decode_image_accepts_real_heif_bytes(self):
+        try:
+            from PIL import Image
+            import pillow_heif
+        except ImportError:
+            self.skipTest("Pillow and pillow-heif are required")
+
+        encoded = io.BytesIO()
+        pillow_heif.from_pillow(
+            Image.new("RGB", (48, 32), color=(10, 20, 30))
+        ).save(encoded)
+        self.assertEqual(encoded.getvalue()[4:12], b"ftypheic")
+
+        IMAGE_RUNTIME.register_image_decoders()
+        encoded.seek(0)
+        decoded = IMAGE_RUNTIME.decode_image(encoded)
+
+        self.assertEqual(decoded.mode, "RGB")
+        self.assertEqual(decoded.size, (48, 32))
 
 
 if __name__ == "__main__":

@@ -86,7 +86,7 @@ fn permanent_delete_cleans_every_media_owned_row() {
     let face_group_id = connection.last_insert_rowid();
     connection
         .execute(
-            "INSERT INTO face_group_members (face_group_id, face_id) VALUES (?, ?)",
+            "INSERT INTO face_group_members (face_group_id, face_id, manual_anchor) VALUES (?, ?, 0)",
             [face_group_id, face_id],
         )
         .expect("Failed to insert face group member");

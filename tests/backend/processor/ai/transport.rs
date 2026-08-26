@@ -1,6 +1,7 @@
 use std::future::Future;
 
 use futures::{SinkExt, StreamExt};
+use momento_api::processor::ai::result::process_received_results;
 use momento_api::processor::ai::transport::{
     LlmConnection, PreparedSubmissionInput, SubmissionOutcome, TransportHandle,
 };
@@ -252,7 +253,7 @@ async fn cancellation_outbox_is_retained_until_websocket_acknowledgement() {
 }
 
 #[tokio::test]
-async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
+async fn websocket_results_are_acknowledged_after_durable_receipt_before_processing() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "transport-result.jpg");
     let rejected_media_id = create_test_media(&pool, "transport-result-rejected.jpg");
@@ -280,11 +281,11 @@ async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
         )
         .await;
         match receive_client_control(&mut socket).await {
-            ClientControlMessage::ResultAcknowledged { job_id, attempt } => {
+            ClientControlMessage::ResultReceived { job_id, attempt } => {
                 assert_eq!(job_id, "transport-result-ok");
                 assert_eq!(attempt, 1);
             }
-            other => panic!("expected result acknowledgement, received {other:?}"),
+            other => panic!("expected result receipt, received {other:?}"),
         }
         send_service_control(
             &mut socket,
@@ -305,16 +306,11 @@ async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
         )
         .await;
         match receive_client_control(&mut socket).await {
-            ClientControlMessage::ResultRejected {
-                job_id,
-                attempt,
-                error,
-            } => {
+            ClientControlMessage::ResultReceived { job_id, attempt } => {
                 assert_eq!(job_id, "transport-result-bad");
                 assert_eq!(attempt, 1);
-                assert!(error.contains("does not match submitted job"));
             }
-            other => panic!("expected result rejection, received {other:?}"),
+            other => panic!("expected result receipt, received {other:?}"),
         }
     })
     .await;
@@ -323,6 +319,21 @@ async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
         .expect("WebSocket connection");
     server.await.expect("server task");
 
+    let connection = pool.get().expect("connection");
+    let received_results: i64 = connection
+        .query_row("SELECT COUNT(*) FROM llm_job_results", [], |row| row.get(0))
+        .expect("received result count");
+    let persisted_before_processing: i64 = connection
+        .query_row("SELECT COUNT(*) FROM media_text", [], |row| row.get(0))
+        .expect("unprocessed result count");
+    assert_eq!(received_results, 1);
+    assert_eq!(persisted_before_processing, 0);
+    drop(connection);
+
+    assert_eq!(
+        process_received_results(&pool, 10).expect("process received result"),
+        1
+    );
     let connection = pool.get().expect("connection");
     let persisted: String = connection
         .query_row(
@@ -339,7 +350,8 @@ async fn websocket_results_are_acknowledged_or_rejected_after_persistence() {
         )
         .expect("rejected job status");
     assert_eq!(persisted, "persisted");
-    assert_eq!(rejected_status, "submitted");
+    assert_eq!(rejected_status, "failed");
+    assert_eq!(pending_count(&pool, "llm_job_results"), 0);
 }
 
 #[tokio::test]

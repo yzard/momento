@@ -316,28 +316,32 @@ pub fn finalize_ready_runs(pool: &DbPool) -> AppResult<()> {
         if pending != 0 {
             continue;
         }
-        let failures: i64 =
+        let failed_jobs: i64 =
             connection.query_row(queries::deduplicate::COUNT_FAILED_JOBS, [run_id], |row| {
                 row.get(0)
             })?;
-        if failures > 0 {
-            connection.execute(queries::deduplicate::MARK_RUN_FAILED, [run_id])?;
-            continue;
-        }
-        generate_clusters(pool, run_id)?;
-        connection.execute(queries::deduplicate::MARK_RUN_COMPLETED, [run_id])?;
+        let completion_error = (failed_jobs > 0).then(|| {
+            format!(
+                "{failed_jobs} image clustering jobs failed; groups generated from successful results"
+            )
+        });
+        generate_clusters(pool, run_id, completion_error.as_deref())?;
     }
     Ok(())
 }
 
-pub fn generate_clusters(pool: &DbPool, run_id: i64) -> AppResult<()> {
+pub fn generate_clusters(
+    pool: &DbPool,
+    run_id: i64,
+    completion_error: Option<&str>,
+) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let dirty_count = fetch_one(&connection, queries::deduplicate::COUNT_DIRTY, &[], |row| {
         row.get::<_, i64>(0)
     })?
     .unwrap_or(0);
     if dirty_count == 0 {
-        return Ok(());
+        return complete_run(pool, run_id, completion_error);
     }
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(queries::deduplicate::CLEAN_DIRTY, [])?;
@@ -374,7 +378,12 @@ pub fn generate_clusters(pool: &DbPool, run_id: i64) -> AppResult<()> {
     if cancellation_requested(pool, run_id)? {
         return Ok(());
     }
-    replace_clusters(pool, run_id, pending_clusters.canonicalize())
+    replace_clusters(
+        pool,
+        run_id,
+        pending_clusters.canonicalize(),
+        completion_error,
+    )
 }
 
 fn load_current_index_page(
@@ -566,7 +575,12 @@ fn representative_match(
     time_matches.then_some((similarity, distance))
 }
 
-fn replace_clusters(pool: &DbPool, run_id: i64, clusters: Vec<PendingCluster>) -> AppResult<()> {
+fn replace_clusters(
+    pool: &DbPool,
+    run_id: i64,
+    clusters: Vec<PendingCluster>,
+    completion_error: Option<&str>,
+) -> AppResult<()> {
     let cluster_count = clusters.len() as i64;
     let cluster_payload = serde_json::to_string(
         &clusters
@@ -609,7 +623,24 @@ fn replace_clusters(pool: &DbPool, run_id: i64, clusters: Vec<PendingCluster>) -
     )?;
     transaction.execute(
         queries::deduplicate::COMPLETE_RUN,
-        rusqlite::params!["completed", Option::<String>::None, run_id],
+        rusqlite::params!["completed", completion_error, run_id],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn complete_run(pool: &DbPool, run_id: i64, completion_error: Option<&str>) -> AppResult<()> {
+    let connection = pool.get().map_err(AppError::Pool)?;
+    let transaction = connection.unchecked_transaction()?;
+    let locked_run =
+        transaction.execute(queries::deduplicate::LOCK_RUN_FOR_REPLACEMENT, [run_id])?;
+    if locked_run == 0 {
+        transaction.rollback()?;
+        return Ok(());
+    }
+    transaction.execute(
+        queries::deduplicate::COMPLETE_RUN,
+        rusqlite::params!["completed", completion_error, run_id],
     )?;
     transaction.commit()?;
     Ok(())

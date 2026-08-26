@@ -56,14 +56,16 @@ import
   -> durable llm-service disk queue
   -> one task runtime performs inference
   -> result returned on the originating client's WebSocket
-  -> transactional Momento result persistence + terminal job state
-  -> result acknowledgement
+  -> durable Momento result inbox receipt
+  -> result receipt acknowledgement + llm-service queue deletion
+  -> independent transactional Momento result persistence + terminal job state
   -> optional separately scheduled downstream work
 ```
 
 No stage runs its downstream stage inline. Import only creates metadata work; metadata prepares
 inputs; an AI trigger creates inference jobs; the Momento submission worker sends them;
-llm-service performs inference; the WebSocket result handler persists results. Type-specific work after inference,
+llm-service performs inference; the WebSocket handler durably receives results; the independent
+Momento result worker persists them. Type-specific work after inference,
 such as deduplication cluster generation, is another scheduled stage.
 
 Local and WebDAV imports use the same `finalize_staged_original` implementation. A source is
@@ -110,7 +112,7 @@ The primary implementation points are:
 - `src/backend/processor/ai/transport.rs`: connect, stream jobs, cancel, and receive results.
 - `src/backend/processor/ai/result.rs`: validate and transactionally persist results.
 - `src/backend_llm/routes.rs`: authenticate clients and stream WebSocket admission.
-- `src/backend_llm/transport.rs`: active-client registry and result acknowledgements.
+- `src/backend_llm/transport.rs`: active-client registry and durable-receipt acknowledgements.
 - `src/backend_llm/scheduler.rs`: durable queue, batching, result retries, and recovery.
 - `src/backend_llm/provider.rs`: task registry, local runtime lifecycle, and inference dispatch.
 
@@ -251,7 +253,7 @@ media or model result data and remain durable so delayed or retried submissions 
 cannot recreate cancelled work.
 
 ```text
-.tmp -> queuing -> processing -> deleted after a successful result acknowledgement
+.tmp -> queuing -> processing -> deleted after Momento durably receives the result
                             \-> callback_pending -> deleted after a successful retry
                                                  \-> failed after retry exhaustion
                   processing -> failed for terminal local queue/processing failure
@@ -259,8 +261,9 @@ cannot recreate cancelled work.
 
 Each job directory contains `manifest.json` and `input-N` files. Inference adds `result.json`;
 callback retry state adds `callback.json`; terminal queue failures add `failure.json`. There is
-no `completed/` directory and no configurable queue-size limit. A matching WebSocket result
-acknowledgement permits deletion of all llm-service job data.
+no `completed/` directory and no configurable queue-size limit. A matching WebSocket durable
+result-receipt acknowledgement permits deletion of all llm-service job data. It does not report
+whether Momento's later result persistence and downstream processing succeeded.
 
 Startup recovery removes incomplete `.tmp` admissions, moves interrupted `processing` jobs back
 to `queuing`, keeps `callback_pending` jobs that already have `result.json`, and requeues callback
@@ -307,8 +310,8 @@ not survive their parent process.
 One failed job does not prevent other in-flight jobs from finishing. Provider or runtime inference
 errors become durable failed result payloads. Loss of the local runtime transport is retried from
 the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Result
-delivery uses its acknowledgement timeout, fixed retry delay, and maximum-attempt policy. A result
-acknowledgement deletes the queue directory; rejection, timeout, or disconnect moves or keeps it in
+delivery uses its acknowledgement timeout, fixed retry delay, and maximum-attempt policy. A durable
+receipt acknowledgement deletes the queue directory; receipt rejection, timeout, or disconnect keeps it in
 `callback_pending`, and retry exhaustion moves it to `failed`.
 
 ### Result contract
@@ -319,12 +322,16 @@ completed payload contains matching correlation fields,
 ordered `inputResults` carrying each original sequence and frame timestamp. A failed payload
 contains `status = failed` and an error.
 
-Momento validates correlation fields inside an immediate SQLite transaction. Only a matching
-`submitted` job may transition to `completed` or `failed`. Result persistence and the terminal
-state transition commit atomically. Matching results for an already terminal job are acknowledged
-idempotently; late results for cancelled jobs are acknowledged without persisting results. Momento
-sends `resultAcknowledged` only after this transaction commits; validation or persistence errors
-send `resultRejected` so llm-service retains and retries the durable result.
+Momento first stores an incoming result in its durable `llm_job_results` inbox and then sends
+`resultReceived`. That receipt is the llm-service success boundary and permits llm-service to delete
+all local task data. `resultReceiptRejected` is reserved for failure to durably receive the payload;
+it is never used for later validation, crop generation, database persistence, or downstream work.
+Momento's independent result worker validates correlation and task-specific payload fields, persists
+the result, performs required local post-processing, and atomically transitions its job to
+`completed`. Any permanent validation or post-processing failure transitions only the Momento job
+to `failed`; transient local failures retry from the durable inbox. Matching duplicate deliveries
+are received idempotently, and late results for terminal or removed jobs are acknowledged without
+recreating work.
 
 Persistence is deliberately type-specific. OCR and tagging store present text results in
 input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
@@ -469,16 +476,21 @@ normalized `frontalityScore` derived from all five landmarks. Frontality account
 roll plus nose and mouth-center horizontal offsets, is constrained to `[0, 1]`, and is persisted
 with the face row. Momento keeps the 256x256 portrait output size and the existing crop dimensions;
 only the crop origin changes so the portrait is centered on `eyeCenter`, subject to image-edge
-clamping.
+clamping. Face crops reference the immutable submitted original snapshot. Momento uses ImageMagick
+to select its first frame, apply stored orientation, and normalize it to PNG in memory before Rust
+decodes and crops it; conversion failures are logged and fail only the corresponding Momento job.
 
 Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
-seed embedding that first created each group. A face joins the first seed whose cosine similarity
-reaches `llm.face_group_similarity_threshold`; the default is `0.41`, lower values are more
-tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use the
-thumbnail representative, compare every member pair, apply transitive closure, or run a second
-group-to-group merge pass. Manual groups remain excluded from automatic regrouping. Changing these
-semantics requires explicit false-merge analysis and grouping tests, not just changing the
-thumbnail representative.
+seed embedding that first created each automatic group. A face joins the first automatic seed whose
+cosine similarity reaches `llm.face_group_similarity_threshold`; the default is `0.41`, lower values
+are more tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use
+the thumbnail representative, compare every automatic member pair, apply transitive closure, or run
+a second group-to-group merge pass. A manual merge makes every face selected by that merge a fixed
+manual anchor. Later detections compare against every anchor and join the best matching manual group
+before automatic grouping. Automatically attached members are reevaluated on each run and never
+become anchors, preventing transitive similarity drift. Manual groups and their anchors are never
+deleted by automatic regrouping. Changing these semantics requires explicit false-merge analysis
+and grouping tests, not just changing the thumbnail representative.
 
 `face_groups.representative_face_id` is a thumbnail choice, not the grouping seed. Select it only
 after automatic membership is complete and select it again after a manual merge. Rank each face by

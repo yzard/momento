@@ -153,11 +153,12 @@ fn face_callback_records_success_when_no_faces_are_detected() {
 }
 
 #[test]
-fn face_grouping_creates_deterministic_group_for_matching_embeddings() {
+fn failed_face_jobs_still_group_successful_results() {
     init_test_paths();
     let pool = create_test_db();
     let first_media_id = create_test_media(&pool, "first.jpg");
     let second_media_id = create_test_media(&pool, "second.jpg");
+    let failed_media_id = create_test_media(&pool, "failed.jpg");
     let connection = pool.get().expect("connection");
     let embedding = base64::engine::general_purpose::STANDARD
         .decode(embedding())
@@ -168,6 +169,13 @@ fn face_grouping_creates_deterministic_group_for_matching_embeddings() {
     connection
         .execute(queries::faces::INSERT_GROUPING_RUN, [])
         .expect("run");
+    let run_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES ('failed-face-job', ?, ?, 'face_detection', 'failed')",
+            rusqlite::params![failed_media_id, run_id],
+        )
+        .expect("failed face job");
     drop(connection);
     face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize");
     let connection = pool.get().expect("connection");
@@ -177,6 +185,18 @@ fn face_grouping_creates_deterministic_group_for_matching_embeddings() {
         })
         .expect("members");
     assert_eq!(count, 2);
+    let (run_status, run_error): (String, Option<String>) = connection
+        .query_row(
+            "SELECT status, error FROM face_grouping_runs WHERE id = ?",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("grouping run status");
+    assert_eq!(run_status, "completed");
+    assert_eq!(
+        run_error.as_deref(),
+        Some("1 face detection jobs failed; groups generated from successful results")
+    );
 }
 
 #[test]
@@ -400,17 +420,28 @@ fn restart_recovery_resumes_running_face_jobs_and_finishes_cancellation() {
 }
 
 #[test]
-fn automatic_regrouping_does_not_duplicate_manually_merged_faces() {
+fn automatic_regrouping_attaches_new_faces_to_any_matching_manual_anchor() {
     init_test_paths();
     let pool = create_test_db();
-    let embedding = base64::engine::general_purpose::STANDARD
-        .decode(embedding())
-        .expect("embedding");
+    let first_anchor_embedding = [1.0_f32, 0.0_f32]
+        .into_iter()
+        .chain(std::iter::repeat_n(0.0_f32, 510))
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let second_anchor_embedding = [0.0_f32, 1.0_f32]
+        .into_iter()
+        .chain(std::iter::repeat_n(0.0_f32, 510))
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
     let media_ids = ["manual-a.jpg", "manual-b.jpg", "automatic.jpg"]
         .map(|filename| create_test_media(&pool, filename));
     let connection = pool.get().expect("connection");
     let mut face_ids = Vec::new();
-    for media_id in media_ids {
+    for (media_id, face_embedding) in media_ids.into_iter().zip([
+        first_anchor_embedding,
+        second_anchor_embedding.clone(),
+        second_anchor_embedding,
+    ]) {
         connection
             .execute(
                 queries::faces::INSERT_FACE,
@@ -425,7 +456,7 @@ fn automatic_regrouping_does_not_duplicate_manually_merged_faces() {
                     1.0,
                     1.0,
                     1.0,
-                    embedding.clone(),
+                    face_embedding,
                     "faces/test.jpg"
                 ],
             )
@@ -441,7 +472,10 @@ fn automatic_regrouping_does_not_duplicate_manually_merged_faces() {
     let manual_group_id = connection.last_insert_rowid();
     for face_id in &face_ids[..2] {
         connection
-            .execute(queries::faces::INSERT_MEMBER, [manual_group_id, *face_id])
+            .execute(
+                queries::faces::INSERT_MANUAL_MEMBER,
+                [manual_group_id, *face_id],
+            )
             .expect("manual member");
     }
     connection
@@ -465,5 +499,22 @@ fn automatic_regrouping_does_not_duplicate_manually_merged_faces() {
     let group_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM face_groups", [], |row| row.get(0))
         .expect("group count");
-    assert_eq!(group_count, 2);
+    assert_eq!(group_count, 1);
+    let (new_face_group_id, new_face_manual_anchor): (i64, i64) = connection
+        .query_row(
+            "SELECT face_group_id, manual_anchor FROM face_group_members WHERE face_id = ?",
+            [face_ids[2]],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("new face membership");
+    assert_eq!(new_face_group_id, manual_group_id);
+    assert_eq!(new_face_manual_anchor, 0);
+    let manual_anchor_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM face_group_members WHERE face_group_id = ? AND manual_anchor = 1",
+            [manual_group_id],
+            |row| row.get(0),
+        )
+        .expect("manual anchor count");
+    assert_eq!(manual_anchor_count, 2);
 }

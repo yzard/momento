@@ -85,11 +85,11 @@ pub enum ClientControlMessage {
         request_id: String,
         request: CancelJobsRequest,
     },
-    ResultAcknowledged {
+    ResultReceived {
         job_id: String,
         attempt: u32,
     },
-    ResultRejected {
+    ResultReceiptRejected {
         job_id: String,
         attempt: u32,
         error: String,

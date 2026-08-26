@@ -146,7 +146,7 @@ impl ConnectionRegistry {
             .map_err(|_| format!("client connection closed: {client_id}"))
     }
 
-    pub async fn acknowledge_result(
+    pub async fn complete_result_delivery(
         &self,
         client_id: &str,
         generation: u64,
@@ -230,10 +230,10 @@ impl ResultDeliveryTransport for ConnectionRegistry {
         }
         match tokio::time::timeout(acknowledgement_timeout, receiver).await {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => Err("result acknowledgement channel closed".to_string()),
+            Ok(Err(_)) => Err("result receipt channel closed".to_string()),
             Err(_) => {
                 self.pending_results.lock().await.remove(&key);
-                Err("result acknowledgement timed out".to_string())
+                Err("result receipt timed out".to_string())
             }
         }
     }

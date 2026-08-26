@@ -12,6 +12,7 @@ from image_runtime import (
     ModelHTTPServer,
     create_inference_slots,
     decode_image,
+    register_image_decoders,
     select_cuda_device,
     serve_until_stopped,
 )
@@ -270,6 +271,7 @@ def main():
     if arguments.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
 
+    register_image_decoders()
     Handler.runtime = ImageAestheticsRuntime(
         arguments.clip_model, arguments.aesthetic_head, arguments.device
     )

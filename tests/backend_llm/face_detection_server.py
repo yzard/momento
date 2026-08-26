@@ -138,7 +138,7 @@ class FaceDetectionServerTests(unittest.TestCase):
                 FACE_DETECTION_SERVER.create_inference_slots(1)
             )
             FACE_DETECTION_SERVER.Handler.input_root = input_root
-            server = FACE_DETECTION_SERVER.ThreadingHTTPServer(
+            server = FACE_DETECTION_SERVER.ModelHTTPServer(
                 ("127.0.0.1", 0), FACE_DETECTION_SERVER.Handler
             )
             server_thread = threading.Thread(target=server.serve_forever)

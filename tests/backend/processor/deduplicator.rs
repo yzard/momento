@@ -139,18 +139,34 @@ fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
 }
 
 #[test]
-fn failed_clustering_job_fails_deduplicate_run() {
+fn failed_clustering_jobs_still_generate_groups_from_successful_indexes() {
     let pool = create_test_db();
-    let media_id = create_test_media(&pool, "failed.jpg");
+    let first_media_id = create_test_media(&pool, "successful-a.jpg");
+    let second_media_id = create_test_media(&pool, "successful-b.jpg");
+    let failed_media_id = create_test_media(&pool, "failed.jpg");
+    insert_similarity_index(&pool, first_media_id, &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second_media_id, &[1.0, 0.0], 7, 1_005);
     let run_id = create_run(&pool, "scheduled", Some("2026-08-12T03:00:00Z")).expect("run");
     let connection = pool.get().expect("connection");
-    connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('failed-job', ?, ?, 'image_clustering', 'failed')", rusqlite::params![media_id, run_id]).expect("job");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('failed-job', ?, ?, 'image_clustering', 'failed')", rusqlite::params![failed_media_id, run_id]).expect("job");
     drop(connection);
     finalize_ready_runs(&pool).expect("finalize failure");
+
+    let run = latest_run(&pool).expect("latest").expect("run");
+    assert_eq!(run.status, "completed");
     assert_eq!(
-        latest_run(&pool).expect("latest").expect("run").status,
-        "failed"
+        run.error.as_deref(),
+        Some("1 image clustering jobs failed; groups generated from successful results")
     );
+    let connection = pool.get().expect("connection");
+    let cluster_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_clusters",
+            [],
+            |row| row.get(0),
+        )
+        .expect("cluster count");
+    assert_eq!(cluster_count, 1);
 }
 
 #[test]
@@ -250,7 +266,7 @@ fn identical_near_duplicate_and_burst_sets_are_persisted_once() {
     insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
     let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
 
-    generate_clusters(&pool, run_id).expect("Failed to generate clusters");
+    generate_clusters(&pool, run_id, None).expect("Failed to generate clusters");
 
     let connection = pool.get().expect("Failed to get connection");
     let (cluster_count, kind, member_count): (i64, String, i64) = connection
@@ -284,7 +300,7 @@ fn distinct_media_sets_remain_separate_after_canonicalization() {
     insert_similarity_index(&pool, fourth, &[0.0, 1.0], 8, 2_005);
     let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
 
-    generate_clusters(&pool, run_id).expect("Failed to generate clusters");
+    generate_clusters(&pool, run_id, None).expect("Failed to generate clusters");
 
     let connection = pool.get().expect("Failed to get connection");
     let (cluster_count, member_count): (i64, i64) = connection
@@ -333,7 +349,7 @@ fn cancelled_generation_keeps_the_previous_complete_clusters() {
         .expect("Failed to request cancellation");
     drop(connection);
 
-    generate_clusters(&pool, run_id).expect("Cancelled generation should stop cleanly");
+    generate_clusters(&pool, run_id, None).expect("Cancelled generation should stop cleanly");
 
     let connection = pool.get().expect("Failed to get connection");
     let remaining_cluster: (i64, String) = connection

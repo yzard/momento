@@ -1,10 +1,229 @@
 use momento_common::llm::{JobInputResult, JobResult};
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
+
+const RESULT_PROCESSING_MAX_ATTEMPTS: i64 = 5;
+
+pub fn receive_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
+    let payload = serde_json::to_string(&request)?;
+    let connection = pool.get()?;
+    let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+    let Some((media_id, task, attempts, status)) = transaction
+        .query_row(
+            queries::llm_callback::SELECT_JOB,
+            [&request.job_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        tracing::warn!(
+            job_id = request.job_id,
+            "discarding result for an unknown Momento job"
+        );
+        transaction.commit()?;
+        return Ok(());
+    };
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+        transaction.commit()?;
+        return Ok(());
+    }
+    let expected_attempt = if status == "submitted" {
+        attempts
+    } else {
+        attempts + 1
+    };
+    if media_id != request.media_id
+        || task != request.task
+        || expected_attempt != i64::from(request.attempt)
+    {
+        let error = "received LLM result does not match the Momento job";
+        transaction.execute(
+            queries::llm_callback::MARK_RESULT_CORRELATION_FAILED,
+            rusqlite::params![error, request.job_id],
+        )?;
+        transaction.commit()?;
+        tracing::error!(
+            job_id = request.job_id,
+            media_id = request.media_id,
+            task = request.task,
+            attempt = request.attempt,
+            "{error}"
+        );
+        return Ok(());
+    }
+    if matches!(status.as_str(), "queued" | "submitting")
+        && transaction.execute(
+            queries::llm_callback::MARK_UNACKNOWLEDGED_RESULT_SUBMITTED,
+            rusqlite::params![request.attempt, request.job_id, request.attempt],
+        )? != 1
+    {
+        return Err(AppError::Conflict(
+            "Momento job changed while receiving the LLM result".to_string(),
+        ));
+    }
+    transaction.execute(
+        queries::llm_callback::INSERT_RECEIVED_RESULT,
+        rusqlite::params![request.job_id, payload],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub async fn run(pool: DbPool, interval: Duration, batch_size: usize) {
+    loop {
+        let claim_pool = pool.clone();
+        let claimed =
+            tokio::task::spawn_blocking(move || claim_received_results(&claim_pool, batch_size))
+                .await;
+        let claimed = match claimed {
+            Ok(Ok(claimed)) => claimed,
+            Ok(Err(error)) => {
+                tracing::warn!("Momento LLM result claim failed: {error}");
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!("Momento LLM result claim worker stopped unexpectedly: {error}");
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+        };
+        let claimed_count = claimed.len();
+        let mut processing = tokio::task::JoinSet::new();
+        for (job_id, payload, attempts) in claimed {
+            let result_pool = pool.clone();
+            processing.spawn_blocking(move || {
+                process_claimed_result(&result_pool, &job_id, &payload, attempts)
+                    .map_err(|error| (job_id, error))
+            });
+        }
+        while let Some(processed) = processing.join_next().await {
+            match processed {
+                Ok(Ok(())) => {}
+                Ok(Err((job_id, error))) => {
+                    tracing::warn!(job_id, error = %error, "Momento LLM result processing failed")
+                }
+                Err(error) => {
+                    tracing::warn!("Momento LLM result worker stopped unexpectedly: {error}")
+                }
+            }
+        }
+        if claimed_count < batch_size {
+            tokio::time::sleep(interval).await;
+        }
+    }
+}
+
+pub fn process_received_results(pool: &DbPool, batch_size: usize) -> AppResult<usize> {
+    let claimed = claim_received_results(pool, batch_size)?;
+    let processed = claimed.len();
+    for (job_id, payload, attempts) in claimed {
+        process_claimed_result(pool, &job_id, &payload, attempts)?;
+    }
+    Ok(processed)
+}
+
+fn claim_received_results(
+    pool: &DbPool,
+    batch_size: usize,
+) -> AppResult<Vec<(String, String, i64)>> {
+    if batch_size == 0 {
+        return Err(AppError::Validation(
+            "LLM result worker batch size must be positive".to_string(),
+        ));
+    }
+    pool.get()?
+        .execute(queries::llm_callback::RECLAIM_RESULTS, [])?;
+    let mut claimed = Vec::with_capacity(batch_size);
+    while claimed.len() < batch_size {
+        let Some((job_id, payload, attempts)) = claim_received_result(pool)? else {
+            break;
+        };
+        claimed.push((job_id, payload, attempts));
+    }
+    Ok(claimed)
+}
+
+fn claim_received_result(pool: &DbPool) -> AppResult<Option<(String, String, i64)>> {
+    pool.get()?
+        .query_row(queries::llm_callback::CLAIM_RESULT, [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .map_err(AppError::from)
+}
+
+fn process_claimed_result(
+    pool: &DbPool,
+    job_id: &str,
+    payload: &str,
+    attempts: i64,
+) -> AppResult<()> {
+    let request = match serde_json::from_str::<JobResult>(payload) {
+        Ok(request) => request,
+        Err(error) => return fail_received_result(pool, job_id, &error.to_string()),
+    };
+    match process_result(pool, request) {
+        Ok(()) => delete_received_result(pool, job_id),
+        Err(error)
+            if result_error_is_retryable(&error) && attempts < RESULT_PROCESSING_MAX_ATTEMPTS =>
+        {
+            pool.get()?.execute(
+                queries::llm_callback::RETRY_RESULT,
+                rusqlite::params![error.to_string(), job_id],
+            )?;
+            tracing::warn!(job_id, error = %error, attempts, "retrying Momento LLM result processing");
+            Ok(())
+        }
+        Err(error) => fail_received_result(pool, job_id, &error.to_string()),
+    }
+}
+
+fn result_error_is_retryable(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::DatabaseBusy
+            | AppError::Database(_)
+            | AppError::Pool(_)
+            | AppError::Io(_)
+            | AppError::Internal(_)
+    )
+}
+
+fn delete_received_result(pool: &DbPool, job_id: &str) -> AppResult<()> {
+    pool.get()?
+        .execute(queries::llm_callback::DELETE_RESULT, [job_id])?;
+    Ok(())
+}
+
+fn fail_received_result(pool: &DbPool, job_id: &str, error: &str) -> AppResult<()> {
+    let connection = pool.get()?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        queries::llm_callback::MARK_RECEIVED_RESULT_FAILED,
+        rusqlite::params![error, job_id],
+    )?;
+    transaction.execute(queries::llm_callback::DELETE_RESULT, [job_id])?;
+    transaction.commit()?;
+    tracing::error!(
+        job_id,
+        error,
+        "Momento LLM result processing failed permanently"
+    );
+    Ok(())
+}
 
 pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
     let connection = pool.get()?;

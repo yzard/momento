@@ -439,18 +439,18 @@ async fn handle_service_message(
             let result_pool = pool.clone();
             let result_outbound = outbound.clone();
             tokio::spawn(async move {
-                let processed = tokio::task::spawn_blocking(move || {
-                    super::result::process_result(&result_pool, result)
+                let received = tokio::task::spawn_blocking(move || {
+                    super::result::receive_result(&result_pool, result)
                 })
                 .await;
-                let message = match processed {
-                    Ok(Ok(())) => ClientControlMessage::ResultAcknowledged { job_id, attempt },
-                    Ok(Err(error)) => ClientControlMessage::ResultRejected {
+                let message = match received {
+                    Ok(Ok(())) => ClientControlMessage::ResultReceived { job_id, attempt },
+                    Ok(Err(error)) => ClientControlMessage::ResultReceiptRejected {
                         job_id,
                         attempt,
                         error: error.to_string(),
                     },
-                    Err(error) => ClientControlMessage::ResultRejected {
+                    Err(error) => ClientControlMessage::ResultReceiptRejected {
                         job_id,
                         attempt,
                         error: error.to_string(),

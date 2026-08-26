@@ -2,12 +2,12 @@
 """Shared CPU runtime for screenshot and document classification."""
 
 import argparse
-import csv
 import io
 import json
 import math
 import re
 import subprocess
+import tempfile
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -16,6 +16,7 @@ from image_runtime import (
     ModelHTTPServer,
     create_inference_slots,
     decode_image,
+    register_image_decoders,
     serve_until_stopped,
 )
 from runtime_input import read_runtime_input
@@ -25,6 +26,24 @@ CLASSIFIERS = ("screenshot_detection", "document_detection")
 SCREENSHOT_THRESHOLD = 0.58
 DOCUMENT_THRESHOLD = 0.58
 TIME_PATTERN = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
+TESSERACT_TSV_COLUMNS = (
+    "level",
+    "page_num",
+    "block_num",
+    "par_num",
+    "line_num",
+    "word_num",
+    "left",
+    "top",
+    "width",
+    "height",
+    "conf",
+    "text",
+)
+MAX_TESSERACT_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_TESSERACT_ROW_BYTES = 1024 * 1024
+MAX_TESSERACT_TEXT_BYTES = 4096
+MAX_TEXT_REGIONS = 10000
 
 
 def bounded_score(score, score_name):
@@ -162,40 +181,98 @@ def visual_metrics(image):
 def extract_text_regions(image):
     encoded = io.BytesIO()
     image.save(encoded, format="PNG")
-    process = subprocess.run(
-        ["tesseract", "stdin", "stdout", "--psm", "11", "tsv"],
-        input=encoded.getvalue(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if process.returncode != 0:
-        detail = process.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"Tesseract failed with exit code {process.returncode}: {detail}")
+    with tempfile.TemporaryFile() as tsv_output:
+        process = subprocess.run(
+            ["tesseract", "stdin", "stdout", "--psm", "11", "tsv"],
+            input=encoded.getvalue(),
+            stdout=tsv_output,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if process.returncode != 0:
+            detail = process.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"Tesseract failed with exit code {process.returncode}: {detail}"
+            )
+        tsv_output.seek(0)
+        return parse_text_regions(tsv_output, image.width, image.height)
 
+
+def read_bounded_tsv_row(tsv_output, remaining_bytes):
+    if remaining_bytes <= 0:
+        return None, 0
+    read_limit = min(MAX_TESSERACT_ROW_BYTES + 1, remaining_bytes)
+    row = tsv_output.readline(read_limit)
+    consumed = len(row)
+    if not row:
+        return b"", consumed
+    if len(row) <= MAX_TESSERACT_ROW_BYTES:
+        return row, consumed
+    if row.endswith(b"\n"):
+        return None, consumed
+    while consumed < remaining_bytes:
+        remainder = tsv_output.readline(
+            min(MAX_TESSERACT_ROW_BYTES + 1, remaining_bytes - consumed)
+        )
+        consumed += len(remainder)
+        if not remainder or remainder.endswith(b"\n"):
+            break
+    return None, consumed
+
+
+def parse_text_regions(tsv_output, image_width, image_height):
+    if image_width <= 0 or image_height <= 0:
+        raise RuntimeError("Tesseract image dimensions must be positive")
+    remaining_bytes = MAX_TESSERACT_OUTPUT_BYTES
+    header, consumed = read_bounded_tsv_row(tsv_output, remaining_bytes)
+    remaining_bytes -= consumed
+    if header is None or not header:
+        raise RuntimeError("Tesseract TSV header is missing or oversized")
+    columns = tuple(
+        field.decode("utf-8", errors="replace")
+        for field in header.rstrip(b"\r\n").split(b"\t")
+    )
+    if columns != TESSERACT_TSV_COLUMNS:
+        raise RuntimeError("Tesseract TSV header is invalid")
     regions = []
-    rows = csv.DictReader(io.StringIO(process.stdout.decode("utf-8")), delimiter="\t")
-    for row in rows:
-        text = (row.get("text") or "").strip()
-        confidence_text = row.get("conf") or "-1"
-        try:
-            confidence = float(confidence_text)
-            left = int(row.get("left") or 0)
-            top = int(row.get("top") or 0)
-            width = int(row.get("width") or 0)
-            height = int(row.get("height") or 0)
-        except ValueError:
+    while remaining_bytes > 0 and len(regions) < MAX_TEXT_REGIONS:
+        row, consumed = read_bounded_tsv_row(tsv_output, remaining_bytes)
+        remaining_bytes -= consumed
+        if row == b"":
+            break
+        if row is None:
             continue
-        if not text or confidence < 25.0 or width <= 0 or height <= 0:
+        fields = row.rstrip(b"\r\n").split(b"\t", len(TESSERACT_TSV_COLUMNS) - 1)
+        if len(fields) != len(TESSERACT_TSV_COLUMNS):
+            continue
+        text_bytes = fields[11].strip()
+        if not text_bytes or len(text_bytes) > MAX_TESSERACT_TEXT_BYTES:
+            continue
+        text = text_bytes.decode("utf-8", errors="replace")
+        try:
+            confidence = float(fields[10])
+            left = int(fields[6])
+            top = int(fields[7])
+            width = int(fields[8])
+            height = int(fields[9])
+        except (TypeError, ValueError):
+            continue
+        if (
+            not text
+            or not math.isfinite(confidence)
+            or confidence < 25.0
+            or width <= 0
+            or height <= 0
+        ):
             continue
         regions.append(
             {
                 "text": text,
                 "confidence": confidence / 100.0,
-                "x": left / image.width,
-                "y": top / image.height,
-                "width": width / image.width,
-                "height": height / image.height,
+                "x": left / image_width,
+                "y": top / image_height,
+                "width": width / image_width,
+                "height": height / image_height,
             }
         )
     return regions
@@ -379,6 +456,7 @@ def main():
     if arguments.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
 
+    register_image_decoders()
     Handler.runtime = ClassifierRuntime(arguments.classifier)
     Handler.inference_slots = create_inference_slots(arguments.max_concurrent_jobs)
     Handler.input_root = Path(arguments.input_root)
