@@ -122,7 +122,36 @@ pub struct ServiceConfig {
     pub max_tokens: u32,
     pub minimum_face_likelihood: Option<f64>,
     pub minimum_face_resolution_pixels: Option<u32>,
-    pub max_concurrent_jobs: usize,
+    pub face_detection_size: Option<u32>,
+    pub recognition_batch_size: Option<usize>,
+    pub recognition_batch_wait_milliseconds: Option<u64>,
+    pub model_batch_wait_milliseconds: Option<u64>,
+    pub max_concurrent_jobs: Option<usize>,
+    pub cpu_processing_concurrency: Option<usize>,
+    pub model_concurrency: Option<usize>,
+}
+
+impl ServiceConfig {
+    pub fn configured_model_concurrency(&self) -> Result<usize, ServiceError> {
+        let concurrency = if matches!(
+            self.model_type.as_str(),
+            "image_clustering"
+                | "image_aesthetics"
+                | "face_detection"
+                | "screenshot_detection"
+                | "document_detection"
+        ) {
+            self.model_concurrency
+        } else {
+            self.max_concurrent_jobs
+        };
+        concurrency.ok_or_else(|| {
+            ServiceError::Configuration(format!(
+                "{} model concurrency is not configured",
+                self.model_type
+            ))
+        })
+    }
 }
 
 impl Config {
@@ -226,27 +255,56 @@ impl Config {
         if !service.enabled {
             return Ok(());
         }
-        if service.max_concurrent_jobs == 0 {
-            return Err(ServiceError::Configuration(
-                "enabled service max_concurrent_jobs must be positive".to_string(),
-            ));
-        }
         match service.model_type.as_str() {
-            "ocr" => self.validate_ocr_service(service),
-            "image_tagging" => self.validate_image_tagging_service(service),
+            "ocr" => self.validate_standard_service(service, Self::validate_ocr_service),
+            "image_tagging" => {
+                self.validate_standard_service(service, Self::validate_image_tagging_service)
+            }
             "image_clustering" => self.validate_image_clustering_service(service),
             "image_aesthetics" => self.validate_image_aesthetics_service(service),
             "face_detection" => self.validate_face_detection_service(service),
             "screenshot_detection" => {
-                self.validate_image_service_timeouts(service, "screenshot detection")
+                self.validate_classifier_service(service, "screenshot detection")
             }
-            "document_detection" => {
-                self.validate_image_service_timeouts(service, "document detection")
-            }
+            "document_detection" => self.validate_classifier_service(service, "document detection"),
             model_type => Err(ServiceError::Configuration(format!(
                 "unsupported service model_type: {model_type}"
             ))),
         }
+    }
+
+    fn validate_standard_service(
+        &self,
+        service: &ServiceConfig,
+        validate_service: fn(&Self, &ServiceConfig) -> Result<(), ServiceError>,
+    ) -> Result<(), ServiceError> {
+        if service
+            .max_concurrent_jobs
+            .is_none_or(|concurrency| concurrency == 0)
+        {
+            return Err(ServiceError::Configuration(
+                "enabled service max_concurrent_jobs must be positive".to_string(),
+            ));
+        }
+        if service.cpu_processing_concurrency.is_some()
+            || service.model_concurrency.is_some()
+            || service.model_batch_wait_milliseconds.is_some()
+        {
+            return Err(ServiceError::Configuration(format!(
+                "{} does not accept staged concurrency fields",
+                service.model_type
+            )));
+        }
+        validate_service(self, service)
+    }
+
+    fn validate_classifier_service(
+        &self,
+        service: &ServiceConfig,
+        service_name: &str,
+    ) -> Result<(), ServiceError> {
+        self.validate_staged_image_service(service, service_name)?;
+        self.validate_image_service_timeouts(service, service_name)
     }
 
     fn validate_ocr_service(&self, service: &ServiceConfig) -> Result<(), ServiceError> {
@@ -269,6 +327,7 @@ impl Config {
         &self,
         service: &ServiceConfig,
     ) -> Result<(), ServiceError> {
+        self.validate_dynamic_batched_image_service(service, "image clustering")?;
         self.validate_image_service_timeouts(service, "image clustering")
     }
 
@@ -276,7 +335,22 @@ impl Config {
         &self,
         service: &ServiceConfig,
     ) -> Result<(), ServiceError> {
+        self.validate_dynamic_batched_image_service(service, "image aesthetics")?;
         self.validate_image_service_timeouts(service, "image aesthetics")
+    }
+
+    fn validate_dynamic_batched_image_service(
+        &self,
+        service: &ServiceConfig,
+        service_name: &str,
+    ) -> Result<(), ServiceError> {
+        self.validate_staged_image_service(service, service_name)?;
+        if service.model_batch_wait_milliseconds.is_none() {
+            return Err(ServiceError::Configuration(format!(
+                "{service_name} model_batch_wait_milliseconds is required"
+            )));
+        }
+        Ok(())
     }
 
     fn validate_image_service_timeouts(
@@ -293,6 +367,7 @@ impl Config {
     }
 
     fn validate_face_detection_service(&self, service: &ServiceConfig) -> Result<(), ServiceError> {
+        self.validate_staged_image_service(service, "face detection")?;
         if service.startup_timeout_seconds == 0 || service.request_timeout_seconds == 0 {
             return Err(ServiceError::Configuration(
                 "face detection timeouts must be positive".to_string(),
@@ -317,6 +392,53 @@ impl Config {
             return Err(ServiceError::Configuration(
                 "face detection minimum_face_resolution_pixels must be positive".to_string(),
             ));
+        }
+        if !matches!(service.face_detection_size, Some(640 | 960 | 1280)) {
+            return Err(ServiceError::Configuration(
+                "face detection face_detection_size must be one of 640, 960, or 1280".to_string(),
+            ));
+        }
+        if service
+            .recognition_batch_size
+            .is_none_or(|batch_size| batch_size == 0)
+        {
+            return Err(ServiceError::Configuration(
+                "face detection recognition_batch_size must be positive".to_string(),
+            ));
+        }
+        if service.recognition_batch_wait_milliseconds.is_none() {
+            return Err(ServiceError::Configuration(
+                "face detection recognition_batch_wait_milliseconds is required".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_staged_image_service(
+        &self,
+        service: &ServiceConfig,
+        service_name: &str,
+    ) -> Result<(), ServiceError> {
+        if service
+            .cpu_processing_concurrency
+            .is_none_or(|concurrency| concurrency == 0)
+        {
+            return Err(ServiceError::Configuration(format!(
+                "enabled {service_name} service cpu_processing_concurrency must be positive"
+            )));
+        }
+        if service
+            .model_concurrency
+            .is_none_or(|concurrency| concurrency == 0)
+        {
+            return Err(ServiceError::Configuration(format!(
+                "enabled {service_name} service model_concurrency must be positive"
+            )));
+        }
+        if service.max_concurrent_jobs.is_some() {
+            return Err(ServiceError::Configuration(format!(
+                "{service_name} uses cpu_processing_concurrency and model_concurrency, not max_concurrent_jobs"
+            )));
         }
         Ok(())
     }
@@ -371,15 +493,31 @@ mod tests {
     use super::*;
 
     fn service(model_type: &str) -> ServiceConfig {
+        let is_face_detection = model_type == "face_detection";
+        let is_image_clustering = model_type == "image_clustering";
+        let is_image_aesthetics = model_type == "image_aesthetics";
+        let is_screenshot_detection = model_type == "screenshot_detection";
+        let is_document_detection = model_type == "document_detection";
+        let uses_dynamic_batching = is_image_clustering || is_image_aesthetics;
+        let uses_staged_concurrency = uses_dynamic_batching
+            || is_face_detection
+            || is_screenshot_detection
+            || is_document_detection;
         ServiceConfig {
             enabled: true,
             model_type: model_type.to_string(),
             startup_timeout_seconds: 10,
             request_timeout_seconds: 10,
             max_tokens: 100,
-            minimum_face_likelihood: (model_type == "face_detection").then_some(0.8),
-            minimum_face_resolution_pixels: (model_type == "face_detection").then_some(112),
-            max_concurrent_jobs: 8,
+            minimum_face_likelihood: is_face_detection.then_some(0.8),
+            minimum_face_resolution_pixels: is_face_detection.then_some(112),
+            face_detection_size: is_face_detection.then_some(960),
+            recognition_batch_size: is_face_detection.then_some(64),
+            recognition_batch_wait_milliseconds: is_face_detection.then_some(5),
+            model_batch_wait_milliseconds: uses_dynamic_batching.then_some(5),
+            max_concurrent_jobs: (!uses_staged_concurrency).then_some(8),
+            cpu_processing_concurrency: uses_staged_concurrency.then_some(8),
+            model_concurrency: uses_staged_concurrency.then_some(8),
         }
     }
 
@@ -402,7 +540,7 @@ mod tests {
     #[test]
     fn enabled_service_requires_positive_concurrency() {
         let mut config = local_config();
-        config.service[0].max_concurrent_jobs = 0;
+        config.service[0].max_concurrent_jobs = Some(0);
 
         let error = config
             .validate()
@@ -434,6 +572,47 @@ mod tests {
         assert!(config.validate().is_err());
         config.service[1].minimum_face_likelihood = Some(0.8);
         config.service[1].minimum_face_resolution_pixels = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].minimum_face_resolution_pixels = Some(112);
+        config.service[1].face_detection_size = Some(800);
+        assert!(config.validate().is_err());
+        config.service[1].face_detection_size = Some(960);
+        config.service[1].recognition_batch_size = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].recognition_batch_size = Some(64);
+        config.service[1].recognition_batch_wait_milliseconds = None;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn image_aesthetics_requires_staged_concurrency_and_batch_wait() {
+        let mut config = local_config();
+        config.service.push(service("image_aesthetics"));
+        assert!(config.validate().is_ok());
+
+        config.service[1].cpu_processing_concurrency = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].cpu_processing_concurrency = Some(8);
+        config.service[1].model_concurrency = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].model_concurrency = Some(64);
+        config.service[1].model_batch_wait_milliseconds = None;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn image_clustering_requires_staged_concurrency_and_batch_wait() {
+        let mut config = local_config();
+        config.service.push(service("image_clustering"));
+        assert!(config.validate().is_ok());
+
+        config.service[1].cpu_processing_concurrency = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].cpu_processing_concurrency = Some(16);
+        config.service[1].model_concurrency = Some(0);
+        assert!(config.validate().is_err());
+        config.service[1].model_concurrency = Some(16);
+        config.service[1].model_batch_wait_milliseconds = None;
         assert!(config.validate().is_err());
     }
 }

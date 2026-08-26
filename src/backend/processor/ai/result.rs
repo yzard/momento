@@ -1,4 +1,6 @@
-use momento_common::llm::{JobInputResult, JobResult};
+use momento_common::llm::{
+    JobInputResult, JobResult, IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -749,7 +751,9 @@ fn persist_clustering_result(
         .ok_or_else(|| {
             AppError::BadRequest("clustering embeddingDimensions is required".to_string())
         })? as usize;
-    if dimensions != 384 || embedding_bytes.len() != dimensions * std::mem::size_of::<f32>() {
+    if dimensions != IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS
+        || embedding_bytes.len() != dimensions * std::mem::size_of::<f32>()
+    {
         return Err(AppError::BadRequest(
             "clustering embedding has invalid dimensions".to_string(),
         ));

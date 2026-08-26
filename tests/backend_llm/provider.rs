@@ -26,12 +26,18 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--mode', required=True)
 parser.add_argument('--port', required=True, type=int)
 parser.add_argument('--start-log', required=True)
-parser.add_argument('--max-concurrent-jobs', required=True, type=int)
+parser.add_argument('--max-concurrent-jobs', type=int)
+parser.add_argument('--cpu-processing-concurrency', type=int)
+parser.add_argument('--model-concurrency', type=int)
+parser.add_argument('--model-batch-wait-milliseconds', type=int)
 parser.add_argument('--input-root', required=True)
 parser.add_argument('--mount-source', required=True)
 parser.add_argument('--cache-dir', required=True)
 parser.add_argument('--minimum-face-likelihood', type=float)
 parser.add_argument('--minimum-face-resolution-pixels', type=int)
+parser.add_argument('--face-detection-size', type=int)
+parser.add_argument('--recognition-batch-size', type=int)
+parser.add_argument('--recognition-batch-wait-milliseconds', type=int)
 arguments = parser.parse_args()
 expected_cache_dir = os.path.join(os.path.dirname(arguments.start_log), 'llm', 'cache')
 if arguments.cache_dir != expected_cache_dir:
@@ -41,13 +47,31 @@ if os.environ.get('XDG_CACHE_HOME') != expected_cache_dir:
 if os.environ.get('HOME') != expected_cache_dir:
     raise RuntimeError('invalid runtime home directory')
 if 'face_detection' in arguments.mode:
+    if arguments.cpu_processing_concurrency != 2:
+        raise RuntimeError('invalid CPU processing concurrency')
+    if arguments.model_concurrency != 2:
+        raise RuntimeError('invalid model concurrency')
+    if arguments.face_detection_size != 960:
+        raise RuntimeError('invalid face detection size')
+    if arguments.recognition_batch_size != 64:
+        raise RuntimeError('invalid recognition batch size')
+    if arguments.recognition_batch_wait_milliseconds != 5:
+        raise RuntimeError('invalid recognition batch wait')
     if arguments.minimum_face_likelihood != 0.8:
         raise RuntimeError('invalid minimum face likelihood')
     if arguments.minimum_face_resolution_pixels != 112:
         raise RuntimeError('invalid minimum face resolution')
+if 'image_aesthetics' in arguments.mode or 'image_clustering' in arguments.mode:
+    if arguments.cpu_processing_concurrency != 2:
+        raise RuntimeError('invalid dynamic batch CPU processing concurrency')
+    if arguments.model_concurrency != 2:
+        raise RuntimeError('invalid dynamic batch model concurrency')
+    if arguments.model_batch_wait_milliseconds != 5:
+        raise RuntimeError('invalid dynamic batch model wait')
 
+runtime_concurrency = arguments.model_concurrency or arguments.max_concurrent_jobs
 with open(arguments.start_log, 'a', encoding='utf-8') as output:
-    output.write(arguments.mode + ':' + str(arguments.max_concurrent_jobs) + '\n')
+    output.write(arguments.mode + ':' + str(runtime_concurrency) + '\n')
 
 def start_worker(duration_seconds):
     worker_ready = arguments.start_log + '.worker-ready'
@@ -212,14 +236,14 @@ class Handler(BaseHTTPRequestHandler):
                 'embeddingDimensions': 512,
             }]})
             return
-        embedding = [1.0] + [0.0] * 383
-        encoded = base64.b64encode(struct.pack('<384f', *embedding)).decode('ascii')
+        embedding = [1.0] + [0.0] * 767
+        encoded = base64.b64encode(struct.pack('<768f', *embedding)).decode('ascii')
         if arguments.mode == 'malformed_clustering':
             encoded = base64.b64encode(struct.pack('<f', 1.0)).decode('ascii')
         self.send_json(200, {
             'embedding': encoded,
             'embeddingEncoding': 'float32_le',
-            'embeddingDimensions': 384,
+            'embeddingDimensions': 768,
             'perceptualHash': '0123456789abcdef',
             'qualityScore': 0.75,
         })
@@ -273,8 +297,6 @@ pub(super) fn service(
         port.to_string(),
         "--start-log".to_string(),
         start_log.to_string_lossy().into_owned(),
-        "--max-concurrent-jobs".to_string(),
-        "{max_concurrent_jobs}".to_string(),
         "--input-root".to_string(),
         "{input_root}".to_string(),
         "--mount-source".to_string(),
@@ -284,16 +306,40 @@ pub(super) fn service(
     ];
     if model_type == "face_detection" {
         arguments.extend([
+            "--cpu-processing-concurrency".to_string(),
+            "{cpu_processing_concurrency}".to_string(),
+            "--model-concurrency".to_string(),
+            "{model_concurrency}".to_string(),
+            "--face-detection-size".to_string(),
+            "{face_detection_size}".to_string(),
+            "--recognition-batch-size".to_string(),
+            "{recognition_batch_size}".to_string(),
+            "--recognition-batch-wait-milliseconds".to_string(),
+            "{recognition_batch_wait_milliseconds}".to_string(),
             "--minimum-face-likelihood".to_string(),
             "{minimum_face_likelihood}".to_string(),
             "--minimum-face-resolution-pixels".to_string(),
             "{minimum_face_resolution_pixels}".to_string(),
         ]);
+    } else if matches!(model_type, "image_clustering" | "image_aesthetics") {
+        arguments.extend([
+            "--cpu-processing-concurrency".to_string(),
+            "{cpu_processing_concurrency}".to_string(),
+            "--model-concurrency".to_string(),
+            "{model_concurrency}".to_string(),
+            "--model-batch-wait-milliseconds".to_string(),
+            "{model_batch_wait_milliseconds}".to_string(),
+        ]);
+    } else {
+        arguments.extend([
+            "--max-concurrent-jobs".to_string(),
+            "{model_concurrency}".to_string(),
+        ]);
     }
     let model_version = if model_type == "ocr" {
         "unlimited_ocr".to_string()
     } else if model_type == "image_clustering" {
-        "dinov2-small".to_string()
+        "dinov2-base".to_string()
     } else if model_type == "image_aesthetics" {
         "clip-vit-b-32-laion-aesthetic-v1".to_string()
     } else if model_type == "face_detection" {
@@ -306,6 +352,16 @@ pub(super) fn service(
         "ram++".to_string()
     };
     let service_type = ServiceType::from_task(model_type).expect("known test service");
+    let is_screenshot_detection = model_type == "screenshot_detection";
+    let is_document_detection = model_type == "document_detection";
+    let is_face_detection = model_type == "face_detection";
+    let is_image_clustering = model_type == "image_clustering";
+    let is_image_aesthetics = model_type == "image_aesthetics";
+    let uses_dynamic_batching = is_image_clustering || is_image_aesthetics;
+    let uses_staged_concurrency = uses_dynamic_batching
+        || is_face_detection
+        || is_screenshot_detection
+        || is_document_detection;
     (
         ServiceConfig {
             enabled: true,
@@ -313,9 +369,15 @@ pub(super) fn service(
             startup_timeout_seconds: 5,
             request_timeout_seconds: 5,
             max_tokens: 8192,
-            minimum_face_likelihood: (model_type == "face_detection").then_some(0.8),
-            minimum_face_resolution_pixels: (model_type == "face_detection").then_some(112),
-            max_concurrent_jobs: 2,
+            minimum_face_likelihood: is_face_detection.then_some(0.8),
+            minimum_face_resolution_pixels: is_face_detection.then_some(112),
+            face_detection_size: is_face_detection.then_some(960),
+            recognition_batch_size: is_face_detection.then_some(64),
+            recognition_batch_wait_milliseconds: is_face_detection.then_some(5),
+            model_batch_wait_milliseconds: uses_dynamic_batching.then_some(5),
+            max_concurrent_jobs: (!uses_staged_concurrency).then_some(2),
+            cpu_processing_concurrency: uses_staged_concurrency.then_some(2),
+            model_concurrency: uses_staged_concurrency.then_some(2),
         },
         RuntimeSpec {
             service_type,
@@ -330,7 +392,7 @@ pub(super) fn service(
             model: if model_type == "ocr" {
                 "baidu/Unlimited-OCR".to_string()
             } else if model_type == "image_clustering" {
-                "facebook/dinov2-small".to_string()
+                "facebook/dinov2-base".to_string()
             } else if model_type == "image_aesthetics" {
                 "ViT-B/32".to_string()
             } else if model_type == "face_detection" {
@@ -340,7 +402,7 @@ pub(super) fn service(
             },
             model_version,
             embedding_dimensions: if model_type == "image_clustering" {
-                384
+                768
             } else if model_type == "face_detection" {
                 512
             } else {
@@ -478,7 +540,7 @@ async fn manager_reuses_a_runtime_and_switches_for_a_different_task() {
     .await
     .expect("Second clustering request should reuse the runtime");
 
-    assert_eq!(first.embedding_dimensions, Some(384));
+    assert_eq!(first.embedding_dimensions, Some(768));
     assert_eq!(first.embedding_encoding.as_deref(), Some("float32_le"));
     assert!(first
         .embedding
@@ -487,7 +549,7 @@ async fn manager_reuses_a_runtime_and_switches_for_a_different_task() {
     assert_eq!(first.quality_score, Some(0.75));
     let serialized = serde_json::to_value(&first).expect("Response should serialize");
     assert_eq!(serialized["embeddingEncoding"], "float32_le");
-    assert_eq!(serialized["embeddingDimensions"], 384);
+    assert_eq!(serialized["embeddingDimensions"], 768);
     assert_eq!(serialized["perceptualHash"], "0123456789abcdef");
     assert_eq!(serialized["qualityScore"], 0.75);
     assert_eq!(second.perceptual_hash.as_deref(), Some("0123456789abcdef"));
@@ -909,7 +971,7 @@ async fn manager_rejects_invalid_clustering_embedding_length() {
         .await
         .expect_err("Short embedding should be rejected");
 
-    assert!(error.to_string().contains("expected 1536"));
+    assert!(error.to_string().contains("expected 3072"));
     manager
         .shutdown()
         .await

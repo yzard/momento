@@ -5,6 +5,8 @@ pub const WEBSOCKET_PROTOCOL: &str = "momento-llm-v1";
 pub const MAX_CLIENT_ID_BYTES: usize = 128;
 pub const MAX_CONTROL_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_BINARY_CHUNK_BYTES: usize = 64 * 1024;
+pub const IMAGE_CLUSTERING_MODEL_VERSION: &str = "dinov2-base";
+pub const IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS: usize = 768;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

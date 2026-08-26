@@ -2246,6 +2246,11 @@ pub mod access {
 pub mod deduplicate {
     pub const COUNT_ENSEMBLED_MEDIA: &str =
         "SELECT COUNT(*) FROM media_similarity_index WHERE processing_status = 1";
+    pub const COUNT_INDEXES_FROM_OTHER_MODEL: &str =
+        "SELECT COUNT(*) FROM media_similarity_index WHERE processing_status = 1 AND model_version != ?";
+    pub const DELETE_HASH_BANDS_FROM_OTHER_MODEL: &str = "DELETE FROM media_similarity_hash_bands WHERE media_id IN (SELECT media_id FROM media_similarity_index WHERE processing_status = 1 AND model_version != ?)";
+    pub const DELETE_INDEXES_FROM_OTHER_MODEL: &str =
+        "DELETE FROM media_similarity_index WHERE processing_status = 1 AND model_version != ?";
     pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
     pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
     pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";

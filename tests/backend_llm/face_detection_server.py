@@ -9,6 +9,7 @@ import threading
 import unittest
 from pathlib import Path
 
+import numpy
 
 SOURCE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -94,9 +95,58 @@ class FaceDetectionServerTests(unittest.TestCase):
 
     def test_runtime_loads_only_detection_and_recognition_models(self):
         self.assertEqual(
-            FACE_DETECTION_SERVER.REQUIRED_MODULES,
-            ["detection", "recognition"],
+            FACE_DETECTION_SERVER.REQUIRED_MODULES, ["detection", "recognition"]
         )
+        self.assertEqual(FACE_DETECTION_SERVER.MODEL_NAME, "buffalo_l")
+        self.assertEqual(FACE_DETECTION_SERVER.RECOGNITION_INPUT_SIZE, 112)
+        self.assertEqual(FACE_DETECTION_SERVER.EMBEDDING_DIMENSIONS, 512)
+
+    def test_detection_size_accepts_only_supported_square_sizes(self):
+        self.assertEqual(
+            FACE_DETECTION_SERVER.SUPPORTED_FACE_DETECTION_SIZES, {640, 960, 1280}
+        )
+
+    def test_filters_small_faces_before_alignment(self):
+        aligned_keypoints = []
+
+        def align_face(_image_array, keypoints):
+            aligned_keypoints.append(keypoints)
+            return keypoints
+
+        keypoints = numpy.asarray(
+            [
+                [[10, 10], [20, 10], [15, 15], [11, 20], [19, 20]],
+                [[100, 100], [200, 100], [150, 150], [110, 200], [190, 200]],
+            ],
+            dtype=numpy.float32,
+        )
+        detected_faces = FACE_DETECTION_SERVER.prepare_detected_faces(
+            numpy.asarray(
+                [[0, 0, 50, 50, 0.99], [50, 50, 250, 250, 0.90]], dtype=numpy.float32
+            ),
+            keypoints,
+            numpy.zeros((1000, 1000, 3), dtype=numpy.uint8),
+            1000,
+            1000,
+            0.60,
+            100,
+            align_face,
+        )
+
+        self.assertEqual(len(detected_faces), 1)
+        self.assertEqual(len(aligned_keypoints), 1)
+        numpy.testing.assert_array_equal(aligned_keypoints[0], keypoints[1])
+
+    def test_normalizes_recognition_embedding(self):
+        embedding = FACE_DETECTION_SERVER.normalize_embedding([3.0, 4.0] + [0.0] * 510)
+
+        self.assertAlmostEqual(embedding[0], 0.6)
+        self.assertAlmostEqual(embedding[1], 0.8)
+        self.assertAlmostEqual(sum(value * value for value in embedding), 1.0)
+
+    def test_rejects_zero_norm_recognition_embedding(self):
+        with self.assertRaisesRegex(RuntimeError, "zero norm"):
+            FACE_DETECTION_SERVER.normalize_embedding([0.0] * 512)
 
     def test_model_directory_must_be_baked_into_the_image(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -134,9 +184,6 @@ class FaceDetectionServerTests(unittest.TestCase):
                 }
             ).encode()
             FACE_DETECTION_SERVER.Handler.runtime = runtime
-            FACE_DETECTION_SERVER.Handler.inference_slots = (
-                FACE_DETECTION_SERVER.create_inference_slots(1)
-            )
             FACE_DETECTION_SERVER.Handler.input_root = input_root
             server = FACE_DETECTION_SERVER.ModelHTTPServer(
                 ("127.0.0.1", 0), FACE_DETECTION_SERVER.Handler
@@ -163,15 +210,6 @@ class FaceDetectionServerTests(unittest.TestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(runtime.received, b"queued-image")
-
-    def test_model_concurrency_is_bounded_inside_runtime(self):
-        slots = FACE_DETECTION_SERVER.create_inference_slots(2)
-
-        self.assertTrue(slots.acquire(blocking=False))
-        self.assertTrue(slots.acquire(blocking=False))
-        self.assertFalse(slots.acquire(blocking=False))
-        slots.release()
-        slots.release()
 
     def test_keyboard_interrupt_closes_server_without_escaping(self):
         class InterruptedServer:

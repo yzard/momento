@@ -10,6 +10,7 @@ use crate::test_utils::{create_test_db, create_test_media};
 fn insert_similarity_index(
     pool: &momento_api::database::DbPool,
     media_id: i64,
+    model_version: &str,
     embedding: &[f32],
     band_value: i64,
     capture_time: i64,
@@ -21,7 +22,7 @@ fn insert_similarity_index(
             rusqlite::params![
                 media_id,
                 format!("hash_{media_id}"),
-                "model",
+                model_version,
                 "preprocess",
                 embedding_to_blob(embedding),
                 0_i64,
@@ -35,6 +36,17 @@ fn insert_similarity_index(
             rusqlite::params![media_id, 0_i64, band_value],
         )
         .expect("Failed to insert similarity hash band");
+}
+
+fn prepare_clustering_input(pool: &momento_api::database::DbPool, media_id: i64, filename: &str) {
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("metadata job");
+    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'previews', ?, ?, 'image/jpeg', 4, 'hash')", rusqlite::params![media_id, format!("ai/{filename}"), filename]).expect("prepared input");
 }
 
 #[test]
@@ -53,15 +65,7 @@ fn scan_claim_is_persistent_and_exclusive() {
 fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "clustering-input.jpg");
-    let connection = pool.get().expect("connection");
-    connection
-        .execute(
-            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
-            [media_id],
-        )
-        .expect("metadata job");
-    connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'previews', 'ai/clustering.jpg', 'clustering.jpg', 'image/jpeg', 4, 'hash')", [media_id]).expect("prepared input");
-    drop(connection);
+    prepare_clustering_input(&pool, media_id, "clustering.jpg");
     let run_id = create_run(&pool, "manual", None).expect("run");
 
     assert_eq!(queue_clustering_jobs(&pool, run_id).expect("queue"), 1);
@@ -110,6 +114,71 @@ fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
 }
 
 #[test]
+fn clustering_run_replaces_indexes_from_the_previous_model() {
+    let pool = create_test_db();
+    let stale_media_id = create_test_media(&pool, "stale-small.jpg");
+    let current_media_id = create_test_media(&pool, "current-base.jpg");
+    prepare_clustering_input(&pool, stale_media_id, "stale-small.jpg");
+    prepare_clustering_input(&pool, current_media_id, "current-base.jpg");
+    insert_similarity_index(&pool, stale_media_id, "dinov2-small", &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(
+        &pool,
+        current_media_id,
+        "dinov2-base",
+        &[1.0, 0.0],
+        7,
+        1_005,
+    );
+    let connection = pool.get().expect("connection");
+    let cluster_id: i64 = connection
+        .query_row(
+            "INSERT INTO media_similarity_clusters (kind, representative_media_id) VALUES ('near_duplicate', ?) RETURNING id",
+            [current_media_id],
+            |row| row.get(0),
+        )
+        .expect("cluster");
+    connection.execute("INSERT INTO media_similarity_cluster_members (cluster_id, media_id, cosine_similarity, perceptual_hash_distance) VALUES (?, ?, 1.0, 0), (?, ?, 0.99, 0)", rusqlite::params![cluster_id, current_media_id, cluster_id, stale_media_id]).expect("cluster members");
+    drop(connection);
+    let run_id = create_run(&pool, "manual", None).expect("run");
+
+    assert_eq!(queue_clustering_jobs(&pool, run_id).expect("queue"), 1);
+
+    let connection = pool.get().expect("connection");
+    let queued_media_id: i64 = connection
+        .query_row(
+            "SELECT media_id FROM llm_jobs WHERE deduplicate_run_id = ?",
+            [run_id],
+            |row| row.get(0),
+        )
+        .expect("queued media");
+    let remaining_models = connection
+        .prepare("SELECT model_version FROM media_similarity_index ORDER BY media_id")
+        .expect("models query")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("models")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("model versions");
+    let stale_band_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_hash_bands WHERE media_id = ?",
+            [stale_media_id],
+            |row| row.get(0),
+        )
+        .expect("stale bands");
+    let cluster_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_clusters",
+            [],
+            |row| row.get(0),
+        )
+        .expect("clusters");
+    assert_eq!(queued_media_id, stale_media_id);
+    assert_eq!(remaining_models, vec!["dinov2-base"]);
+    assert_eq!(stale_band_count, 0);
+    assert_eq!(cluster_count, 0);
+}
+
+#[test]
 fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "cancel.jpg");
@@ -144,8 +213,8 @@ fn failed_clustering_jobs_still_generate_groups_from_successful_indexes() {
     let first_media_id = create_test_media(&pool, "successful-a.jpg");
     let second_media_id = create_test_media(&pool, "successful-b.jpg");
     let failed_media_id = create_test_media(&pool, "failed.jpg");
-    insert_similarity_index(&pool, first_media_id, &[1.0, 0.0], 7, 1_000);
-    insert_similarity_index(&pool, second_media_id, &[1.0, 0.0], 7, 1_005);
+    insert_similarity_index(&pool, first_media_id, "dinov2-base", &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second_media_id, "dinov2-base", &[1.0, 0.0], 7, 1_005);
     let run_id = create_run(&pool, "scheduled", Some("2026-08-12T03:00:00Z")).expect("run");
     let connection = pool.get().expect("connection");
     connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('failed-job', ?, ?, 'image_clustering', 'failed')", rusqlite::params![failed_media_id, run_id]).expect("job");
@@ -262,8 +331,8 @@ fn identical_near_duplicate_and_burst_sets_are_persisted_once() {
     let pool = create_test_db();
     let first = create_test_media(&pool, "first.jpg");
     let second = create_test_media(&pool, "second.jpg");
-    insert_similarity_index(&pool, first, &[1.0, 0.0], 7, 1_000);
-    insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
+    insert_similarity_index(&pool, first, "dinov2-base", &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second, "dinov2-base", &[1.0, 0.0], 7, 1_005);
     let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
 
     generate_clusters(&pool, run_id, None).expect("Failed to generate clusters");
@@ -294,10 +363,10 @@ fn distinct_media_sets_remain_separate_after_canonicalization() {
     let second = create_test_media(&pool, "first-set-b.jpg");
     let third = create_test_media(&pool, "second-set-a.jpg");
     let fourth = create_test_media(&pool, "second-set-b.jpg");
-    insert_similarity_index(&pool, first, &[1.0, 0.0], 7, 1_000);
-    insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
-    insert_similarity_index(&pool, third, &[0.0, 1.0], 8, 2_000);
-    insert_similarity_index(&pool, fourth, &[0.0, 1.0], 8, 2_005);
+    insert_similarity_index(&pool, first, "dinov2-base", &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second, "dinov2-base", &[1.0, 0.0], 7, 1_005);
+    insert_similarity_index(&pool, third, "dinov2-base", &[0.0, 1.0], 8, 2_000);
+    insert_similarity_index(&pool, fourth, "dinov2-base", &[0.0, 1.0], 8, 2_005);
     let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
 
     generate_clusters(&pool, run_id, None).expect("Failed to generate clusters");
@@ -320,8 +389,8 @@ fn cancelled_generation_keeps_the_previous_complete_clusters() {
     let pool = create_test_db();
     let first = create_test_media(&pool, "existing-a.jpg");
     let second = create_test_media(&pool, "existing-b.jpg");
-    insert_similarity_index(&pool, first, &[1.0, 0.0], 7, 1_000);
-    insert_similarity_index(&pool, second, &[1.0, 0.0], 7, 1_005);
+    insert_similarity_index(&pool, first, "dinov2-base", &[1.0, 0.0], 7, 1_000);
+    insert_similarity_index(&pool, second, "dinov2-base", &[1.0, 0.0], 7, 1_005);
     let connection = pool.get().expect("Failed to get connection");
     connection
         .execute(

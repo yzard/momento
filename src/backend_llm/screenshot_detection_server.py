@@ -10,7 +10,6 @@ from screenshot_document_common import (
     visual_metrics,
 )
 
-
 SCREENSHOT_THRESHOLD = 0.58
 TIME_PATTERN = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
 

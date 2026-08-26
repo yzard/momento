@@ -5,10 +5,7 @@ import types
 import unittest
 from pathlib import Path
 
-
-SOURCE_PATH = (
-    Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "image_runtime.py"
-)
+SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "image_runtime.py"
 SPECIFICATION = importlib.util.spec_from_file_location("image_runtime", SOURCE_PATH)
 IMAGE_RUNTIME = importlib.util.module_from_spec(SPECIFICATION)
 SPECIFICATION.loader.exec_module(IMAGE_RUNTIME)
@@ -17,6 +14,7 @@ ModelHTTPServer = IMAGE_RUNTIME.ModelHTTPServer
 create_inference_slots = IMAGE_RUNTIME.create_inference_slots
 decode_image = IMAGE_RUNTIME.decode_image
 register_image_decoders = IMAGE_RUNTIME.register_image_decoders
+resize_for_analysis = IMAGE_RUNTIME.resize_for_analysis
 select_cuda_device = IMAGE_RUNTIME.select_cuda_device
 serve_until_stopped = IMAGE_RUNTIME.serve_until_stopped
 
@@ -58,6 +56,20 @@ class ImageRuntimeTests(unittest.TestCase):
         self.assertEqual(decoded.mode, "RGB")
         self.assertEqual(decoded.size, (120, 40))
 
+    def test_resize_for_analysis_preserves_aspect_ratio_and_bounds_the_maximum_side(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+
+        resized = IMAGE_RUNTIME.resize_for_analysis(Image.new("RGB", (1200, 400)), 512)
+
+        self.assertEqual(resized.size, (512, 171))
+
+    def test_resize_for_analysis_rejects_non_positive_maximum_side(self):
+        with self.assertRaisesRegex(ValueError, "maximum_side_length"):
+            IMAGE_RUNTIME.resize_for_analysis(object(), 0)
+
     def test_registers_heif_without_embedded_thumbnails(self):
         calls = []
         pillow_heif = types.ModuleType("pillow_heif")
@@ -83,9 +95,7 @@ class ImageRuntimeTests(unittest.TestCase):
             self.skipTest("Pillow and pillow-heif are required")
 
         encoded = io.BytesIO()
-        pillow_heif.from_pillow(
-            Image.new("RGB", (48, 32), color=(10, 20, 30))
-        ).save(encoded)
+        pillow_heif.from_pillow(Image.new("RGB", (48, 32), color=(10, 20, 30))).save(encoded)
         self.assertEqual(encoded.getvalue()[4:12], b"ftypheic")
 
         IMAGE_RUNTIME.register_image_decoders()

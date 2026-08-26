@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::Utc;
+use momento_common::llm::IMAGE_CLUSTERING_MODEL_VERSION;
 use tracing::info;
 
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries, DbPool};
@@ -275,6 +276,23 @@ pub fn queue_clustering_jobs(pool: &DbPool, run_id: i64) -> AppResult<usize> {
         return Ok(0);
     }
     let transaction = connection.unchecked_transaction()?;
+    let indexes_from_other_model: i64 = transaction.query_row(
+        queries::deduplicate::COUNT_INDEXES_FROM_OTHER_MODEL,
+        [IMAGE_CLUSTERING_MODEL_VERSION],
+        |row| row.get(0),
+    )?;
+    if indexes_from_other_model > 0 {
+        transaction.execute(queries::deduplicate::CLEAN_CLUSTERS, [])?;
+        transaction.execute(
+            queries::deduplicate::DELETE_HASH_BANDS_FROM_OTHER_MODEL,
+            [IMAGE_CLUSTERING_MODEL_VERSION],
+        )?;
+        transaction.execute(
+            queries::deduplicate::DELETE_INDEXES_FROM_OTHER_MODEL,
+            [IMAGE_CLUSTERING_MODEL_VERSION],
+        )?;
+        transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
+    }
     let queued_jobs = transaction.execute(
         queries::deduplicate::CREATE_CLUSTERING_JOBS,
         rusqlite::params![run_id, run_id],

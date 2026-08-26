@@ -923,7 +923,7 @@ fn clustering_result_persists_integer_capture_timestamp() {
         .expect("similarity run");
     connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status, attempts) VALUES ('result-clustering', ?, ?, 'image_clustering', 'submitted', 1)", [media_id, run_id]).expect("job");
     drop(connection);
-    let embedding = base64::engine::general_purpose::STANDARD.encode(vec![0_u8; 384 * 4]);
+    let embedding = base64::engine::general_purpose::STANDARD.encode(vec![0_u8; 768 * 4]);
     let result = JobResult {
         job_id: "result-clustering".to_string(),
         media_id,
@@ -931,11 +931,11 @@ fn clustering_result_persists_integer_capture_timestamp() {
         attempt: 1,
         status: "completed".to_string(),
         model_type: Some("image_clustering".to_string()),
-        model_version: Some("dinov2-small".to_string()),
+        model_version: Some("dinov2-base".to_string()),
         result: Some(serde_json::json!({
             "embedding": embedding,
             "embeddingEncoding": "float32_le",
-            "embeddingDimensions": 384,
+            "embeddingDimensions": 768,
             "perceptualHash": "0123456789abcdef"
         })),
         input_results: None,

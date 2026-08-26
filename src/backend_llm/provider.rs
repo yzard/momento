@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use momento_common::llm::{IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS, IMAGE_CLUSTERING_MODEL_VERSION};
 use reqwest::Client;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -19,11 +20,15 @@ use crate::error::ServiceError;
 const RUNTIME_HOST: &str = "127.0.0.1";
 const RUNTIME_INPUT_PLACEHOLDER: &str = "{input_root}";
 const RUNTIME_CACHE_PLACEHOLDER: &str = "{cache_dir}";
-const RUNTIME_CONCURRENCY_PLACEHOLDER: &str = "{max_concurrent_jobs}";
+const MODEL_CONCURRENCY_PLACEHOLDER: &str = "{model_concurrency}";
+const CPU_PROCESSING_CONCURRENCY_PLACEHOLDER: &str = "{cpu_processing_concurrency}";
+const MODEL_BATCH_WAIT_PLACEHOLDER: &str = "{model_batch_wait_milliseconds}";
 const FACE_LIKELIHOOD_PLACEHOLDER: &str = "{minimum_face_likelihood}";
 const FACE_RESOLUTION_PLACEHOLDER: &str = "{minimum_face_resolution_pixels}";
+const FACE_DETECTION_SIZE_PLACEHOLDER: &str = "{face_detection_size}";
+const RECOGNITION_BATCH_SIZE_PLACEHOLDER: &str = "{recognition_batch_size}";
+const RECOGNITION_BATCH_WAIT_PLACEHOLDER: &str = "{recognition_batch_wait_milliseconds}";
 const SYSTEM_RUNTIME_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const CLUSTERING_EMBEDDING_DIMENSIONS: usize = 384;
 const FACE_EMBEDDING_DIMENSIONS: usize = 512;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const RUNTIME_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -170,7 +175,7 @@ impl RuntimeCatalog {
                     "--max-num-batched-tokens",
                     "8192",
                     "--max-num-seqs",
-                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    MODEL_CONCURRENCY_PLACEHOLDER,
                     "--allowed-local-media-path",
                     RUNTIME_INPUT_PLACEHOLDER,
                     "--gpu-memory-utilization",
@@ -199,7 +204,7 @@ impl RuntimeCatalog {
                     "--device",
                     "cuda:0",
                     "--max-concurrent-jobs",
-                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    MODEL_CONCURRENCY_PLACEHOLDER,
                     "--input-root",
                     RUNTIME_INPUT_PLACEHOLDER,
                 ]
@@ -218,7 +223,7 @@ impl RuntimeCatalog {
                 arguments: vec![
                     "/app/runtimes/image_clustering_server.py",
                     "--model",
-                    "/opt/models/dinov2-small",
+                    "/opt/models/dinov2-base",
                     "--cache-dir",
                     "{cache_dir}/huggingface",
                     "--device",
@@ -227,8 +232,12 @@ impl RuntimeCatalog {
                     RUNTIME_HOST,
                     "--port",
                     "8300",
-                    "--max-concurrent-jobs",
-                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--cpu-processing-concurrency",
+                    CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    "--model-concurrency",
+                    MODEL_CONCURRENCY_PLACEHOLDER,
+                    "--model-batch-wait-milliseconds",
+                    MODEL_BATCH_WAIT_PLACEHOLDER,
                     "--input-root",
                     RUNTIME_INPUT_PLACEHOLDER,
                 ]
@@ -237,9 +246,9 @@ impl RuntimeCatalog {
                 .collect(),
                 environment: Vec::new(),
                 base_url: "http://127.0.0.1:8300".to_string(),
-                model: "facebook/dinov2-small".to_string(),
-                model_version: "dinov2-small".to_string(),
-                embedding_dimensions: CLUSTERING_EMBEDDING_DIMENSIONS,
+                model: "facebook/dinov2-base".to_string(),
+                model_version: IMAGE_CLUSTERING_MODEL_VERSION.to_string(),
+                embedding_dimensions: IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS,
             },
             RuntimeSpec {
                 service_type: ServiceType::FaceDetection,
@@ -254,10 +263,18 @@ impl RuntimeCatalog {
                     RUNTIME_HOST,
                     "--port",
                     "8500",
-                    "--max-concurrent-jobs",
-                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--cpu-processing-concurrency",
+                    CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    "--model-concurrency",
+                    MODEL_CONCURRENCY_PLACEHOLDER,
                     "--input-root",
                     RUNTIME_INPUT_PLACEHOLDER,
+                    "--face-detection-size",
+                    FACE_DETECTION_SIZE_PLACEHOLDER,
+                    "--recognition-batch-size",
+                    RECOGNITION_BATCH_SIZE_PLACEHOLDER,
+                    "--recognition-batch-wait-milliseconds",
+                    RECOGNITION_BATCH_WAIT_PLACEHOLDER,
                     "--minimum-face-likelihood",
                     FACE_LIKELIHOOD_PLACEHOLDER,
                     "--minimum-face-resolution-pixels",
@@ -287,8 +304,12 @@ impl RuntimeCatalog {
                     RUNTIME_HOST,
                     "--port",
                     "8600",
-                    "--max-concurrent-jobs",
-                    RUNTIME_CONCURRENCY_PLACEHOLDER,
+                    "--cpu-processing-concurrency",
+                    CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    "--model-concurrency",
+                    MODEL_CONCURRENCY_PLACEHOLDER,
+                    "--model-batch-wait-milliseconds",
+                    MODEL_BATCH_WAIT_PLACEHOLDER,
                     "--input-root",
                     RUNTIME_INPUT_PLACEHOLDER,
                 ]
@@ -1565,8 +1586,10 @@ fn detection_runtime_spec(
             RUNTIME_HOST,
             "--port",
             port,
-            "--max-concurrent-jobs",
-            RUNTIME_CONCURRENCY_PLACEHOLDER,
+            "--cpu-processing-concurrency",
+            CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+            "--model-concurrency",
+            MODEL_CONCURRENCY_PLACEHOLDER,
             "--input-root",
             RUNTIME_INPUT_PLACEHOLDER,
             "--text-detection-model",
@@ -1798,26 +1821,56 @@ fn spawn_service_command(
         ))
     })?;
     let cache_dir = cache_dir.to_string_lossy();
+    let model_concurrency = config.configured_model_concurrency()?.to_string();
+    let cpu_processing_concurrency = config
+        .cpu_processing_concurrency
+        .map(|concurrency| concurrency.to_string());
+    let model_batch_wait_milliseconds = config
+        .model_batch_wait_milliseconds
+        .map(|wait_milliseconds| wait_milliseconds.to_string());
     let minimum_face_likelihood = config
         .minimum_face_likelihood
         .map(|likelihood| likelihood.to_string());
     let minimum_face_resolution_pixels = config
         .minimum_face_resolution_pixels
         .map(|resolution| resolution.to_string());
+    let face_detection_size = config
+        .face_detection_size
+        .map(|detection_size| detection_size.to_string());
+    let recognition_batch_size = config
+        .recognition_batch_size
+        .map(|batch_size| batch_size.to_string());
+    let recognition_batch_wait_milliseconds = config
+        .recognition_batch_wait_milliseconds
+        .map(|wait_milliseconds| wait_milliseconds.to_string());
     let args = runtime
         .arguments
         .iter()
         .map(|arg| {
-            let mut argument = arg.replace(RUNTIME_INPUT_PLACEHOLDER, &input_root).replace(
-                RUNTIME_CONCURRENCY_PLACEHOLDER,
-                &config.max_concurrent_jobs.to_string(),
-            );
+            let mut argument = arg
+                .replace(RUNTIME_INPUT_PLACEHOLDER, &input_root)
+                .replace(MODEL_CONCURRENCY_PLACEHOLDER, &model_concurrency);
             argument = argument.replace(RUNTIME_CACHE_PLACEHOLDER, &cache_dir);
+            if let Some(concurrency) = &cpu_processing_concurrency {
+                argument = argument.replace(CPU_PROCESSING_CONCURRENCY_PLACEHOLDER, concurrency);
+            }
+            if let Some(wait_milliseconds) = &model_batch_wait_milliseconds {
+                argument = argument.replace(MODEL_BATCH_WAIT_PLACEHOLDER, wait_milliseconds);
+            }
             if let Some(likelihood) = &minimum_face_likelihood {
                 argument = argument.replace(FACE_LIKELIHOOD_PLACEHOLDER, likelihood);
             }
             if let Some(resolution) = &minimum_face_resolution_pixels {
                 argument = argument.replace(FACE_RESOLUTION_PLACEHOLDER, resolution);
+            }
+            if let Some(detection_size) = &face_detection_size {
+                argument = argument.replace(FACE_DETECTION_SIZE_PLACEHOLDER, detection_size);
+            }
+            if let Some(batch_size) = &recognition_batch_size {
+                argument = argument.replace(RECOGNITION_BATCH_SIZE_PLACEHOLDER, batch_size);
+            }
+            if let Some(wait_milliseconds) = &recognition_batch_wait_milliseconds {
+                argument = argument.replace(RECOGNITION_BATCH_WAIT_PLACEHOLDER, wait_milliseconds);
             }
             argument
         })
@@ -1912,7 +1965,10 @@ fn redact_base64_token(output: &mut String, text: &str, start: Option<usize>, en
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeCatalog, ServiceManager, ServiceType};
+    use super::{
+        RuntimeCatalog, ServiceManager, ServiceType, CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+        MODEL_BATCH_WAIT_PLACEHOLDER, MODEL_CONCURRENCY_PLACEHOLDER,
+    };
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1965,6 +2021,26 @@ mod tests {
             .environment
             .iter()
             .any(|(name, value)| { name == "VLLM_USE_FLASHINFER_SAMPLER" && value == "0" }));
+
+        let clustering = runtimes
+            .get(ServiceType::ImageClustering)
+            .expect("image clustering runtime");
+        for expected_arguments in [
+            [
+                "--cpu-processing-concurrency",
+                CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+            ],
+            ["--model-concurrency", MODEL_CONCURRENCY_PLACEHOLDER],
+            [
+                "--model-batch-wait-milliseconds",
+                MODEL_BATCH_WAIT_PLACEHOLDER,
+            ],
+        ] {
+            assert!(clustering
+                .arguments
+                .windows(2)
+                .any(|arguments| arguments == expected_arguments));
+        }
 
         let aesthetics = runtimes
             .get(ServiceType::ImageAesthetics)
@@ -2022,6 +2098,16 @@ mod tests {
                 .arguments
                 .windows(2)
                 .any(|arguments| { arguments == ["--device", "gpu:0"] }));
+            assert!(detection_runtime.arguments.windows(2).any(|arguments| {
+                arguments
+                    == [
+                        "--cpu-processing-concurrency",
+                        CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    ]
+            }));
+            assert!(detection_runtime.arguments.windows(2).any(|arguments| {
+                arguments == ["--model-concurrency", MODEL_CONCURRENCY_PLACEHOLDER]
+            }));
             assert_eq!(
                 detection_runtime.model,
                 "PP-OCRv6_small_det+PP-OCRv6_small_rec"

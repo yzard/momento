@@ -40,6 +40,16 @@ def decode_image(image_source):
         raise InvalidImageError(f"could not decode image: {error}") from error
 
 
+def resize_for_analysis(image, maximum_side_length):
+    from PIL import Image
+
+    if maximum_side_length <= 0:
+        raise ValueError("analysis maximum_side_length must be positive")
+    resized_image = image.copy()
+    resized_image.thumbnail((maximum_side_length, maximum_side_length), Image.Resampling.LANCZOS)
+    return resized_image
+
+
 class ModelHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 1024

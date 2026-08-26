@@ -29,24 +29,34 @@ mod template {
     pub(super) const OCR_MAX_CONCURRENT_JOBS: usize = 100;
     pub(super) const IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
     pub(super) const IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const IMAGE_TAGGING_MAX_CONCURRENT_JOBS: usize = 16;
+    pub(super) const IMAGE_TAGGING_MAX_CONCURRENT_JOBS: usize = 8;
     pub(super) const IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
     pub(super) const IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS: usize = 32;
+    pub(super) const IMAGE_CLUSTERING_CPU_PROCESSING_CONCURRENCY: usize = 16;
+    pub(super) const IMAGE_CLUSTERING_MODEL_CONCURRENCY: usize = 16;
+    pub(super) const IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS: u64 = 5;
     pub(super) const IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS: u64 = 900;
     pub(super) const IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS: usize = 16;
+    pub(super) const IMAGE_AESTHETICS_CPU_PROCESSING_CONCURRENCY: usize = 16;
+    pub(super) const IMAGE_AESTHETICS_MODEL_CONCURRENCY: usize = 64;
+    pub(super) const IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS: u64 = 5;
     pub(super) const FACE_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 900;
     pub(super) const FACE_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const FACE_DETECTION_MAX_CONCURRENT_JOBS: usize = 16;
+    pub(super) const FACE_DETECTION_CPU_PROCESSING_CONCURRENCY: usize = 8;
+    pub(super) const FACE_DETECTION_MODEL_CONCURRENCY: usize = 8;
+    pub(super) const FACE_DETECTION_SIZE: u32 = 960;
+    pub(super) const FACE_RECOGNITION_BATCH_SIZE: usize = 64;
+    pub(super) const FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS: u64 = 5;
     pub(super) const MINIMUM_FACE_LIKELIHOOD: f64 = 0.6;
     pub(super) const MINIMUM_FACE_RESOLUTION_PIXELS: u32 = 100;
     pub(super) const SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
     pub(super) const SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS: usize = 8;
+    pub(super) const SCREENSHOT_DETECTION_CPU_PROCESSING_CONCURRENCY: usize = 8;
+    pub(super) const SCREENSHOT_DETECTION_MODEL_CONCURRENCY: usize = 8;
     pub(super) const DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
     pub(super) const DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS: usize = 8;
+    pub(super) const DOCUMENT_DETECTION_CPU_PROCESSING_CONCURRENCY: usize = 8;
+    pub(super) const DOCUMENT_DETECTION_MODEL_CONCURRENCY: usize = 8;
 }
 
 pub(crate) fn server_host() -> String {
@@ -186,8 +196,16 @@ pub(crate) fn render_template(source: &str) -> String {
             template::IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
-            "{{IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS}}",
-            template::IMAGE_CLUSTERING_MAX_CONCURRENT_JOBS.to_string(),
+            "{{IMAGE_CLUSTERING_CPU_PROCESSING_CONCURRENCY}}",
+            template::IMAGE_CLUSTERING_CPU_PROCESSING_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{IMAGE_CLUSTERING_MODEL_CONCURRENCY}}",
+            template::IMAGE_CLUSTERING_MODEL_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS}}",
+            template::IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS.to_string(),
         ),
         (
             "{{IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS}}",
@@ -198,8 +216,16 @@ pub(crate) fn render_template(source: &str) -> String {
             template::IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
-            "{{IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS}}",
-            template::IMAGE_AESTHETICS_MAX_CONCURRENT_JOBS.to_string(),
+            "{{IMAGE_AESTHETICS_CPU_PROCESSING_CONCURRENCY}}",
+            template::IMAGE_AESTHETICS_CPU_PROCESSING_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{IMAGE_AESTHETICS_MODEL_CONCURRENCY}}",
+            template::IMAGE_AESTHETICS_MODEL_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS}}",
+            template::IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS.to_string(),
         ),
         (
             "{{FACE_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
@@ -210,8 +236,24 @@ pub(crate) fn render_template(source: &str) -> String {
             template::FACE_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
-            "{{FACE_DETECTION_MAX_CONCURRENT_JOBS}}",
-            template::FACE_DETECTION_MAX_CONCURRENT_JOBS.to_string(),
+            "{{FACE_DETECTION_CPU_PROCESSING_CONCURRENCY}}",
+            template::FACE_DETECTION_CPU_PROCESSING_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{FACE_DETECTION_MODEL_CONCURRENCY}}",
+            template::FACE_DETECTION_MODEL_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{FACE_DETECTION_SIZE}}",
+            template::FACE_DETECTION_SIZE.to_string(),
+        ),
+        (
+            "{{FACE_RECOGNITION_BATCH_SIZE}}",
+            template::FACE_RECOGNITION_BATCH_SIZE.to_string(),
+        ),
+        (
+            "{{FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS}}",
+            template::FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS.to_string(),
         ),
         (
             "{{MINIMUM_FACE_LIKELIHOOD}}",
@@ -230,8 +272,12 @@ pub(crate) fn render_template(source: &str) -> String {
             template::SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
-            "{{SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS}}",
-            template::SCREENSHOT_DETECTION_MAX_CONCURRENT_JOBS.to_string(),
+            "{{SCREENSHOT_DETECTION_CPU_PROCESSING_CONCURRENCY}}",
+            template::SCREENSHOT_DETECTION_CPU_PROCESSING_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{SCREENSHOT_DETECTION_MODEL_CONCURRENCY}}",
+            template::SCREENSHOT_DETECTION_MODEL_CONCURRENCY.to_string(),
         ),
         (
             "{{DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
@@ -242,8 +288,12 @@ pub(crate) fn render_template(source: &str) -> String {
             template::DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
-            "{{DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS}}",
-            template::DOCUMENT_DETECTION_MAX_CONCURRENT_JOBS.to_string(),
+            "{{DOCUMENT_DETECTION_CPU_PROCESSING_CONCURRENCY}}",
+            template::DOCUMENT_DETECTION_CPU_PROCESSING_CONCURRENCY.to_string(),
+        ),
+        (
+            "{{DOCUMENT_DETECTION_MODEL_CONCURRENCY}}",
+            template::DOCUMENT_DETECTION_MODEL_CONCURRENCY.to_string(),
         ),
     ];
 

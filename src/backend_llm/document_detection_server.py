@@ -10,7 +10,6 @@ from screenshot_document_common import (
     visual_metrics,
 )
 
-
 DOCUMENT_THRESHOLD = 0.58
 
 
@@ -23,9 +22,7 @@ def text_layout_metrics(text_regions):
     )
     occupancy_score = bounded_score(occupied_area / 0.16, "text occupancy score")
 
-    centers = sorted(
-        region["y"] + region["height"] / 2.0 for region in text_regions
-    )
+    centers = sorted(region["y"] + region["height"] / 2.0 for region in text_regions)
     line_centers = []
     for center in centers:
         if not line_centers or center - line_centers[-1][-1] > 0.025:

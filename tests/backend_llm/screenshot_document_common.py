@@ -9,7 +9,6 @@ from unittest import mock
 
 from PIL import Image
 
-
 SOURCE_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -48,41 +47,79 @@ class FakePaddleOCRPipeline:
 
 
 class ScreenshotDocumentCommonTests(unittest.TestCase):
-    def test_runtime_decodes_once_and_calls_the_supplied_detector(self):
-        decoded_image = object()
+    def test_runtime_prepares_ocr_input_and_calls_the_supplied_detector(self):
+        decoded_image = Image.new("RGB", (20, 10), color=(10, 20, 30))
         text_regions = [{"text": "visible"}]
         expected_response = {"detected": True, "confidence": 0.9}
         detector = mock.Mock(return_value=expected_response)
         text_region_extractor = mock.Mock()
         text_region_extractor.infer.return_value = text_regions
         with mock.patch.object(COMMON, "decode_image", return_value=decoded_image):
-            response = COMMON.DetectionRuntime(
-                detector, text_region_extractor
-            ).infer(b"image")
+            runtime = COMMON.DetectionRuntime(detector, text_region_extractor)
+            prepared_input = runtime.prepare_input(b"image")
+            response = runtime.infer(prepared_input)
 
         self.assertEqual(response, expected_response)
-        text_region_extractor.infer.assert_called_once_with(decoded_image)
+        paddle_image = text_region_extractor.infer.call_args.args[0]
+        self.assertEqual(paddle_image.shape, (10, 20, 3))
+        text_region_extractor.infer.assert_called_once_with(paddle_image, 20, 10)
         detector.assert_called_once_with(decoded_image, text_regions)
 
-    def test_runtime_concurrency_slot_is_acquired_before_input_handling(self):
+    def test_cpu_processing_slot_is_released_before_model_inference(self):
         events = []
 
         class Slot:
+            def __init__(self, name):
+                self.name = name
+
             def __enter__(self):
-                events.append("acquired")
+                events.append(f"{self.name} acquired")
 
             def __exit__(self, exception_type, exception, traceback):
-                events.append("released")
+                events.append(f"{self.name} released")
 
-        class FakeHandler:
-            inference_slots = Slot()
+        class ImageSource:
+            def __enter__(self):
+                events.append("opened")
+                return b"image"
 
-            def handle_inference(self):
-                events.append("read")
+            def __exit__(self, exception_type, exception, traceback):
+                events.append("closed")
 
-        COMMON.run_bounded_inference(FakeHandler())
+        class Runtime:
+            def prepare_input(self, image_source):
+                events.append("resized")
+                return image_source
 
-        self.assertEqual(events, ["acquired", "read", "released"])
+            def infer(self, prepared_input):
+                events.append("model inference")
+                return prepared_input
+
+        handler = types.SimpleNamespace(
+            cpu_processing_slots=Slot("cpu"),
+            model_slots=Slot("model"),
+            input_root=Path("/inputs"),
+            runtime=Runtime(),
+        )
+        with mock.patch.object(
+            COMMON, "read_runtime_input", return_value=ImageSource()
+        ):
+            response = COMMON.run_bounded_model_inference(handler)
+
+        self.assertEqual(response, b"image")
+        self.assertEqual(
+            events,
+            [
+                "model acquired",
+                "cpu acquired",
+                "opened",
+                "resized",
+                "closed",
+                "cpu released",
+                "model inference",
+                "model released",
+            ],
+        )
 
     def test_pipeline_configuration_groups_requests_and_batches_recognition(self):
         configuration = COMMON.paddleocr_pipeline_configuration(
@@ -99,11 +136,13 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
             configuration["SubModules"]["TextDetection"]["model_dir"],
             "/models/detection",
         )
-        self.assertNotIn(
-            "batch_size", configuration["SubModules"]["TextDetection"]
-        )
+        self.assertNotIn("batch_size", configuration["SubModules"]["TextDetection"])
         self.assertEqual(
             configuration["SubModules"]["TextRecognition"]["batch_size"], 8
+        )
+        self.assertEqual(
+            configuration["SubModules"]["TextDetection"]["max_side_limit"],
+            COMMON.PADDLEOCR_MAX_SIDE_LENGTH,
         )
 
     def test_pipeline_configuration_rejects_non_positive_batch_size(self):
@@ -213,6 +252,27 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "different lengths"):
             COMMON.paddleocr_text_regions(prediction, 100, 100)
 
+    def test_resize_for_paddleocr_limits_landscape_and_portrait_images(self):
+        landscape = Image.new("RGB", (4032, 3024))
+        portrait = Image.new("RGB", (3024, 4032))
+
+        resized_landscape = COMMON.resize_for_paddleocr(landscape, 4000)
+        resized_portrait = COMMON.resize_for_paddleocr(portrait, 4000)
+
+        self.assertEqual(resized_landscape.size, (4000, 3000))
+        self.assertEqual(resized_portrait.size, (3000, 4000))
+
+    def test_resize_for_paddleocr_does_not_upscale_smaller_images(self):
+        image = Image.new("RGB", (2000, 1500))
+
+        resized_image = COMMON.resize_for_paddleocr(image, 4000)
+
+        self.assertIs(resized_image, image)
+
+    def test_resize_for_paddleocr_rejects_non_positive_limit(self):
+        with self.assertRaisesRegex(ValueError, "max_side_length must be positive"):
+            COMMON.resize_for_paddleocr(Image.new("RGB", (20, 10)), 0)
+
     def test_concurrent_requests_use_one_pipeline_call_and_one_worker_thread(self):
         request_count = 4
         predictions = [
@@ -220,14 +280,21 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
             for index in range(request_count)
         ]
         pipeline = FakePaddleOCRPipeline(predictions)
-        processor = COMMON.PaddleOCRBatchProcessor(pipeline, request_count, 0.05)
+        processor = COMMON.PaddleOCRBatchProcessor(
+            pipeline,
+            request_count,
+            0.05,
+        )
         start_barrier = threading.Barrier(request_count)
         responses = [None] * request_count
 
         def submit_request(request_index):
             start_barrier.wait()
+            image = Image.new("RGB", (20, 10), color=(10, 20, 30))
             responses[request_index] = processor.infer(
-                Image.new("RGB", (20, 10), color=(10, 20, 30))
+                COMMON.image_to_paddle_array(image),
+                image.width,
+                image.height,
             )
 
         request_threads = [
@@ -255,15 +322,49 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
 
     def test_pipeline_failure_is_delivered_to_every_request_without_hanging(self):
         pipeline = FakePaddleOCRPipeline([])
-        processor = COMMON.PaddleOCRBatchProcessor(pipeline, 1, 0.0)
+        processor = COMMON.PaddleOCRBatchProcessor(
+            pipeline,
+            1,
+            0.0,
+        )
 
         with self.assertRaisesRegex(RuntimeError, "different number of results"):
-            processor.infer(Image.new("RGB", (20, 10)))
+            image = Image.new("RGB", (20, 10))
+            processor.infer(
+                COMMON.image_to_paddle_array(image),
+                image.width,
+                image.height,
+            )
         processor.close()
 
         self.assertTrue(pipeline.closed)
         with self.assertRaisesRegex(RuntimeError, "processor is closed"):
-            processor.infer(Image.new("RGB", (20, 10)))
+            processor.infer(
+                COMMON.image_to_paddle_array(image),
+                image.width,
+                image.height,
+            )
+
+    def test_batch_processor_normalizes_boxes_against_resized_ocr_image(self):
+        pipeline = FakePaddleOCRPipeline(
+            [paddleocr_prediction("text", 0.9, [0, 0, 40, 30])]
+        )
+        processor = COMMON.PaddleOCRBatchProcessor(pipeline, 1, 0.0)
+        resized_image = COMMON.resize_for_paddleocr(
+            Image.new("RGB", (4032, 3024)),
+            40,
+        )
+
+        regions = processor.infer(
+            COMMON.image_to_paddle_array(resized_image),
+            resized_image.width,
+            resized_image.height,
+        )
+        processor.close()
+
+        self.assertEqual(pipeline.batches[0][0].shape, (30, 40, 3))
+        self.assertEqual(regions[0]["width"], 1.0)
+        self.assertEqual(regions[0]["height"], 1.0)
 
 
 if __name__ == "__main__":
