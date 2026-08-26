@@ -211,8 +211,10 @@ class Handler(BaseHTTPRequestHandler):
                 'boundingBox': {'x': 0.1, 'y': 0.2, 'width': 0.3, 'height': 0.4},
                 'eyeCenter': {'x': 0.25, 'y': 0.32},
                 'confidence': 0.95,
-                'qualityScore': 0.8,
+                'faceSizeScore': 0.8,
                 'frontalityScore': 0.9,
+                'visibilityScore': 0.85,
+                'featureClarityScore': 0.75,
                 'embedding': encoded,
                 'embeddingEncoding': 'float32_le',
                 'embeddingDimensions': 512,
@@ -229,8 +231,10 @@ class Handler(BaseHTTPRequestHandler):
                 'boundingBox': {'x': 0.1, 'y': 0.2, 'width': 0.3, 'height': 0.4},
                 'eyeCenter': {'x': 1.5, 'y': 0.32},
                 'confidence': 0.95,
-                'qualityScore': 0.8,
+                'faceSizeScore': 0.8,
                 'frontalityScore': 0.9,
+                'visibilityScore': 0.85,
+                'featureClarityScore': 0.75,
                 'embedding': '',
                 'embeddingEncoding': 'float32_le',
                 'embeddingDimensions': 512,
@@ -1145,6 +1149,9 @@ async fn manager_reuses_face_runtime_and_serializes_ordered_faces() {
     assert_eq!(first.faces[0].eye_center.x, 0.25);
     assert_eq!(first.faces[0].eye_center.y, 0.32);
     assert_eq!(first.faces[0].frontality_score, 0.9);
+    assert_eq!(first.faces[0].face_size_score, 0.8);
+    assert_eq!(first.faces[0].visibility_score, 0.85);
+    assert_eq!(first.faces[0].feature_clarity_score, 0.75);
     assert_eq!(first.faces[0].embedding_encoding, "float32_le");
     assert_eq!(second.faces[0].bounding_box.width, 0.3);
     assert_eq!(manager.active_name(), "insightface");

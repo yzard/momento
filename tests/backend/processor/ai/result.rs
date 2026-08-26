@@ -295,8 +295,10 @@ fn face_result(job_id: &str, media_id: i64) -> JobResult {
             "boundingBox": {"x": 0.9, "y": 0.8, "width": 0.10000003, "height": 0.20000003},
             "eyeCenter": {"x": 0.95, "y": 0.86},
             "confidence": 0.95,
-            "qualityScore": 0.8,
+            "faceSizeScore": 0.8,
             "frontalityScore": 0.9,
+            "visibilityScore": 0.85,
+            "featureClarityScore": 0.75,
             "embedding": embedding,
             "embeddingEncoding": "float32_le",
             "embeddingDimensions": 512
@@ -796,7 +798,7 @@ fn face_result_persists_crop_and_success_marker() {
     let connection = pool.get().expect("connection");
     let (crop_path, box_x, box_width, frontality): (String, f64, f64, f64) = connection
         .query_row(
-            "SELECT crop_path, x, width, frontality FROM media_faces WHERE media_id = ?",
+            "SELECT crop_path, x, width, frontality_score FROM media_faces WHERE media_id = ?",
             [media_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )

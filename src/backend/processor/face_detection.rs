@@ -8,6 +8,7 @@ use image::imageops::FilterType;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
+use crate::config::FaceGroupRepresentativeConfig;
 use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
@@ -29,9 +30,26 @@ struct FaceResult {
     eye_center_x: f64,
     eye_center_y: f64,
     confidence: f64,
-    quality: f64,
-    frontality: f64,
+    face_size_score: f64,
+    frontality_score: f64,
+    visibility_score: f64,
+    feature_clarity_score: f64,
     embedding: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct FaceRepresentativeCandidate {
+    id: i64,
+    crop_path: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    confidence: f64,
+    face_size_score: f64,
+    frontality_score: f64,
+    visibility_score: f64,
+    feature_clarity_score: f64,
 }
 
 type ManualGroupAnchors = BTreeMap<i64, Vec<Vec<f32>>>;
@@ -173,8 +191,10 @@ pub fn persist_prepared_result(
                 face.width,
                 face.height,
                 face.confidence,
-                face.quality,
-                face.frontality,
+                face.face_size_score,
+                face.frontality_score,
+                face.visibility_score,
+                face.feature_clarity_score,
                 face.embedding,
                 crop_path
             ],
@@ -311,8 +331,10 @@ fn parse_face(sequence: i64, value: &serde_json::Value) -> AppResult<FaceResult>
         eye_center_x: eye_coordinate("x")?,
         eye_center_y: eye_coordinate("y")?,
         confidence: scalar("confidence")?,
-        quality: scalar("qualityScore")?,
-        frontality: scalar("frontalityScore")?,
+        face_size_score: scalar("faceSizeScore")?,
+        frontality_score: scalar("frontalityScore")?,
+        visibility_score: scalar("visibilityScore")?,
+        feature_clarity_score: scalar("featureClarityScore")?,
         embedding: bytes,
     })
 }
@@ -483,7 +505,11 @@ pub fn start(pool: &DbPool, enabled: bool) -> AppResult<usize> {
     Ok(queued_jobs)
 }
 
-pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> AppResult<()> {
+pub fn finalize_ready_runs(
+    pool: &DbPool,
+    group_similarity_threshold: f32,
+    representative_config: &FaceGroupRepresentativeConfig,
+) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let run = connection
         .query_row(queries::faces::SELECT_ACTIVE_RUN, [], |row| {
@@ -553,7 +579,7 @@ pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> Ap
         .copied()
         .chain(automatic_groups.iter().map(|(group_id, _)| *group_id))
     {
-        transaction.execute(queries::faces::UPDATE_GROUP_REPRESENTATIVE, [group_id])?;
+        update_group_representative(&transaction, group_id, representative_config)?;
     }
     let completion_error = (failed_jobs > 0).then(|| {
         format!(
@@ -566,6 +592,113 @@ pub fn finalize_ready_runs(pool: &DbPool, group_similarity_threshold: f32) -> Ap
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+fn map_representative_candidate(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<FaceRepresentativeCandidate> {
+    Ok(FaceRepresentativeCandidate {
+        id: row.get(0)?,
+        crop_path: row.get(1)?,
+        x: row.get(2)?,
+        y: row.get(3)?,
+        width: row.get(4)?,
+        height: row.get(5)?,
+        confidence: row.get(6)?,
+        face_size_score: row.get(7)?,
+        frontality_score: row.get(8)?,
+        visibility_score: row.get(9)?,
+        feature_clarity_score: row.get(10)?,
+    })
+}
+
+fn center_proximity(candidate: &FaceRepresentativeCandidate) -> f64 {
+    let center_x_offset = candidate.x + candidate.width / 2.0 - 0.5;
+    let center_y_offset = candidate.y + candidate.height / 2.0 - 0.5;
+    (1.0 - 2.0 * (center_x_offset.powi(2) + center_y_offset.powi(2))).clamp(0.0, 1.0)
+}
+
+fn representative_score(
+    candidate: &FaceRepresentativeCandidate,
+    config: &FaceGroupRepresentativeConfig,
+) -> f64 {
+    config.confidence_weight * candidate.confidence
+        + config.face_size_weight * candidate.face_size_score
+        + config.center_proximity_weight * center_proximity(candidate)
+        + config.frontality_weight * candidate.frontality_score
+        + config.visibility_weight * candidate.visibility_score
+        + config.feature_clarity_weight * candidate.feature_clarity_score
+}
+
+fn select_representative<'a>(
+    candidates: &'a [FaceRepresentativeCandidate],
+    config: &FaceGroupRepresentativeConfig,
+) -> Option<&'a FaceRepresentativeCandidate> {
+    candidates.iter().max_by(|left, right| {
+        representative_score(left, config)
+            .total_cmp(&representative_score(right, config))
+            .then_with(|| right.id.cmp(&left.id))
+    })
+}
+
+pub fn update_group_representative(
+    connection: &Connection,
+    group_id: i64,
+    config: &FaceGroupRepresentativeConfig,
+) -> AppResult<()> {
+    let candidates = connection
+        .prepare(queries::faces::SELECT_GROUP_REPRESENTATIVE_CANDIDATES)?
+        .query_map([group_id], map_representative_candidate)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let representative_id = select_representative(&candidates, config).map(|face| face.id);
+    connection.execute(
+        queries::faces::UPDATE_GROUP_REPRESENTATIVE_ID,
+        rusqlite::params![representative_id, group_id],
+    )?;
+    Ok(())
+}
+
+pub fn recompute_all_group_representatives(
+    pool: &DbPool,
+    config: &FaceGroupRepresentativeConfig,
+) -> AppResult<()> {
+    let connection = pool.get().map_err(AppError::Pool)?;
+    let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+    let group_ids = transaction
+        .prepare(queries::faces::SELECT_ALL_GROUP_IDS)?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for group_id in group_ids {
+        update_group_representative(&transaction, group_id, config)?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+pub fn visible_representative_crop(
+    connection: &Connection,
+    group_id: i64,
+    user_id: i64,
+    config: &FaceGroupRepresentativeConfig,
+) -> AppResult<Option<String>> {
+    let stored_crop = connection
+        .query_row(
+            queries::faces::SELECT_VISIBLE_STORED_REPRESENTATIVE_CROP,
+            rusqlite::params![group_id, user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if stored_crop.is_some() {
+        return Ok(stored_crop);
+    }
+    let candidates = connection
+        .prepare(queries::faces::SELECT_VISIBLE_GROUP_REPRESENTATIVE_CANDIDATES)?
+        .query_map(
+            rusqlite::params![group_id, user_id],
+            map_representative_candidate,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(select_representative(&candidates, config).map(|face| face.crop_path.clone()))
 }
 
 fn load_manual_group_anchors(transaction: &Transaction<'_>) -> AppResult<ManualGroupAnchors> {

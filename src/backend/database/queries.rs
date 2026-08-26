@@ -536,32 +536,73 @@ pub mod faces {
     ON CONFLICT(face_group_id, face_id) DO UPDATE SET
         manual_anchor = 1
     "#;
-    pub const INSERT_FACE: &str = "INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-    // Squared center distance is at most 0.5, so 1 - (2 * distance) normalizes
-    // center proximity to the same [0, 1] range as frontality.
-    pub const UPDATE_GROUP_REPRESENTATIVE: &str = r#"
-    UPDATE face_groups
-       SET representative_face_id = (
-           SELECT mf.id
-             FROM face_group_members AS fgm
-             JOIN media_faces AS mf ON mf.id = fgm.face_id
-            WHERE fgm.face_group_id = face_groups.id
-         ORDER BY (
-                      0.2 * (
-                          1.0 - 2.0 * (
-                              ((mf.x + (mf.width / 2.0) - 0.5) * (mf.x + (mf.width / 2.0) - 0.5))
-                              + ((mf.y + (mf.height / 2.0) - 0.5) * (mf.y + (mf.height / 2.0) - 0.5))
-                          )
-                      )
-                      + 0.8 * mf.frontality
-                  ) DESC
-                , mf.quality DESC
-                , mf.confidence DESC
-                , mf.id ASC
-            LIMIT 1
-       )
-     WHERE id = ?
+    pub const INSERT_FACE: &str = r#"
+    INSERT INTO media_faces
+      ( media_id
+      , input_sequence
+      , face_index
+      , x
+      , y
+      , width
+      , height
+      , confidence
+      , face_size_score
+      , frontality_score
+      , visibility_score
+      , feature_clarity_score
+      , embedding
+      , crop_path
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     "#;
+    pub const SELECT_GROUP_REPRESENTATIVE_CANDIDATES: &str = r#"
+    SELECT media_faces.id
+         , media_faces.crop_path
+         , media_faces.x
+         , media_faces.y
+         , media_faces.width
+         , media_faces.height
+         , media_faces.confidence
+         , media_faces.face_size_score
+         , media_faces.frontality_score
+         , media_faces.visibility_score
+         , media_faces.feature_clarity_score
+      FROM face_group_members
+      JOIN media_faces ON media_faces.id = face_group_members.face_id
+     WHERE face_group_members.face_group_id = ?
+     ORDER BY media_faces.id
+    "#;
+    pub const SELECT_VISIBLE_GROUP_REPRESENTATIVE_CANDIDATES: &str = r#"
+    SELECT media_faces.id
+         , media_faces.crop_path
+         , media_faces.x
+         , media_faces.y
+         , media_faces.width
+         , media_faces.height
+         , media_faces.confidence
+         , media_faces.face_size_score
+         , media_faces.frontality_score
+         , media_faces.visibility_score
+         , media_faces.feature_clarity_score
+      FROM face_group_members
+      JOIN media_faces ON media_faces.id = face_group_members.face_id
+      JOIN media_access ON media_access.media_id = media_faces.media_id
+     WHERE face_group_members.face_group_id = ?
+       AND media_access.user_id = ?
+       AND media_access.deleted_at IS NULL
+     ORDER BY media_faces.id
+    "#;
+    pub const SELECT_VISIBLE_STORED_REPRESENTATIVE_CROP: &str = r#"
+    SELECT media_faces.crop_path
+      FROM face_groups
+      JOIN media_faces ON media_faces.id = face_groups.representative_face_id
+      JOIN media_access ON media_access.media_id = media_faces.media_id
+     WHERE face_groups.id = ?
+       AND media_access.user_id = ?
+       AND media_access.deleted_at IS NULL
+    "#;
+    pub const UPDATE_GROUP_REPRESENTATIVE_ID: &str =
+        "UPDATE face_groups SET representative_face_id = ? WHERE id = ?";
+    pub const SELECT_ALL_GROUP_IDS: &str = "SELECT id FROM face_groups ORDER BY id";
     pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces WHERE media_id = ?";
     pub const CANCEL_RECOVERED_CANCELLING_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
     pub const QUEUE_RECOVERED_CANCELLATION_SCOPE: &str = "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) SELECT 'task', 'face_detection' WHERE EXISTS (SELECT 1 FROM face_grouping_runs WHERE status = 'cancelling')";
@@ -582,30 +623,6 @@ pub mod faces {
     pub const COUNT_VISIBLE_GROUPS: &str = "SELECT COUNT(*) FROM (SELECT fg.id FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id)";
     pub const SELECT_GROUP: &str = "SELECT fg.id, COUNT(fgm.face_id), COUNT(DISTINCT mf.media_id) FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE fg.id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id";
     pub const SELECT_GROUP_MEDIA: &str = "SELECT DISTINCT m.id, m.filename, m.original_filename, m.media_type, m.mime_type, mm.width, mm.height, m.file_size, mm.duration_seconds, mm.date_taken, mm.gps_latitude, mm.gps_longitude, mm.camera_make, mm.camera_model, mm.lens_make, mm.lens_model, mm.iso, mm.exposure_time, mm.f_number, mm.focal_length, mm.focal_length_35mm, mm.gps_altitude, mm.location_city, mm.location_state, mm.location_country, mm.video_codec, mm.keywords, m.created_at FROM media AS m JOIN media_faces AS mf ON mf.media_id = m.id JOIN face_group_members AS fgm ON fgm.face_id = mf.id JOIN media_access AS ma ON ma.media_id = m.id LEFT JOIN media_metadata AS mm ON mm.media_id = m.id WHERE fgm.face_group_id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL ORDER BY m.id";
-    pub const SELECT_CROP: &str = r#"
-    SELECT mf.crop_path
-      FROM face_group_members AS fgm
-      JOIN media_faces AS mf ON mf.id = fgm.face_id
-      JOIN media_access AS ma ON ma.media_id = mf.media_id
-      LEFT JOIN face_groups AS fg ON fg.id = fgm.face_group_id
-     WHERE fgm.face_group_id = ?
-       AND ma.user_id = ?
-       AND ma.deleted_at IS NULL
-  ORDER BY CASE WHEN mf.id = fg.representative_face_id THEN 0 ELSE 1 END
-         , (
-               0.2 * (
-                   1.0 - 2.0 * (
-                       ((mf.x + (mf.width / 2.0) - 0.5) * (mf.x + (mf.width / 2.0) - 0.5))
-                       + ((mf.y + (mf.height / 2.0) - 0.5) * (mf.y + (mf.height / 2.0) - 0.5))
-                   )
-               )
-               + 0.8 * mf.frontality
-           ) DESC
-         , mf.quality DESC
-         , mf.confidence DESC
-         , mf.id ASC
-     LIMIT 1
-    "#;
     pub const SELECT_EXISTING_GROUPS: &str = "SELECT id FROM face_groups WHERE id IN (%s)";
     pub const SELECT_MERGE_MEMBERS: &str =
         "SELECT face_id FROM face_group_members WHERE face_group_id IN (%s)";

@@ -105,12 +105,14 @@ fn start_background_tasks(
 
     let face_pool = pool.clone();
     let face_group_similarity_threshold = config.llm.face_group_similarity_threshold;
+    let face_representative_config = config.face_group_representative.clone();
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(5);
         loop {
             if let Err(error) = momento_api::processor::face_detection::finalize_ready_runs(
                 &face_pool,
                 face_group_similarity_threshold,
+                &face_representative_config,
             ) {
                 tracing::warn!("face grouping finalization failed: {error}");
             }
@@ -197,6 +199,11 @@ async fn main() {
         .expect("Failed to recover interrupted deduplicate scans");
     momento_api::processor::face_detection::recover_interrupted_runs(&pool)
         .expect("Failed to recover interrupted face grouping scans");
+    momento_api::processor::face_detection::recompute_all_group_representatives(
+        &pool,
+        &config.face_group_representative,
+    )
+    .expect("Failed to recompute face group representatives");
     recover_interrupted_imports(&pool).expect("Failed to recover interrupted imports");
 
     let admin_id = ensure_default_admin(&pool).expect("Failed to initialize administrator");

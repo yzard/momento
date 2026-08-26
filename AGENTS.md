@@ -346,8 +346,8 @@ text currently becomes an empty string. Aesthetics validates five finite scores 
 ordered input-level scores in `media_aesthetic_inputs`, and stores the first-input aggregate in
 `media_aesthetics`. Clustering validates its embedding/hash result and updates
 similarity tables. Face detection
-validates bounding boxes, eye centers, confidence, quality, frontality, and 512-dimensional
-embeddings before writing crops and face rows. A generic transport response does not remove the
+validates bounding boxes, eye centers, confidence, face size, frontality, BiSeNet visibility,
+facial-feature clarity, and 512-dimensional embeddings before writing crops and face rows. A generic transport response does not remove the
 requirement for explicit validation, storage, clean/reset behavior, and optional downstream
 scheduling for each inference type.
 Screenshot and document results require a boolean `detected` and finite `confidence` in `[0, 1]`.
@@ -486,7 +486,12 @@ required ranges rather than pinning locally tuned thresholds.
 Face results include a normalized `eyeCenter` derived from InsightFace's first two landmarks and a
 normalized `frontalityScore` derived from all five landmarks. Frontality accounts for eye-line
 roll plus nose and mouth-center horizontal offsets, is constrained to `[0, 1]`, and is persisted
-with the face row. Momento keeps the 256x256 portrait output size and the existing crop dimensions;
+with the face row. The runtime keeps one CUDA BiSeNet ResNet18 ONNX session beside Buffalo L,
+parses dynamically batched aligned faces at the model's fixed 512x512 input, and derives
+`visibilityScore` from the expected eye, nose, and mouth regions. It derives
+`featureClarityScore` from local edge strength inside the visible semantic regions. The old
+combined `qualityScore` is replaced by independent `faceSizeScore`, visibility, and feature
+clarity values. Momento keeps the 256x256 portrait output size and the existing crop dimensions;
 only the crop origin changes so the portrait is centered on `eyeCenter`, subject to image-edge
 clamping. Face crops reference the immutable submitted original snapshot. Momento uses ImageMagick
 to select its first frame, apply stored orientation, and normalize it to PNG in memory before Rust
@@ -506,11 +511,13 @@ and grouping tests, not just changing the thumbnail representative.
 
 `face_groups.representative_face_id` is a thumbnail choice, not the grouping seed. Select it only
 after automatic membership is complete and select it again after a manual merge. Rank each face by
-`0.2 * center_proximity + 0.8 * frontality`, where center proximity normalizes squared
-face-box-center distance from the media center to `[0, 1]`. Higher scores win, followed by quality
-descending, confidence descending, and face ID ascending as deterministic tie-breakers. If the
-global representative is not visible to a requesting user, thumbnail lookup applies the same score
-to that user's accessible members.
+the six weights in `[face_group_representative]`: confidence, face size, center proximity,
+frontality, visibility, and feature clarity. The weights must be non-negative and sum to `1`.
+Center proximity normalizes squared face-box-center distance from the media center to `[0, 1]`;
+higher weighted scores win and face ID ascending is the deterministic tie-breaker. Recompute all
+stored representatives at startup so configuration changes apply to existing groups. If the global
+representative is not visible to a requesting user, thumbnail lookup applies the same configured
+score to that user's accessible members.
 
 The face-group list is sorted in the backend before `LIMIT`/`OFFSET`: distinct visible media count
 descending, then face-group ID ascending as the stable tie-breaker. Do not sort paginated face

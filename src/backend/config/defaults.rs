@@ -33,6 +33,12 @@ pub(crate) const LLM_SUBMISSION_MAX_IN_FLIGHT: usize = 128;
 pub(crate) const LLM_RESULT_POLL_INTERVAL_SECONDS: u64 = 1;
 pub(crate) const LLM_RESULT_CPU_PROCESSING_CONCURRENCY: usize = 8;
 pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.41;
+pub(crate) const FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT: f64 = 0.05;
+pub(crate) const FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT: f64 = 0.10;
+pub(crate) const FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT: f64 = 0.10;
+pub(crate) const FACE_REPRESENTATIVE_FRONTALITY_WEIGHT: f64 = 0.25;
+pub(crate) const FACE_REPRESENTATIVE_VISIBILITY_WEIGHT: f64 = 0.30;
+pub(crate) const FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT: f64 = 0.20;
 pub(crate) const CRONJOB_TIMEZONE: &str = "Etc/UTC";
 pub(crate) const OCR_CRON: &str = "0 1 * * *";
 pub(crate) const IMAGE_TAGGING_CRON: &str = "0 2 * * *";
@@ -296,6 +302,30 @@ pub(crate) fn face_group_similarity_threshold() -> f32 {
     FACE_GROUP_SIMILARITY_THRESHOLD
 }
 
+pub(crate) fn face_representative_confidence_weight() -> f64 {
+    FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT
+}
+
+pub(crate) fn face_representative_face_size_weight() -> f64 {
+    FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT
+}
+
+pub(crate) fn face_representative_center_proximity_weight() -> f64 {
+    FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT
+}
+
+pub(crate) fn face_representative_frontality_weight() -> f64 {
+    FACE_REPRESENTATIVE_FRONTALITY_WEIGHT
+}
+
+pub(crate) fn face_representative_visibility_weight() -> f64 {
+    FACE_REPRESENTATIVE_VISIBILITY_WEIGHT
+}
+
+pub(crate) fn face_representative_feature_clarity_weight() -> f64 {
+    FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT
+}
+
 pub(crate) fn llm_submission_poll_interval_seconds() -> u64 {
     LLM_SUBMISSION_POLL_INTERVAL_SECONDS
 }
@@ -479,6 +509,30 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{FACE_GROUP_SIMILARITY_THRESHOLD}}",
             FACE_GROUP_SIMILARITY_THRESHOLD.to_string(),
+        ),
+        (
+            "{{FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT}}",
+            FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT.to_string(),
+        ),
+        (
+            "{{FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT}}",
+            FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT.to_string(),
+        ),
+        (
+            "{{FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT}}",
+            FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT.to_string(),
+        ),
+        (
+            "{{FACE_REPRESENTATIVE_FRONTALITY_WEIGHT}}",
+            FACE_REPRESENTATIVE_FRONTALITY_WEIGHT.to_string(),
+        ),
+        (
+            "{{FACE_REPRESENTATIVE_VISIBILITY_WEIGHT}}",
+            FACE_REPRESENTATIVE_VISIBILITY_WEIGHT.to_string(),
+        ),
+        (
+            "{{FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT}}",
+            FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT.to_string(),
         ),
         ("{{CRONJOB_TIMEZONE}}", CRONJOB_TIMEZONE.to_string()),
         ("{{OCR_CRON}}", OCR_CRON.to_string()),

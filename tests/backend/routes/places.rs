@@ -141,7 +141,7 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
             rusqlite::params![cluttered_media, "text".repeat(100)],
         )
         .expect("ocr clutter");
-    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, 0.1, 0.1, 0.6, 0.6, 1, 1, 1, X'00000000', 'faces/cluttered.jpg')", [cluttered_media]).expect("dominant face");
+    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, face_size_score, frontality_score, visibility_score, feature_clarity_score, embedding, crop_path) VALUES (?, 0, 0, 0.1, 0.1, 0.6, 0.6, 1, 1, 1, 1, 1, X'00000000', 'faces/cluttered.jpg')", [cluttered_media]).expect("dominant face");
     drop(connection);
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {}", token(user_id));

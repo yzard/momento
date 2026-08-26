@@ -75,7 +75,7 @@ fn permanent_delete_cleans_every_media_owned_row() {
     let crop_directory = paths().previews.join("faces").join(media_id.to_string());
     std::fs::create_dir_all(&crop_directory).expect("face crop directory");
     std::fs::write(crop_directory.join("face.jpg"), b"face").expect("face crop");
-    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, 0, 0, 1, 1, 1, 1, 1, X'00000000', ?)", rusqlite::params![media_id, format!("faces/{media_id}/face.jpg")]).expect("Failed to insert face");
+    connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, face_size_score, frontality_score, visibility_score, feature_clarity_score, embedding, crop_path) VALUES (?, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, X'00000000', ?)", rusqlite::params![media_id, format!("faces/{media_id}/face.jpg")]).expect("Failed to insert face");
     let face_id = connection.last_insert_rowid();
     connection
         .execute(

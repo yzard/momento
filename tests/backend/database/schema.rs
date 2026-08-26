@@ -1,4 +1,5 @@
 use crate::test_utils::{create_test_db, create_test_media};
+use momento_api::database::queries;
 
 #[test]
 fn creates_active_media_access_index() {
@@ -165,4 +166,41 @@ fn classifier_tables_enforce_boolean_and_confidence_ranges() {
             [media_id],
         )
         .is_err());
+}
+
+#[test]
+fn face_schema_stores_independent_bounded_quality_scores() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "face-score-constraints.jpg");
+    let connection = pool.get().expect("database connection");
+
+    for invalid_scores in [
+        (1.1_f64, 1.0_f64, 1.0_f64, 1.0_f64, 1.0_f64),
+        (1.0, -0.1, 1.0, 1.0, 1.0),
+        (1.0, 1.0, 1.1, 1.0, 1.0),
+        (1.0, 1.0, 1.0, -0.1, 1.0),
+        (1.0, 1.0, 1.0, 1.0, 1.1),
+    ] {
+        assert!(connection
+            .execute(
+                queries::faces::INSERT_FACE,
+                rusqlite::params![
+                    media_id,
+                    0,
+                    0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    invalid_scores.0,
+                    invalid_scores.1,
+                    invalid_scores.2,
+                    invalid_scores.3,
+                    invalid_scores.4,
+                    [0_u8; 4],
+                    "faces/invalid.jpg"
+                ],
+            )
+            .is_err());
+    }
 }

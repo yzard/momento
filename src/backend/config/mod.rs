@@ -509,6 +509,63 @@ impl LlmConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaceGroupRepresentativeConfig {
+    #[serde(default = "defaults::face_representative_confidence_weight")]
+    pub confidence_weight: f64,
+    #[serde(default = "defaults::face_representative_face_size_weight")]
+    pub face_size_weight: f64,
+    #[serde(default = "defaults::face_representative_center_proximity_weight")]
+    pub center_proximity_weight: f64,
+    #[serde(default = "defaults::face_representative_frontality_weight")]
+    pub frontality_weight: f64,
+    #[serde(default = "defaults::face_representative_visibility_weight")]
+    pub visibility_weight: f64,
+    #[serde(default = "defaults::face_representative_feature_clarity_weight")]
+    pub feature_clarity_weight: f64,
+}
+
+impl Default for FaceGroupRepresentativeConfig {
+    fn default() -> Self {
+        Self {
+            confidence_weight: defaults::FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT,
+            face_size_weight: defaults::FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT,
+            center_proximity_weight: defaults::FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT,
+            frontality_weight: defaults::FACE_REPRESENTATIVE_FRONTALITY_WEIGHT,
+            visibility_weight: defaults::FACE_REPRESENTATIVE_VISIBILITY_WEIGHT,
+            feature_clarity_weight: defaults::FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT,
+        }
+    }
+}
+
+impl FaceGroupRepresentativeConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        let weights = [
+            ("confidence_weight", self.confidence_weight),
+            ("face_size_weight", self.face_size_weight),
+            ("center_proximity_weight", self.center_proximity_weight),
+            ("frontality_weight", self.frontality_weight),
+            ("visibility_weight", self.visibility_weight),
+            ("feature_clarity_weight", self.feature_clarity_weight),
+        ];
+        for &(name, weight) in &weights {
+            if !weight.is_finite() || weight < 0.0 {
+                return Err(std::io::Error::other(format!(
+                    "face_group_representative {name} must be finite and non-negative"
+                )));
+            }
+        }
+        let total_weight = weights.iter().map(|(_, weight)| weight).sum::<f64>();
+        if (total_weight - 1.0).abs() > 1e-6 {
+            return Err(std::io::Error::other(
+                "face_group_representative weights must sum to 1",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -532,6 +589,8 @@ pub struct Config {
     pub llm_result_worker: LlmResultWorkerConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub face_group_representative: FaceGroupRepresentativeConfig,
     #[serde(default)]
     pub cronjob: CronjobConfig,
 }
@@ -573,6 +632,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     config.webdav.validate()?;
     config.backup.validate()?;
     config.llm.validate()?;
+    config.face_group_representative.validate()?;
     config.llm_submission_worker.validate()?;
     config.llm_result_worker.validate()?;
     config.cronjob.validate()?;

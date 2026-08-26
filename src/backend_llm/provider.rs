@@ -78,8 +78,10 @@ pub struct FaceDetection {
     pub bounding_box: NormalizedBoundingBox,
     pub eye_center: NormalizedPoint,
     pub confidence: f32,
-    pub quality_score: f32,
+    pub face_size_score: f32,
     pub frontality_score: f32,
+    pub visibility_score: f32,
+    pub feature_clarity_score: f32,
     pub embedding: String,
     pub embedding_encoding: String,
     pub embedding_dimensions: usize,
@@ -259,6 +261,8 @@ impl RuntimeCatalog {
                     "buffalo_l",
                     "--cache-dir",
                     "/opt/models/insightface",
+                    "--face-parsing-model",
+                    "/opt/models/face-parsing/resnet18.onnx",
                     "--host",
                     RUNTIME_HOST,
                     "--port",
@@ -286,7 +290,7 @@ impl RuntimeCatalog {
                 environment: Vec::new(),
                 base_url: "http://127.0.0.1:8500".to_string(),
                 model: "buffalo_l".to_string(),
-                model_version: "buffalo_l".to_string(),
+                model_version: "buffalo_l+bisenet_resnet18".to_string(),
                 embedding_dimensions: FACE_EMBEDDING_DIMENSIONS,
             },
             RuntimeSpec {
@@ -1280,8 +1284,10 @@ struct FaceDetectionRuntimeFace {
     bounding_box: FaceDetectionRuntimeBoundingBox,
     eye_center: FaceDetectionRuntimePoint,
     confidence: f32,
-    quality_score: f32,
+    face_size_score: f32,
     frontality_score: f32,
+    visibility_score: f32,
+    feature_clarity_score: f32,
     embedding: String,
     embedding_encoding: String,
     embedding_dimensions: usize,
@@ -1359,8 +1365,10 @@ impl FaceDetectionProvider {
                     y: face.eye_center.y,
                 },
                 confidence: face.confidence,
-                quality_score: face.quality_score,
+                face_size_score: face.face_size_score,
                 frontality_score: face.frontality_score,
+                visibility_score: face.visibility_score,
+                feature_clarity_score: face.feature_clarity_score,
                 embedding: face.embedding,
                 embedding_encoding: face.embedding_encoding,
                 embedding_dimensions: face.embedding_dimensions,
@@ -1420,8 +1428,14 @@ impl FaceDetectionProvider {
             validate_normalized_face_box(&face.bounding_box)?;
             validate_normalized_point(&face.eye_center, "eye center")?;
             validate_unit_score(face.confidence, "confidence", "InsightFace")?;
-            validate_unit_score(face.quality_score, "quality score", "InsightFace")?;
+            validate_unit_score(face.face_size_score, "face size score", "InsightFace")?;
             validate_unit_score(face.frontality_score, "frontality score", "InsightFace")?;
+            validate_unit_score(face.visibility_score, "visibility score", "BiSeNet")?;
+            validate_unit_score(
+                face.feature_clarity_score,
+                "feature clarity score",
+                "BiSeNet",
+            )?;
             if face.embedding_encoding != "float32_le" {
                 return Err(ServiceError::Upstream(format!(
                     "InsightFace returned unsupported embedding encoding `{}`",
@@ -2061,6 +2075,18 @@ mod tests {
             .arguments
             .iter()
             .any(|argument| { argument == "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" }));
+
+        let face_detection = runtimes
+            .get(ServiceType::FaceDetection)
+            .expect("face detection runtime");
+        assert!(face_detection.arguments.windows(2).any(|arguments| {
+            arguments
+                == [
+                    "--face-parsing-model",
+                    "/opt/models/face-parsing/resnet18.onnx",
+                ]
+        }));
+        assert_eq!(face_detection.model_version, "buffalo_l+bisenet_resnet18");
 
         for (service_type, runtime_script, model, model_version) in [
             (

@@ -3,6 +3,7 @@ use axum_test::TestServer;
 use base64::Engine;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
+use momento_api::processor::face_detection;
 use serde_json::json;
 
 use crate::test_utils::{create_test_app, create_test_media, create_test_user, grant_media_access};
@@ -27,7 +28,7 @@ fn inaccessible_representative_uses_weighted_visible_face_score() {
         (center_media_id, 0.4, 0.1, "faces/center.jpg"),
         (frontal_media_id, 0.41, 1.0, "faces/frontal.jpg"),
     ] {
-        connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, ?, 0.4, 0.2, 0.2, 1, 1, ?, X'00000000', ?)", rusqlite::params![media_id, face_x, frontality, crop_path]).expect("face");
+        connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, face_size_score, frontality_score, visibility_score, feature_clarity_score, embedding, crop_path) VALUES (?, 0, 0, ?, 0.4, 0.2, 0.2, 1, 1, ?, 1, 1, X'00000000', ?)", rusqlite::params![media_id, face_x, frontality, crop_path]).expect("face");
         face_ids.push(connection.last_insert_rowid());
     }
     connection
@@ -46,13 +47,14 @@ fn inaccessible_representative_uses_weighted_visible_face_score() {
             .expect("group member");
     }
 
-    let crop_path: String = connection
-        .query_row(
-            momento_api::database::queries::faces::SELECT_CROP,
-            rusqlite::params![group_id, viewer_id],
-            |row| row.get(0),
-        )
-        .expect("visible representative crop");
+    let crop_path = face_detection::visible_representative_crop(
+        &connection,
+        group_id,
+        viewer_id,
+        &Config::default().face_group_representative,
+    )
+    .expect("visible representative query")
+    .expect("visible representative crop");
 
     assert_eq!(crop_path, "faces/frontal.jpg");
 }
@@ -71,7 +73,7 @@ async fn face_groups_are_paginated_by_descending_media_count() {
                 &format!("group-{group_index}-media-{media_index}.jpg"),
             );
             grant_media_access(&pool, media_id, viewer_id);
-            connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, 0.4, 0.4, 0.2, 0.2, 1, 1, 1, X'00000000', 'faces/missing.jpg')", [media_id]).expect("face");
+            connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, face_size_score, frontality_score, visibility_score, feature_clarity_score, embedding, crop_path) VALUES (?, 0, 0, 0.4, 0.4, 0.2, 0.2, 1, 1, 1, 1, 1, X'00000000', 'faces/missing.jpg')", [media_id]).expect("face");
             let face_id = connection.last_insert_rowid();
             representative_face_id.get_or_insert(face_id);
             face_ids.push(face_id);
@@ -148,7 +150,7 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
     for (index, media_id) in [visible_media_id, hidden_media_id].into_iter().enumerate() {
         let face_x = if index == 0 { 0.0 } else { 0.4 };
         let crop_path = format!("faces/route-{index}.jpg");
-        connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, quality, frontality, embedding, crop_path) VALUES (?, 0, 0, ?, 0.4, 0.2, 0.2, 1, 1, 1, ?, ?)", rusqlite::params![media_id, face_x, base64::engine::general_purpose::STANDARD.decode(&embedding).expect("embedding"), crop_path]).expect("face");
+        connection.execute("INSERT INTO media_faces (media_id, input_sequence, face_index, x, y, width, height, confidence, face_size_score, frontality_score, visibility_score, feature_clarity_score, embedding, crop_path) VALUES (?, 0, 0, ?, 0.4, 0.2, 0.2, 1, 1, 1, 1, 1, ?, ?)", rusqlite::params![media_id, face_x, base64::engine::general_purpose::STANDARD.decode(&embedding).expect("embedding"), crop_path]).expect("face");
         let face_id = connection.last_insert_rowid();
         face_ids.push(face_id);
         connection
@@ -210,20 +212,22 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
     assert_eq!(manual_anchor_count, 2);
     assert_eq!(member_count, 2);
     assert_eq!(representative_face_id, face_ids[1]);
-    let viewer_crop: String = connection
-        .query_row(
-            momento_api::database::queries::faces::SELECT_CROP,
-            rusqlite::params![1, viewer_id],
-            |row| row.get(0),
-        )
-        .expect("viewer crop");
-    let administrator_crop: String = connection
-        .query_row(
-            momento_api::database::queries::faces::SELECT_CROP,
-            rusqlite::params![1, administrator_id],
-            |row| row.get(0),
-        )
-        .expect("administrator crop");
+    let viewer_crop = face_detection::visible_representative_crop(
+        &connection,
+        1,
+        viewer_id,
+        &Config::default().face_group_representative,
+    )
+    .expect("viewer representative query")
+    .expect("viewer crop");
+    let administrator_crop = face_detection::visible_representative_crop(
+        &connection,
+        1,
+        administrator_id,
+        &Config::default().face_group_representative,
+    )
+    .expect("administrator representative query")
+    .expect("administrator crop");
     assert_eq!(viewer_crop, "faces/route-0.jpg");
     assert_eq!(administrator_crop, "faces/route-1.jpg");
     let source_count: i64 = connection

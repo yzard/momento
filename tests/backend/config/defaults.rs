@@ -47,6 +47,41 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         .expect("template document detection enablement"));
     assert!(!runtime_defaults.llm.screenshot_detection_enabled);
     assert!(!runtime_defaults.llm.document_detection_enabled);
+    for (field, runtime_weight) in [
+        (
+            "confidence_weight",
+            runtime_defaults.face_group_representative.confidence_weight,
+        ),
+        (
+            "face_size_weight",
+            runtime_defaults.face_group_representative.face_size_weight,
+        ),
+        (
+            "center_proximity_weight",
+            runtime_defaults
+                .face_group_representative
+                .center_proximity_weight,
+        ),
+        (
+            "frontality_weight",
+            runtime_defaults.face_group_representative.frontality_weight,
+        ),
+        (
+            "visibility_weight",
+            runtime_defaults.face_group_representative.visibility_weight,
+        ),
+        (
+            "feature_clarity_weight",
+            runtime_defaults
+                .face_group_representative
+                .feature_clarity_weight,
+        ),
+    ] {
+        assert_eq!(
+            template["face_group_representative"][field].as_float(),
+            Some(runtime_weight)
+        );
+    }
     assert_eq!(
         template["llm_result_worker"]["cpu_processing_concurrency"].as_integer(),
         Some(

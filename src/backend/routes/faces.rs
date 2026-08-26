@@ -12,6 +12,7 @@ use crate::models::{
     FaceGroupMediaResponse, FaceGroupRequest, FaceGroupResponse, FaceGroupsListRequest,
     FaceGroupsListResponse, FaceGroupsMergeRequest,
 };
+use crate::processor::face_detection;
 use crate::routes::media::map_media_row;
 use crate::utils::path::resolve_existing_storage_path;
 
@@ -100,11 +101,11 @@ async fn get_thumbnail(
     Json(request): Json<FaceGroupRequest>,
 ) -> AppResult<Response> {
     let connection = state.pool.get().map_err(AppError::Pool)?;
-    let crop_path: String = fetch_one(
+    let crop_path = face_detection::visible_representative_crop(
         &connection,
-        queries::faces::SELECT_CROP,
-        &[&request.face_group_id, &current_user.id],
-        |row| row.get(0),
+        request.face_group_id,
+        current_user.id,
+        &state.config.face_group_representative,
     )?
     .ok_or_else(|| AppError::NotFound("Face group thumbnail not found".to_string()))?;
     let path =
@@ -157,10 +158,14 @@ async fn merge_groups(
         transaction.execute(queries::faces::INSERT_MANUAL_MEMBER, [target_id, face_id])?;
     }
     transaction.execute(queries::faces::UPDATE_MANUAL_GROUP, [target_id])?;
-    transaction.execute(queries::faces::UPDATE_GROUP_REPRESENTATIVE, [target_id])?;
     for source_id in ordered_ids.into_iter().skip(1) {
         transaction.execute(queries::faces::DELETE_GROUP, [source_id])?;
     }
+    face_detection::update_group_representative(
+        &transaction,
+        target_id,
+        &state.config.face_group_representative,
+    )?;
     let face_count: i64 =
         transaction.query_row(queries::faces::COUNT_GROUP_MEMBERS, [target_id], |row| {
             row.get(0)

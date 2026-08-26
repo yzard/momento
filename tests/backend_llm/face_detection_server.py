@@ -39,13 +39,40 @@ class FaceDetectionServerTests(unittest.TestCase):
             bounding_box, {"x": 0.0, "y": 0.1, "width": 1.0, "height": 0.9}
         )
 
-    def test_quality_score_is_bounded(self):
-        score = FACE_DETECTION_SERVER.quality_score(
-            0.9, {"x": 0.1, "y": 0.1, "width": 0.25, "height": 0.25}
+    def test_face_size_score_is_bounded(self):
+        score = FACE_DETECTION_SERVER.face_size_score(
+            {"x": 0.1, "y": 0.1, "width": 0.25, "height": 0.25}
         )
 
         self.assertGreaterEqual(score, 0.0)
         self.assertLessEqual(score, 1.0)
+
+    def test_visibility_score_penalizes_missing_facial_regions(self):
+        visible_mask = numpy.ones((112, 112), dtype=numpy.uint8)
+        occluded_mask = numpy.zeros((112, 112), dtype=numpy.uint8)
+
+        self.assertEqual(FACE_DETECTION_SERVER.face_visibility_score(visible_mask), 1.0)
+        self.assertEqual(
+            FACE_DETECTION_SERVER.face_visibility_score(occluded_mask), 0.0
+        )
+
+    def test_feature_clarity_score_prefers_sharp_facial_regions(self):
+        parsing_mask = numpy.ones((112, 112), dtype=numpy.uint8)
+        flat_face = numpy.full((112, 112, 3), 128, dtype=numpy.uint8)
+        checkerboard = ((numpy.indices((112, 112)).sum(axis=0) % 2) * 255).astype(
+            numpy.uint8
+        )
+        sharp_face = numpy.repeat(checkerboard[:, :, None], 3, axis=2)
+
+        flat_score = FACE_DETECTION_SERVER.facial_feature_clarity_score(
+            flat_face, parsing_mask
+        )
+        sharp_score = FACE_DETECTION_SERVER.facial_feature_clarity_score(
+            sharp_face, parsing_mask
+        )
+
+        self.assertEqual(flat_score, 0.0)
+        self.assertGreater(sharp_score, flat_score)
 
     def test_normalizes_eye_center_from_first_two_landmarks(self):
         eye_center = FACE_DETECTION_SERVER.normalized_eye_center(
@@ -99,6 +126,10 @@ class FaceDetectionServerTests(unittest.TestCase):
         )
         self.assertEqual(FACE_DETECTION_SERVER.MODEL_NAME, "buffalo_l")
         self.assertEqual(FACE_DETECTION_SERVER.RECOGNITION_INPUT_SIZE, 112)
+        self.assertEqual(FACE_DETECTION_SERVER.FACE_PARSING_INPUT_SIZE, 512)
+        self.assertEqual(FACE_DETECTION_SERVER.FACE_PARSING_CLASS_COUNT, 19)
+        self.assertEqual(FACE_DETECTION_SERVER.FACE_PARSING_BATCH_SIZE, 8)
+        self.assertEqual(FACE_DETECTION_SERVER.FACE_PARSING_BATCH_WAIT_MILLISECONDS, 5)
         self.assertEqual(FACE_DETECTION_SERVER.EMBEDDING_DIMENSIONS, 512)
 
     def test_detection_size_accepts_only_supported_square_sizes(self):

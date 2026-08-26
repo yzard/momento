@@ -1,4 +1,5 @@
 use base64::Engine;
+use momento_api::config::FaceGroupRepresentativeConfig;
 use momento_api::database::queries;
 use momento_api::processor::face_detection;
 use momento_common::llm::JobInputResult;
@@ -33,6 +34,8 @@ fn insert_face(
                 1.0_f64,
                 1.0_f64,
                 frontality,
+                1.0_f64,
+                1.0_f64,
                 embedding,
                 "faces/test.jpg"
             ],
@@ -86,7 +89,7 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
     let results = vec![JobInputResult {
         sequence: 0,
         frame_timestamp_ms: None,
-        result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "eyeCenter": { "x": 0.5, "y": 0.3 }, "confidence": 1.0, "qualityScore": 1.0, "frontalityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
+        result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "eyeCenter": { "x": 0.5, "y": 0.3 }, "confidence": 1.0, "faceSizeScore": 1.0, "frontalityScore": 1.0, "visibilityScore": 1.0, "featureClarityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
     }];
     assert!(face_detection::prepare_result(
         &connection,
@@ -185,7 +188,8 @@ fn failed_face_jobs_still_group_successful_results() {
         )
         .expect("failed face job");
     drop(connection);
-    face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize");
+    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
+        .expect("finalize");
     let connection = pool.get().expect("connection");
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM face_group_members", [], |row| {
@@ -243,7 +247,8 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
         .expect("strict grouping run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.7).expect("strict grouping");
+    face_detection::finalize_ready_runs(&pool, 0.7, &FaceGroupRepresentativeConfig::default())
+        .expect("strict grouping");
     let connection = pool.get().expect("connection");
     let strict_groups: i64 = connection
         .query_row("SELECT COUNT(*) FROM face_groups", [], |row| row.get(0))
@@ -254,7 +259,8 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
         .expect("tolerant grouping run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.55).expect("tolerant grouping");
+    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
+        .expect("tolerant grouping");
     let tolerant_groups: i64 = pool
         .get()
         .expect("connection")
@@ -318,7 +324,8 @@ fn face_group_representative_weights_frontality_over_center_proximity() {
         .expect("grouping run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize grouping");
+    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
+        .expect("finalize grouping");
     let connection = pool.get().expect("connection");
     let frontality_dominant_representative: i64 = connection
         .query_row(
@@ -340,6 +347,98 @@ fn face_group_representative_weights_frontality_over_center_proximity() {
         near_center_frontal_face_id
     );
     assert_eq!(center_weighted_representative, center_frontal_face_id);
+}
+
+#[test]
+fn face_group_representative_recomputes_from_configured_visibility_and_clarity_weights() {
+    init_test_paths();
+    let pool = create_test_db();
+    let visibility_media_id = create_test_media(&pool, "visible-face.jpg");
+    let clarity_media_id = create_test_media(&pool, "clear-face.jpg");
+    let embedding = base64::engine::general_purpose::STANDARD
+        .decode(embedding())
+        .expect("embedding");
+    let connection = pool.get().expect("connection");
+    let mut face_ids = Vec::new();
+    for (media_id, visibility_score, feature_clarity_score) in [
+        (visibility_media_id, 1.0_f64, 0.0_f64),
+        (clarity_media_id, 0.0_f64, 1.0_f64),
+    ] {
+        connection
+            .execute(
+                queries::faces::INSERT_FACE,
+                rusqlite::params![
+                    media_id,
+                    0,
+                    0,
+                    0.4,
+                    0.4,
+                    0.2,
+                    0.2,
+                    1.0,
+                    1.0,
+                    1.0,
+                    visibility_score,
+                    feature_clarity_score,
+                    &embedding,
+                    "faces/test.jpg"
+                ],
+            )
+            .expect("face");
+        face_ids.push(connection.last_insert_rowid());
+    }
+    connection
+        .execute(queries::faces::INSERT_GROUP, [])
+        .expect("group");
+    let group_id = connection.last_insert_rowid();
+    for face_id in &face_ids {
+        connection
+            .execute(
+                queries::faces::INSERT_AUTOMATIC_MEMBER,
+                [group_id, *face_id],
+            )
+            .expect("member");
+    }
+    let visibility_config = FaceGroupRepresentativeConfig {
+        confidence_weight: 0.0,
+        face_size_weight: 0.0,
+        center_proximity_weight: 0.0,
+        frontality_weight: 0.0,
+        visibility_weight: 1.0,
+        feature_clarity_weight: 0.0,
+    };
+    face_detection::update_group_representative(&connection, group_id, &visibility_config)
+        .expect("visibility representative");
+    let representative_face_id: i64 = connection
+        .query_row(
+            "SELECT representative_face_id FROM face_groups WHERE id = ?",
+            [group_id],
+            |row| row.get(0),
+        )
+        .expect("representative");
+    assert_eq!(representative_face_id, face_ids[0]);
+    drop(connection);
+
+    let clarity_config = FaceGroupRepresentativeConfig {
+        confidence_weight: 0.0,
+        face_size_weight: 0.0,
+        center_proximity_weight: 0.0,
+        frontality_weight: 0.0,
+        visibility_weight: 0.0,
+        feature_clarity_weight: 1.0,
+    };
+    face_detection::recompute_all_group_representatives(&pool, &clarity_config)
+        .expect("clarity representative recomputation");
+    let representative_face_id: i64 = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT representative_face_id FROM face_groups WHERE id = ?",
+            [group_id],
+            |row| row.get(0),
+        )
+        .expect("representative");
+    assert_eq!(representative_face_id, face_ids[1]);
 }
 
 #[test]
@@ -464,6 +563,8 @@ fn automatic_regrouping_attaches_new_faces_to_any_matching_manual_anchor() {
                     1.0,
                     1.0,
                     1.0,
+                    1.0,
+                    1.0,
                     face_embedding,
                     "faces/test.jpg"
                 ],
@@ -491,7 +592,8 @@ fn automatic_regrouping_attaches_new_faces_to_any_matching_manual_anchor() {
         .expect("run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.55).expect("finalize");
+    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
+        .expect("finalize");
 
     let connection = pool.get().expect("connection");
     for face_id in &face_ids[..2] {

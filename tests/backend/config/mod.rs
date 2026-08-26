@@ -616,6 +616,24 @@ fn test_load_config_rejects_invalid_face_group_similarity_threshold() {
 }
 
 #[test]
+fn test_load_config_rejects_invalid_face_representative_weights() {
+    for invalid_weights in [
+        "confidence_weight = -0.1\nface_size_weight = 0.2\ncenter_proximity_weight = 0.1\nfrontality_weight = 0.25\nvisibility_weight = 0.3\nfeature_clarity_weight = 0.25\n",
+        "confidence_weight = 0.1\nface_size_weight = 0.1\ncenter_proximity_weight = 0.1\nfrontality_weight = 0.1\nvisibility_weight = 0.1\nfeature_clarity_weight = 0.1\n",
+    ] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(
+            &dir,
+            &format!("[face_group_representative]\n{invalid_weights}"),
+        );
+
+        let error = load_config(&path).expect_err("Invalid representative weights must fail");
+
+        assert!(error.to_string().contains("face_group_representative"));
+    }
+}
+
+#[test]
 fn test_load_config_rejects_each_invalid_ai_schedule() {
     for (field, expression) in [
         ("ocr_cron", "0 1 * * *"),

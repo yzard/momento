@@ -30,11 +30,13 @@ ARG DINOV2_BASE_REVISION=f9e44c814b77203eaa57a6bdbbd535f21ede1415
 ARG RAM_CHECKPOINT_REVISION=84d4aee3a0265c4e0df1f714f0572011d1bf2ec3
 ARG BERT_TOKENIZER_REVISION=86b5e0934494bd15c9632b12f734a8a67f723594
 ARG BUFFALO_L_RELEASE=v0.7
+ARG FACE_PARSING_RELEASE=weights
 ARG AESTHETIC_PREDICTOR_REVISION=6d122adad522ab246644d9dc1c6d7a3810ee255f
 ARG PP_OCRV6_SMALL_DET_REVISION=106c97591b235f607453300d9fc8c1cad1b25488
 ARG PP_OCRV6_SMALL_REC_REVISION=bd619643acac4b9650c040234da8d944476ee3f1
 ARG RAM_CHECKPOINT_SHA256=497c178836ba66698ca226c7895317e6e800034be986452dbd2593298d50e87d
 ARG BUFFALO_L_SHA256=80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f
+ARG FACE_PARSING_RESNET18_SHA256=0d9bd318e46987c3bdbfacae9e2c0f461cae1c6ac6ea6d43bbe541a91727e33f
 ARG CLIP_VIT_B_32_SHA256=40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
 ARG AESTHETIC_HEAD_SHA256=c7b14cead230694acc7b9447974d3cad78003c72da032e402a303b6c2429e85f
 
@@ -303,6 +305,17 @@ RUN mkdir -p /opt/models/insightface/models/buffalo_l \
     && unzip /tmp/buffalo_l.zip -d /opt/models/insightface/models/buffalo_l \
     && rm /tmp/buffalo_l.zip
 
+FROM build-tools AS face-parsing-model
+
+ARG FACE_PARSING_RELEASE
+ARG FACE_PARSING_RESNET18_SHA256
+
+RUN mkdir -p /opt/models/face-parsing \
+    && curl --fail --location --retry 3 \
+    "https://github.com/yakhyo/face-parsing/releases/download/${FACE_PARSING_RELEASE}/resnet18.onnx" \
+    --output /opt/models/face-parsing/resnet18.onnx \
+    && echo "${FACE_PARSING_RESNET18_SHA256}  /opt/models/face-parsing/resnet18.onnx" | sha256sum --check -
+
 FROM build-tools AS image-aesthetics-model
 
 ARG AESTHETIC_PREDICTOR_REVISION
@@ -350,6 +363,7 @@ COPY --from=dinov2-model /opt/models/dinov2-base /opt/models/dinov2-base
 COPY --from=bert-tokenizer-model /opt/models/huggingface /opt/models/huggingface
 COPY --from=ram-model /opt/models/ram /opt/models/ram
 COPY --from=insightface-model /opt/models/insightface /opt/models/insightface
+COPY --from=face-parsing-model /opt/models/face-parsing /opt/models/face-parsing
 COPY --from=image-aesthetics-model /opt/models/clip /opt/models/clip
 COPY --from=image-aesthetics-model /opt/models/aesthetic /opt/models/aesthetic
 
@@ -360,7 +374,7 @@ RUN set -eux; \
     /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()"; \
     /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
     /opt/venvs/dinov2/bin/python -c "import clip, torch, transformers; from pathlib import Path; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-base', local_files_only=True).hidden_size == 768; assert 'ViT-B/32' in clip.available_models(); state = torch.load('/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth', map_location='cpu', weights_only=True); assert state['weight'].shape == (1, 512); assert state['bias'].shape == (1,); assert Path('/opt/models/clip/ViT-B-32.pt').is_file()"; \
-    /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"; \
+    /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx')); assert Path('/opt/models/face-parsing/resnet18.onnx').is_file()"; \
     /opt/venvs/paddleocr/bin/python -c "from importlib.metadata import version; from pathlib import Path; assert version('paddlepaddle-gpu') == '${PADDLEPADDLE_VERSION}'; assert version('paddleocr') == '${PADDLEOCR_VERSION}'; model_root = Path('/opt/models/paddleocr'); assert all((model_root / model / filename).is_file() for model in ('PP-OCRv6_small_det', 'PP-OCRv6_small_rec') for filename in ('inference.json', 'inference.pdiparams', 'inference.yml'))"; \
     rm -rf /tmp/verification-cache
 

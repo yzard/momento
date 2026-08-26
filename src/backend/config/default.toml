@@ -87,6 +87,15 @@ document_detection_enabled = {{DOCUMENT_DETECTION_ENABLED}}
 # Lower values group less-similar faces; higher values require closer matches.
 face_group_similarity_threshold = {{FACE_GROUP_SIMILARITY_THRESHOLD}}
 
+[face_group_representative]
+# These six weights must be non-negative and sum to 1.
+confidence_weight = {{FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT}}
+face_size_weight = {{FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT}}
+center_proximity_weight = {{FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT}}
+frontality_weight = {{FACE_REPRESENTATIVE_FRONTALITY_WEIGHT}}
+visibility_weight = {{FACE_REPRESENTATIVE_VISIBILITY_WEIGHT}}
+feature_clarity_weight = {{FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT}}
+
 [cronjob]
 # Five-field cron expressions are evaluated in this IANA timezone.
 timezone = "{{CRONJOB_TIMEZONE}}"
