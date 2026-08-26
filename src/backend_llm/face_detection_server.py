@@ -28,6 +28,7 @@ MODEL_NAME = "buffalo_l"
 RECOGNITION_INPUT_SIZE = 112
 FACE_PARSING_INPUT_SIZE = 512
 FACE_PARSING_CLASS_COUNT = 19
+FACE_PARSING_PRIMARY_OUTPUT_NAME = "output"
 FACE_PARSING_BATCH_SIZE = 8
 FACE_PARSING_BATCH_WAIT_MILLISECONDS = 5
 REQUIRED_MODULES = ["detection", "recognition"]
@@ -237,6 +238,15 @@ def preprocess_face_parsing_batch(aligned_faces):
     return numpy.ascontiguousarray(numpy.stack(tensors), dtype=numpy.float32)
 
 
+def select_face_parsing_output_name(model_outputs):
+    if not model_outputs:
+        raise RuntimeError("BiSeNet does not expose an output")
+    for model_output in model_outputs:
+        if model_output.name == FACE_PARSING_PRIMARY_OUTPUT_NAME:
+            return model_output.name
+    return model_outputs[0].name
+
+
 def postprocess_face_parsing_batch(model_output, aligned_faces):
     import cv2
     import numpy
@@ -406,11 +416,11 @@ class FaceDetectionRuntime:
         )
         face_parsing_input = face_parsing_session.get_inputs()[0]
         face_parsing_outputs = face_parsing_session.get_outputs()
-        if len(face_parsing_outputs) != 1:
-            raise RuntimeError("BiSeNet must expose exactly one output")
         self.face_parsing_session = face_parsing_session
         self.face_parsing_input_name = face_parsing_input.name
-        self.face_parsing_output_name = face_parsing_outputs[0].name
+        self.face_parsing_output_name = select_face_parsing_output_name(
+            face_parsing_outputs
+        )
 
         def parse_faces(aligned_faces):
             model_input = preprocess_face_parsing_batch(aligned_faces)

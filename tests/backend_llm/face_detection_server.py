@@ -132,6 +132,32 @@ class FaceDetectionServerTests(unittest.TestCase):
         self.assertEqual(FACE_DETECTION_SERVER.FACE_PARSING_BATCH_WAIT_MILLISECONDS, 5)
         self.assertEqual(FACE_DETECTION_SERVER.EMBEDDING_DIMENSIONS, 512)
 
+    def test_selects_primary_face_parsing_output_and_ignores_auxiliary_outputs(self):
+        class FakeOutput:
+            def __init__(self, name):
+                self.name = name
+
+        outputs = [FakeOutput("output16"), FakeOutput("output"), FakeOutput("output32")]
+
+        self.assertEqual(
+            FACE_DETECTION_SERVER.select_face_parsing_output_name(outputs), "output"
+        )
+
+    def test_uses_first_face_parsing_output_when_primary_name_is_unavailable(self):
+        class FakeOutput:
+            def __init__(self, name):
+                self.name = name
+
+        outputs = [FakeOutput("primary"), FakeOutput("auxiliary")]
+
+        self.assertEqual(
+            FACE_DETECTION_SERVER.select_face_parsing_output_name(outputs), "primary"
+        )
+
+    def test_rejects_face_parsing_model_without_outputs(self):
+        with self.assertRaisesRegex(RuntimeError, "does not expose an output"):
+            FACE_DETECTION_SERVER.select_face_parsing_output_name([])
+
     def test_detection_size_accepts_only_supported_square_sizes(self):
         self.assertEqual(
             FACE_DETECTION_SERVER.SUPPORTED_FACE_DETECTION_SIZES, {640, 960, 1280}
