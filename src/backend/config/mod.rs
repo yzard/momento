@@ -443,24 +443,24 @@ impl LlmSubmissionWorkerConfig {
 pub struct LlmResultWorkerConfig {
     #[serde(default = "defaults::llm_result_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "defaults::llm_result_batch_size")]
-    pub batch_size: usize,
+    #[serde(default = "defaults::llm_result_cpu_processing_concurrency")]
+    pub cpu_processing_concurrency: usize,
 }
 
 impl Default for LlmResultWorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: defaults::LLM_RESULT_POLL_INTERVAL_SECONDS,
-            batch_size: defaults::LLM_RESULT_BATCH_SIZE,
+            cpu_processing_concurrency: defaults::LLM_RESULT_CPU_PROCESSING_CONCURRENCY,
         }
     }
 }
 
 impl LlmResultWorkerConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.poll_interval_seconds == 0 || self.batch_size == 0 {
+        if self.poll_interval_seconds == 0 || self.cpu_processing_concurrency == 0 {
             return Err(std::io::Error::other(
-                "llm result poll interval and batch size must be positive",
+                "llm result poll interval and CPU processing concurrency must be positive",
             ));
         }
         Ok(())

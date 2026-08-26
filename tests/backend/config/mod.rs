@@ -187,22 +187,32 @@ fn test_load_config_rejects_removed_llm_submission_batch_size() {
 }
 
 #[test]
-fn test_load_config_reads_llm_result_worker_batch() {
+fn test_load_config_reads_llm_result_worker_concurrency() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[llm_result_worker]\nbatch_size = 23\npoll_interval_seconds = 3\n",
+        "[llm_result_worker]\npoll_interval_seconds = 3\ncpu_processing_concurrency = 7\n",
     );
 
     let config = load_config(&path).expect("Failed to load config");
 
-    assert_eq!(config.llm_result_worker.batch_size, 23);
     assert_eq!(config.llm_result_worker.poll_interval_seconds, 3);
+    assert_eq!(config.llm_result_worker.cpu_processing_concurrency, 7);
+}
+
+#[test]
+fn test_load_config_rejects_removed_llm_result_worker_batch_size() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[llm_result_worker]\nbatch_size = 64\n");
+
+    let error = load_config(&path).expect_err("Result worker batch size has been removed");
+
+    assert!(error.to_string().contains("batch_size"));
 }
 
 #[test]
 fn test_load_config_rejects_invalid_llm_result_worker_settings() {
-    for setting in ["batch_size", "poll_interval_seconds"] {
+    for setting in ["poll_interval_seconds", "cpu_processing_concurrency"] {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = write_config(&dir, &format!("[llm_result_worker]\n{setting} = 0\n"));
 
@@ -515,6 +525,7 @@ fn test_save_default_config_round_trips() {
     assert!(generated.contains("# Five-field cron expressions"));
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
     assert!(generated["metadata_worker"].get("batch_size").is_none());
+    assert!(generated["llm_result_worker"].get("batch_size").is_none());
     assert!(generated.get("admin").is_none());
     assert!(generated.get("storage").is_none());
     assert_eq!(generated["server"]["data_dir"].as_str(), Some("/data"));

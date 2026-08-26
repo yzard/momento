@@ -440,21 +440,21 @@ pub fn portrait_crop_box(
     let face_height = face_height * image_height;
     let center_x = eye_center_x * image_width;
     let center_y = eye_center_y * image_height;
-    let crop_width = (face_width * 2.2)
+    let crop_size = (face_width * 2.2)
         .max(face_height * 2.0)
         .min(image_width)
+        .min(image_height)
         .max(1.0);
-    let crop_height = crop_width.min(image_height).max(1.0);
-    let crop_x = (center_x - (crop_width / 2.0))
+    let crop_x = (center_x - (crop_size / 2.0))
         .max(0.0)
-        .min(image_width - crop_width);
-    let crop_y = (center_y - (crop_height / 2.0))
+        .min(image_width - crop_size);
+    let crop_y = (center_y - (crop_size / 2.0))
         .max(0.0)
-        .min(image_height - crop_height);
+        .min(image_height - crop_size);
     let crop_x = crop_x.floor() as u32;
     let crop_y = crop_y.floor() as u32;
-    let crop_width = (crop_width.ceil() as u32).min(image_width_pixels - crop_x);
-    let crop_height = (crop_height.ceil() as u32).min(image_height_pixels - crop_y);
+    let crop_width = (crop_size.ceil() as u32).min(image_width_pixels - crop_x);
+    let crop_height = (crop_size.ceil() as u32).min(image_height_pixels - crop_y);
     (crop_x, crop_y, crop_width, crop_height)
 }
 

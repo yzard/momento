@@ -48,6 +48,14 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
     assert!(!runtime_defaults.llm.screenshot_detection_enabled);
     assert!(!runtime_defaults.llm.document_detection_enabled);
     assert_eq!(
+        template["llm_result_worker"]["cpu_processing_concurrency"].as_integer(),
+        Some(
+            runtime_defaults
+                .llm_result_worker
+                .cpu_processing_concurrency as i64
+        )
+    );
+    assert_eq!(
         template["cronjob"]["screenshot_detection_cron"].as_str(),
         Some("0 6 * * *")
     );

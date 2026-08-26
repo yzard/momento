@@ -639,7 +639,7 @@ pub mod llm_callback {
         "INSERT OR IGNORE INTO llm_job_results (job_id, payload) VALUES (?, ?)";
     pub const MARK_UNACKNOWLEDGED_RESULT_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = ?, submitted_at = COALESCE(submitted_at, datetime('now')), claimed_at = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting') AND attempts + 1 = ?";
     pub const MARK_RESULT_CORRELATION_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting', 'submitted')";
-    pub const SELECT_RESULT_BATCH: &str = r#"
+    pub const SELECT_RESULT_CANDIDATES: &str = r#"
         SELECT job_id
              , payload
           FROM llm_job_results

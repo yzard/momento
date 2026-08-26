@@ -66,9 +66,9 @@ poll_interval_seconds = {{LLM_SUBMISSION_POLL_INTERVAL_SECONDS}}
 max_in_flight = {{LLM_SUBMISSION_MAX_IN_FLIGHT}}
 
 [llm_result_worker]
-# One dedicated thread prepares queued AI results, then persists each batch in one SQLite transaction.
+# CPU workers continuously prepare queued AI results; one dedicated writer persists each completed result.
 poll_interval_seconds = {{LLM_RESULT_POLL_INTERVAL_SECONDS}}
-batch_size = {{LLM_RESULT_BATCH_SIZE}}
+cpu_processing_concurrency = {{LLM_RESULT_CPU_PROCESSING_CONCURRENCY}}
 
 [llm]
 # The API initiates one authenticated WebSocket to llm-service.

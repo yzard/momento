@@ -326,13 +326,15 @@ impl RuntimeCatalog {
                 ServiceType::ScreenshotDetection,
                 "/app/runtimes/screenshot_detection_server.py",
                 "8700",
-                "screenshot-paddleocr-v2",
+                "PP-OCRv6_small_det+PP-OCRv6_small_rec",
+                "screenshot-paddleocr-v3",
             ),
             detection_runtime_spec(
                 ServiceType::DocumentDetection,
                 "/app/runtimes/document_detection_server.py",
                 "8800",
-                "document-paddleocr-v2",
+                "PP-OCRv6_small_det",
+                "document-paddleocr-v3",
             ),
         ])
     }
@@ -1575,6 +1577,7 @@ fn detection_runtime_spec(
     service_type: ServiceType,
     runtime_script: &str,
     port: &str,
+    model: &str,
     model_version: &str,
 ) -> RuntimeSpec {
     RuntimeSpec {
@@ -1606,7 +1609,7 @@ fn detection_runtime_spec(
         .collect(),
         environment: Vec::new(),
         base_url: format!("http://{RUNTIME_HOST}:{port}"),
-        model: "PP-OCRv6_small_det+PP-OCRv6_small_rec".to_string(),
+        model: model.to_string(),
         model_version: model_version.to_string(),
         embedding_dimensions: 0,
     }
@@ -2059,16 +2062,18 @@ mod tests {
             .iter()
             .any(|argument| { argument == "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" }));
 
-        for (service_type, runtime_script, model_version) in [
+        for (service_type, runtime_script, model, model_version) in [
             (
                 ServiceType::ScreenshotDetection,
                 "/app/runtimes/screenshot_detection_server.py",
-                "screenshot-paddleocr-v2",
+                "PP-OCRv6_small_det+PP-OCRv6_small_rec",
+                "screenshot-paddleocr-v3",
             ),
             (
                 ServiceType::DocumentDetection,
                 "/app/runtimes/document_detection_server.py",
-                "document-paddleocr-v2",
+                "PP-OCRv6_small_det",
+                "document-paddleocr-v3",
             ),
         ] {
             let detection_runtime = runtimes.get(service_type).expect("detection runtime");
@@ -2108,10 +2113,7 @@ mod tests {
             assert!(detection_runtime.arguments.windows(2).any(|arguments| {
                 arguments == ["--model-concurrency", MODEL_CONCURRENCY_PLACEHOLDER]
             }));
-            assert_eq!(
-                detection_runtime.model,
-                "PP-OCRv6_small_det+PP-OCRv6_small_rec"
-            );
+            assert_eq!(detection_runtime.model, model);
             assert_eq!(detection_runtime.model_version, model_version);
         }
     }

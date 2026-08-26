@@ -3,12 +3,13 @@
 import argparse
 import json
 import math
-import queue
-import threading
-import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 
+from dynamic_batching import DynamicBatcher
 from image_runtime import (
     InvalidImageError,
     ModelHTTPServer,
@@ -22,7 +23,8 @@ from runtime_input import read_runtime_input
 MINIMUM_TEXT_CONFIDENCE = 0.25
 MAX_TEXT_BYTES = 4096
 MAX_TEXT_REGIONS = 10000
-PADDLEOCR_MAX_SIDE_LENGTH = 4000
+PADDLEOCR_MODEL_IMAGE_SIZE = 1280
+PIPELINE_BUFFER_BATCHES = 2
 
 
 def bounded_score(score, score_name):
@@ -76,12 +78,7 @@ def compact_status_component_score(grayscale):
             maximum_row = max(maximum_row, current_row)
             minimum_column = min(minimum_column, current_column)
             maximum_column = max(maximum_column, current_column)
-            for row_offset, column_offset in (
-                (-1, 0),
-                (1, 0),
-                (0, -1),
-                (0, 1),
-            ):
+            for row_offset, column_offset in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 neighbor_row = current_row + row_offset
                 neighbor_column = current_column + column_offset
                 if (
@@ -97,11 +94,7 @@ def compact_status_component_score(grayscale):
                 stack.append((neighbor_row, neighbor_column))
         component_width = maximum_column - minimum_column + 1
         component_height = maximum_row - minimum_row + 1
-        if (
-            3 <= area <= 600
-            and component_width <= maximum_width
-            and component_height <= maximum_height
-        ):
+        if 3 <= area <= 600 and component_width <= maximum_width and component_height <= maximum_height:
             compact_components += 1
     return bounded_score(compact_components / 3.0, "compact component score")
 
@@ -112,9 +105,7 @@ def visual_metrics(image):
     pixels = analysis_pixels(image)
     maximum = pixels.max(axis=2)
     minimum = pixels.min(axis=2)
-    grayscale = (
-        0.299 * pixels[:, :, 0] + 0.587 * pixels[:, :, 1] + 0.114 * pixels[:, :, 2]
-    )
+    grayscale = 0.299 * pixels[:, :, 0] + 0.587 * pixels[:, :, 1] + 0.114 * pixels[:, :, 2]
     saturation = maximum - minimum
     neutral_bright = (saturation < 0.08) & (grayscale > 0.72)
 
@@ -140,8 +131,7 @@ def visual_metrics(image):
     probabilities = histogram[histogram > 0] / histogram.sum()
     entropy = float(-(probabilities * numpy.log2(probabilities)).sum()) / 6.0
     photo_likelihood = bounded_score(
-        0.60 * min(float(saturation.mean()) / 0.30, 1.0) + 0.40 * min(entropy, 1.0),
-        "photo likelihood",
+        0.60 * min(float(saturation.mean()) / 0.30, 1.0) + 0.40 * min(entropy, 1.0), "photo likelihood"
     )
     return {
         "paper": float(neutral_bright.mean()),
@@ -152,50 +142,69 @@ def visual_metrics(image):
     }
 
 
-def paddleocr_pipeline_configuration(
-    text_detection_model_path,
-    text_recognition_model_path,
-    batch_size,
-):
-    if batch_size <= 0:
-        raise ValueError("PaddleOCR batch_size must be positive")
-    return {
-        "pipeline_name": "OCR",
-        "batch_size": batch_size,
-        "text_type": "general",
-        "use_doc_preprocessor": False,
-        "use_textline_orientation": False,
-        "SubModules": {
-            "TextDetection": {
-                "module_name": "text_detection",
-                "model_name": "PP-OCRv6_small_det",
-                "model_dir": str(text_detection_model_path),
-                "limit_side_len": 64,
-                "limit_type": "min",
-                "max_side_limit": PADDLEOCR_MAX_SIDE_LENGTH,
-                "thresh": 0.2,
-                "box_thresh": 0.45,
-                "unclip_ratio": 1.4,
-            },
-            "TextRecognition": {
-                "module_name": "text_recognition",
-                "model_name": "PP-OCRv6_small_rec",
-                "model_dir": str(text_recognition_model_path),
-                "batch_size": batch_size,
-                "score_thresh": MINIMUM_TEXT_CONFIDENCE,
-            },
-        },
-    }
+class PaddleOCRModelComponents:
+    def __init__(self, detection_model: Any, recognition_model: Any | None, polygon_cropper: Any) -> None:
+        self.detection_model = detection_model
+        self.recognition_model = recognition_model
+        self.polygon_cropper = polygon_cropper
+
+    def detect(self, model_images: list[Any]) -> list[Any]:
+        if not model_images:
+            raise ValueError("PaddleOCR detection batch must not be empty")
+        try:
+            predictions = list(
+                self.detection_model(
+                    model_images,
+                    batch_size=len(model_images),
+                    limit_side_len=64,
+                    limit_type="min",
+                    max_side_limit=PADDLEOCR_MODEL_IMAGE_SIZE,
+                    thresh=0.2,
+                    box_thresh=0.45,
+                    unclip_ratio=1.4,
+                )
+            )
+        except (IndexError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+            raise RuntimeError(f"PaddleOCR text detection failed: {error}") from error
+        if len(predictions) != len(model_images):
+            raise RuntimeError("PaddleOCR text detection returned a different number of results than inputs")
+        return predictions
+
+    def recognize(self, text_crops: list[Any]) -> list[Any]:
+        if not text_crops:
+            raise ValueError("PaddleOCR recognition batch must not be empty")
+        if self.recognition_model is None:
+            raise RuntimeError("PaddleOCR recognition model is not loaded")
+        try:
+            predictions = list(self.recognition_model(text_crops, batch_size=len(text_crops), return_word_box=False))
+        except (IndexError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+            raise RuntimeError(f"PaddleOCR text recognition failed: {error}") from error
+        if len(predictions) != len(text_crops):
+            raise RuntimeError("PaddleOCR text recognition returned a different number of results than inputs")
+        return predictions
+
+    def crop(self, model_image: Any, polygons: list[Any]) -> list[Any]:
+        text_crops = list(self.polygon_cropper(model_image, polygons))
+        if len(text_crops) != len(polygons):
+            raise RuntimeError("PaddleOCR cropper returned a different number of crops than polygons")
+        return text_crops
+
+    def close(self) -> None:
+        if self.recognition_model is not None:
+            self.recognition_model.close()
+        self.detection_model.close()
 
 
-def load_paddleocr_pipeline(
-    text_detection_model_path,
-    text_recognition_model_path,
-    device,
-    batch_size,
-):
+def load_paddleocr_models(
+    text_detection_model_path: Path,
+    text_recognition_model_path: Path,
+    device: str,
+    model_batch_size: int,
+    load_recognition_model: bool,
+) -> PaddleOCRModelComponents:
     import paddle
-    from paddleocr import PaddleOCR
+    from paddlex.inference.models import create_predictor
+    from paddlex.inference.pipelines.components import CropByPolys
 
     if not device.startswith("gpu:"):
         raise RuntimeError("PaddleOCR detection requires a gpu:<index> device")
@@ -210,28 +219,33 @@ def load_paddleocr_pipeline(
     if device_index >= paddle.device.cuda.device_count():
         raise RuntimeError(f"PaddleOCR CUDA device {device_index} is unavailable")
 
-    for model_path in (text_detection_model_path, text_recognition_model_path):
-        if not model_path.is_dir():
-            raise RuntimeError(f"PaddleOCR model directory is missing: {model_path}")
+    if not text_detection_model_path.is_dir():
+        raise RuntimeError(f"PaddleOCR model directory is missing: {text_detection_model_path}")
+    if load_recognition_model and not text_recognition_model_path.is_dir():
+        raise RuntimeError(f"PaddleOCR model directory is missing: {text_recognition_model_path}")
 
-    configuration = paddleocr_pipeline_configuration(
-        text_detection_model_path,
-        text_recognition_model_path,
-        batch_size,
-    )
-    return PaddleOCR(
-        paddlex_config=configuration,
-        text_detection_model_name="PP-OCRv6_small_det",
-        text_detection_model_dir=str(text_detection_model_path),
-        text_recognition_model_name="PP-OCRv6_small_rec",
-        text_recognition_model_dir=str(text_recognition_model_path),
-        text_recognition_batch_size=batch_size,
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-        text_rec_score_thresh=MINIMUM_TEXT_CONFIDENCE,
+    detection_model = create_predictor(
+        model_name="PP-OCRv6_small_det",
+        model_dir=str(text_detection_model_path),
         device=device,
+        batch_size=model_batch_size,
+        limit_side_len=64,
+        limit_type="min",
+        max_side_limit=PADDLEOCR_MODEL_IMAGE_SIZE,
+        thresh=0.2,
+        box_thresh=0.45,
+        unclip_ratio=1.4,
     )
+    recognition_model = None
+    if load_recognition_model:
+        recognition_model = create_predictor(
+            model_name="PP-OCRv6_small_rec",
+            model_dir=str(text_recognition_model_path),
+            device=device,
+            batch_size=model_batch_size,
+            return_word_box=False,
+        )
+    return PaddleOCRModelComponents(detection_model, recognition_model, CropByPolys(det_box_type="quad"))
 
 
 def image_to_paddle_array(image):
@@ -243,247 +257,208 @@ def image_to_paddle_array(image):
     return numpy.ascontiguousarray(rgb_pixels[:, :, ::-1])
 
 
-def resize_for_paddleocr(image, max_side_length):
+@dataclass(frozen=True)
+class PreparedDetectionInput:
+    image: Any
+    model_image: Any
+    content_left: int
+    content_top: int
+    content_width: int
+    content_height: int
+
+
+def prepare_detection_input(image: Any, model_image_size: int) -> PreparedDetectionInput:
     from PIL import Image
 
-    if max_side_length <= 0:
-        raise ValueError("PaddleOCR max_side_length must be positive")
+    if model_image_size <= 0:
+        raise ValueError("PaddleOCR model_image_size must be positive")
     if image.width <= 0 or image.height <= 0:
         raise RuntimeError("PaddleOCR image dimensions must be positive")
 
-    longest_side = max(image.width, image.height)
-    if longest_side <= max_side_length:
-        return image
-    if image.width >= image.height:
-        resized_size = (
-            max_side_length,
-            max(1, image.height * max_side_length // image.width),
-        )
-    else:
-        resized_size = (
-            max(1, image.width * max_side_length // image.height),
-            max_side_length,
-        )
-    return image.resize(resized_size, Image.Resampling.LANCZOS)
+    scale = min(model_image_size / image.width, model_image_size / image.height)
+    content_width = max(1, min(model_image_size, round(image.width * scale)))
+    content_height = max(1, min(model_image_size, round(image.height * scale)))
+    content_left = (model_image_size - content_width) // 2
+    content_top = (model_image_size - content_height) // 2
+    resized_image = image.resize((content_width, content_height), Image.Resampling.LANCZOS)
+    model_canvas = Image.new("RGB", (model_image_size, model_image_size), color=(255, 255, 255))
+    model_canvas.paste(resized_image, (content_left, content_top))
+    return PreparedDetectionInput(
+        image=image,
+        model_image=image_to_paddle_array(model_canvas),
+        content_left=content_left,
+        content_top=content_top,
+        content_width=content_width,
+        content_height=content_height,
+    )
 
 
-def paddleocr_text_regions(prediction, image_width, image_height):
-    if image_width <= 0 or image_height <= 0:
-        raise RuntimeError("PaddleOCR image dimensions must be positive")
+def normalized_text_region(prepared_input: PreparedDetectionInput, polygon: Any, confidence: Any) -> dict[str, Any]:
+    import numpy
+
+    polygon_array = numpy.asarray(polygon, dtype=numpy.float64)
+    if polygon_array.shape != (4, 2):
+        raise RuntimeError("PaddleOCR text detection polygon must contain four points")
+    if not numpy.isfinite(polygon_array).all():
+        raise RuntimeError("PaddleOCR text detection polygon must be finite")
     try:
-        recognized_texts = prediction["rec_texts"]
-        recognition_scores = prediction["rec_scores"]
-        recognition_boxes = prediction["rec_boxes"]
-    except (KeyError, TypeError) as error:
-        raise RuntimeError("PaddleOCR result is missing text-region fields") from error
-    if not (len(recognized_texts) == len(recognition_scores) == len(recognition_boxes)):
-        raise RuntimeError("PaddleOCR text-region fields have different lengths")
+        numeric_confidence = float(confidence)
+    except (TypeError, ValueError):
+        raise RuntimeError("PaddleOCR text detection confidence is invalid") from None
+    if not math.isfinite(numeric_confidence) or not 0.0 <= numeric_confidence <= 1.0:
+        raise RuntimeError("PaddleOCR text detection confidence must be finite and between zero and one")
 
-    regions = []
-    for region_index, text in enumerate(recognized_texts):
-        if len(regions) >= MAX_TEXT_REGIONS:
-            break
-        if not isinstance(text, str):
-            raise RuntimeError("PaddleOCR recognized text must be a string")
-        text = text.strip()
-        if not text or len(text.encode("utf-8")) > MAX_TEXT_BYTES:
-            continue
-        try:
-            confidence = float(recognition_scores[region_index])
-            left, top, right, bottom = (
-                float(coordinate) for coordinate in recognition_boxes[region_index]
-            )
-        except (TypeError, ValueError):
-            raise RuntimeError("PaddleOCR text-region values are invalid") from None
-        if not all(
-            math.isfinite(number) for number in (confidence, left, top, right, bottom)
-        ):
-            raise RuntimeError("PaddleOCR text-region values must be finite")
-        if confidence < 0.0 or confidence > 1.0:
-            raise RuntimeError("PaddleOCR text confidence must be between zero and one")
-        if confidence < MINIMUM_TEXT_CONFIDENCE:
-            continue
-
-        clipped_left = max(0.0, min(float(image_width), left))
-        clipped_top = max(0.0, min(float(image_height), top))
-        clipped_right = max(0.0, min(float(image_width), right))
-        clipped_bottom = max(0.0, min(float(image_height), bottom))
-        width = clipped_right - clipped_left
-        height = clipped_bottom - clipped_top
-        if width <= 0.0 or height <= 0.0:
-            continue
-        regions.append(
-            {
-                "text": text,
-                "confidence": confidence,
-                "x": clipped_left / image_width,
-                "y": clipped_top / image_height,
-                "width": width / image_width,
-                "height": height / image_height,
-            }
-        )
-    return regions
+    content_right = prepared_input.content_left + prepared_input.content_width
+    content_bottom = prepared_input.content_top + prepared_input.content_height
+    left = max(float(prepared_input.content_left), min(float(content_right), float(polygon_array[:, 0].min())))
+    top = max(float(prepared_input.content_top), min(float(content_bottom), float(polygon_array[:, 1].min())))
+    right = max(float(prepared_input.content_left), min(float(content_right), float(polygon_array[:, 0].max())))
+    bottom = max(float(prepared_input.content_top), min(float(content_bottom), float(polygon_array[:, 1].max())))
+    return {
+        "text": "",
+        "confidence": numeric_confidence,
+        "x": (left - prepared_input.content_left) / prepared_input.content_width,
+        "y": (top - prepared_input.content_top) / prepared_input.content_height,
+        "width": max(0.0, right - left) / prepared_input.content_width,
+        "height": max(0.0, bottom - top) / prepared_input.content_height,
+    }
 
 
-class PaddleOCRBatchRequest:
-    def __init__(self, paddle_image, image_width, image_height):
-        self.paddle_image = paddle_image
-        self.image_width = image_width
-        self.image_height = image_height
-        self.completed = threading.Event()
-        self.text_regions = None
-        self.error = None
-
-
-class PaddleOCRBatchProcessor:
-    def __init__(
-        self,
-        pipeline,
-        model_concurrency,
-        batch_wait_seconds,
-    ):
-        if model_concurrency <= 0:
-            raise ValueError("model_concurrency must be positive")
-        if batch_wait_seconds < 0.0:
-            raise ValueError("batch_wait_seconds must not be negative")
-        self.pipeline = pipeline
-        self.model_concurrency = model_concurrency
-        self.batch_wait_seconds = batch_wait_seconds
-        self.pending_requests = queue.Queue(maxsize=model_concurrency)
-        self.stop_marker = object()
-        self.submission_lock = threading.Lock()
-        self.closed = False
-        self.worker = threading.Thread(
-            target=self.process_batches,
-            name="paddleocr-batch-worker",
-        )
-        self.worker.start()
-
-    def infer(self, paddle_image, image_width, image_height):
-        pending_request = PaddleOCRBatchRequest(
-            paddle_image,
-            image_width,
-            image_height,
-        )
-        with self.submission_lock:
-            if self.closed:
-                raise RuntimeError("PaddleOCR batch processor is closed")
-            self.pending_requests.put(pending_request)
-        pending_request.completed.wait()
-        if pending_request.error is not None:
-            raise pending_request.error
-        return pending_request.text_regions
-
-    def collect_batch(self, first_request):
-        pending_batch = [first_request]
-        stop_after_batch = False
-        deadline = time.monotonic() + self.batch_wait_seconds
-        while len(pending_batch) < self.model_concurrency:
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0.0:
-                break
-            try:
-                pending_request = self.pending_requests.get(timeout=remaining_seconds)
-            except queue.Empty:
-                break
-            if pending_request is self.stop_marker:
-                stop_after_batch = True
-                break
-            pending_batch.append(pending_request)
-        return pending_batch, stop_after_batch
-
-    def process_batch(self, pending_batch):
-        try:
-            paddle_images = [
-                pending_request.paddle_image for pending_request in pending_batch
-            ]
-            predictions = self.pipeline.predict(paddle_images)
-            if len(predictions) != len(pending_batch):
-                raise RuntimeError(
-                    "PaddleOCR returned a different number of results than inputs"
-                )
-            for pending_request, prediction in zip(
-                pending_batch,
-                predictions,
-            ):
-                pending_request.text_regions = paddleocr_text_regions(
-                    prediction,
-                    pending_request.image_width,
-                    pending_request.image_height,
-                )
-        except (
-            IndexError,
-            KeyError,
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-        ) as error:
-            for pending_request in pending_batch:
-                pending_request.error = RuntimeError(
-                    f"PaddleOCR inference failed: {error}"
-                )
-        finally:
-            for pending_request in pending_batch:
-                pending_request.completed.set()
-
-    def process_batches(self):
-        while True:
-            first_request = self.pending_requests.get()
-            if first_request is self.stop_marker:
-                return
-            pending_batch, stop_after_batch = self.collect_batch(first_request)
-            self.process_batch(pending_batch)
-            if stop_after_batch:
-                return
-
-    def close(self):
-        with self.submission_lock:
-            if self.closed:
-                return
-            self.closed = True
-            self.pending_requests.put(self.stop_marker)
-        self.worker.join()
-        self.pipeline.close()
+@dataclass(frozen=True)
+class PreparedTextLayout:
+    text_regions: list[dict[str, Any]]
+    recognition_region_indexes: list[int]
+    recognition_crops: list[Any]
 
 
 class DetectionRuntime:
-    def __init__(self, detector, text_region_extractor):
+    def __init__(
+        self,
+        detector: Callable[[Any, list[dict[str, Any]]], dict[str, Any]],
+        recognition_region_filter: Callable[[dict[str, Any]], bool] | None,
+        model_components: PaddleOCRModelComponents,
+        cpu_processing_concurrency: int,
+        model_concurrency: int,
+        model_batch_wait_milliseconds: int,
+    ) -> None:
         self.detector = detector
-        self.text_region_extractor = text_region_extractor
-
-    def prepare_input(self, image_source):
-        image = decode_image(image_source)
-        resized_image = resize_for_paddleocr(image, PADDLEOCR_MAX_SIDE_LENGTH)
-        return image, image_to_paddle_array(resized_image), resized_image.size
-
-    def infer(self, prepared_input):
-        image, paddle_image, resized_size = prepared_input
-        resized_width, resized_height = resized_size
-        text_regions = self.text_region_extractor.infer(
-            paddle_image,
-            resized_width,
-            resized_height,
+        self.recognition_region_filter = recognition_region_filter
+        self.model_components = model_components
+        self.cpu_processing_slots = create_inference_slots(cpu_processing_concurrency)
+        self.pipeline_slots = create_inference_slots(model_concurrency * PIPELINE_BUFFER_BATCHES)
+        self.detection_batcher = DynamicBatcher(
+            self._detect_batch, model_concurrency, model_batch_wait_milliseconds, "paddleocr-detection-batcher"
         )
-        return self.detector(image, text_regions)
+        self.recognition_batcher = None
+        if recognition_region_filter is not None:
+            if model_components.recognition_model is None:
+                raise ValueError("PaddleOCR recognition filter requires a recognition model")
+            self.recognition_batcher = DynamicBatcher(
+                self._recognize_batch, model_concurrency, model_batch_wait_milliseconds, "paddleocr-recognition-batcher"
+            )
+
+    def prepare_input(self, image_source: Any) -> PreparedDetectionInput:
+        image = decode_image(image_source)
+        return prepare_detection_input(image, PADDLEOCR_MODEL_IMAGE_SIZE)
+
+    def detect(self, prepared_input: PreparedDetectionInput) -> Any:
+        return self.detection_batcher.infer([prepared_input])[0]
+
+    def prepare_text_layout(
+        self, prepared_input: PreparedDetectionInput, detection_prediction: Any
+    ) -> PreparedTextLayout:
+        try:
+            polygons = detection_prediction["dt_polys"]
+            confidences = detection_prediction["dt_scores"]
+        except (KeyError, TypeError) as error:
+            raise RuntimeError("PaddleOCR text detection result is missing required fields") from error
+        if len(polygons) != len(confidences):
+            raise RuntimeError("PaddleOCR text detection polygons and confidences have different lengths")
+
+        text_regions = []
+        recognition_region_indexes = []
+        recognition_polygons = []
+        for polygon, confidence in zip(polygons, confidences):
+            if len(text_regions) >= MAX_TEXT_REGIONS:
+                break
+            text_region = normalized_text_region(prepared_input, polygon, confidence)
+            if text_region["width"] <= 0.0 or text_region["height"] <= 0.0:
+                continue
+            text_regions.append(text_region)
+            if self.recognition_region_filter is not None and self.recognition_region_filter(text_region):
+                recognition_region_indexes.append(len(text_regions) - 1)
+                recognition_polygons.append(polygon)
+
+        recognition_crops = []
+        if recognition_polygons:
+            recognition_crops = self.model_components.crop(prepared_input.model_image, recognition_polygons)
+        return PreparedTextLayout(text_regions, recognition_region_indexes, recognition_crops)
+
+    def recognize(self, recognition_crops: list[Any]) -> list[Any]:
+        if not recognition_crops:
+            return []
+        if self.recognition_batcher is None:
+            raise RuntimeError("PaddleOCR recognition crops exist without a recognition batcher")
+        return self.recognition_batcher.infer(recognition_crops)
+
+    def classify(
+        self,
+        prepared_input: PreparedDetectionInput,
+        prepared_layout: PreparedTextLayout,
+        recognition_predictions: Sequence[Any],
+    ) -> dict[str, Any]:
+        if len(recognition_predictions) != len(prepared_layout.recognition_region_indexes):
+            raise RuntimeError("PaddleOCR recognition results do not match requested text regions")
+        for region_index, recognition_prediction in zip(
+            prepared_layout.recognition_region_indexes, recognition_predictions
+        ):
+            try:
+                recognized_text = recognition_prediction["rec_text"]
+                recognition_confidence = float(recognition_prediction["rec_score"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError("PaddleOCR text recognition result is invalid") from error
+            if not isinstance(recognized_text, str):
+                raise RuntimeError("PaddleOCR recognized text must be a string")
+            recognized_text = recognized_text.strip()
+            if not math.isfinite(recognition_confidence) or not 0.0 <= recognition_confidence <= 1.0:
+                raise RuntimeError("PaddleOCR recognition confidence must be finite and between zero and one")
+            if recognition_confidence < MINIMUM_TEXT_CONFIDENCE or not recognized_text:
+                continue
+            if len(recognized_text.encode("utf-8")) > MAX_TEXT_BYTES:
+                continue
+            prepared_layout.text_regions[region_index]["text"] = recognized_text
+            prepared_layout.text_regions[region_index]["confidence"] = recognition_confidence
+        return self.detector(prepared_input.image, prepared_layout.text_regions)
+
+    def close(self) -> None:
+        self.detection_batcher.close()
+        if self.recognition_batcher is not None:
+            self.recognition_batcher.close()
+        self.model_components.close()
+
+    def _detect_batch(self, prepared_inputs: list[PreparedDetectionInput]) -> list[Any]:
+        return self.model_components.detect([prepared_input.model_image for prepared_input in prepared_inputs])
+
+    def _recognize_batch(self, recognition_crops: list[Any]) -> list[Any]:
+        return self.model_components.recognize(recognition_crops)
 
 
-def prepare_runtime_input(handler):
-    with handler.cpu_processing_slots:
-        with read_runtime_input(handler, handler.input_root) as image_source:
-            return handler.runtime.prepare_input(image_source)
-
-
-def run_bounded_model_inference(handler):
-    with handler.model_slots:
-        prepared_input = prepare_runtime_input(handler)
-        return handler.runtime.infer(prepared_input)
+def run_detection_pipeline(handler: Any) -> dict[str, Any]:
+    runtime = handler.runtime
+    with runtime.pipeline_slots:
+        with runtime.cpu_processing_slots:
+            with read_runtime_input(handler, handler.input_root) as image_source:
+                prepared_input = runtime.prepare_input(image_source)
+        detection_prediction = runtime.detect(prepared_input)
+        with runtime.cpu_processing_slots:
+            prepared_layout = runtime.prepare_text_layout(prepared_input, detection_prediction)
+        recognition_predictions = runtime.recognize(prepared_layout.recognition_crops)
+        with runtime.cpu_processing_slots:
+            return runtime.classify(prepared_input, prepared_layout, recognition_predictions)
 
 
 class DetectionHandler(BaseHTTPRequestHandler):
     runtime = None
-    cpu_processing_slots = None
-    model_slots = None
     input_root = None
 
     def do_GET(self):
@@ -501,7 +476,7 @@ class DetectionHandler(BaseHTTPRequestHandler):
     def handle_inference(self):
         try:
             # Bound decoded image memory before opening or reading the queued input.
-            response = run_bounded_model_inference(self)
+            response = run_detection_pipeline(self)
         except InvalidImageError as error:
             self.send_json(400, {"detail": str(error)})
             return
@@ -517,9 +492,7 @@ class DetectionHandler(BaseHTTPRequestHandler):
         return
 
     def send_json(self, status, payload):
-        body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -527,7 +500,10 @@ class DetectionHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def serve_detection(detector):
+def serve_detection(
+    detector: Callable[[Any, list[dict[str, Any]]], dict[str, Any]],
+    recognition_region_filter: Callable[[dict[str, Any]], bool] | None,
+) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
@@ -537,7 +513,7 @@ def serve_detection(detector):
     parser.add_argument("--text-detection-model", required=True)
     parser.add_argument("--text-recognition-model", required=True)
     parser.add_argument("--device", required=True)
-    parser.add_argument("--batch-wait-milliseconds", type=float, required=True)
+    parser.add_argument("--batch-wait-milliseconds", type=int, required=True)
     arguments = parser.parse_args()
     if arguments.cpu_processing_concurrency <= 0:
         parser.error("--cpu-processing-concurrency must be positive")
@@ -547,26 +523,23 @@ def serve_detection(detector):
         parser.error("--batch-wait-milliseconds must not be negative")
 
     register_image_decoders()
-    pipeline = load_paddleocr_pipeline(
+    model_components = load_paddleocr_models(
         Path(arguments.text_detection_model),
         Path(arguments.text_recognition_model),
         arguments.device,
         arguments.model_concurrency,
+        recognition_region_filter is not None,
     )
-    batch_processor = PaddleOCRBatchProcessor(
-        pipeline,
+    DetectionHandler.runtime = DetectionRuntime(
+        detector,
+        recognition_region_filter,
+        model_components,
+        arguments.cpu_processing_concurrency,
         arguments.model_concurrency,
-        arguments.batch_wait_milliseconds / 1000.0,
+        arguments.batch_wait_milliseconds,
     )
-    DetectionHandler.runtime = DetectionRuntime(detector, batch_processor)
-    DetectionHandler.cpu_processing_slots = create_inference_slots(
-        arguments.cpu_processing_concurrency
-    )
-    DetectionHandler.model_slots = create_inference_slots(arguments.model_concurrency)
     DetectionHandler.input_root = Path(arguments.input_root)
     try:
-        serve_until_stopped(
-            ModelHTTPServer((arguments.host, arguments.port), DetectionHandler)
-        )
+        serve_until_stopped(ModelHTTPServer((arguments.host, arguments.port), DetectionHandler))
     finally:
-        batch_processor.close()
+        DetectionHandler.runtime.close()

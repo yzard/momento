@@ -330,14 +330,15 @@ Momento first stores an incoming result in its durable `llm_job_results` inbox a
 `resultReceived`. That receipt is the llm-service success boundary and permits llm-service to delete
 all local task data. `resultReceiptRejected` is reserved for failure to durably receive the payload;
 it is never used for later validation, crop generation, database persistence, or downstream work.
-Momento's independent `ai-result-writer` OS thread is the only AI-result SQLite writer. It reads a
-configured batch from the durable inbox, performs expensive face-image preparation before opening
-the write transaction, then persists the entire batch in one SQLite transaction. Results within a
-batch use savepoints so a permanently invalid payload fails only its Momento job. A transient
-database, pool, I/O, or internal failure rolls back the complete batch and leaves every inbox row
-available for unbounded retry; transient failures never exhaust an attempt limit, delete the inbox
-payload, or mark the Momento job failed. Matching duplicate deliveries are received idempotently,
-and late results for terminal or removed jobs are acknowledged without recreating work.
+Momento's independent `ai-result-writer` OS thread is the only AI-result SQLite writer. A rolling,
+bounded CPU worker window continuously prepares durable inbox results, including expensive face-image
+normalization and cropping. Each completed preparation is persisted immediately in its own short
+SQLite transaction, its worker slot is refilled without waiting for other preparations, and a slow
+image never forms a batch barrier. A permanently invalid payload fails only its Momento job. A
+transient database, pool, I/O, or internal failure leaves that inbox row available for unbounded
+retry; transient failures never exhaust an attempt limit, delete the inbox payload, or mark the
+Momento job failed. Matching duplicate deliveries are received idempotently, and late results for
+terminal or removed jobs are acknowledged without recreating work.
 
 Persistence is deliberately type-specific. OCR and tagging store present text results in
 input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
@@ -470,7 +471,8 @@ does not read Momento originals, previews, or thumbnails.
 
 Momento's `[llm_submission_worker]` controls only the outbound WebSocket submission window.
 `[llm_result_worker]` independently controls the single AI-result writer thread's inbox poll
-interval and SQLite transaction batch size; it never creates concurrent AI-result database writers.
+interval and rolling CPU preparation concurrency; it has no batch size and never creates concurrent
+AI-result database writers.
 
 ### Face detection and grouping
 

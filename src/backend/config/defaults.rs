@@ -31,7 +31,7 @@ pub(crate) const METADATA_WORKER_MAX_ATTEMPTS: u32 = 5;
 pub(crate) const LLM_SUBMISSION_POLL_INTERVAL_SECONDS: u64 = 5;
 pub(crate) const LLM_SUBMISSION_MAX_IN_FLIGHT: usize = 128;
 pub(crate) const LLM_RESULT_POLL_INTERVAL_SECONDS: u64 = 1;
-pub(crate) const LLM_RESULT_BATCH_SIZE: usize = 64;
+pub(crate) const LLM_RESULT_CPU_PROCESSING_CONCURRENCY: usize = 8;
 pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.41;
 pub(crate) const CRONJOB_TIMEZONE: &str = "Etc/UTC";
 pub(crate) const OCR_CRON: &str = "0 1 * * *";
@@ -308,8 +308,8 @@ pub(crate) fn llm_result_poll_interval_seconds() -> u64 {
     LLM_RESULT_POLL_INTERVAL_SECONDS
 }
 
-pub(crate) fn llm_result_batch_size() -> usize {
-    LLM_RESULT_BATCH_SIZE
+pub(crate) fn llm_result_cpu_processing_concurrency() -> usize {
+    LLM_RESULT_CPU_PROCESSING_CONCURRENCY
 }
 
 pub(crate) fn render_template(source: &str) -> String {
@@ -442,8 +442,8 @@ pub(crate) fn render_template(source: &str) -> String {
             LLM_RESULT_POLL_INTERVAL_SECONDS.to_string(),
         ),
         (
-            "{{LLM_RESULT_BATCH_SIZE}}",
-            LLM_RESULT_BATCH_SIZE.to_string(),
+            "{{LLM_RESULT_CPU_PROCESSING_CONCURRENCY}}",
+            LLM_RESULT_CPU_PROCESSING_CONCURRENCY.to_string(),
         ),
         ("{{LLM_ENABLED}}", template::LLM_ENABLED.to_string()),
         (

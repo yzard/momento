@@ -1,9 +1,10 @@
-use momento_common::llm::{
-    JobInputResult, JobResult, IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS,
-};
+use momento_common::llm::{JobInputResult, JobResult, IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
-use std::collections::HashSet;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
@@ -12,6 +13,11 @@ use crate::error::{AppError, AppResult};
 struct QueuedResult {
     job_id: String,
     payload: String,
+}
+
+struct PreparedResultCompletion {
+    job_id: String,
+    prepared: AppResult<PreparedQueuedResult>,
 }
 
 enum PreparedQueuedResult {
@@ -98,42 +104,275 @@ pub fn receive_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
     Ok(())
 }
 
-pub fn run(pool: DbPool, interval: Duration, batch_size: usize) -> ! {
-    loop {
-        match process_received_results(&pool, batch_size) {
-            Ok(processed) if processed == batch_size => continue,
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "Momento LLM result batch remains queued and will be retried"
-                );
-            }
+struct RollingCpuWorkers<Input, Output> {
+    input_sender: Option<SyncSender<Input>>,
+    output_receiver: Receiver<Output>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl<Input: Send + 'static, Output: Send + 'static> RollingCpuWorkers<Input, Output> {
+    fn new<ProcessInput>(
+        cpu_processing_concurrency: usize,
+        worker_name: &str,
+        process_input: ProcessInput,
+    ) -> AppResult<Self>
+    where
+        ProcessInput: Fn(Input) -> Output + Send + Sync + 'static,
+    {
+        if cpu_processing_concurrency == 0 {
+            return Err(AppError::Validation(
+                "CPU processing concurrency must be positive".to_string(),
+            ));
         }
-        std::thread::sleep(interval);
+        if worker_name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "CPU worker name must not be empty".to_string(),
+            ));
+        }
+
+        let (input_sender, input_receiver) = mpsc::sync_channel(cpu_processing_concurrency);
+        let (output_sender, output_receiver) = mpsc::channel();
+        let input_receiver = Arc::new(Mutex::new(input_receiver));
+        let process_input = Arc::new(process_input);
+        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(cpu_processing_concurrency);
+        for worker_index in 0..cpu_processing_concurrency {
+            let worker_input_receiver = Arc::clone(&input_receiver);
+            let worker_output_sender = output_sender.clone();
+            let worker_process_input = Arc::clone(&process_input);
+            let thread_name = format!("{worker_name}-{worker_index}");
+            let worker = match std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || loop {
+                    let input = {
+                        let receiver = match worker_input_receiver.lock() {
+                            Ok(receiver) => receiver,
+                            Err(_) => return,
+                        };
+                        match receiver.recv() {
+                            Ok(input) => input,
+                            Err(_) => return,
+                        }
+                    };
+                    if worker_output_sender
+                        .send(worker_process_input(input))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    drop(input_sender);
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(AppError::Internal(format!(
+                        "failed to start CPU processing worker: {error}"
+                    )));
+                }
+            };
+            workers.push(worker);
+        }
+        drop(output_sender);
+        Ok(Self {
+            input_sender: Some(input_sender),
+            output_receiver,
+            workers,
+        })
+    }
+
+    fn submit(&self, input: Input) -> AppResult<()> {
+        self.input_sender
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("CPU processing workers are closed".to_string()))?
+            .send(input)
+            .map_err(|_| {
+                AppError::Internal("CPU processing workers stopped unexpectedly".to_string())
+            })
+    }
+
+    fn receive(&self) -> AppResult<Output> {
+        self.output_receiver.recv().map_err(|_| {
+            AppError::Internal("CPU processing workers stopped unexpectedly".to_string())
+        })
+    }
+
+    fn receive_timeout(&self, timeout: Duration) -> AppResult<Option<Output>> {
+        match self.output_receiver.recv_timeout(timeout) {
+            Ok(output) => Ok(Some(output)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(AppError::Internal(
+                "CPU processing workers stopped unexpectedly".to_string(),
+            )),
+        }
     }
 }
 
-pub fn process_received_results(pool: &DbPool, batch_size: usize) -> AppResult<usize> {
-    if batch_size == 0 {
-        return Err(AppError::Validation(
-            "LLM result worker batch size must be positive".to_string(),
-        ));
+impl<Input, Output> Drop for RollingCpuWorkers<Input, Output> {
+    fn drop(&mut self) {
+        self.input_sender.take();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
     }
-    let batch_size = i64::try_from(batch_size).map_err(|_| {
-        AppError::Validation("LLM result worker batch size is too large".to_string())
-    })?;
-    let connection = pool.get()?;
-    let queued = select_result_batch(&connection, batch_size)?;
-    if queued.is_empty() {
-        return Ok(0);
+}
+
+struct ResultPipeline {
+    pool: DbPool,
+    cpu_processing_concurrency: usize,
+    cpu_workers: RollingCpuWorkers<QueuedResult, PreparedResultCompletion>,
+    in_flight_job_ids: HashSet<String>,
+    retry_after: HashMap<String, Instant>,
+}
+
+impl ResultPipeline {
+    fn new(pool: DbPool, cpu_processing_concurrency: usize) -> AppResult<Self> {
+        let preparation_pool = pool.clone();
+        let cpu_workers = RollingCpuWorkers::new(
+            cpu_processing_concurrency,
+            "ai-result-cpu",
+            move |queued: QueuedResult| {
+                let job_id = queued.job_id.clone();
+                let prepared = (|| {
+                    let connection = preparation_pool.get()?;
+                    prepare_queued_result(&connection, queued)
+                })();
+                PreparedResultCompletion { job_id, prepared }
+            },
+        )?;
+        Ok(Self {
+            pool,
+            cpu_processing_concurrency,
+            cpu_workers,
+            in_flight_job_ids: HashSet::new(),
+            retry_after: HashMap::new(),
+        })
     }
-    let prepared = queued
-        .into_iter()
-        .map(|queued| prepare_queued_result(&connection, queued))
-        .collect::<AppResult<Vec<_>>>()?;
-    let processed = prepared.len();
-    persist_result_batch(&connection, prepared)?;
+
+    fn refill(&mut self) -> AppResult<usize> {
+        let now = Instant::now();
+        self.retry_after.retain(|_, retry_at| *retry_at > now);
+        let available_slots = self
+            .cpu_processing_concurrency
+            .saturating_sub(self.in_flight_job_ids.len());
+        if available_slots == 0 {
+            return Ok(0);
+        }
+        let candidate_limit = self
+            .in_flight_job_ids
+            .len()
+            .checked_add(self.retry_after.len())
+            .and_then(|excluded_count| excluded_count.checked_add(available_slots))
+            .ok_or_else(|| {
+                AppError::Validation("LLM result candidate window is too large".to_string())
+            })?;
+        let candidate_limit = i64::try_from(candidate_limit).map_err(|_| {
+            AppError::Validation("LLM result candidate window is too large".to_string())
+        })?;
+        let candidates = {
+            let connection = self.pool.get()?;
+            select_result_candidates(&connection, candidate_limit)?
+        };
+
+        let mut submitted = 0;
+        for queued in candidates {
+            if self.in_flight_job_ids.contains(&queued.job_id)
+                || self.retry_after.contains_key(&queued.job_id)
+            {
+                continue;
+            }
+            let job_id = queued.job_id.clone();
+            self.cpu_workers.submit(queued)?;
+            self.in_flight_job_ids.insert(job_id);
+            submitted += 1;
+            if submitted == available_slots {
+                break;
+            }
+        }
+        Ok(submitted)
+    }
+
+    fn receive(&self) -> AppResult<PreparedResultCompletion> {
+        self.cpu_workers.receive()
+    }
+
+    fn receive_timeout(&self, timeout: Duration) -> AppResult<Option<PreparedResultCompletion>> {
+        self.cpu_workers.receive_timeout(timeout)
+    }
+
+    fn complete(&mut self, completion: PreparedResultCompletion) -> (String, AppResult<()>) {
+        let job_id = completion.job_id;
+        if !self.in_flight_job_ids.remove(&job_id) {
+            return (
+                job_id,
+                Err(AppError::Internal(
+                    "CPU worker completed a result that was not in flight".to_string(),
+                )),
+            );
+        }
+        let persisted = completion.prepared.and_then(|prepared| {
+            let connection = self.pool.get()?;
+            persist_prepared_result(&connection, prepared)
+        });
+        (job_id, persisted)
+    }
+
+    fn defer_retry(&mut self, job_id: String, retry_delay: Duration) {
+        self.retry_after
+            .insert(job_id, Instant::now() + retry_delay);
+    }
+
+    fn in_flight_count(&self) -> usize {
+        self.in_flight_job_ids.len()
+    }
+}
+
+pub fn run(pool: DbPool, interval: Duration, cpu_processing_concurrency: usize) -> ! {
+    let mut pipeline = ResultPipeline::new(pool, cpu_processing_concurrency)
+        .expect("validated LLM result CPU pipeline must start");
+    loop {
+        if let Err(error) = pipeline.refill() {
+            tracing::warn!(error = %error, "Momento LLM result pipeline refill failed");
+        }
+        if pipeline.in_flight_count() == 0 {
+            std::thread::sleep(interval);
+            continue;
+        }
+        let completion = match pipeline.receive_timeout(interval) {
+            Ok(Some(completion)) => completion,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(error = %error, "Momento LLM result CPU pipeline stopped");
+                std::thread::sleep(interval);
+                continue;
+            }
+        };
+        let (job_id, persisted) = pipeline.complete(completion);
+        if let Err(error) = persisted {
+            tracing::warn!(
+                job_id,
+                error = %error,
+                "Momento LLM result remains queued and will be retried"
+            );
+            pipeline.defer_retry(job_id, interval);
+        }
+    }
+}
+
+pub fn process_available_results(
+    pool: &DbPool,
+    cpu_processing_concurrency: usize,
+) -> AppResult<usize> {
+    let mut pipeline = ResultPipeline::new(pool.clone(), cpu_processing_concurrency)?;
+    pipeline.refill()?;
+    let mut processed = 0;
+    while pipeline.in_flight_count() > 0 {
+        let completion = pipeline.receive()?;
+        let (_, persisted) = pipeline.complete(completion);
+        persisted?;
+        processed += 1;
+        pipeline.refill()?;
+    }
     Ok(processed)
 }
 
@@ -148,10 +387,13 @@ fn result_error_is_retryable(error: &AppError) -> bool {
     )
 }
 
-fn select_result_batch(connection: &Connection, batch_size: i64) -> AppResult<Vec<QueuedResult>> {
+fn select_result_candidates(
+    connection: &Connection,
+    candidate_limit: i64,
+) -> AppResult<Vec<QueuedResult>> {
     connection
-        .prepare(queries::llm_callback::SELECT_RESULT_BATCH)?
-        .query_map([batch_size], |row| {
+        .prepare(queries::llm_callback::SELECT_RESULT_CANDIDATES)?
+        .query_map([candidate_limit], |row| {
             Ok(QueuedResult {
                 job_id: row.get(0)?,
                 payload: row.get(1)?,
@@ -246,56 +488,52 @@ fn prepare_face_result(
     .map(Some)
 }
 
-fn persist_result_batch(
+fn persist_prepared_result(
     connection: &Connection,
-    prepared: Vec<PreparedQueuedResult>,
+    prepared: PreparedQueuedResult,
 ) -> AppResult<()> {
     let mut transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-    let mut face_file_changes = Vec::new();
-    let mut permanent_failures = Vec::new();
-    for prepared_result in prepared {
-        match prepared_result {
-            PreparedQueuedResult::PermanentFailure { job_id, error } => {
-                fail_received_result(&transaction, &job_id, &error)?;
-                permanent_failures.push((job_id, error));
-            }
-            PreparedQueuedResult::Result {
-                job_id,
-                request,
-                face,
-            } => {
-                let result = {
-                    let mut savepoint = transaction.savepoint()?;
-                    match persist_result(&savepoint, *request, face) {
-                        Ok(changes) => {
-                            savepoint.execute(queries::llm_callback::DELETE_RESULT, [&job_id])?;
-                            savepoint.commit()?;
-                            Ok(changes)
-                        }
-                        Err(error) => {
-                            savepoint.rollback()?;
-                            Err(error)
-                        }
-                    }
-                };
-                match result {
+    let mut face_file_changes = None;
+    let mut permanent_failure = None;
+    match prepared {
+        PreparedQueuedResult::PermanentFailure { job_id, error } => {
+            fail_received_result(&transaction, &job_id, &error)?;
+            permanent_failure = Some((job_id, error));
+        }
+        PreparedQueuedResult::Result {
+            job_id,
+            request,
+            face,
+        } => {
+            let result = {
+                let mut savepoint = transaction.savepoint()?;
+                match persist_result(&savepoint, *request, face) {
                     Ok(changes) => {
-                        face_file_changes.extend(changes);
+                        savepoint.execute(queries::llm_callback::DELETE_RESULT, [&job_id])?;
+                        savepoint.commit()?;
+                        Ok(changes)
                     }
-                    Err(error) if result_error_is_retryable(&error) => return Err(error),
                     Err(error) => {
-                        fail_received_result(&transaction, &job_id, &error.to_string())?;
-                        permanent_failures.push((job_id, error.to_string()));
+                        savepoint.rollback()?;
+                        Err(error)
                     }
+                }
+            };
+            match result {
+                Ok(changes) => face_file_changes = changes,
+                Err(error) if result_error_is_retryable(&error) => return Err(error),
+                Err(error) => {
+                    fail_received_result(&transaction, &job_id, &error.to_string())?;
+                    permanent_failure = Some((job_id, error.to_string()));
                 }
             }
         }
     }
     transaction.commit()?;
-    for changes in face_file_changes {
+    if let Some(changes) = face_file_changes {
         changes.commit();
     }
-    for (job_id, error) in permanent_failures {
+    if let Some((job_id, error)) = permanent_failure {
         tracing::error!(
             job_id,
             error,
@@ -794,4 +1032,67 @@ fn persist_clustering_result(
     }
     connection.execute(queries::llm_callback::UPSERT_DIRTY, [media_id])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    use super::RollingCpuWorkers;
+    use crate::error::AppError;
+
+    #[test]
+    fn rolling_cpu_workers_return_fast_work_without_waiting_for_slow_work() {
+        let slow_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (slow_started_sender, slow_started_receiver) = mpsc::channel();
+        let worker_slow_release = Arc::clone(&slow_release);
+        let workers = RollingCpuWorkers::new(2, "test-cpu", move |input| {
+            if input == "slow" {
+                slow_started_sender.send(()).expect("slow-start signal");
+                let (release_lock, release_condition) = &*worker_slow_release;
+                let mut released = release_lock.lock().expect("slow release lock");
+                while !*released {
+                    released = release_condition.wait(released).expect("slow release wait");
+                }
+            }
+            input
+        })
+        .expect("rolling CPU workers");
+
+        workers.submit("slow").expect("submit slow work");
+        slow_started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("slow work must start");
+        workers.submit("fast").expect("submit fast work");
+
+        let first_output = workers
+            .receive_timeout(Duration::from_secs(1))
+            .expect("receive fast work")
+            .expect("fast work must complete");
+        assert_eq!(first_output, "fast");
+
+        workers
+            .submit("fast-refill")
+            .expect("refill the completed worker slot");
+        let refilled_output = workers
+            .receive_timeout(Duration::from_secs(1))
+            .expect("receive refilled work")
+            .expect("refilled work must complete before slow work");
+        assert_eq!(refilled_output, "fast-refill");
+
+        let (release_lock, release_condition) = &*slow_release;
+        *release_lock.lock().expect("slow release lock") = true;
+        release_condition.notify_all();
+        assert_eq!(workers.receive().expect("receive slow work"), "slow");
+    }
+
+    #[test]
+    fn rolling_cpu_workers_reject_zero_concurrency() {
+        let error = RollingCpuWorkers::new(0, "test-cpu", |input: usize| input)
+            .err()
+            .expect("zero concurrency must fail");
+
+        assert!(matches!(error, AppError::Validation(_)));
+    }
 }

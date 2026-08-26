@@ -58,6 +58,14 @@ fn portrait_crop_includes_head_and_shoulders_within_image_bounds() {
         face_detection::portrait_crop_box(1000, 600, 0.9, 0.75, 0.15, 0.25);
     assert!(edge_x + edge_width <= 1000);
     assert!(edge_y + edge_height <= 600);
+    assert_eq!(edge_width, edge_height);
+
+    let (wide_x, wide_y, wide_width, wide_height) =
+        face_detection::portrait_crop_box(1600, 400, 0.5, 0.5, 0.4, 0.8);
+    assert!(wide_x + wide_width <= 1600);
+    assert!(wide_y + wide_height <= 400);
+    assert_eq!(wide_width, wide_height);
+    assert_eq!(wide_height, 400);
 }
 
 #[test]

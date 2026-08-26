@@ -3,14 +3,10 @@
 
 import re
 
-from screenshot_document_common import (
-    bounded_score,
-    detection_response,
-    serve_detection,
-    visual_metrics,
-)
+from screenshot_document_common import bounded_score, detection_response, serve_detection, visual_metrics
 
 SCREENSHOT_THRESHOLD = 0.58
+STATUS_REGION_MAXIMUM_CENTER_Y = 0.13
 TIME_PATTERN = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
 
 
@@ -27,15 +23,9 @@ def mobile_aspect_score(image):
 
 def status_region_score(text_regions):
     top_regions = [
-        region
-        for region in text_regions
-        if region["y"] + region["height"] / 2.0 <= 0.13
+        region for region in text_regions if region["y"] + region["height"] / 2.0 <= STATUS_REGION_MAXIMUM_CENTER_Y
     ]
-    bottom_regions = [
-        region
-        for region in text_regions
-        if region["y"] + region["height"] / 2.0 >= 0.87
-    ]
+    bottom_regions = [region for region in text_regions if region["y"] + region["height"] / 2.0 >= 0.87]
     contains_time = any(TIME_PATTERN.search(region["text"]) for region in top_regions)
     return bounded_score(
         0.55 * float(contains_time)
@@ -43,6 +33,10 @@ def status_region_score(text_regions):
         + 0.15 * min(len(bottom_regions) / 2.0, 1.0),
         "status region score",
     )
+
+
+def should_recognize_screenshot_region(text_region):
+    return text_region["y"] + text_region["height"] / 2.0 <= STATUS_REGION_MAXIMUM_CENTER_Y
 
 
 def classify_screenshot(image, text_regions):
@@ -58,4 +52,4 @@ def classify_screenshot(image, text_regions):
 
 
 if __name__ == "__main__":
-    serve_detection(classify_screenshot)
+    serve_detection(classify_screenshot, should_recognize_screenshot_region)

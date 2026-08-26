@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use futures::{SinkExt, StreamExt};
-use momento_api::processor::ai::result::process_received_results;
+use momento_api::processor::ai::result::process_available_results;
 use momento_api::processor::ai::transport::{
     LlmConnection, PreparedSubmissionInput, SubmissionOutcome, TransportHandle,
 };
@@ -331,7 +331,7 @@ async fn websocket_results_are_acknowledged_after_durable_receipt_before_process
     drop(connection);
 
     assert_eq!(
-        process_received_results(&pool, 10).expect("process received result"),
+        process_available_results(&pool, 2).expect("process received result"),
         1
     );
     let connection = pool.get().expect("connection");

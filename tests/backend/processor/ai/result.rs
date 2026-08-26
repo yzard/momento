@@ -6,7 +6,7 @@ use momento_api::constants::paths;
 use momento_api::database::{create_pool_at, init_database, DbPool};
 use momento_api::error::AppError;
 use momento_api::processor::ai::result::{
-    process_received_results, process_result, receive_result,
+    process_available_results, process_result, receive_result,
 };
 use momento_common::llm::{JobInputResult, JobResult};
 use sha2::{Digest, Sha256};
@@ -78,7 +78,7 @@ fn received_result_is_durable_before_momento_processing() {
     drop(connection);
 
     assert_eq!(
-        process_received_results(&pool, 1).expect("process durable result"),
+        process_available_results(&pool, 1).expect("process durable result"),
         1
     );
     let connection = pool.get().expect("connection");
@@ -96,25 +96,19 @@ fn received_result_is_durable_before_momento_processing() {
 }
 
 #[test]
-fn result_worker_persists_multiple_results_in_one_batch() {
+fn result_pipeline_persists_multiple_results_without_a_batch_barrier() {
     let pool = create_test_db();
     let first_media_id = create_test_media(&pool, "batch-first.jpg");
     let second_media_id = create_test_media(&pool, "batch-second.jpg");
     insert_submitted_job(&pool, "batch-first", first_media_id, "ocr", 1);
     insert_submitted_job(&pool, "batch-second", second_media_id, "ocr", 1);
-    receive_result(
-        &pool,
-        completed_result("batch-first", first_media_id, 1),
-    )
-    .expect("first durable result receipt");
-    receive_result(
-        &pool,
-        completed_result("batch-second", second_media_id, 1),
-    )
-    .expect("second durable result receipt");
+    receive_result(&pool, completed_result("batch-first", first_media_id, 1))
+        .expect("first durable result receipt");
+    receive_result(&pool, completed_result("batch-second", second_media_id, 1))
+        .expect("second durable result receipt");
 
     assert_eq!(
-        process_received_results(&pool, 10).expect("persist result batch"),
+        process_available_results(&pool, 2).expect("persist available results"),
         2
     );
 
@@ -140,7 +134,18 @@ fn result_worker_persists_multiple_results_in_one_batch() {
 }
 
 #[test]
-fn database_contention_keeps_the_entire_result_batch_queued_for_retry() {
+fn result_worker_rejects_zero_cpu_processing_concurrency() {
+    let pool = create_test_db();
+
+    let error =
+        process_available_results(&pool, 0).expect_err("zero CPU processing concurrency must fail");
+
+    assert!(matches!(error, AppError::Validation(_)));
+    assert!(error.to_string().contains("CPU processing concurrency"));
+}
+
+#[test]
+fn database_contention_keeps_unpersisted_results_queued_for_retry() {
     init_test_paths();
     let directory = TempDir::new().expect("database directory");
     let database_path = directory.path().join("database.sqlite");
@@ -155,22 +160,16 @@ fn database_contention_keeps_the_entire_result_batch_queued_for_retry() {
     let second_media_id = create_test_media(&pool, "busy-second.jpg");
     insert_submitted_job(&pool, "busy-first", first_media_id, "ocr", 1);
     insert_submitted_job(&pool, "busy-second", second_media_id, "ocr", 1);
-    receive_result(
-        &pool,
-        completed_result("busy-first", first_media_id, 1),
-    )
-    .expect("first durable result receipt");
-    receive_result(
-        &pool,
-        completed_result("busy-second", second_media_id, 1),
-    )
-    .expect("second durable result receipt");
+    receive_result(&pool, completed_result("busy-first", first_media_id, 1))
+        .expect("first durable result receipt");
+    receive_result(&pool, completed_result("busy-second", second_media_id, 1))
+        .expect("second durable result receipt");
     let writer = rusqlite::Connection::open(&database_path).expect("writer connection");
     writer
         .execute_batch("BEGIN IMMEDIATE")
         .expect("writer transaction");
 
-    let error = process_received_results(&pool, 10).expect_err("busy batch must be deferred");
+    let error = process_available_results(&pool, 2).expect_err("busy result must be deferred");
     assert!(matches!(error, AppError::DatabaseBusy), "{error}");
     let queued: i64 = pool
         .get()
@@ -181,7 +180,7 @@ fn database_contention_keeps_the_entire_result_batch_queued_for_retry() {
     writer.execute_batch("ROLLBACK").expect("writer rollback");
 
     assert_eq!(
-        process_received_results(&pool, 10).expect("retry queued batch"),
+        process_available_results(&pool, 2).expect("retry queued results"),
         2
     );
     let connection = pool.get().expect("connection");
@@ -205,7 +204,7 @@ fn invalid_received_result_fails_only_the_momento_job() {
 
     receive_result(&pool, result).expect("durable invalid result receipt");
     assert_eq!(
-        process_received_results(&pool, 1).expect("process invalid result"),
+        process_available_results(&pool, 1).expect("process invalid result"),
         1
     );
 
@@ -890,7 +889,7 @@ fn face_normalization_failure_marks_the_momento_job_failed_after_receipt() {
     receive_result(&pool, face_result("result-face-invalid", media_id))
         .expect("durable face result receipt");
     assert_eq!(
-        process_received_results(&pool, 1).expect("process invalid face input"),
+        process_available_results(&pool, 1).expect("process invalid face input"),
         1
     );
 
