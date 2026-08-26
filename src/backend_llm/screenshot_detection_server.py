@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU runtime entrypoint for screenshot detection."""
+"""GPU PaddleOCR-assisted runtime entrypoint for screenshot detection."""
 
 import re
 

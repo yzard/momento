@@ -305,13 +305,13 @@ impl RuntimeCatalog {
                 ServiceType::ScreenshotDetection,
                 "/app/runtimes/screenshot_detection_server.py",
                 "8700",
-                "screenshot-heuristics-v1",
+                "screenshot-paddleocr-v2",
             ),
             detection_runtime_spec(
                 ServiceType::DocumentDetection,
                 "/app/runtimes/document_detection_server.py",
                 "8800",
-                "document-heuristics-v1",
+                "document-paddleocr-v2",
             ),
         ])
     }
@@ -1558,7 +1558,7 @@ fn detection_runtime_spec(
 ) -> RuntimeSpec {
     RuntimeSpec {
         service_type,
-        executable: PathBuf::from("/opt/venvs/classifier/bin/python"),
+        executable: PathBuf::from("/opt/venvs/paddleocr/bin/python"),
         arguments: vec![
             runtime_script,
             "--host",
@@ -1569,13 +1569,21 @@ fn detection_runtime_spec(
             RUNTIME_CONCURRENCY_PLACEHOLDER,
             "--input-root",
             RUNTIME_INPUT_PLACEHOLDER,
+            "--text-detection-model",
+            "/opt/models/paddleocr/PP-OCRv6_small_det",
+            "--text-recognition-model",
+            "/opt/models/paddleocr/PP-OCRv6_small_rec",
+            "--device",
+            "gpu:0",
+            "--batch-wait-milliseconds",
+            "5",
         ]
         .into_iter()
         .map(str::to_string)
         .collect(),
         environment: Vec::new(),
         base_url: format!("http://{RUNTIME_HOST}:{port}"),
-        model: String::new(),
+        model: "PP-OCRv6_small_det+PP-OCRv6_small_rec".to_string(),
         model_version: model_version.to_string(),
         embedding_dimensions: 0,
     }
@@ -1975,25 +1983,50 @@ mod tests {
             .iter()
             .any(|argument| { argument == "/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth" }));
 
-        for (service_type, runtime_script) in [
+        for (service_type, runtime_script, model_version) in [
             (
                 ServiceType::ScreenshotDetection,
                 "/app/runtimes/screenshot_detection_server.py",
+                "screenshot-paddleocr-v2",
             ),
             (
                 ServiceType::DocumentDetection,
                 "/app/runtimes/document_detection_server.py",
+                "document-paddleocr-v2",
             ),
         ] {
             let detection_runtime = runtimes.get(service_type).expect("detection runtime");
             assert_eq!(
                 detection_runtime.executable,
-                PathBuf::from("/opt/venvs/classifier/bin/python")
+                PathBuf::from("/opt/venvs/paddleocr/bin/python")
             );
             assert_eq!(
                 &detection_runtime.arguments[..2],
                 [runtime_script, "--host"]
             );
+            assert!(detection_runtime.arguments.windows(2).any(|arguments| {
+                arguments
+                    == [
+                        "--text-detection-model",
+                        "/opt/models/paddleocr/PP-OCRv6_small_det",
+                    ]
+            }));
+            assert!(detection_runtime.arguments.windows(2).any(|arguments| {
+                arguments
+                    == [
+                        "--text-recognition-model",
+                        "/opt/models/paddleocr/PP-OCRv6_small_rec",
+                    ]
+            }));
+            assert!(detection_runtime
+                .arguments
+                .windows(2)
+                .any(|arguments| { arguments == ["--device", "gpu:0"] }));
+            assert_eq!(
+                detection_runtime.model,
+                "PP-OCRv6_small_det+PP-OCRv6_small_rec"
+            );
+            assert_eq!(detection_runtime.model_version, model_version);
         }
     }
 }

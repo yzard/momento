@@ -232,8 +232,10 @@ deployments and builds exactly two containers: `momento-api` and `momento-llm-se
 Model runtimes are processes inside `momento-llm-service`; the deployment does not mount the Docker socket
 or create model containers. The CUDA 12.9 llm-service image contains isolated environments and
 baked model weights for Unlimited-OCR, RAM++, DINOv2-small, CLIP ViT-B/32 with the LAION aesthetic
-head, and InsightFace `buffalo_l`. It also includes the CPU screenshot/document classifier runtime
-and Tesseract. Task activation performs no package installation or model download.
+head, InsightFace `buffalo_l`, and PP-OCRv6-small. Screenshot and document detection share a
+PaddleOCR-assisted runtime design. Each active detector owns one CUDA pipeline and combines
+concurrent requests into bounded GPU micro-batches. Task activation performs no package
+installation or model download.
 
 Requirements:
 
@@ -317,13 +319,13 @@ hosted inference API.
 | `image_clustering` | Meta DINOv2-small | GPU | Normalized 384-dimensional embedding, perceptual hash, and image-quality score | Self-supervised visual features provide robust similarity matching without depending on filenames, metadata, or predefined tags. |
 | `image_aesthetics` | OpenAI CLIP ViT-B/32 with a LAION aesthetic linear head | GPU | Aesthetic, scenic, simplicity, landscape, and technical-quality scores | The learned aesthetic head ranks visual appeal, while CLIP prompt similarity and image measurements provide the additional cover-selection signals. |
 | `face_detection` | InsightFace `buffalo_l` | GPU | Face boxes, landmarks, normalized 512-dimensional identity embeddings, quality, and frontality | Detection and recognition embeddings support local face grouping; quality and frontality select better representatives. |
-| `screenshot_detection` | Tesseract TSV plus visual heuristics | CPU | Boolean decision and confidence | The detector needs inexpensive word boxes and confidence for status-region layout, not polished OCR text. CPU execution avoids loading another GPU model and combines text position with mobile aspect ratio, compact UI components, edge geometry, and flat-color structure. |
-| `document_detection` | Tesseract TSV plus visual heuristics | CPU | Boolean decision and confidence | Tesseract directly supplies spatial word regions for text coverage, line spacing, and alignment. The detector combines them with paper-like color and photographic-content penalties while leaving the GPU available for higher-cost models. |
+| `screenshot_detection` | PP-OCRv6-small plus visual heuristics | GPU | Boolean decision and confidence | PaddleOCR supplies text boxes and confidence for status-region analysis. One CUDA pipeline consumes bounded micro-batches, then the detector combines those regions with mobile aspect ratio, compact UI components, edge geometry, and flat-color structure. |
+| `document_detection` | PP-OCRv6-small plus visual heuristics | GPU | Boolean decision and confidence | PaddleOCR supplies spatial text regions for coverage, line spacing, and alignment. One CUDA pipeline consumes bounded micro-batches, and the detector combines the regions with paper-like color and photographic-content penalties. |
 
 | OCR choice | Best use | Layout data | Hardware | Role in Momento |
 | --- | --- | --- | --- | --- |
 | Unlimited-OCR | High-quality text recognition | Returns text/Markdown rather than the normalized word regions required by the classifiers | GPU | Primary `ocr` task |
-| Tesseract | Fast spatial text hints | Returns TSV word boxes and confidence directly | CPU | Internal signal for screenshot and document classification; not a replacement for primary OCR |
+| PP-OCRv6-small | Fast spatial text hints | Returns text boxes and recognition confidence directly | GPU | Internal batched signal for screenshot and document classification; not a replacement for primary OCR |
 
 | Classifier behavior | Screenshot detection | Document detection |
 | --- | --- | --- |

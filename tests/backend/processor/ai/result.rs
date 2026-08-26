@@ -96,6 +96,106 @@ fn received_result_is_durable_before_momento_processing() {
 }
 
 #[test]
+fn result_worker_persists_multiple_results_in_one_batch() {
+    let pool = create_test_db();
+    let first_media_id = create_test_media(&pool, "batch-first.jpg");
+    let second_media_id = create_test_media(&pool, "batch-second.jpg");
+    insert_submitted_job(&pool, "batch-first", first_media_id, "ocr", 1);
+    insert_submitted_job(&pool, "batch-second", second_media_id, "ocr", 1);
+    receive_result(
+        &pool,
+        completed_result("batch-first", first_media_id, 1),
+    )
+    .expect("first durable result receipt");
+    receive_result(
+        &pool,
+        completed_result("batch-second", second_media_id, 1),
+    )
+    .expect("second durable result receipt");
+
+    assert_eq!(
+        process_received_results(&pool, 10).expect("persist result batch"),
+        2
+    );
+
+    let connection = pool.get().expect("connection");
+    let completed: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_jobs WHERE id IN ('batch-first', 'batch-second') AND status = 'completed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("completed jobs");
+    let persisted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_text WHERE media_id IN (?, ?)",
+            rusqlite::params![first_media_id, second_media_id],
+            |row| row.get(0),
+        )
+        .expect("persisted results");
+    let queued: i64 = connection
+        .query_row("SELECT COUNT(*) FROM llm_job_results", [], |row| row.get(0))
+        .expect("queued results");
+    assert_eq!((completed, persisted, queued), (2, 2, 0));
+}
+
+#[test]
+fn database_contention_keeps_the_entire_result_batch_queued_for_retry() {
+    init_test_paths();
+    let directory = TempDir::new().expect("database directory");
+    let database_path = directory.path().join("database.sqlite");
+    let pool = create_pool_at(&database_path).expect("database pool");
+    let connection = pool.get().expect("connection");
+    init_database(&connection).expect("database schema");
+    connection
+        .busy_timeout(Duration::from_millis(20))
+        .expect("short test busy timeout");
+    drop(connection);
+    let first_media_id = create_test_media(&pool, "busy-first.jpg");
+    let second_media_id = create_test_media(&pool, "busy-second.jpg");
+    insert_submitted_job(&pool, "busy-first", first_media_id, "ocr", 1);
+    insert_submitted_job(&pool, "busy-second", second_media_id, "ocr", 1);
+    receive_result(
+        &pool,
+        completed_result("busy-first", first_media_id, 1),
+    )
+    .expect("first durable result receipt");
+    receive_result(
+        &pool,
+        completed_result("busy-second", second_media_id, 1),
+    )
+    .expect("second durable result receipt");
+    let writer = rusqlite::Connection::open(&database_path).expect("writer connection");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("writer transaction");
+
+    let error = process_received_results(&pool, 10).expect_err("busy batch must be deferred");
+    assert!(matches!(error, AppError::DatabaseBusy), "{error}");
+    let queued: i64 = pool
+        .get()
+        .expect("connection")
+        .query_row("SELECT COUNT(*) FROM llm_job_results", [], |row| row.get(0))
+        .expect("queued results");
+    assert_eq!(queued, 2);
+    writer.execute_batch("ROLLBACK").expect("writer rollback");
+
+    assert_eq!(
+        process_received_results(&pool, 10).expect("retry queued batch"),
+        2
+    );
+    let connection = pool.get().expect("connection");
+    let completed: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_jobs WHERE id IN ('busy-first', 'busy-second') AND status = 'completed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("completed jobs");
+    assert_eq!(completed, 2);
+}
+
+#[test]
 fn invalid_received_result_fails_only_the_momento_job() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "invalid-received-result.jpg");

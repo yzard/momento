@@ -433,13 +433,7 @@ CREATE TABLE IF NOT EXISTS llm_job_inputs (
 CREATE TABLE IF NOT EXISTS llm_job_results (
     job_id TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('queued', 'processing')) DEFAULT 'queued',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    available_at TEXT NOT NULL DEFAULT (datetime('now')),
-    claimed_at TEXT,
-    last_error TEXT,
     received_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (job_id) REFERENCES llm_jobs(id) ON DELETE CASCADE
 );
 
@@ -619,8 +613,8 @@ CREATE INDEX IF NOT EXISTS idx_llm_jobs_claim
 CREATE INDEX IF NOT EXISTS idx_llm_job_inputs_job
     ON llm_job_inputs (job_id, sequence);
 
-CREATE INDEX IF NOT EXISTS idx_llm_job_results_claim
-    ON llm_job_results (status, available_at, received_at);
+CREATE INDEX IF NOT EXISTS idx_llm_job_results_received
+    ON llm_job_results (received_at, job_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_jobs_active_media_task
     ON llm_jobs (media_id, task)

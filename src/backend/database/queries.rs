@@ -639,9 +639,14 @@ pub mod llm_callback {
         "INSERT OR IGNORE INTO llm_job_results (job_id, payload) VALUES (?, ?)";
     pub const MARK_UNACKNOWLEDGED_RESULT_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = ?, submitted_at = COALESCE(submitted_at, datetime('now')), claimed_at = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting') AND attempts + 1 = ?";
     pub const MARK_RESULT_CORRELATION_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting', 'submitted')";
-    pub const RECLAIM_RESULTS: &str = "UPDATE llm_job_results SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), last_error = 'Momento result worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', '-5 minutes')";
-    pub const CLAIM_RESULT: &str = "UPDATE llm_job_results SET status = 'processing', attempts = attempts + 1, claimed_at = datetime('now'), updated_at = datetime('now') WHERE job_id = (SELECT job_id FROM llm_job_results WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY received_at, job_id LIMIT 1) AND status = 'queued' RETURNING job_id, payload, attempts";
-    pub const RETRY_RESULT: &str = "UPDATE llm_job_results SET status = 'queued', available_at = datetime('now', '+30 seconds'), claimed_at = NULL, last_error = ?, updated_at = datetime('now') WHERE job_id = ? AND status = 'processing'";
+    pub const SELECT_RESULT_BATCH: &str = r#"
+        SELECT job_id
+             , payload
+          FROM llm_job_results
+      ORDER BY received_at
+             , job_id
+         LIMIT ?
+    "#;
     pub const DELETE_RESULT: &str = "DELETE FROM llm_job_results WHERE job_id = ?";
     pub const MARK_RECEIVED_RESULT_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted'";
     pub const UPSERT_TEXT: &str = "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, ?, ?) ON CONFLICT(media_id, model_type) DO UPDATE SET model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";

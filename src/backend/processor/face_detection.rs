@@ -5,7 +5,7 @@ use std::process::Command;
 
 use base64::Engine;
 use image::imageops::FilterType;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
@@ -42,6 +42,13 @@ pub struct FaceFileChanges {
     committed: bool,
 }
 
+pub struct PreparedFaceDetectionResult {
+    media_id: i64,
+    model_version: String,
+    faces: Vec<(FaceResult, String)>,
+    file_changes: FaceFileChanges,
+}
+
 impl FaceFileChanges {
     pub fn commit(mut self) {
         self.committed = true;
@@ -62,14 +69,14 @@ impl Drop for FaceFileChanges {
     }
 }
 
-pub fn persist_result(
-    transaction: &Transaction<'_>,
+pub fn prepare_result(
+    connection: &Connection,
     job_id: &str,
     media_id: i64,
     model_type: &str,
     model_version: &str,
     input_results: Option<&[JobInputResult]>,
-) -> AppResult<FaceFileChanges> {
+) -> AppResult<PreparedFaceDetectionResult> {
     if model_type != FACE_DETECTION_MODEL_TYPE {
         return Err(AppError::BadRequest(
             "face detection result modelType must be face_detection".to_string(),
@@ -78,7 +85,7 @@ pub fn persist_result(
     let input_results = input_results.ok_or_else(|| {
         AppError::BadRequest("face_detection inputResults is required".to_string())
     })?;
-    let expected_inputs = transaction
+    let expected_inputs = connection
         .prepare(queries::faces::SELECT_INPUT_CORRELATION)?
         .query_map([job_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
@@ -117,7 +124,7 @@ pub fn persist_result(
             faces.push(parsed);
         }
     }
-    let old_paths = transaction
+    let old_paths = connection
         .prepare(queries::faces::SELECT_MEDIA_CROPS)?
         .query_map([media_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?
@@ -131,13 +138,31 @@ pub fn persist_result(
     };
     let mut persisted_faces = Vec::with_capacity(faces.len());
     for face in faces {
-        let (crop_path, absolute_path) = write_crop(transaction, job_id, media_id, &face)?;
+        let (crop_path, absolute_path) = write_crop(connection, job_id, media_id, &face)?;
         changes.new_paths.push(absolute_path);
         persisted_faces.push((face, crop_path));
     }
-    transaction.execute(queries::faces::DELETE_MEDIA_FACES, [media_id])?;
-    for (face, crop_path) in persisted_faces {
-        transaction.execute(
+    Ok(PreparedFaceDetectionResult {
+        media_id,
+        model_version: model_version.to_string(),
+        faces: persisted_faces,
+        file_changes: changes,
+    })
+}
+
+pub fn persist_prepared_result(
+    connection: &Connection,
+    prepared: PreparedFaceDetectionResult,
+) -> AppResult<FaceFileChanges> {
+    let PreparedFaceDetectionResult {
+        media_id,
+        model_version,
+        faces,
+        file_changes,
+    } = prepared;
+    connection.execute(queries::faces::DELETE_MEDIA_FACES, [media_id])?;
+    for (face, crop_path) in faces {
+        connection.execute(
             queries::faces::INSERT_FACE,
             rusqlite::params![
                 media_id,
@@ -155,11 +180,11 @@ pub fn persist_result(
             ],
         )?;
     }
-    transaction.execute(
+    connection.execute(
         queries::faces::UPSERT_RESULT,
         rusqlite::params![media_id, model_version],
     )?;
-    Ok(changes)
+    Ok(file_changes)
 }
 
 fn validate_input_result(
@@ -293,13 +318,13 @@ fn parse_face(sequence: i64, value: &serde_json::Value) -> AppResult<FaceResult>
 }
 
 fn write_crop(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     job_id: &str,
     media_id: i64,
     face: &FaceResult,
 ) -> AppResult<(String, PathBuf)> {
     let (storage_root, input_path, expected_size, expected_hash): (String, String, i64, String) =
-        transaction.query_row(
+        connection.query_row(
             queries::faces::SELECT_INPUT_PATH,
             rusqlite::params![job_id, face.sequence],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),

@@ -75,14 +75,13 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
         .expect("run");
     connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES ('face-job', ?, 1, 'face_detection', 'submitted')", [media_id]).expect("job");
     connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('face-job', 0, 'image', 'previews', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", []).expect("job input");
-    let transaction = connection.unchecked_transaction().expect("transaction");
     let results = vec![JobInputResult {
         sequence: 0,
         frame_timestamp_ms: None,
         result: serde_json::json!({ "task": "face_detection", "modelType": "face_detection", "modelVersion": "buffalo_l", "faces": [{ "index": 0, "boundingBox": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "eyeCenter": { "x": 0.5, "y": 0.3 }, "confidence": 1.0, "qualityScore": 1.0, "frontalityScore": 1.0, "embedding": "bad", "embeddingEncoding": "float32_le", "embeddingDimensions": 512 }] }),
     }];
-    assert!(face_detection::persist_result(
-        &transaction,
+    assert!(face_detection::prepare_result(
+        &connection,
         "face-job",
         media_id,
         "face_detection",
@@ -90,7 +89,6 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
         Some(&results)
     )
     .is_err());
-    transaction.rollback().expect("rollback");
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM media_faces", [], |row| row.get(0))
         .expect("count");
@@ -111,7 +109,6 @@ fn face_callback_records_success_when_no_faces_are_detected() {
         .expect("run");
     connection.execute("INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) VALUES ('no-face-job', ?, 1, 'face_detection', 'submitted')", [media_id]).expect("job");
     connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('no-face-job', 0, 'image', 'previews', 'missing.jpg', 'missing.jpg', 'image/jpeg', 1, 'hash')", []).expect("job input");
-    let transaction = connection.unchecked_transaction().expect("transaction");
     let results = vec![JobInputResult {
         sequence: 0,
         frame_timestamp_ms: None,
@@ -122,8 +119,8 @@ fn face_callback_records_success_when_no_faces_are_detected() {
             "faces": []
         }),
     }];
-    let changes = face_detection::persist_result(
-        &transaction,
+    let prepared = face_detection::prepare_result(
+        &connection,
         "no-face-job",
         media_id,
         "face_detection",
@@ -131,6 +128,9 @@ fn face_callback_records_success_when_no_faces_are_detected() {
         Some(&results),
     )
     .expect("empty face callback");
+    let transaction = connection.unchecked_transaction().expect("transaction");
+    let changes = face_detection::persist_prepared_result(&transaction, prepared)
+        .expect("persist empty face callback");
     transaction.commit().expect("commit");
     changes.commit();
 

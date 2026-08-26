@@ -19,6 +19,9 @@ ARG PILLOW_HEIF_VERSION=1.5.0
 ARG CYTHON_VERSION=3.1.2
 ARG INSIGHTFACE_VERSION=0.7.3
 ARG ONNXRUNTIME_GPU_VERSION=1.22.0
+ARG PADDLEPADDLE_VERSION=3.3.0
+ARG PADDLEOCR_VERSION=3.7.0
+ARG PADDLEX_VERSION=3.7.2
 
 ARG CLIP_COMMIT=d05afc436d78f1c48dc0dbf8e5980a9d471f35f6
 ARG RAM_COMMIT=7cb804a8609e9f4b1a50b7f31436d2df40bb9481
@@ -28,6 +31,8 @@ ARG RAM_CHECKPOINT_REVISION=84d4aee3a0265c4e0df1f714f0572011d1bf2ec3
 ARG BERT_TOKENIZER_REVISION=86b5e0934494bd15c9632b12f734a8a67f723594
 ARG BUFFALO_L_RELEASE=v0.7
 ARG AESTHETIC_PREDICTOR_REVISION=6d122adad522ab246644d9dc1c6d7a3810ee255f
+ARG PP_OCRV6_SMALL_DET_REVISION=106c97591b235f607453300d9fc8c1cad1b25488
+ARG PP_OCRV6_SMALL_REC_REVISION=bd619643acac4b9650c040234da8d944476ee3f1
 ARG RAM_CHECKPOINT_SHA256=497c178836ba66698ca226c7895317e6e800034be986452dbd2593298d50e87d
 ARG BUFFALO_L_SHA256=80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f
 ARG CLIP_VIT_B_32_SHA256=40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
@@ -68,8 +73,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     python3 \
     python3-venv \
-    tesseract-ocr \
-    tesseract-ocr-eng \
     tini \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
@@ -125,6 +128,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends cuda-driver-dev
        TRITON_CACHE_DIR=/opt/triton-cache \
        /opt/venvs/ocr/bin/python -c "from triton.backends.nvidia.driver import CudaUtils; CudaUtils()"
 
+FROM build-tools AS paddleocr-builder
+
+ARG NUMPY_VERSION
+ARG PADDLEPADDLE_VERSION
+ARG PADDLEOCR_VERSION
+ARG PADDLEX_VERSION
+ARG PILLOW_VERSION
+ARG PILLOW_HEIF_VERSION
+
+# The CUDA base already owns the complete 12.9 runtime. Paddle's Python metadata also
+# lists wheel-packaged copies of those libraries, so install Paddle without those
+# duplicate multi-gigabyte dependencies and verify it links against the image runtime.
+RUN uv venv --python /usr/bin/python3 /opt/venvs/paddleocr \
+    && uv pip install --python /opt/venvs/paddleocr/bin/python \
+       --index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ \
+       --no-deps \
+       "paddlepaddle-gpu==${PADDLEPADDLE_VERSION}"
+
+RUN uv pip install --python /opt/venvs/paddleocr/bin/python \
+       "networkx" \
+       "numpy==${NUMPY_VERSION}" \
+       "opt_einsum==3.3.0" \
+       "paddleocr==${PADDLEOCR_VERSION}" \
+       "paddlex[ocr-core]==${PADDLEX_VERSION}" \
+       "Pillow==${PILLOW_VERSION}" \
+       "pillow-heif==${PILLOW_HEIF_VERSION}" \
+       "protobuf>=3.20.2" \
+       "safetensors>=0.6.0" \
+    && /opt/venvs/paddleocr/bin/python -c "from importlib.metadata import version; from pathlib import Path; import httpx, networkx, numpy, opt_einsum, pillow_heif, safetensors; assert version('paddlepaddle-gpu') == '${PADDLEPADDLE_VERSION}'; assert version('paddleocr') == '${PADDLEOCR_VERSION}'; assert version('paddlex') == '${PADDLEX_VERSION}'; assert pillow_heif.__version__ == '${PILLOW_HEIF_VERSION}'; assert (Path('/opt/venvs/paddleocr/lib/python3.10/site-packages/paddle/base/libpaddle.so')).is_file()"
+
+FROM paddleocr-builder AS paddleocr-verifier
+
+# Paddle loads libcuda eagerly. Build stages have no NVIDIA driver mount, so use
+# NVIDIA's development stub only for import verification; it is not copied into
+# the final image, where the container runtime provides the real driver library.
+RUN apt-get update && apt-get install -y --no-install-recommends cuda-driver-dev-12-9 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s libcuda.so /usr/local/cuda-12.9/targets/x86_64-linux/lib/stubs/libcuda.so.1 \
+    && LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib/stubs \
+       /opt/venvs/paddleocr/bin/python -c "import paddle, paddleocr, paddlex; assert paddle.__version__ == '${PADDLEPADDLE_VERSION}'; assert paddle.is_compiled_with_cuda(); assert paddleocr.__version__ == '${PADDLEOCR_VERSION}'; assert paddlex.__version__ == '${PADDLEX_VERSION}'"
+
 FROM build-tools AS python-builder
 
 ARG TORCH_VERSION
@@ -152,8 +196,7 @@ RUN uv pip install --system --python /usr/bin/python3 \
 
 RUN uv venv --python /usr/bin/python3 --system-site-packages /opt/venvs/ram \
     && uv venv --python /usr/bin/python3 --system-site-packages /opt/venvs/dinov2 \
-    && uv venv --python /usr/bin/python3 /opt/venvs/insightface \
-    && uv venv --python /usr/bin/python3 /opt/venvs/classifier
+    && uv venv --python /usr/bin/python3 /opt/venvs/insightface
 
 RUN uv pip install --python /opt/venvs/ram/bin/python \
     "transformers==${TRANSFORMERS_RAM_VERSION}" \
@@ -191,20 +234,13 @@ RUN uv pip install --python /opt/venvs/insightface/bin/python \
     "Pillow==${PILLOW_VERSION}" \
     "pillow-heif==${PILLOW_HEIF_VERSION}"
 
-RUN uv pip install --python /opt/venvs/classifier/bin/python \
-    "numpy==${NUMPY_VERSION}" \
-    "Pillow==${PILLOW_VERSION}" \
-    "pillow-heif==${PILLOW_HEIF_VERSION}"
-
 RUN set -e; \
     uv pip check --system --python /usr/bin/python3 \
     && uv pip check --python /opt/venvs/insightface/bin/python \
-    && uv pip check --python /opt/venvs/classifier/bin/python \
     && /opt/venvs/ram/bin/python -c "import clip, fairscale, ram, timm, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/')" \
     && /opt/venvs/dinov2/bin/python -c "import clip, torch, torchvision, transformers; assert torch.__version__.startswith('${TORCH_VERSION}'); assert torchvision.__version__.startswith('${TORCHVISION_VERSION}'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert 'ViT-B/32' in clip.available_models()" \
     && /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime" \
-    && /opt/venvs/classifier/bin/python -c "import numpy; from PIL import Image" \
-    && for python in /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/classifier/bin/python; do \
+    && for python in /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python; do \
         "$python" -c "import pillow_heif; assert pillow_heif.__version__ == '${PILLOW_HEIF_VERSION}'"; \
     done
 
@@ -215,6 +251,16 @@ ARG UNLIMITED_OCR_REVISION
 RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ocr/bin/python -c \
     "from huggingface_hub import snapshot_download; snapshot_download('baidu/Unlimited-OCR', revision='${UNLIMITED_OCR_REVISION}', local_dir='/opt/models/unlimited-ocr')" \
     && rm -rf /opt/models/unlimited-ocr/.cache
+
+FROM paddleocr-verifier AS paddleocr-model
+
+ARG PP_OCRV6_SMALL_DET_REVISION
+ARG PP_OCRV6_SMALL_REC_REVISION
+
+RUN HF_HUB_OFFLINE=0 /opt/venvs/paddleocr/bin/python -c \
+    "from huggingface_hub import snapshot_download; snapshot_download('PaddlePaddle/PP-OCRv6_small_det', revision='${PP_OCRV6_SMALL_DET_REVISION}', local_dir='/opt/models/paddleocr/PP-OCRv6_small_det'); snapshot_download('PaddlePaddle/PP-OCRv6_small_rec', revision='${PP_OCRV6_SMALL_REC_REVISION}', local_dir='/opt/models/paddleocr/PP-OCRv6_small_rec')" \
+    && rm -rf /opt/models/paddleocr/PP-OCRv6_small_det/.cache \
+       /opt/models/paddleocr/PP-OCRv6_small_rec/.cache
 
 FROM python-builder AS dinov2-model
 
@@ -276,6 +322,8 @@ RUN mkdir -p /opt/models/clip /opt/models/aesthetic \
 FROM runtime-base
 
 ARG SOURCE_REPOSITORY=https://github.com/yzard/momento
+ARG PADDLEPADDLE_VERSION
+ARG PADDLEOCR_VERSION
 ARG TRANSFORMERS_RAM_VERSION
 ARG TRANSFORMERS_DINOV2_VERSION
 
@@ -291,12 +339,13 @@ COPY --from=ocr-builder /opt/python /opt/python
 COPY --from=ocr-without-nvidia /opt/venvs/ocr /opt/venvs/ocr
 COPY --from=ocr-builder /opt/venvs/ocr/lib/python3.12/site-packages/nvidia /opt/venvs/ocr/lib/python3.12/site-packages/nvidia
 COPY --from=triton-launcher-builder /opt/triton-cache /opt/triton-cache
+COPY --from=paddleocr-verifier /opt/venvs/paddleocr /opt/venvs/paddleocr
 COPY --from=python-builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/python3.10/dist-packages
 COPY --from=python-builder /opt/venvs/ram /opt/venvs/ram
 COPY --from=python-builder /opt/venvs/dinov2 /opt/venvs/dinov2
 COPY --from=python-builder /opt/venvs/insightface /opt/venvs/insightface
-COPY --from=python-builder /opt/venvs/classifier /opt/venvs/classifier
 COPY --from=unlimited-ocr-model /opt/models/unlimited-ocr /opt/models/unlimited-ocr
+COPY --from=paddleocr-model /opt/models/paddleocr /opt/models/paddleocr
 COPY --from=dinov2-model /opt/models/dinov2-small /opt/models/dinov2-small
 COPY --from=bert-tokenizer-model /opt/models/huggingface /opt/models/huggingface
 COPY --from=ram-model /opt/models/ram /opt/models/ram
@@ -312,8 +361,7 @@ RUN set -eux; \
     /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
     /opt/venvs/dinov2/bin/python -c "import clip, torch, transformers; from pathlib import Path; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-small', local_files_only=True).hidden_size == 384; assert 'ViT-B/32' in clip.available_models(); state = torch.load('/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth', map_location='cpu', weights_only=True); assert state['weight'].shape == (1, 512); assert state['bias'].shape == (1,); assert Path('/opt/models/clip/ViT-B-32.pt').is_file()"; \
     /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx'))"; \
-    /opt/venvs/classifier/bin/python -c "import numpy; from PIL import Image"; \
-    tesseract --version >/dev/null; \
+    /opt/venvs/paddleocr/bin/python -c "from importlib.metadata import version; from pathlib import Path; assert version('paddlepaddle-gpu') == '${PADDLEPADDLE_VERSION}'; assert version('paddleocr') == '${PADDLEOCR_VERSION}'; model_root = Path('/opt/models/paddleocr'); assert all((model_root / model / filename).is_file() for model in ('PP-OCRv6_small_det', 'PP-OCRv6_small_rec') for filename in ('inference.json', 'inference.pdiparams', 'inference.yml'))"; \
     rm -rf /tmp/verification-cache
 
 WORKDIR /app
@@ -323,7 +371,7 @@ COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
 RUN set -e; \
-    for python in /opt/venvs/ocr/bin/python /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/classifier/bin/python; do \
+    for python in /opt/venvs/ocr/bin/python /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/paddleocr/bin/python; do \
         PYTHONPATH=/app/runtimes "$python" -c "import io; from PIL import Image; import pillow_heif; from image_runtime import register_image_decoders; output = io.BytesIO(); pillow_heif.from_pillow(Image.new('RGB', (3, 2), color=(10, 20, 30))).save(output); assert output.getvalue()[4:12] == b'ftypheic'; register_image_decoders(); output.seek(0); decoded = Image.open(output); decoded.load(); assert decoded.format == 'HEIF'; assert decoded.size == (3, 2)"; \
     done \
     && chmod +x /entrypoint_llm.sh \

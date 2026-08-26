@@ -1,11 +1,11 @@
 """Shared image analysis and HTTP runtime for screenshot and document detection."""
 
 import argparse
-import io
 import json
 import math
-import subprocess
-import tempfile
+import queue
+import threading
+import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -20,23 +20,8 @@ from image_runtime import (
 from runtime_input import read_runtime_input
 
 
-TESSERACT_TSV_COLUMNS = (
-    "level",
-    "page_num",
-    "block_num",
-    "par_num",
-    "line_num",
-    "word_num",
-    "left",
-    "top",
-    "width",
-    "height",
-    "conf",
-    "text",
-)
-MAX_TESSERACT_OUTPUT_BYTES = 64 * 1024 * 1024
-MAX_TESSERACT_ROW_BYTES = 1024 * 1024
-MAX_TESSERACT_TEXT_BYTES = 4096
+MINIMUM_TEXT_CONFIDENCE = 0.25
+MAX_TEXT_BYTES = 4096
 MAX_TEXT_REGIONS = 10000
 
 
@@ -172,99 +157,154 @@ def visual_metrics(image):
     }
 
 
-def extract_text_regions(image):
-    encoded = io.BytesIO()
-    image.save(encoded, format="PNG")
-    with tempfile.TemporaryFile() as tsv_output:
-        process = subprocess.run(
-            ["tesseract", "stdin", "stdout", "--psm", "11", "tsv"],
-            input=encoded.getvalue(),
-            stdout=tsv_output,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if process.returncode != 0:
-            detail = process.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"Tesseract failed with exit code {process.returncode}: {detail}"
-            )
-        tsv_output.seek(0)
-        return parse_text_regions(tsv_output, image.width, image.height)
+def paddleocr_pipeline_configuration(
+    text_detection_model_path,
+    text_recognition_model_path,
+    batch_size,
+):
+    if batch_size <= 0:
+        raise ValueError("PaddleOCR batch_size must be positive")
+    return {
+        "pipeline_name": "OCR",
+        "batch_size": batch_size,
+        "text_type": "general",
+        "use_doc_preprocessor": False,
+        "use_textline_orientation": False,
+        "SubModules": {
+            "TextDetection": {
+                "module_name": "text_detection",
+                "model_name": "PP-OCRv6_small_det",
+                "model_dir": str(text_detection_model_path),
+                "limit_side_len": 64,
+                "limit_type": "min",
+                "max_side_limit": 4000,
+                "thresh": 0.2,
+                "box_thresh": 0.45,
+                "unclip_ratio": 1.4,
+            },
+            "TextRecognition": {
+                "module_name": "text_recognition",
+                "model_name": "PP-OCRv6_small_rec",
+                "model_dir": str(text_recognition_model_path),
+                "batch_size": batch_size,
+                "score_thresh": MINIMUM_TEXT_CONFIDENCE,
+            },
+        },
+    }
 
 
-def read_bounded_tsv_row(tsv_output, remaining_bytes):
-    if remaining_bytes <= 0:
-        return None, 0
-    read_limit = min(MAX_TESSERACT_ROW_BYTES + 1, remaining_bytes)
-    row = tsv_output.readline(read_limit)
-    consumed = len(row)
-    if not row:
-        return b"", consumed
-    if len(row) <= MAX_TESSERACT_ROW_BYTES:
-        return row, consumed
-    if row.endswith(b"\n"):
-        return None, consumed
-    while consumed < remaining_bytes:
-        remainder = tsv_output.readline(
-            min(MAX_TESSERACT_ROW_BYTES + 1, remaining_bytes - consumed)
-        )
-        consumed += len(remainder)
-        if not remainder or remainder.endswith(b"\n"):
-            break
-    return None, consumed
+def load_paddleocr_pipeline(
+    text_detection_model_path,
+    text_recognition_model_path,
+    device,
+    batch_size,
+):
+    import paddle
+    from paddleocr import PaddleOCR
 
+    if not device.startswith("gpu:"):
+        raise RuntimeError("PaddleOCR detection requires a gpu:<index> device")
+    try:
+        device_index = int(device.removeprefix("gpu:"))
+    except ValueError as error:
+        raise RuntimeError("PaddleOCR GPU device index is invalid") from error
+    if device_index < 0:
+        raise RuntimeError("PaddleOCR GPU device index must not be negative")
+    if not paddle.is_compiled_with_cuda():
+        raise RuntimeError("PaddleOCR requires a CUDA-enabled PaddlePaddle build")
+    if device_index >= paddle.device.cuda.device_count():
+        raise RuntimeError(f"PaddleOCR CUDA device {device_index} is unavailable")
 
-def parse_text_regions(tsv_output, image_width, image_height):
-    if image_width <= 0 or image_height <= 0:
-        raise RuntimeError("Tesseract image dimensions must be positive")
-    remaining_bytes = MAX_TESSERACT_OUTPUT_BYTES
-    header, consumed = read_bounded_tsv_row(tsv_output, remaining_bytes)
-    remaining_bytes -= consumed
-    if header is None or not header:
-        raise RuntimeError("Tesseract TSV header is missing or oversized")
-    columns = tuple(
-        field.decode("utf-8", errors="replace")
-        for field in header.rstrip(b"\r\n").split(b"\t")
+    for model_path in (text_detection_model_path, text_recognition_model_path):
+        if not model_path.is_dir():
+            raise RuntimeError(f"PaddleOCR model directory is missing: {model_path}")
+
+    configuration = paddleocr_pipeline_configuration(
+        text_detection_model_path,
+        text_recognition_model_path,
+        batch_size,
     )
-    if columns != TESSERACT_TSV_COLUMNS:
-        raise RuntimeError("Tesseract TSV header is invalid")
+    return PaddleOCR(
+        paddlex_config=configuration,
+        text_detection_model_name="PP-OCRv6_small_det",
+        text_detection_model_dir=str(text_detection_model_path),
+        text_recognition_model_name="PP-OCRv6_small_rec",
+        text_recognition_model_dir=str(text_recognition_model_path),
+        text_recognition_batch_size=batch_size,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        text_rec_score_thresh=MINIMUM_TEXT_CONFIDENCE,
+        device=device,
+    )
+
+
+def image_to_paddle_array(image):
+    import numpy
+
+    rgb_pixels = numpy.asarray(image, dtype=numpy.uint8)
+    if rgb_pixels.ndim != 3 or rgb_pixels.shape[2] != 3:
+        raise RuntimeError("PaddleOCR image must contain three color channels")
+    return numpy.ascontiguousarray(rgb_pixels[:, :, ::-1])
+
+
+def paddleocr_text_regions(prediction, image_width, image_height):
+    if image_width <= 0 or image_height <= 0:
+        raise RuntimeError("PaddleOCR image dimensions must be positive")
+    try:
+        recognized_texts = prediction["rec_texts"]
+        recognition_scores = prediction["rec_scores"]
+        recognition_boxes = prediction["rec_boxes"]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError("PaddleOCR result is missing text-region fields") from error
+    if not (
+        len(recognized_texts)
+        == len(recognition_scores)
+        == len(recognition_boxes)
+    ):
+        raise RuntimeError("PaddleOCR text-region fields have different lengths")
+
     regions = []
-    while remaining_bytes > 0 and len(regions) < MAX_TEXT_REGIONS:
-        row, consumed = read_bounded_tsv_row(tsv_output, remaining_bytes)
-        remaining_bytes -= consumed
-        if row == b"":
+    for region_index, text in enumerate(recognized_texts):
+        if len(regions) >= MAX_TEXT_REGIONS:
             break
-        if row is None:
+        if not isinstance(text, str):
+            raise RuntimeError("PaddleOCR recognized text must be a string")
+        text = text.strip()
+        if not text or len(text.encode("utf-8")) > MAX_TEXT_BYTES:
             continue
-        fields = row.rstrip(b"\r\n").split(b"\t", len(TESSERACT_TSV_COLUMNS) - 1)
-        if len(fields) != len(TESSERACT_TSV_COLUMNS):
-            continue
-        text_bytes = fields[11].strip()
-        if not text_bytes or len(text_bytes) > MAX_TESSERACT_TEXT_BYTES:
-            continue
-        text = text_bytes.decode("utf-8", errors="replace")
         try:
-            confidence = float(fields[10])
-            left = int(fields[6])
-            top = int(fields[7])
-            width = int(fields[8])
-            height = int(fields[9])
+            confidence = float(recognition_scores[region_index])
+            left, top, right, bottom = (
+                float(coordinate)
+                for coordinate in recognition_boxes[region_index]
+            )
         except (TypeError, ValueError):
-            continue
-        if (
-            not text
-            or not math.isfinite(confidence)
-            or confidence < 25.0
-            or width <= 0
-            or height <= 0
+            raise RuntimeError("PaddleOCR text-region values are invalid") from None
+        if not all(
+            math.isfinite(number)
+            for number in (confidence, left, top, right, bottom)
         ):
+            raise RuntimeError("PaddleOCR text-region values must be finite")
+        if confidence < 0.0 or confidence > 1.0:
+            raise RuntimeError("PaddleOCR text confidence must be between zero and one")
+        if confidence < MINIMUM_TEXT_CONFIDENCE:
+            continue
+
+        clipped_left = max(0.0, min(float(image_width), left))
+        clipped_top = max(0.0, min(float(image_height), top))
+        clipped_right = max(0.0, min(float(image_width), right))
+        clipped_bottom = max(0.0, min(float(image_height), bottom))
+        width = clipped_right - clipped_left
+        height = clipped_bottom - clipped_top
+        if width <= 0.0 or height <= 0.0:
             continue
         regions.append(
             {
                 "text": text,
-                "confidence": confidence / 100.0,
-                "x": left / image_width,
-                "y": top / image_height,
+                "confidence": confidence,
+                "x": clipped_left / image_width,
+                "y": clipped_top / image_height,
                 "width": width / image_width,
                 "height": height / image_height,
             }
@@ -272,13 +312,125 @@ def parse_text_regions(tsv_output, image_width, image_height):
     return regions
 
 
+class PaddleOCRBatchRequest:
+    def __init__(self, image):
+        self.image = image
+        self.completed = threading.Event()
+        self.text_regions = None
+        self.error = None
+
+
+class PaddleOCRBatchProcessor:
+    def __init__(self, pipeline, max_batch_size, batch_wait_seconds):
+        if max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        if batch_wait_seconds < 0.0:
+            raise ValueError("batch_wait_seconds must not be negative")
+        self.pipeline = pipeline
+        self.max_batch_size = max_batch_size
+        self.batch_wait_seconds = batch_wait_seconds
+        self.pending_requests = queue.Queue(maxsize=max_batch_size)
+        self.stop_marker = object()
+        self.submission_lock = threading.Lock()
+        self.closed = False
+        self.worker = threading.Thread(
+            target=self.process_batches,
+            name="paddleocr-batch-worker",
+        )
+        self.worker.start()
+
+    def infer(self, image):
+        pending_request = PaddleOCRBatchRequest(image)
+        with self.submission_lock:
+            if self.closed:
+                raise RuntimeError("PaddleOCR batch processor is closed")
+            self.pending_requests.put(pending_request)
+        pending_request.completed.wait()
+        if pending_request.error is not None:
+            raise pending_request.error
+        return pending_request.text_regions
+
+    def collect_batch(self, first_request):
+        pending_batch = [first_request]
+        stop_after_batch = False
+        deadline = time.monotonic() + self.batch_wait_seconds
+        while len(pending_batch) < self.max_batch_size:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0.0:
+                break
+            try:
+                pending_request = self.pending_requests.get(
+                    timeout=remaining_seconds
+                )
+            except queue.Empty:
+                break
+            if pending_request is self.stop_marker:
+                stop_after_batch = True
+                break
+            pending_batch.append(pending_request)
+        return pending_batch, stop_after_batch
+
+    def process_batch(self, pending_batch):
+        try:
+            paddle_images = [
+                image_to_paddle_array(pending_request.image)
+                for pending_request in pending_batch
+            ]
+            predictions = self.pipeline.predict(paddle_images)
+            if len(predictions) != len(pending_batch):
+                raise RuntimeError(
+                    "PaddleOCR returned a different number of results than inputs"
+                )
+            for pending_request, prediction in zip(pending_batch, predictions):
+                pending_request.text_regions = paddleocr_text_regions(
+                    prediction,
+                    pending_request.image.width,
+                    pending_request.image.height,
+                )
+        except (
+            IndexError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            for pending_request in pending_batch:
+                pending_request.error = RuntimeError(
+                    f"PaddleOCR inference failed: {error}"
+                )
+        finally:
+            for pending_request in pending_batch:
+                pending_request.completed.set()
+
+    def process_batches(self):
+        while True:
+            first_request = self.pending_requests.get()
+            if first_request is self.stop_marker:
+                return
+            pending_batch, stop_after_batch = self.collect_batch(first_request)
+            self.process_batch(pending_batch)
+            if stop_after_batch:
+                return
+
+    def close(self):
+        with self.submission_lock:
+            if self.closed:
+                return
+            self.closed = True
+            self.pending_requests.put(self.stop_marker)
+        self.worker.join()
+        self.pipeline.close()
+
+
 class DetectionRuntime:
-    def __init__(self, detector):
+    def __init__(self, detector, text_region_extractor):
         self.detector = detector
+        self.text_region_extractor = text_region_extractor
 
     def infer(self, image_bytes):
         image = decode_image(image_bytes)
-        text_regions = extract_text_regions(image)
+        text_regions = self.text_region_extractor.infer(image)
         return self.detector(image, text_regions)
 
 
@@ -340,16 +492,36 @@ def serve_detection(detector):
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--max-concurrent-jobs", type=int, required=True)
     parser.add_argument("--input-root", required=True)
+    parser.add_argument("--text-detection-model", required=True)
+    parser.add_argument("--text-recognition-model", required=True)
+    parser.add_argument("--device", required=True)
+    parser.add_argument("--batch-wait-milliseconds", type=float, required=True)
     arguments = parser.parse_args()
     if arguments.max_concurrent_jobs <= 0:
         parser.error("--max-concurrent-jobs must be positive")
+    if arguments.batch_wait_milliseconds < 0.0:
+        parser.error("--batch-wait-milliseconds must not be negative")
 
     register_image_decoders()
-    DetectionHandler.runtime = DetectionRuntime(detector)
+    pipeline = load_paddleocr_pipeline(
+        Path(arguments.text_detection_model),
+        Path(arguments.text_recognition_model),
+        arguments.device,
+        arguments.max_concurrent_jobs,
+    )
+    batch_processor = PaddleOCRBatchProcessor(
+        pipeline,
+        arguments.max_concurrent_jobs,
+        arguments.batch_wait_milliseconds / 1000.0,
+    )
+    DetectionHandler.runtime = DetectionRuntime(detector, batch_processor)
     DetectionHandler.inference_slots = create_inference_slots(
         arguments.max_concurrent_jobs
     )
     DetectionHandler.input_root = Path(arguments.input_root)
-    serve_until_stopped(
-        ModelHTTPServer((arguments.host, arguments.port), DetectionHandler)
-    )
+    try:
+        serve_until_stopped(
+            ModelHTTPServer((arguments.host, arguments.port), DetectionHandler)
+        )
+    finally:
+        batch_processor.close()

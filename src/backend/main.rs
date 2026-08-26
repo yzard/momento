@@ -77,11 +77,12 @@ fn start_background_tasks(
 
     let ai_result_pool = pool.clone();
     let ai_result_interval =
-        std::time::Duration::from_secs(config.llm_submission_worker.poll_interval_seconds);
-    let ai_result_batch_size = config.llm_submission_worker.max_in_flight;
-    tokio::spawn(async move {
-        ai::result::run(ai_result_pool, ai_result_interval, ai_result_batch_size).await;
-    });
+        std::time::Duration::from_secs(config.llm_result_worker.poll_interval_seconds);
+    let ai_result_batch_size = config.llm_result_worker.batch_size;
+    std::thread::Builder::new()
+        .name("ai-result-writer".to_string())
+        .spawn(move || ai::result::run(ai_result_pool, ai_result_interval, ai_result_batch_size))
+        .expect("failed to start the AI result writer thread");
 
     let deduplicate_pool = pool.clone();
     tokio::spawn(async move {

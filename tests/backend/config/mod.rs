@@ -187,6 +187,32 @@ fn test_load_config_rejects_removed_llm_submission_batch_size() {
 }
 
 #[test]
+fn test_load_config_reads_llm_result_worker_batch() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[llm_result_worker]\nbatch_size = 23\npoll_interval_seconds = 3\n",
+    );
+
+    let config = load_config(&path).expect("Failed to load config");
+
+    assert_eq!(config.llm_result_worker.batch_size, 23);
+    assert_eq!(config.llm_result_worker.poll_interval_seconds, 3);
+}
+
+#[test]
+fn test_load_config_rejects_invalid_llm_result_worker_settings() {
+    for setting in ["batch_size", "poll_interval_seconds"] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(&dir, &format!("[llm_result_worker]\n{setting} = 0\n"));
+
+        let error = load_config(&path).expect_err("Invalid result worker setting must fail");
+
+        assert!(error.to_string().contains("llm result"), "{error}");
+    }
+}
+
+#[test]
 fn test_load_config_missing_file_is_an_error() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let missing = dir.path().join("does-not-exist.toml");

@@ -438,6 +438,35 @@ impl LlmSubmissionWorkerConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmResultWorkerConfig {
+    #[serde(default = "defaults::llm_result_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    #[serde(default = "defaults::llm_result_batch_size")]
+    pub batch_size: usize,
+}
+
+impl Default for LlmResultWorkerConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_seconds: defaults::LLM_RESULT_POLL_INTERVAL_SECONDS,
+            batch_size: defaults::LLM_RESULT_BATCH_SIZE,
+        }
+    }
+}
+
+impl LlmResultWorkerConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.poll_interval_seconds == 0 || self.batch_size == 0 {
+            return Err(std::io::Error::other(
+                "llm result poll interval and batch size must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl LlmConfig {
     fn validate(&self) -> std::io::Result<()> {
         if !self.face_group_similarity_threshold.is_finite()
@@ -500,6 +529,8 @@ pub struct Config {
     #[serde(default)]
     pub llm_submission_worker: LlmSubmissionWorkerConfig,
     #[serde(default)]
+    pub llm_result_worker: LlmResultWorkerConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
     pub cronjob: CronjobConfig,
@@ -543,6 +574,7 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     config.backup.validate()?;
     config.llm.validate()?;
     config.llm_submission_worker.validate()?;
+    config.llm_result_worker.validate()?;
     config.cronjob.validate()?;
     Ok(config)
 }
