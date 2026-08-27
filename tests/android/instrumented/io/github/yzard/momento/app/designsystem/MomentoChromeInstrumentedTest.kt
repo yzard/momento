@@ -69,4 +69,18 @@ class MomentoChromeInstrumentedTest {
         composeRule.onNodeWithContentDescription("Back to places").assertHasClickAction().performClick()
         composeRule.runOnIdle { assertEquals(1, backClicks) }
     }
+
+    @Test
+    fun mediaPageTitleUsesReadableFloatingChrome() {
+        composeRule.setContent {
+            MomentoTheme(ThemePreference.LIGHT) {
+                MomentoMediaPageTitle(
+                    text = "Screenshots",
+                    modifier = Modifier,
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Screenshots").assertIsDisplayed()
+    }
 }

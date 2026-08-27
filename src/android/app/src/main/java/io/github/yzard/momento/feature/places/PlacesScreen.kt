@@ -40,6 +40,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -49,7 +50,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import io.github.yzard.momento.app.designsystem.MomentoDetailPageHeader
 import io.github.yzard.momento.app.designsystem.MomentoPageHeader
-import io.github.yzard.momento.app.designsystem.momentoDetailMediaContentPadding
+import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.Place
@@ -293,7 +294,7 @@ private fun PlaceDetailScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         when {
             media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
             media == null -> LoadingState()
@@ -301,7 +302,7 @@ private fun PlaceDetailScreen(
                 media = media!!,
                 repository = repository,
                 selectedMediaIds = emptySet(),
-                contentPadding = momentoDetailMediaContentPadding,
+                contentPadding = momentoMediaViewerContentPadding,
                 headerContent = null,
                 footerContent = if (more && nextCursor != null) {
                     {

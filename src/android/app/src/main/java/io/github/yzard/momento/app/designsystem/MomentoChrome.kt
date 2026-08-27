@@ -39,7 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-val momentoDetailMediaContentPadding = PaddingValues(bottom = 104.dp)
+val momentoMediaViewerContentPadding = PaddingValues(top = 104.dp, bottom = 104.dp)
 
 @Composable
 fun MomentoPageTitle(text: String, modifier: Modifier) {
@@ -52,6 +52,30 @@ fun MomentoPageTitle(text: String, modifier: Modifier) {
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
+}
+
+@Composable
+fun MomentoMediaPageTitle(text: String, modifier: Modifier) {
+    val colors = momentoFloatingControlColors(darkTheme = true)
+    Surface(
+        modifier = modifier
+            .padding(start = 12.dp, top = 10.dp),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = colors.container,
+        contentColor = colors.content,
+        border = BorderStroke(1.dp, colors.outline),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp,
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.heightIn(min = 48.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @Composable
@@ -99,17 +123,45 @@ fun MomentoDetailPageHeader(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    MomentoPageHeader(
-        title = title,
-        subtitle = subtitle,
-        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars),
-        leadingContent = {
+    val colors = momentoFloatingControlColors(darkTheme = true)
+    Surface(
+        modifier = modifier
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(start = 12.dp, top = 10.dp, end = 12.dp),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = colors.container,
+        contentColor = colors.content,
+        border = BorderStroke(1.dp, colors.outline),
+        shadowElevation = 0.dp,
+        tonalElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier.heightIn(min = 56.dp).padding(end = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             IconButton(onClick = onBack, enabled = enabled) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, backContentDescription)
             }
-        },
-        trailingContent = null,
-    )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        color = colors.content.copy(alpha = 0.72f),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

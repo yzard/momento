@@ -70,7 +70,7 @@ import io.github.yzard.momento.app.designsystem.MomentoActionChip
 import io.github.yzard.momento.app.designsystem.MomentoDetailPageHeader
 import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
 import io.github.yzard.momento.app.designsystem.MomentoPageHeader
-import io.github.yzard.momento.app.designsystem.momentoDetailMediaContentPadding
+import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Album
@@ -269,7 +269,7 @@ private fun AlbumDetailScreen(
     LaunchedEffect(albumId) { loadAlbum() }
     val album = detail
     if (album == null) {
-        Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
             Column(Modifier.align(Alignment.Center).padding(24.dp)) {
                 if (error == null) CircularProgressIndicator() else {
                     Text(error!!, color = MaterialTheme.colorScheme.error)
@@ -297,12 +297,12 @@ private fun AlbumDetailScreen(
         return succeeded
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         MediaGrid(
             media = album.media,
             repository = repository,
             selectedMediaIds = selectedIds,
-            contentPadding = momentoDetailMediaContentPadding,
+            contentPadding = momentoMediaViewerContentPadding,
             headerContent = null,
             footerContent = null,
             modifier = Modifier.fillMaxSize(),

@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
@@ -54,8 +53,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
+import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.TimelineGroup
@@ -401,12 +402,12 @@ private fun ContinuousTimelineGrid(
         }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
         val columns = adaptiveGridColumns(maxWidth.value.toInt())
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
             state = gridState,
-            contentPadding = PaddingValues(bottom = 104.dp),
+            contentPadding = momentoMediaViewerContentPadding,
         ) {
             if (leadingItemCount > 0) {
                 item(key = "newer", span = { GridItemSpan(maxLineSpan) }) {
@@ -486,7 +487,7 @@ private fun FloatingTimelineHeader(
     chooseDate: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors()
+    val floatingColors = momentoFloatingControlColors(darkTheme = true)
     Surface(
         modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
         color = floatingColors.container,
@@ -514,7 +515,7 @@ private fun TimelineSelectionControl(
     requestAddToAlbum: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors()
+    val floatingColors = momentoFloatingControlColors(darkTheme = true)
     Surface(
         modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
         color = floatingColors.container,

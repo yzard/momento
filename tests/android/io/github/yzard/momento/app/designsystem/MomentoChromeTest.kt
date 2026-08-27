@@ -37,10 +37,10 @@ class MomentoChromeTest {
     }
 
     @Test
-    fun detailMediaRunsToTheTopAndReservesOnlyBottomChromeSpace() {
-        assertEquals(0.dp, momentoDetailMediaContentPadding.calculateTopPadding())
-        assertEquals(104.dp, momentoDetailMediaContentPadding.calculateBottomPadding())
-        assertEquals(0.dp, momentoDetailMediaContentPadding.calculateLeftPadding(LayoutDirection.Ltr))
-        assertEquals(0.dp, momentoDetailMediaContentPadding.calculateRightPadding(LayoutDirection.Ltr))
+    fun mediaViewerReservesBlackTopChromeAndBottomControls() {
+        assertEquals(104.dp, momentoMediaViewerContentPadding.calculateTopPadding())
+        assertEquals(104.dp, momentoMediaViewerContentPadding.calculateBottomPadding())
+        assertEquals(0.dp, momentoMediaViewerContentPadding.calculateLeftPadding(LayoutDirection.Ltr))
+        assertEquals(0.dp, momentoMediaViewerContentPadding.calculateRightPadding(LayoutDirection.Ltr))
     }
 }
