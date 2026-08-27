@@ -112,16 +112,16 @@ struct RollingCpuWorkers<Input, Output> {
 
 impl<Input: Send + 'static, Output: Send + 'static> RollingCpuWorkers<Input, Output> {
     fn new<ProcessInput>(
-        cpu_processing_concurrency: usize,
+        concurrency: usize,
         worker_name: &str,
         process_input: ProcessInput,
     ) -> AppResult<Self>
     where
         ProcessInput: Fn(Input) -> Output + Send + Sync + 'static,
     {
-        if cpu_processing_concurrency == 0 {
+        if concurrency == 0 {
             return Err(AppError::Validation(
-                "CPU processing concurrency must be positive".to_string(),
+                "Result processing concurrency must be positive".to_string(),
             ));
         }
         if worker_name.trim().is_empty() {
@@ -130,12 +130,12 @@ impl<Input: Send + 'static, Output: Send + 'static> RollingCpuWorkers<Input, Out
             ));
         }
 
-        let (input_sender, input_receiver) = mpsc::sync_channel(cpu_processing_concurrency);
+        let (input_sender, input_receiver) = mpsc::sync_channel(concurrency);
         let (output_sender, output_receiver) = mpsc::channel();
         let input_receiver = Arc::new(Mutex::new(input_receiver));
         let process_input = Arc::new(process_input);
-        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(cpu_processing_concurrency);
-        for worker_index in 0..cpu_processing_concurrency {
+        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(concurrency);
+        for worker_index in 0..concurrency {
             let worker_input_receiver = Arc::clone(&input_receiver);
             let worker_output_sender = output_sender.clone();
             let worker_process_input = Arc::clone(&process_input);
@@ -219,30 +219,27 @@ impl<Input, Output> Drop for RollingCpuWorkers<Input, Output> {
 
 struct ResultPipeline {
     pool: DbPool,
-    cpu_processing_concurrency: usize,
+    concurrency: usize,
     cpu_workers: RollingCpuWorkers<QueuedResult, PreparedResultCompletion>,
     in_flight_job_ids: HashSet<String>,
     retry_after: HashMap<String, Instant>,
 }
 
 impl ResultPipeline {
-    fn new(pool: DbPool, cpu_processing_concurrency: usize) -> AppResult<Self> {
+    fn new(pool: DbPool, concurrency: usize) -> AppResult<Self> {
         let preparation_pool = pool.clone();
-        let cpu_workers = RollingCpuWorkers::new(
-            cpu_processing_concurrency,
-            "ai-result-cpu",
-            move |queued: QueuedResult| {
+        let cpu_workers =
+            RollingCpuWorkers::new(concurrency, "ai-result-cpu", move |queued: QueuedResult| {
                 let job_id = queued.job_id.clone();
                 let prepared = (|| {
                     let connection = preparation_pool.get()?;
                     prepare_queued_result(&connection, queued)
                 })();
                 PreparedResultCompletion { job_id, prepared }
-            },
-        )?;
+            })?;
         Ok(Self {
             pool,
-            cpu_processing_concurrency,
+            concurrency,
             cpu_workers,
             in_flight_job_ids: HashSet::new(),
             retry_after: HashMap::new(),
@@ -253,7 +250,7 @@ impl ResultPipeline {
         let now = Instant::now();
         self.retry_after.retain(|_, retry_at| *retry_at > now);
         let available_slots = self
-            .cpu_processing_concurrency
+            .concurrency
             .saturating_sub(self.in_flight_job_ids.len());
         if available_slots == 0 {
             return Ok(0);
@@ -327,8 +324,8 @@ impl ResultPipeline {
     }
 }
 
-pub fn run(pool: DbPool, interval: Duration, cpu_processing_concurrency: usize) -> ! {
-    let mut pipeline = ResultPipeline::new(pool, cpu_processing_concurrency)
+pub fn run(pool: DbPool, interval: Duration, concurrency: usize) -> ! {
+    let mut pipeline = ResultPipeline::new(pool, concurrency)
         .expect("validated LLM result CPU pipeline must start");
     loop {
         if let Err(error) = pipeline.refill() {
@@ -359,11 +356,8 @@ pub fn run(pool: DbPool, interval: Duration, cpu_processing_concurrency: usize) 
     }
 }
 
-pub fn process_available_results(
-    pool: &DbPool,
-    cpu_processing_concurrency: usize,
-) -> AppResult<usize> {
-    let mut pipeline = ResultPipeline::new(pool.clone(), cpu_processing_concurrency)?;
+pub fn process_available_results(pool: &DbPool, concurrency: usize) -> AppResult<usize> {
+    let mut pipeline = ResultPipeline::new(pool.clone(), concurrency)?;
     pipeline.refill()?;
     let mut processed = 0;
     while pipeline.in_flight_count() > 0 {

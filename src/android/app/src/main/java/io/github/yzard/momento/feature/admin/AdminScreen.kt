@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
@@ -60,7 +62,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -99,6 +104,24 @@ enum class AdminAiFeature(val identifier: String, val label: String) {
     IMAGE_AESTHETICS("image_aesthetics", "Image aesthetics"),
     DEDUPLICATE("deduplicate", "Deduplication"),
     FACE_DETECTION("face_detection", "Face detection"),
+}
+
+private val cronFieldLabels = listOf("Minute", "Hour", "Day", "Month", "Weekday")
+
+fun splitCronExpression(cronExpression: String): List<String> {
+    val fields = cronExpression.trim().split(Regex("\\s+"))
+    if (fields.size != cronFieldLabels.size) return List(cronFieldLabels.size) { "" }
+    return fields
+}
+
+fun joinCronFields(cronFields: List<String>): String {
+    require(cronFields.size == cronFieldLabels.size) { "A cron schedule must contain five fields" }
+    return cronFields.joinToString(" ") { it.trim() }
+}
+
+fun validCronFields(cronFields: List<String>): Boolean {
+    if (cronFields.size != cronFieldLabels.size) return false
+    return cronFields.all { field -> field.trim().isNotEmpty() && !field.trim().contains(Regex("\\s")) }
 }
 
 fun toggledRole(role: String): String = if (role == "admin") "user" else "admin"
@@ -805,8 +828,11 @@ private fun AiAdministration(
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                     ) {
+                        val primaryControlKey = "$controlKey-primary"
+                        val cleanControlKey = "$controlKey-clean"
+                        val primaryActionLabel = if (running) "Cancel $label" else "Start $label"
                         Button(
                             onClick = {
                                 if (running) {
@@ -815,18 +841,31 @@ private fun AiAdministration(
                                         description = "Queued and active work for this control will be cancelled.",
                                         confirmLabel = "Cancel jobs",
                                         execute = {
-                                            runAction(controlKey, "Cancel $label", actionFor(feature, "cancel"))
+                                            runAction(primaryControlKey, "Cancel $label", actionFor(feature, "cancel"))
                                         },
                                     )
                                 } else {
-                                    runAction(controlKey, "Start $label", actionFor(feature, "start"))
+                                    runAction(primaryControlKey, "Start $label", actionFor(feature, "start"))
                                 }
                             },
                             enabled = busyControl == null,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .semantics { contentDescription = primaryActionLabel },
+                            contentPadding = PaddingValues(0.dp),
                         ) {
-                            Icon(if (running) Icons.Default.Stop else Icons.Default.PlayArrow, null)
-                            Text(if (busyControl == controlKey) "Working" else if (running) "Cancel" else "Start")
+                            if (busyControl == primaryControlKey) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                )
+                            } else {
+                                Icon(
+                                    if (running) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                )
+                            }
                         }
                         OutlinedButton(
                             onClick = {
@@ -835,15 +874,24 @@ private fun AiAdministration(
                                     description = "Stored results and eligible job state for this control will be removed.",
                                     confirmLabel = "Clean data",
                                     execute = {
-                                        runAction(controlKey, "Clean $label", actionFor(feature, "clean"))
+                                        runAction(cleanControlKey, "Clean $label", actionFor(feature, "clean"))
                                     },
                                 )
                             },
                             enabled = !running && busyControl == null,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .semantics { contentDescription = "Clean $label data" },
+                            contentPadding = PaddingValues(0.dp),
                         ) {
-                            Icon(Icons.Default.CleaningServices, null)
-                            Text("Clean")
+                            if (busyControl == cleanControlKey) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(Icons.Default.CleaningServices, contentDescription = null)
+                            }
                         }
                     }
                     if (feature != null) {
@@ -932,27 +980,58 @@ private fun AiScheduleEditor(
     busy: Boolean,
     save: (String) -> Unit,
 ) {
-    var cronExpression by remember(schedule.cronExpression) { mutableStateOf(schedule.cronExpression) }
-    val normalizedExpression = cronExpression.trim().replace(Regex("\\s+"), " ")
+    var cronFields by remember(schedule.cronExpression) {
+        mutableStateOf(splitCronExpression(schedule.cronExpression))
+    }
+    val cronExpression = joinCronFields(cronFields)
+    val fieldsValid = validCronFields(cronFields)
+    val storedExpression = joinCronFields(splitCronExpression(schedule.cronExpression))
     Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
         Text("Schedule · five-field cron · system timezone", style = MaterialTheme.typography.labelSmall)
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.Bottom,
         ) {
-            OutlinedTextField(
-                value = cronExpression,
-                onValueChange = { cronExpression = it },
-                label = { Text("$label cron schedule") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-            )
+            cronFieldLabels.forEachIndexed { index, fieldLabel ->
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        fieldLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    OutlinedTextField(
+                        value = cronFields[index],
+                        onValueChange = { fieldValue ->
+                            cronFields = cronFields.toMutableList().also { fields ->
+                                fields[index] = fieldValue
+                            }
+                        },
+                        singleLine = true,
+                        isError = cronFields[index].trim().isEmpty() || cronFields[index].trim().contains(Regex("\\s")),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
             OutlinedButton(
                 onClick = { save(cronExpression) },
-                enabled = !busy && normalizedExpression.isNotEmpty() && normalizedExpression != schedule.cronExpression,
+                enabled = !busy && fieldsValid && cronExpression != storedExpression,
+                modifier = Modifier
+                    .size(48.dp)
+                    .semantics { contentDescription = "Save $label cron schedule" },
+                contentPadding = PaddingValues(0.dp),
             ) {
-                Text("Save")
+                Icon(Icons.Default.Save, contentDescription = null)
             }
+        }
+        if (!fieldsValid) {
+            Text(
+                "Every cron field must contain one value without spaces.",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
     }
 }

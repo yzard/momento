@@ -930,6 +930,71 @@ async fn aggregate_status_reports_exact_independent_job_states_without_a_body() 
 }
 
 #[tokio::test]
+async fn aggregate_status_reports_only_each_media_tasks_latest_job() {
+    init_test_paths();
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.llm.enabled = true;
+    let config_manager = create_test_config_manager(config);
+    let app = create_app(
+        config_manager,
+        pool.clone(),
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let user_id = create_test_user(&pool, "latest-status-admin", "latest-status@example.com");
+    let recovered_media_id = create_test_media(&pool, "recovered-face.jpg");
+    let failed_media_id = create_test_media(&pool, "failed-face.jpg");
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    connection
+        .execute(
+            "INSERT INTO face_grouping_runs (id, status) VALUES (1, 'completed')",
+            [],
+        )
+        .expect("face grouping run");
+    for (job_id, media_id, status, error) in [
+        (
+            "face-old-failure",
+            recovered_media_id,
+            "failed",
+            Some("runtime startup failed"),
+        ),
+        ("face-recovered", recovered_media_id, "completed", None),
+        (
+            "face-current-failure",
+            failed_media_id,
+            "failed",
+            Some("image could not be decoded"),
+        ),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status, last_error) VALUES (?, ?, 1, 'face_detection', ?, ?)",
+                rusqlite::params![job_id, media_id, status, error],
+            )
+            .expect("face detection job");
+    }
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+
+    let response = server
+        .post("/api/v1/ai/status")
+        .add_header(AUTHORIZATION, format!("Bearer {}", admin_token(user_id)))
+        .await;
+
+    response.assert_status_ok();
+    let body: Value = response.json();
+    let face_status = task_status(&body, "face_detection");
+    assert_eq!(face_status["jobs"]["completed"], 1);
+    assert_eq!(face_status["jobs"]["failed"], 1);
+    assert_eq!(face_status["errors"], json!(["image could not be decoded"]));
+}
+
+#[tokio::test]
 async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
     init_test_paths();
     let pool = create_test_db();

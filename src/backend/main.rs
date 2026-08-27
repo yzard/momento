@@ -81,16 +81,10 @@ fn start_background_tasks(
     let ai_result_pool = pool.clone();
     let ai_result_interval =
         std::time::Duration::from_secs(config.llm_result_worker.poll_interval_seconds);
-    let ai_result_cpu_processing_concurrency = config.llm_result_worker.cpu_processing_concurrency;
+    let ai_result_concurrency = config.llm_result_worker.concurrency;
     std::thread::Builder::new()
         .name("ai-result-writer".to_string())
-        .spawn(move || {
-            ai::result::run(
-                ai_result_pool,
-                ai_result_interval,
-                ai_result_cpu_processing_concurrency,
-            )
-        })
+        .spawn(move || ai::result::run(ai_result_pool, ai_result_interval, ai_result_concurrency))
         .expect("failed to start the AI result writer thread");
 
     let deduplicate_pool = pool.clone();

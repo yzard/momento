@@ -356,24 +356,24 @@ impl Default for LlmConfig {
 pub struct LlmSubmissionWorkerConfig {
     #[serde(default = "defaults::llm_submission_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "defaults::llm_submission_max_in_flight")]
-    pub max_in_flight: usize,
+    #[serde(default = "defaults::llm_submission_max_async_submission_tasks")]
+    pub max_async_submission_tasks: usize,
 }
 
 impl Default for LlmSubmissionWorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: defaults::LLM_SUBMISSION_POLL_INTERVAL_SECONDS,
-            max_in_flight: defaults::LLM_SUBMISSION_MAX_IN_FLIGHT,
+            max_async_submission_tasks: defaults::LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS,
         }
     }
 }
 
 impl LlmSubmissionWorkerConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.poll_interval_seconds == 0 || self.max_in_flight == 0 {
+        if self.poll_interval_seconds == 0 || self.max_async_submission_tasks == 0 {
             return Err(std::io::Error::other(
-                "llm submission poll interval and max in-flight submissions must be positive",
+                "llm submission poll interval and maximum asynchronous submission tasks must be positive",
             ));
         }
         Ok(())
@@ -385,24 +385,24 @@ impl LlmSubmissionWorkerConfig {
 pub struct LlmResultWorkerConfig {
     #[serde(default = "defaults::llm_result_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    #[serde(default = "defaults::llm_result_cpu_processing_concurrency")]
-    pub cpu_processing_concurrency: usize,
+    #[serde(default = "defaults::llm_result_concurrency")]
+    pub concurrency: usize,
 }
 
 impl Default for LlmResultWorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: defaults::LLM_RESULT_POLL_INTERVAL_SECONDS,
-            cpu_processing_concurrency: defaults::LLM_RESULT_CPU_PROCESSING_CONCURRENCY,
+            concurrency: defaults::LLM_RESULT_CONCURRENCY,
         }
     }
 }
 
 impl LlmResultWorkerConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.poll_interval_seconds == 0 || self.cpu_processing_concurrency == 0 {
+        if self.poll_interval_seconds == 0 || self.concurrency == 0 {
             return Err(std::io::Error::other(
-                "llm result poll interval and CPU processing concurrency must be positive",
+                "llm result poll interval and concurrency must be positive",
             ));
         }
         Ok(())

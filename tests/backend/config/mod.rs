@@ -160,16 +160,16 @@ fn test_load_config_rejects_configurable_log_file_path() {
 }
 
 #[test]
-fn test_load_config_reads_llm_submission_window() {
+fn test_load_config_reads_llm_async_submission_task_limit() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[llm_submission_worker]\nmax_in_flight = 17\npoll_interval_seconds = 2\n",
+        "[llm_submission_worker]\nmax_async_submission_tasks = 17\npoll_interval_seconds = 2\n",
     );
 
     let config = load_config(&path).expect("Failed to load config");
 
-    assert_eq!(config.llm_submission_worker.max_in_flight, 17);
+    assert_eq!(config.llm_submission_worker.max_async_submission_tasks, 17);
     assert_eq!(config.llm_submission_worker.poll_interval_seconds, 2);
 }
 
@@ -184,17 +184,27 @@ fn test_load_config_rejects_removed_llm_submission_batch_size() {
 }
 
 #[test]
+fn test_load_config_rejects_renamed_llm_submission_max_in_flight() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(&dir, "[llm_submission_worker]\nmax_in_flight = 17\n");
+
+    let error = load_config(&path).expect_err("Renamed submission setting must fail");
+
+    assert!(error.to_string().contains("max_in_flight"));
+}
+
+#[test]
 fn test_load_config_reads_llm_result_worker_concurrency() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[llm_result_worker]\npoll_interval_seconds = 3\ncpu_processing_concurrency = 7\n",
+        "[llm_result_worker]\npoll_interval_seconds = 3\nconcurrency = 7\n",
     );
 
     let config = load_config(&path).expect("Failed to load config");
 
     assert_eq!(config.llm_result_worker.poll_interval_seconds, 3);
-    assert_eq!(config.llm_result_worker.cpu_processing_concurrency, 7);
+    assert_eq!(config.llm_result_worker.concurrency, 7);
 }
 
 #[test]
@@ -208,8 +218,21 @@ fn test_load_config_rejects_removed_llm_result_worker_batch_size() {
 }
 
 #[test]
+fn test_load_config_rejects_renamed_llm_result_cpu_processing_concurrency() {
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let path = write_config(
+        &dir,
+        "[llm_result_worker]\ncpu_processing_concurrency = 7\n",
+    );
+
+    let error = load_config(&path).expect_err("Renamed result worker setting must fail");
+
+    assert!(error.to_string().contains("cpu_processing_concurrency"));
+}
+
+#[test]
 fn test_load_config_rejects_invalid_llm_result_worker_settings() {
-    for setting in ["poll_interval_seconds", "cpu_processing_concurrency"] {
+    for setting in ["poll_interval_seconds", "concurrency"] {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = write_config(&dir, &format!("[llm_result_worker]\n{setting} = 0\n"));
 

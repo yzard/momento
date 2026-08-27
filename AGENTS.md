@@ -122,8 +122,11 @@ The primary implementation points are:
 
 New source and test paths must follow the repository's resource hierarchy and test-mirroring
 convention; existing flat route, query, and frontend API modules are layout debt, not templates to
-copy. All AI control and status endpoints require an administrator. User-facing duplicate-group
-and face-group browsing uses normal authenticated access and filters through `media_access`.
+copy. All AI control and status endpoints require an administrator. The administrator work-status
+table counts only the latest job for each media item and inference task, so a successful rerun
+supersedes an older failure without deleting the historical job. A successfully inferred empty
+result, such as no detected faces, is completed work rather than a failure. User-facing
+duplicate-group and face-group browsing uses normal authenticated access and filters through `media_access`.
 The LLM WebSocket uses the configured client ID and shared API key rather than a user JWT.
 
 Metadata jobs use `queued`, `processing`, `completed`, and `failed` states. Workers atomically
@@ -215,7 +218,7 @@ submission failures. An acknowledgement means only that llm-service has durably 
 not that inference has completed. The result must return the same `jobId`, `mediaId`, `task`, and
 exact submitted `attempt`.
 
-The Momento submission worker keeps a global `max_in_flight` rolling window. It claims and streams
+The Momento submission worker keeps a global `max_async_submission_tasks` rolling window. It claims and streams
 a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
 remains. This transport window is independent from every model runtime's inference concurrency.
 
@@ -481,10 +484,11 @@ result-delivery fields prefixed by `result_delivery_`. The Compose deployment mo
 data root into both containers; llm-service only uses its config, `logs/`, and `llm/` subtree and
 does not read Momento originals, previews, or thumbnails.
 
-Momento's `[llm_submission_worker]` controls only the outbound WebSocket submission window.
-`[llm_result_worker]` independently controls the single AI-result writer thread's inbox poll
-interval and rolling CPU preparation concurrency; it has no batch size and never creates concurrent
-AI-result database writers.
+Momento's `[llm_submission_worker].max_async_submission_tasks` controls only the outbound WebSocket
+submission window. `[llm_result_worker].concurrency` independently controls the result pipeline's
+rolling CPU preparation concurrency; `poll_interval_seconds` controls the single AI-result writer
+thread's inbox poll interval. It has no batch size and never creates concurrent AI-result database
+writers.
 
 ### Face detection and grouping
 

@@ -21,7 +21,7 @@ const RUNTIME_HOST: &str = "127.0.0.1";
 const RUNTIME_INPUT_PLACEHOLDER: &str = "{input_root}";
 const RUNTIME_CACHE_PLACEHOLDER: &str = "{cache_dir}";
 const MODEL_CONCURRENCY_PLACEHOLDER: &str = "{model_concurrency}";
-const CPU_PROCESSING_CONCURRENCY_PLACEHOLDER: &str = "{cpu_processing_concurrency}";
+const PROCESSING_CONCURRENCY_PLACEHOLDER: &str = "{processing_concurrency}";
 const MODEL_BATCH_WAIT_PLACEHOLDER: &str = "{model_batch_wait_milliseconds}";
 const FACE_LIKELIHOOD_PLACEHOLDER: &str = "{minimum_face_likelihood}";
 const FACE_RESOLUTION_PLACEHOLDER: &str = "{minimum_face_resolution_pixels}";
@@ -234,8 +234,8 @@ impl RuntimeCatalog {
                     RUNTIME_HOST,
                     "--port",
                     "8300",
-                    "--cpu-processing-concurrency",
-                    CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    "--processing-concurrency",
+                    PROCESSING_CONCURRENCY_PLACEHOLDER,
                     "--model-concurrency",
                     MODEL_CONCURRENCY_PLACEHOLDER,
                     "--model-batch-wait-milliseconds",
@@ -267,8 +267,8 @@ impl RuntimeCatalog {
                     RUNTIME_HOST,
                     "--port",
                     "8500",
-                    "--cpu-processing-concurrency",
-                    CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    "--processing-concurrency",
+                    PROCESSING_CONCURRENCY_PLACEHOLDER,
                     "--model-concurrency",
                     MODEL_CONCURRENCY_PLACEHOLDER,
                     "--input-root",
@@ -308,8 +308,8 @@ impl RuntimeCatalog {
                     RUNTIME_HOST,
                     "--port",
                     "8600",
-                    "--cpu-processing-concurrency",
-                    CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                    "--processing-concurrency",
+                    PROCESSING_CONCURRENCY_PLACEHOLDER,
                     "--model-concurrency",
                     MODEL_CONCURRENCY_PLACEHOLDER,
                     "--model-batch-wait-milliseconds",
@@ -1603,8 +1603,8 @@ fn detection_runtime_spec(
             RUNTIME_HOST,
             "--port",
             port,
-            "--cpu-processing-concurrency",
-            CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+            "--processing-concurrency",
+            PROCESSING_CONCURRENCY_PLACEHOLDER,
             "--model-concurrency",
             MODEL_CONCURRENCY_PLACEHOLDER,
             "--input-root",
@@ -1839,8 +1839,8 @@ fn spawn_service_command(
     })?;
     let cache_dir = cache_dir.to_string_lossy();
     let model_concurrency = config.configured_model_concurrency()?.to_string();
-    let cpu_processing_concurrency = config
-        .cpu_processing_concurrency
+    let processing_concurrency = config
+        .processing_concurrency
         .map(|concurrency| concurrency.to_string());
     let model_batch_wait_milliseconds = config
         .model_batch_wait_milliseconds
@@ -1868,8 +1868,8 @@ fn spawn_service_command(
                 .replace(RUNTIME_INPUT_PLACEHOLDER, &input_root)
                 .replace(MODEL_CONCURRENCY_PLACEHOLDER, &model_concurrency);
             argument = argument.replace(RUNTIME_CACHE_PLACEHOLDER, &cache_dir);
-            if let Some(concurrency) = &cpu_processing_concurrency {
-                argument = argument.replace(CPU_PROCESSING_CONCURRENCY_PLACEHOLDER, concurrency);
+            if let Some(concurrency) = &processing_concurrency {
+                argument = argument.replace(PROCESSING_CONCURRENCY_PLACEHOLDER, concurrency);
             }
             if let Some(wait_milliseconds) = &model_batch_wait_milliseconds {
                 argument = argument.replace(MODEL_BATCH_WAIT_PLACEHOLDER, wait_milliseconds);
@@ -1983,8 +1983,8 @@ fn redact_base64_token(output: &mut String, text: &str, start: Option<usize>, en
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeCatalog, ServiceManager, ServiceType, CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
-        MODEL_BATCH_WAIT_PLACEHOLDER, MODEL_CONCURRENCY_PLACEHOLDER,
+        RuntimeCatalog, ServiceManager, ServiceType, MODEL_BATCH_WAIT_PLACEHOLDER,
+        MODEL_CONCURRENCY_PLACEHOLDER, PROCESSING_CONCURRENCY_PLACEHOLDER,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2044,8 +2044,8 @@ mod tests {
             .expect("image clustering runtime");
         for expected_arguments in [
             [
-                "--cpu-processing-concurrency",
-                CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                "--processing-concurrency",
+                PROCESSING_CONCURRENCY_PLACEHOLDER,
             ],
             ["--model-concurrency", MODEL_CONCURRENCY_PLACEHOLDER],
             [
@@ -2132,8 +2132,8 @@ mod tests {
             assert!(detection_runtime.arguments.windows(2).any(|arguments| {
                 arguments
                     == [
-                        "--cpu-processing-concurrency",
-                        CPU_PROCESSING_CONCURRENCY_PLACEHOLDER,
+                        "--processing-concurrency",
+                        PROCESSING_CONCURRENCY_PLACEHOLDER,
                     ]
             }));
             assert!(detection_runtime.arguments.windows(2).any(|arguments| {

@@ -354,7 +354,7 @@ pub fn status(
     let transaction = connection.unchecked_transaction()?;
     let mut counts_by_task = HashMap::<String, AiJobCounts>::new();
     for row in transaction
-        .prepare(queries::ai_jobs::SELECT_ALL_STATUS_COUNTS)?
+        .prepare(queries::ai_jobs::SELECT_LATEST_STATUS_COUNTS)?
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -368,7 +368,7 @@ pub fn status(
     }
     let mut errors_by_task = HashMap::<String, Vec<String>>::new();
     for row in transaction
-        .prepare(queries::ai_jobs::SELECT_ALL_FAILURES)?
+        .prepare(queries::ai_jobs::SELECT_LATEST_FAILURES)?
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?

@@ -63,12 +63,12 @@ max_attempts = {{METADATA_WORKER_MAX_ATTEMPTS}}
 [llm_submission_worker]
 # This is the global rolling window for streaming prepared jobs to llm-service.
 poll_interval_seconds = {{LLM_SUBMISSION_POLL_INTERVAL_SECONDS}}
-max_in_flight = {{LLM_SUBMISSION_MAX_IN_FLIGHT}}
+max_async_submission_tasks = {{LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS}}
 
 [llm_result_worker]
 # CPU workers continuously prepare queued AI results; one dedicated writer persists each completed result.
 poll_interval_seconds = {{LLM_RESULT_POLL_INTERVAL_SECONDS}}
-cpu_processing_concurrency = {{LLM_RESULT_CPU_PROCESSING_CONCURRENCY}}
+concurrency = {{LLM_RESULT_CONCURRENCY}}
 
 [llm]
 # The API initiates one authenticated WebSocket to llm-service.

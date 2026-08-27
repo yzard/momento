@@ -337,14 +337,14 @@ class DetectionRuntime:
         detector: Callable[[Any, list[dict[str, Any]]], dict[str, Any]],
         recognition_region_filter: Callable[[dict[str, Any]], bool] | None,
         model_components: PaddleOCRModelComponents,
-        cpu_processing_concurrency: int,
+        processing_concurrency: int,
         model_concurrency: int,
         model_batch_wait_milliseconds: int,
     ) -> None:
         self.detector = detector
         self.recognition_region_filter = recognition_region_filter
         self.model_components = model_components
-        self.cpu_processing_slots = create_inference_slots(cpu_processing_concurrency)
+        self.processing_slots = create_inference_slots(processing_concurrency)
         self.pipeline_slots = create_inference_slots(model_concurrency * PIPELINE_BUFFER_BATCHES)
         self.detection_batcher = DynamicBatcher(
             self._detect_batch, model_concurrency, model_batch_wait_milliseconds, "paddleocr-detection-batcher"
@@ -446,14 +446,14 @@ class DetectionRuntime:
 def run_detection_pipeline(handler: Any) -> dict[str, Any]:
     runtime = handler.runtime
     with runtime.pipeline_slots:
-        with runtime.cpu_processing_slots:
+        with runtime.processing_slots:
             with read_runtime_input(handler, handler.input_root) as image_source:
                 prepared_input = runtime.prepare_input(image_source)
         detection_prediction = runtime.detect(prepared_input)
-        with runtime.cpu_processing_slots:
+        with runtime.processing_slots:
             prepared_layout = runtime.prepare_text_layout(prepared_input, detection_prediction)
         recognition_predictions = runtime.recognize(prepared_layout.recognition_crops)
-        with runtime.cpu_processing_slots:
+        with runtime.processing_slots:
             return runtime.classify(prepared_input, prepared_layout, recognition_predictions)
 
 
@@ -507,7 +507,7 @@ def serve_detection(
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--cpu-processing-concurrency", type=int, required=True)
+    parser.add_argument("--processing-concurrency", type=int, required=True)
     parser.add_argument("--model-concurrency", type=int, required=True)
     parser.add_argument("--input-root", required=True)
     parser.add_argument("--text-detection-model", required=True)
@@ -515,8 +515,8 @@ def serve_detection(
     parser.add_argument("--device", required=True)
     parser.add_argument("--batch-wait-milliseconds", type=int, required=True)
     arguments = parser.parse_args()
-    if arguments.cpu_processing_concurrency <= 0:
-        parser.error("--cpu-processing-concurrency must be positive")
+    if arguments.processing_concurrency <= 0:
+        parser.error("--processing-concurrency must be positive")
     if arguments.model_concurrency <= 0:
         parser.error("--model-concurrency must be positive")
     if arguments.batch_wait_milliseconds < 0.0:
@@ -534,7 +534,7 @@ def serve_detection(
         detector,
         recognition_region_filter,
         model_components,
-        arguments.cpu_processing_concurrency,
+        arguments.processing_concurrency,
         arguments.model_concurrency,
         arguments.batch_wait_milliseconds,
     )

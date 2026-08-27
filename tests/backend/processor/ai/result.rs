@@ -134,14 +134,14 @@ fn result_pipeline_persists_multiple_results_without_a_batch_barrier() {
 }
 
 #[test]
-fn result_worker_rejects_zero_cpu_processing_concurrency() {
+fn result_worker_rejects_zero_concurrency() {
     let pool = create_test_db();
 
-    let error =
-        process_available_results(&pool, 0).expect_err("zero CPU processing concurrency must fail");
+    let error = process_available_results(&pool, 0)
+        .expect_err("zero result processing concurrency must fail");
 
     assert!(matches!(error, AppError::Validation(_)));
-    assert!(error.to_string().contains("CPU processing concurrency"));
+    assert!(error.to_string().contains("Result processing concurrency"));
 }
 
 #[test]

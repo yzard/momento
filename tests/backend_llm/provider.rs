@@ -27,7 +27,7 @@ parser.add_argument('--mode', required=True)
 parser.add_argument('--port', required=True, type=int)
 parser.add_argument('--start-log', required=True)
 parser.add_argument('--max-concurrent-jobs', type=int)
-parser.add_argument('--cpu-processing-concurrency', type=int)
+parser.add_argument('--processing-concurrency', type=int)
 parser.add_argument('--model-concurrency', type=int)
 parser.add_argument('--model-batch-wait-milliseconds', type=int)
 parser.add_argument('--input-root', required=True)
@@ -47,8 +47,8 @@ if os.environ.get('XDG_CACHE_HOME') != expected_cache_dir:
 if os.environ.get('HOME') != expected_cache_dir:
     raise RuntimeError('invalid runtime home directory')
 if 'face_detection' in arguments.mode:
-    if arguments.cpu_processing_concurrency != 2:
-        raise RuntimeError('invalid CPU processing concurrency')
+    if arguments.processing_concurrency != 2:
+        raise RuntimeError('invalid processing concurrency')
     if arguments.model_concurrency != 2:
         raise RuntimeError('invalid model concurrency')
     if arguments.face_detection_size != 960:
@@ -62,8 +62,8 @@ if 'face_detection' in arguments.mode:
     if arguments.minimum_face_resolution_pixels != 112:
         raise RuntimeError('invalid minimum face resolution')
 if 'image_aesthetics' in arguments.mode or 'image_clustering' in arguments.mode:
-    if arguments.cpu_processing_concurrency != 2:
-        raise RuntimeError('invalid dynamic batch CPU processing concurrency')
+    if arguments.processing_concurrency != 2:
+        raise RuntimeError('invalid dynamic batch processing concurrency')
     if arguments.model_concurrency != 2:
         raise RuntimeError('invalid dynamic batch model concurrency')
     if arguments.model_batch_wait_milliseconds != 5:
@@ -310,8 +310,8 @@ pub(super) fn service(
     ];
     if model_type == "face_detection" {
         arguments.extend([
-            "--cpu-processing-concurrency".to_string(),
-            "{cpu_processing_concurrency}".to_string(),
+            "--processing-concurrency".to_string(),
+            "{processing_concurrency}".to_string(),
             "--model-concurrency".to_string(),
             "{model_concurrency}".to_string(),
             "--face-detection-size".to_string(),
@@ -327,8 +327,8 @@ pub(super) fn service(
         ]);
     } else if matches!(model_type, "image_clustering" | "image_aesthetics") {
         arguments.extend([
-            "--cpu-processing-concurrency".to_string(),
-            "{cpu_processing_concurrency}".to_string(),
+            "--processing-concurrency".to_string(),
+            "{processing_concurrency}".to_string(),
             "--model-concurrency".to_string(),
             "{model_concurrency}".to_string(),
             "--model-batch-wait-milliseconds".to_string(),
@@ -380,7 +380,7 @@ pub(super) fn service(
             recognition_batch_wait_milliseconds: is_face_detection.then_some(5),
             model_batch_wait_milliseconds: uses_dynamic_batching.then_some(5),
             max_concurrent_jobs: (!uses_staged_concurrency).then_some(2),
-            cpu_processing_concurrency: uses_staged_concurrency.then_some(2),
+            processing_concurrency: uses_staged_concurrency.then_some(2),
             model_concurrency: uses_staged_concurrency.then_some(2),
         },
         RuntimeSpec {

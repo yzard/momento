@@ -22,7 +22,7 @@ fn local_ocr_configuration(extra: &str) -> String {
 
 fn local_face_configuration(face_detection_size: u32, extra: &str) -> String {
     format!(
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"face_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\ncpu_processing_concurrency = 8\nmodel_concurrency = 8\nface_detection_size = {face_detection_size}\nrecognition_batch_size = 64\nrecognition_batch_wait_milliseconds = 5\nminimum_face_likelihood = 0.8\nminimum_face_resolution_pixels = 100\n{extra}",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"face_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 8\nmodel_concurrency = 8\nface_detection_size = {face_detection_size}\nrecognition_batch_size = 64\nrecognition_batch_wait_milliseconds = 5\nminimum_face_likelihood = 0.8\nminimum_face_resolution_pixels = 100\n{extra}",
         local_ocr_configuration("")
     )
 }
@@ -227,21 +227,21 @@ fn loads_playground_toml_configuration() {
         std::path::Path::new("/data/llm/cache")
     );
     assert_eq!(ocr.max_concurrent_jobs, Some(100));
-    assert_eq!(tagging.max_concurrent_jobs, Some(8));
-    assert_eq!(clustering.cpu_processing_concurrency, Some(16));
+    assert_eq!(tagging.max_concurrent_jobs, Some(16));
+    assert_eq!(clustering.processing_concurrency, Some(16));
     assert_eq!(clustering.model_concurrency, Some(16));
     assert_eq!(clustering.model_batch_wait_milliseconds, Some(5));
-    assert_eq!(aesthetics.cpu_processing_concurrency, Some(16));
+    assert_eq!(aesthetics.processing_concurrency, Some(16));
     assert_eq!(aesthetics.model_concurrency, Some(64));
     assert_eq!(aesthetics.model_batch_wait_milliseconds, Some(5));
-    assert_eq!(face_detection.cpu_processing_concurrency, Some(8));
+    assert_eq!(face_detection.processing_concurrency, Some(8));
     assert_eq!(face_detection.model_concurrency, Some(8));
     assert_eq!(face_detection.face_detection_size, Some(960));
     assert_eq!(face_detection.recognition_batch_size, Some(64));
     assert_eq!(face_detection.recognition_batch_wait_milliseconds, Some(5));
-    assert_eq!(screenshot_detection.cpu_processing_concurrency, Some(8));
+    assert_eq!(screenshot_detection.processing_concurrency, Some(8));
     assert_eq!(screenshot_detection.model_concurrency, Some(8));
-    assert_eq!(document_detection.cpu_processing_concurrency, Some(8));
+    assert_eq!(document_detection.processing_concurrency, Some(8));
     assert_eq!(document_detection.model_concurrency, Some(8));
     assert_eq!(
         config.scheduler.result_delivery_max_concurrent_deliveries,
@@ -316,7 +316,7 @@ fn validates_image_aesthetics_staged_concurrency() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\ncpu_processing_concurrency = 3\nmodel_concurrency = 64\nmodel_batch_wait_milliseconds = 5\n",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 3\nmodel_concurrency = 64\nmodel_batch_wait_milliseconds = 5\n",
         local_ocr_configuration("")
     )
     .expect("Failed to write config fixture");
@@ -326,7 +326,7 @@ fn validates_image_aesthetics_staged_concurrency() {
         .service_for("image_aesthetics")
         .expect("enabled aesthetics service");
 
-    assert_eq!(aesthetics.cpu_processing_concurrency, Some(3));
+    assert_eq!(aesthetics.processing_concurrency, Some(3));
     assert_eq!(aesthetics.model_concurrency, Some(64));
     assert_eq!(aesthetics.model_batch_wait_milliseconds, Some(5));
     assert_eq!(aesthetics.startup_timeout_seconds, 1);
@@ -338,7 +338,7 @@ fn validates_image_clustering_staged_concurrency() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_clustering\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\ncpu_processing_concurrency = 16\nmodel_concurrency = 16\nmodel_batch_wait_milliseconds = 5\n",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_clustering\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 16\nmodel_concurrency = 16\nmodel_batch_wait_milliseconds = 5\n",
         local_ocr_configuration("")
     )
     .expect("Failed to write config fixture");
@@ -348,7 +348,7 @@ fn validates_image_clustering_staged_concurrency() {
         .service_for("image_clustering")
         .expect("enabled clustering service");
 
-    assert_eq!(clustering.cpu_processing_concurrency, Some(16));
+    assert_eq!(clustering.processing_concurrency, Some(16));
     assert_eq!(clustering.configured_model_concurrency().unwrap(), 16);
     assert_eq!(clustering.model_batch_wait_milliseconds, Some(5));
 }
@@ -359,7 +359,7 @@ fn validates_both_classifier_services_without_model_configuration() {
         let mut file = NamedTempFile::new().expect("Failed to create config fixture");
         write!(
             file,
-            "{}\n[[service]]\nenabled = true\nmodel_type = \"{model_type}\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\ncpu_processing_concurrency = 3\nmodel_concurrency = 2\n",
+            "{}\n[[service]]\nenabled = true\nmodel_type = \"{model_type}\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 3\nmodel_concurrency = 2\n",
             local_ocr_configuration("")
         )
         .expect("Failed to write config fixture");
@@ -369,7 +369,7 @@ fn validates_both_classifier_services_without_model_configuration() {
             .service_for(model_type)
             .expect("enabled classifier service");
 
-        assert_eq!(classifier.cpu_processing_concurrency, Some(3));
+        assert_eq!(classifier.processing_concurrency, Some(3));
         assert_eq!(classifier.configured_model_concurrency().unwrap(), 2);
         assert_eq!(classifier.startup_timeout_seconds, 1);
         assert_eq!(classifier.request_timeout_seconds, 1);
@@ -444,7 +444,7 @@ fn classifier_services_reject_the_removed_max_concurrent_jobs_field() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\ncpu_processing_concurrency = 2\nmodel_concurrency = 2\n",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\nprocessing_concurrency = 2\nmodel_concurrency = 2\n",
         local_ocr_configuration("")
     )
     .expect("Failed to write config fixture");
@@ -455,13 +455,10 @@ fn classifier_services_reject_the_removed_max_concurrent_jobs_field() {
 }
 
 #[test]
-fn classifier_services_require_positive_cpu_and_model_concurrency() {
-    for (field, value) in [
-        ("cpu_processing_concurrency", "0"),
-        ("model_concurrency", "0"),
-    ] {
+fn classifier_services_require_positive_processing_and_model_concurrency() {
+    for (field, value) in [("processing_concurrency", "0"), ("model_concurrency", "0")] {
         let configuration = format!(
-            "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\ncpu_processing_concurrency = 2\nmodel_concurrency = 2\n",
+            "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 2\nmodel_concurrency = 2\n",
             local_ocr_configuration("")
         )
         .replace(&format!("{field} = 2"), &format!("{field} = {value}"));
@@ -477,6 +474,7 @@ fn classifier_services_require_positive_cpu_and_model_concurrency() {
 #[test]
 fn classifier_services_reject_removed_concurrency_names() {
     for removed_field in [
+        "cpu_processing_concurrency = 2",
         "cpu_resize_concurrency = 2",
         "model_screenshot_detection_concurrency = 2",
         "model_document_detection_concurrency = 2",
@@ -484,7 +482,7 @@ fn classifier_services_reject_removed_concurrency_names() {
         let mut file = NamedTempFile::new().expect("Failed to create config fixture");
         write!(
             file,
-            "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\ncpu_processing_concurrency = 2\nmodel_concurrency = 2\n{removed_field}\n",
+            "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 2\nmodel_concurrency = 2\n{removed_field}\n",
             local_ocr_configuration("")
         )
         .expect("Failed to write config fixture");
@@ -503,7 +501,7 @@ fn standard_services_reject_classifier_concurrency_fields() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_tagging\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\ncpu_processing_concurrency = 2\n",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_tagging\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\nprocessing_concurrency = 2\n",
         local_ocr_configuration("")
     )
     .expect("Failed to write config fixture");
@@ -520,7 +518,7 @@ fn image_aesthetics_rejects_removed_max_concurrent_jobs() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 16\ncpu_processing_concurrency = 8\nmodel_concurrency = 64\nmodel_batch_wait_milliseconds = 5\n",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 16\nprocessing_concurrency = 8\nmodel_concurrency = 64\nmodel_batch_wait_milliseconds = 5\n",
         local_ocr_configuration("")
     )
     .expect("Failed to write config fixture");
@@ -535,7 +533,7 @@ fn image_clustering_rejects_removed_max_concurrent_jobs() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_clustering\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 32\ncpu_processing_concurrency = 16\nmodel_concurrency = 16\nmodel_batch_wait_milliseconds = 5\n",
+        "{}\n[[service]]\nenabled = true\nmodel_type = \"image_clustering\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 32\nprocessing_concurrency = 16\nmodel_concurrency = 16\nmodel_batch_wait_milliseconds = 5\n",
         local_ocr_configuration("")
     )
     .expect("Failed to write config fixture");

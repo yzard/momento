@@ -127,7 +127,7 @@ pub struct ServiceConfig {
     pub recognition_batch_wait_milliseconds: Option<u64>,
     pub model_batch_wait_milliseconds: Option<u64>,
     pub max_concurrent_jobs: Option<usize>,
-    pub cpu_processing_concurrency: Option<usize>,
+    pub processing_concurrency: Option<usize>,
     pub model_concurrency: Option<usize>,
 }
 
@@ -286,7 +286,7 @@ impl Config {
                 "enabled service max_concurrent_jobs must be positive".to_string(),
             ));
         }
-        if service.cpu_processing_concurrency.is_some()
+        if service.processing_concurrency.is_some()
             || service.model_concurrency.is_some()
             || service.model_batch_wait_milliseconds.is_some()
         {
@@ -420,11 +420,11 @@ impl Config {
         service_name: &str,
     ) -> Result<(), ServiceError> {
         if service
-            .cpu_processing_concurrency
+            .processing_concurrency
             .is_none_or(|concurrency| concurrency == 0)
         {
             return Err(ServiceError::Configuration(format!(
-                "enabled {service_name} service cpu_processing_concurrency must be positive"
+                "enabled {service_name} service processing_concurrency must be positive"
             )));
         }
         if service
@@ -437,7 +437,7 @@ impl Config {
         }
         if service.max_concurrent_jobs.is_some() {
             return Err(ServiceError::Configuration(format!(
-                "{service_name} uses cpu_processing_concurrency and model_concurrency, not max_concurrent_jobs"
+                "{service_name} uses processing_concurrency and model_concurrency, not max_concurrent_jobs"
             )));
         }
         Ok(())
@@ -516,7 +516,7 @@ mod tests {
             recognition_batch_wait_milliseconds: is_face_detection.then_some(5),
             model_batch_wait_milliseconds: uses_dynamic_batching.then_some(5),
             max_concurrent_jobs: (!uses_staged_concurrency).then_some(8),
-            cpu_processing_concurrency: uses_staged_concurrency.then_some(8),
+            processing_concurrency: uses_staged_concurrency.then_some(8),
             model_concurrency: uses_staged_concurrency.then_some(8),
         }
     }
@@ -590,9 +590,9 @@ mod tests {
         config.service.push(service("image_aesthetics"));
         assert!(config.validate().is_ok());
 
-        config.service[1].cpu_processing_concurrency = Some(0);
+        config.service[1].processing_concurrency = Some(0);
         assert!(config.validate().is_err());
-        config.service[1].cpu_processing_concurrency = Some(8);
+        config.service[1].processing_concurrency = Some(8);
         config.service[1].model_concurrency = Some(0);
         assert!(config.validate().is_err());
         config.service[1].model_concurrency = Some(64);
@@ -606,9 +606,9 @@ mod tests {
         config.service.push(service("image_clustering"));
         assert!(config.validate().is_ok());
 
-        config.service[1].cpu_processing_concurrency = Some(0);
+        config.service[1].processing_concurrency = Some(0);
         assert!(config.validate().is_err());
-        config.service[1].cpu_processing_concurrency = Some(16);
+        config.service[1].processing_concurrency = Some(16);
         config.service[1].model_concurrency = Some(0);
         assert!(config.validate().is_err());
         config.service[1].model_concurrency = Some(16);

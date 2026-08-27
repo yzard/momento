@@ -87,6 +87,22 @@ class AdminScreenTest {
     }
 
     @Test
+    fun splitsAndRejoinsExactlyFiveCronFields() {
+        val fields = listOf("15", "1", "*", "*", "1-5")
+
+        assertEquals(fields, splitCronExpression(" 15  1 * * 1-5 "))
+        assertEquals("15 1 * * 1-5", joinCronFields(fields))
+        assertTrue(validCronFields(fields))
+        assertFalse(validCronFields(listOf("15 30", "1", "*", "*", "1-5")))
+        assertEquals(List(5) { "" }, splitCronExpression("15 1 * *"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsJoiningTheWrongCronFieldCount() {
+        joinCronFields(listOf("15", "1", "*", "*"))
+    }
+
+    @Test
     fun selectsJobCountsForTaskAndDeduplicationRows() {
         val taskJobs = AiJobCounts(1, 2, 3, 4, 5, 6)
         val deduplicateJobs = AiJobCounts(7, 8, 9, 10, 11, 12)

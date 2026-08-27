@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertCircle, Bot, Eraser, Loader2, Play, Save, X } from 'lucide-react'
+import type { ReactNode } from 'react'
 
 import {
   aiApi,
@@ -11,6 +12,12 @@ import {
   type AiStatusResponse,
 } from '../../api/ai'
 import { cn } from '../../lib/utils'
+import {
+  joinCronFields,
+  splitCronExpression,
+  validCronFields,
+  type CronFields,
+} from './cron'
 
 const FEATURES: ReadonlyArray<{ feature: AiFeature; label: string }> = [
   { feature: 'ocr', label: 'OCR' },
@@ -22,9 +29,16 @@ const FEATURES: ReadonlyArray<{ feature: AiFeature; label: string }> = [
   { feature: 'face_detection', label: 'Face Detection' },
 ]
 
+const CRON_FIELD_DEFINITIONS = [
+  { key: 'minute', label: 'Minute', index: 0 },
+  { key: 'hour', label: 'Hour', index: 1 },
+  { key: 'day', label: 'Day', index: 2 },
+  { key: 'month', label: 'Month', index: 3 },
+  { key: 'weekday', label: 'Weekday', index: 4 },
+] as const
+
 export default function AiPanel() {
   const statusQuery = useQuery({ queryKey: ['ai', 'status'], queryFn: aiApi.status, refetchInterval: 1000 })
-  const allRunning = FEATURES.some(({ feature }) => isActive(featureState(statusQuery.data, feature)))
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
@@ -41,31 +55,7 @@ export default function AiPanel() {
       </div>
 
       <AiStatusTable status={statusQuery.data} loading={statusQuery.isLoading} />
-
-      <div className="border-t border-border px-5 py-6 sm:px-8">
-        <h3 className="mb-1 text-sm font-bold uppercase tracking-wider text-muted-foreground">AI job controls</h3>
-        <p className="mb-4 text-sm text-muted-foreground">Cron schedules use five fields and the server's system timezone.</p>
-        <div className="space-y-3">
-          <ControlRow
-            label="All AI Jobs"
-            running={allRunning}
-            start={() => aiApi.start()}
-            cancel={() => aiApi.cancel()}
-            clean={() => aiApi.clean()}
-          />
-          {FEATURES.map(({ feature, label }) => (
-            <ControlRow
-              key={feature}
-              label={label}
-              running={isActive(featureState(statusQuery.data, feature))}
-              start={() => aiApi.startFeature(feature)}
-              cancel={() => aiApi.cancelFeature(feature)}
-              clean={() => aiApi.cleanFeature(feature)}
-              schedule={statusQuery.data?.schedules.find((entry) => entry.feature === feature)}
-            />
-          ))}
-        </div>
-      </div>
+      <AiControlTable status={statusQuery.data} />
     </section>
   )
 }
@@ -75,7 +65,7 @@ function AiStatusTable({ status, loading }: { status: AiStatusResponse | undefin
     <div className="px-5 py-6 sm:px-8">
       <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-muted-foreground">AI work status</h3>
       <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="w-full min-w-[680px] border-collapse text-left text-sm">
+        <table aria-label="AI work status" className="w-full min-w-[680px] border-collapse text-left text-sm">
           <thead className="bg-muted/50 text-xs font-bold uppercase tracking-wider text-muted-foreground">
             <tr>
               <th scope="col" className="px-4 py-3">Feature</th>
@@ -133,83 +123,226 @@ function isActive(status: string | undefined): boolean {
 }
 
 interface ControlRowProps {
+  feature: AiFeature
   label: string
   running: boolean
   start: () => Promise<AiActionResponse>
   cancel: () => Promise<AiActionResponse>
   clean: () => Promise<AiActionResponse>
-  schedule?: AiFeatureSchedule
+  schedule: AiFeatureSchedule | undefined
 }
 
-function ControlRow({ label, running, start, cancel, clean, schedule }: ControlRowProps) {
+function AiControlTable({ status }: { status: AiStatusResponse | undefined }) {
+  const allRunning = FEATURES.some(({ feature }) => isActive(featureState(status, feature)))
+
+  return (
+    <div className="border-t border-border px-5 py-6 sm:px-8">
+      <div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+        <div>
+          <h3 className="mb-1 text-sm font-bold uppercase tracking-wider text-muted-foreground">AI job controls</h3>
+          <p className="text-sm text-muted-foreground">Cron schedules use five fields and the server's system timezone.</p>
+        </div>
+        <GlobalAiControls running={allRunning} />
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table aria-label="AI feature controls" className="w-full min-w-[1120px] border-collapse text-left text-sm">
+          <thead className="bg-muted/50 text-xs font-bold uppercase tracking-wider text-muted-foreground">
+            <tr>
+              {['Feature', 'Minute', 'Hour', 'Day', 'Month', 'Weekday', 'Save', 'Start / Cancel', 'Clean'].map((label) => (
+                <th key={label} scope="col" className={cn('px-3 py-3', label === 'Feature' ? 'text-left' : 'text-center')}>{label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {FEATURES.map(({ feature, label }) => (
+              <FeatureControlRow
+                key={feature}
+                feature={feature}
+                label={label}
+                running={isActive(featureState(status, feature))}
+                start={() => aiApi.startFeature(feature)}
+                cancel={() => aiApi.cancelFeature(feature)}
+                clean={() => aiApi.cleanFeature(feature)}
+                schedule={status?.schedules.find((entry) => entry.feature === feature)}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function useAiActionMutation() {
   const queryClient = useQueryClient()
-  const mutation = useMutation({
+  return useMutation({
     mutationFn: (action: () => Promise<AiActionResponse>) => action(),
     onSuccess: () => void Promise.all([
       queryClient.invalidateQueries({ queryKey: ['ai'] }),
       queryClient.invalidateQueries({ queryKey: ['duplicates'] }),
     ]),
   })
+}
+
+function GlobalAiControls({ running }: { running: boolean }) {
+  const mutation = useAiActionMutation()
+  const primaryActionLabel = `${running ? 'Cancel' : 'Start'} All AI Jobs`
 
   return (
-    <div className="border-b border-border pb-3 last:border-b-0 last:pb-0">
-      <div className={cn('grid gap-3', schedule ? 'lg:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_minmax(18rem,1.35fr)]' : 'sm:grid-cols-2')}>
-        <button type="button" onClick={() => mutation.mutate(running ? cancel : start)} disabled={mutation.isPending} className={cn('flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-50', running ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90' : 'bg-primary text-primary-foreground hover:bg-primary/90')}>
-          {mutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : running ? <X className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-          {running ? 'Cancel' : 'Start'} {label}
-        </button>
-        <button type="button" onClick={() => mutation.mutate(clean)} disabled={running || mutation.isPending} className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50">
-          <Eraser className="h-4 w-4" />
-          Clean {label === 'All AI Jobs' ? 'All AI Data' : `${label} Data`}
-        </button>
-        {schedule && <ScheduleEditor label={label} schedule={schedule} />}
-      </div>
-      {mutation.isError && <p role="alert" className="mt-2 flex items-center gap-2 text-sm text-destructive"><AlertCircle className="h-4 w-4" />The {label} action failed. Status updates automatically; try again.</p>}
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="mr-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">All AI Jobs</span>
+      <ActionButton
+        accessibleLabel={primaryActionLabel}
+        visibleLabel={running ? 'Cancel all' : 'Start all'}
+        icon={running ? <X aria-hidden="true" className="h-4 w-4" /> : <Play aria-hidden="true" className="h-4 w-4" />}
+        pending={mutation.isPending}
+        disabled={mutation.isPending}
+        variant={running ? 'destructive' : 'primary'}
+        onClick={() => mutation.mutate(running ? aiApi.cancel : aiApi.start)}
+      />
+      <ActionButton
+        accessibleLabel="Clean All AI Data"
+        visibleLabel="Clean all"
+        icon={<Eraser aria-hidden="true" className="h-4 w-4" />}
+        pending={false}
+        disabled={running || mutation.isPending}
+        variant="clean"
+        onClick={() => mutation.mutate(aiApi.clean)}
+      />
+      {mutation.isError && <span role="alert" className="flex items-center gap-1 text-xs text-destructive"><AlertCircle className="h-3.5 w-3.5" />The all-jobs action failed.</span>}
     </div>
   )
 }
 
-function ScheduleEditor({ label, schedule }: { label: string; schedule: AiFeatureSchedule }) {
+function FeatureControlRow({ feature, label, running, start, cancel, clean, schedule }: ControlRowProps) {
+  const actionMutation = useAiActionMutation()
   const queryClient = useQueryClient()
-  const [cronExpression, setCronExpression] = useState(schedule.cronExpression)
-  useEffect(() => setCronExpression(schedule.cronExpression), [schedule.cronExpression])
+  const scheduleExpression = schedule?.cronExpression
+  const [cronFields, setCronFields] = useState<CronFields>(() => scheduleExpression ? splitCronExpression(scheduleExpression) : ['', '', '', '', ''])
+  useEffect(() => {
+    if (!scheduleExpression) return
+    setCronFields(splitCronExpression(scheduleExpression))
+  }, [scheduleExpression])
+  const cronExpression = joinCronFields(cronFields)
+  const fieldsValid = validCronFields(cronFields)
 
-  const mutation = useMutation({
-    mutationFn: () => aiApi.updateSchedule(schedule.feature, cronExpression),
+  const scheduleMutation = useMutation({
+    mutationFn: () => {
+      if (!schedule) throw new Error(`${label} schedule is not loaded`)
+      if (!fieldsValid) throw new Error(`${label} schedule is invalid`)
+      return aiApi.updateSchedule(schedule.feature, cronExpression)
+    },
     onSuccess: (updatedSchedule) => {
-      setCronExpression(updatedSchedule.cronExpression)
+      setCronFields(splitCronExpression(updatedSchedule.cronExpression))
       void queryClient.invalidateQueries({ queryKey: ['ai', 'status'] })
     },
   })
-  const unchanged = cronExpression.trim().replace(/\s+/g, ' ') === schedule.cronExpression
+  const unchanged = !schedule || cronExpression === joinCronFields(splitCronExpression(schedule.cronExpression))
+  const primaryActionLabel = `${running ? 'Cancel' : 'Start'} ${label}`
+  const invalidFields = Boolean(schedule) && !fieldsValid
+  const hasError = actionMutation.isError || scheduleMutation.isError || invalidFields
+  const rowStatus = invalidFields ? 'Invalid cron values' : hasError ? 'Action failed' : running ? 'Active work' : 'Idle'
 
   return (
-    <form
-      className="flex min-w-0 gap-2"
-      onSubmit={(event) => {
-        event.preventDefault()
-        mutation.mutate()
-      }}
+    <tr className="bg-card align-middle">
+      <th scope="row" className="min-w-44 px-3 py-3">
+        <span className="block whitespace-nowrap font-semibold text-foreground">{label}</span>
+        <span className={cn('text-xs', hasError ? 'text-destructive' : 'text-muted-foreground')} role={hasError ? 'alert' : undefined}>
+          {rowStatus}
+        </span>
+      </th>
+      {CRON_FIELD_DEFINITIONS.map((definition) => {
+        const index = definition.index
+        const inputId = `cron-${feature}-${definition.key}`
+        const fieldInvalid = Boolean(schedule) && (cronFields[index].trim().length === 0 || /\s/.test(cronFields[index].trim()))
+        return (
+          <td key={definition.key} className="w-24 px-2 py-3 text-center">
+            <label htmlFor={inputId} className="sr-only">{label} cron {definition.label.toLowerCase()}</label>
+            <input
+              id={inputId}
+              type="text"
+              value={cronFields[index]}
+              onChange={(event) => {
+                const nextFields = [...cronFields] as CronFields
+                nextFields[index] = event.target.value
+                setCronFields(nextFields)
+              }}
+              aria-invalid={fieldInvalid}
+              disabled={!schedule || scheduleMutation.isPending}
+              autoComplete="off"
+              spellCheck={false}
+              className="min-h-10 w-full min-w-20 rounded-md border border-input bg-background px-2 text-center font-mono text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-wait disabled:opacity-50"
+            />
+          </td>
+        )
+      })}
+      <td className="px-3 py-3 text-center">
+        <ActionButton
+          accessibleLabel={`Save ${label} cron schedule`}
+          visibleLabel="Save"
+          icon={<Save aria-hidden="true" className="h-4 w-4" />}
+          pending={scheduleMutation.isPending}
+          disabled={!schedule || scheduleMutation.isPending || unchanged || !fieldsValid}
+          variant="neutral"
+          onClick={() => scheduleMutation.mutate()}
+        />
+      </td>
+      <td className="px-3 py-3 text-center">
+        <ActionButton
+          accessibleLabel={primaryActionLabel}
+          visibleLabel={running ? 'Cancel' : 'Start'}
+          icon={running ? <X aria-hidden="true" className="h-4 w-4" /> : <Play aria-hidden="true" className="h-4 w-4" />}
+          pending={actionMutation.isPending}
+          disabled={actionMutation.isPending}
+          variant={running ? 'destructive' : 'primary'}
+          onClick={() => actionMutation.mutate(running ? cancel : start)}
+        />
+      </td>
+      <td className="px-3 py-3 text-center">
+        <ActionButton
+          accessibleLabel={`Clean ${label} Data`}
+          visibleLabel="Clean"
+          icon={<Eraser aria-hidden="true" className="h-4 w-4" />}
+          pending={false}
+          disabled={running || actionMutation.isPending}
+          variant="clean"
+          onClick={() => actionMutation.mutate(clean)}
+        />
+      </td>
+    </tr>
+  )
+}
+
+type ActionButtonVariant = 'primary' | 'destructive' | 'clean' | 'neutral'
+
+interface ActionButtonProps {
+  accessibleLabel: string
+  visibleLabel: string
+  icon: ReactNode
+  pending: boolean
+  disabled: boolean
+  variant: ActionButtonVariant
+  onClick: () => void
+}
+
+function ActionButton({ accessibleLabel, visibleLabel, icon, pending, disabled, variant, onClick }: ActionButtonProps) {
+  return (
+    <button
+      type="button"
+      aria-label={accessibleLabel}
+      title={accessibleLabel}
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'inline-flex min-h-10 min-w-20 items-center justify-center gap-2 rounded-md border px-3 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50',
+        variant === 'primary' && 'border-primary bg-primary text-primary-foreground hover:bg-primary/90',
+        variant === 'destructive' && 'border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90',
+        variant === 'clean' && 'border-destructive/20 bg-destructive/5 text-destructive hover:bg-destructive/10',
+        variant === 'neutral' && 'border-border bg-card text-foreground hover:bg-muted',
+      )}
     >
-      <label className="sr-only" htmlFor={`cron-${schedule.feature}`}>{label} cron schedule</label>
-      <input
-        id={`cron-${schedule.feature}`}
-        type="text"
-        value={cronExpression}
-        onChange={(event) => setCronExpression(event.target.value)}
-        aria-invalid={mutation.isError}
-        className="min-h-11 min-w-0 flex-1 rounded-lg border border-input bg-background px-3 font-mono text-sm text-foreground outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/20"
-      />
-      <button
-        type="submit"
-        aria-label={`Save ${label} cron schedule`}
-        disabled={mutation.isPending || unchanged || cronExpression.trim().length === 0}
-        className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-border bg-card px-3 text-sm font-bold text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {mutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-        <span className="hidden sm:inline">Save</span>
-      </button>
-      {mutation.isError && <span role="alert" className="sr-only">The {label} cron schedule is invalid or could not be saved.</span>}
-    </form>
+      {pending ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : icon}
+      <span>{visibleLabel}</span>
+    </button>
   )
 }

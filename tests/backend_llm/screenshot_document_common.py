@@ -278,7 +278,7 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
 
         class Runtime:
             pipeline_slots = Slot("pipeline")
-            cpu_processing_slots = Slot("cpu")
+            processing_slots = Slot("cpu")
 
             def prepare_input(self, image_source):
                 events.append("prepared")

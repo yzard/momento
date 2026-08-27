@@ -126,7 +126,7 @@ describe('AiPanel', () => {
     renderPanel()
 
     await screen.findByRole('cell', { name: '12' })
-    const table = screen.getByRole('table')
+    const table = screen.getByRole('table', { name: 'AI work status' })
     for (const column of ['Queued', 'Submitting', 'Submitted', 'Failed', 'Completed']) {
       expect(within(table).getByRole('columnheader', { name: column })).toBeTruthy()
     }
@@ -136,14 +136,34 @@ describe('AiPanel', () => {
     expect(mocks.status).toHaveBeenCalledOnce()
   })
 
+  it('renders every feature as one cron control-table row with the requested columns', async () => {
+    renderPanel()
+
+    const table = await screen.findByRole('table', { name: 'AI feature controls' })
+    for (const column of ['Feature', 'Minute', 'Hour', 'Day', 'Month', 'Weekday', 'Save', 'Start / Cancel', 'Clean']) {
+      expect(within(table).getByRole('columnheader', { name: column })).toBeTruthy()
+    }
+    expect(within(table).getAllByRole('row')).toHaveLength(8)
+    expect(within(table).getAllByRole('rowheader')).toHaveLength(7)
+    for (const feature of ['OCR', 'Image Tagging', 'Screenshot Detection', 'Document Detection', 'Image Aesthetics', 'Deduplicate', 'Face Detection']) {
+      expect(within(table).getByRole('rowheader', { name: new RegExp(`^${feature}`) })).toBeTruthy()
+    }
+    expect(within(table).queryByText('All AI Jobs')).toBeNull()
+  })
+
   it('starts global and exact named feature controls independently', async () => {
     renderPanel()
     await screen.findByRole('cell', { name: '12' })
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: 'Start All AI Jobs' }))
+    const startAllButton = screen.getByRole('button', { name: 'Start All AI Jobs' })
+    const startDeduplicateButton = screen.getByRole('button', { name: 'Start Deduplicate' })
+    expect(startAllButton.textContent).toBe('Start all')
+    expect(startDeduplicateButton.textContent).toBe('Start')
+
+    await user.click(startAllButton)
     await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce())
-    await user.click(screen.getByRole('button', { name: 'Start Deduplicate' }))
+    await user.click(startDeduplicateButton)
     await waitFor(() => expect(mocks.startFeature).toHaveBeenCalledWith('deduplicate'))
     await user.click(screen.getByRole('button', { name: 'Start Face Detection' }))
     await waitFor(() => expect(mocks.startFeature).toHaveBeenCalledWith('face_detection'))
@@ -167,8 +187,8 @@ describe('AiPanel', () => {
     renderPanel()
     await screen.findByRole('cell', { name: '12' })
 
-    expect(screen.getByRole('button', { name: 'Clean All AI Data' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Clean OCR Data' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Clean All AI Data' }).textContent).toBe('Clean all')
+    expect(screen.getByRole('button', { name: 'Clean OCR Data' }).textContent).toBe('Clean')
     expect(screen.getByRole('button', { name: 'Clean Image Tagging Data' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Clean Screenshot Detection Data' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Clean Document Detection Data' })).toBeTruthy()
@@ -182,12 +202,24 @@ describe('AiPanel', () => {
 
   it('edits and saves each feature cron schedule', async () => {
     renderPanel()
-    const input = await screen.findByRole('textbox', { name: 'OCR cron schedule' })
+    const minuteInput = await screen.findByRole('textbox', { name: 'OCR cron minute' })
+    const hourInput = screen.getByRole('textbox', { name: 'OCR cron hour' })
+    const dayInput = screen.getByRole('textbox', { name: 'OCR cron day' })
+    const monthInput = screen.getByRole('textbox', { name: 'OCR cron month' })
+    const weekdayInput = screen.getByRole('textbox', { name: 'OCR cron weekday' })
     const user = userEvent.setup()
 
-    expect((input as HTMLInputElement).value).toBe('0 2 * * *')
-    await user.clear(input)
-    await user.type(input, '15 1 * * 1-5')
+    await waitFor(() => expect((minuteInput as HTMLInputElement).value).toBe('0'))
+    expect((hourInput as HTMLInputElement).value).toBe('2')
+    expect((dayInput as HTMLInputElement).value).toBe('*')
+    expect((monthInput as HTMLInputElement).value).toBe('*')
+    expect((weekdayInput as HTMLInputElement).value).toBe('*')
+    await user.clear(minuteInput)
+    await user.type(minuteInput, '15')
+    await user.clear(hourInput)
+    await user.type(hourInput, '1')
+    await user.clear(weekdayInput)
+    await user.type(weekdayInput, '1-5')
     await user.click(screen.getByRole('button', { name: 'Save OCR cron schedule' }))
 
     await waitFor(() => expect(mocks.updateSchedule).toHaveBeenCalledWith('ocr', '15 1 * * 1-5'))

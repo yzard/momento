@@ -251,7 +251,7 @@ async fn submit_cycle(
         .map_err(|error| error.to_string())?;
     let first_error = Arc::new(tokio::sync::Mutex::new(None));
     run_rolling_window(
-        NonZeroUsize::new(config.llm_submission_worker.max_in_flight)
+        NonZeroUsize::new(config.llm_submission_worker.max_async_submission_tasks)
             .expect("validated LLM submission window"),
         |capacity| claim_queued_jobs(pool, capacity),
         |job| submit_claimed_job(pool, connection, job),

@@ -29,9 +29,9 @@ pub(crate) const METADATA_WORKER_POLL_INTERVAL_SECONDS: u64 = 10;
 pub(crate) const METADATA_WORKER_LEASE_SECONDS: u64 = 300;
 pub(crate) const METADATA_WORKER_MAX_ATTEMPTS: u32 = 5;
 pub(crate) const LLM_SUBMISSION_POLL_INTERVAL_SECONDS: u64 = 5;
-pub(crate) const LLM_SUBMISSION_MAX_IN_FLIGHT: usize = 128;
+pub(crate) const LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS: usize = 128;
 pub(crate) const LLM_RESULT_POLL_INTERVAL_SECONDS: u64 = 1;
-pub(crate) const LLM_RESULT_CPU_PROCESSING_CONCURRENCY: usize = 8;
+pub(crate) const LLM_RESULT_CONCURRENCY: usize = 8;
 pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.41;
 pub(crate) const FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT: f64 = 0.05;
 pub(crate) const FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT: f64 = 0.10;
@@ -289,16 +289,16 @@ pub(crate) fn llm_submission_poll_interval_seconds() -> u64 {
     LLM_SUBMISSION_POLL_INTERVAL_SECONDS
 }
 
-pub(crate) fn llm_submission_max_in_flight() -> usize {
-    LLM_SUBMISSION_MAX_IN_FLIGHT
+pub(crate) fn llm_submission_max_async_submission_tasks() -> usize {
+    LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS
 }
 
 pub(crate) fn llm_result_poll_interval_seconds() -> u64 {
     LLM_RESULT_POLL_INTERVAL_SECONDS
 }
 
-pub(crate) fn llm_result_cpu_processing_concurrency() -> usize {
-    LLM_RESULT_CPU_PROCESSING_CONCURRENCY
+pub(crate) fn llm_result_concurrency() -> usize {
+    LLM_RESULT_CONCURRENCY
 }
 
 pub(crate) fn render_template(source: &str) -> String {
@@ -423,16 +423,16 @@ pub(crate) fn render_template(source: &str) -> String {
             LLM_SUBMISSION_POLL_INTERVAL_SECONDS.to_string(),
         ),
         (
-            "{{LLM_SUBMISSION_MAX_IN_FLIGHT}}",
-            LLM_SUBMISSION_MAX_IN_FLIGHT.to_string(),
+            "{{LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS}}",
+            LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS.to_string(),
         ),
         (
             "{{LLM_RESULT_POLL_INTERVAL_SECONDS}}",
             LLM_RESULT_POLL_INTERVAL_SECONDS.to_string(),
         ),
         (
-            "{{LLM_RESULT_CPU_PROCESSING_CONCURRENCY}}",
-            LLM_RESULT_CPU_PROCESSING_CONCURRENCY.to_string(),
+            "{{LLM_RESULT_CONCURRENCY}}",
+            LLM_RESULT_CONCURRENCY.to_string(),
         ),
         ("{{LLM_ENABLED}}", template::LLM_ENABLED.to_string()),
         (

@@ -83,13 +83,23 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         );
     }
     assert_eq!(
-        template["llm_result_worker"]["cpu_processing_concurrency"].as_integer(),
+        template["llm_submission_worker"]["max_async_submission_tasks"].as_integer(),
         Some(
             runtime_defaults
-                .llm_result_worker
-                .cpu_processing_concurrency as i64
+                .llm_submission_worker
+                .max_async_submission_tasks as i64
         )
     );
+    assert!(template["llm_submission_worker"]
+        .get("max_in_flight")
+        .is_none());
+    assert_eq!(
+        template["llm_result_worker"]["concurrency"].as_integer(),
+        Some(runtime_defaults.llm_result_worker.concurrency as i64)
+    );
+    assert!(template["llm_result_worker"]
+        .get("cpu_processing_concurrency")
+        .is_none());
     assert_eq!(
         template["llm"]["screenshot_detection_cron"].as_str(),
         Some("0 6 * * *")

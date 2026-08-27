@@ -344,7 +344,7 @@ class FaceDetectionRuntime:
         minimum_face_likelihood,
         minimum_face_resolution_pixels,
         face_detection_size,
-        cpu_processing_concurrency,
+        processing_concurrency,
         model_concurrency,
         recognition_batch_size,
         recognition_batch_wait_milliseconds,
@@ -371,7 +371,7 @@ class FaceDetectionRuntime:
         )
         self.minimum_face_likelihood = minimum_face_likelihood
         self.minimum_face_resolution_pixels = minimum_face_resolution_pixels
-        self.cpu_processing_slots = create_inference_slots(cpu_processing_concurrency)
+        self.processing_slots = create_inference_slots(processing_concurrency)
         self.detection_slots = create_inference_slots(model_concurrency)
         self.application.prepare(
             ctx_id=0,
@@ -443,19 +443,19 @@ class FaceDetectionRuntime:
     def infer(self, image_source):
         import numpy
 
-        with self.cpu_processing_slots:
+        with self.processing_slots:
             image = decode_image(image_source)
             image_width = image.width
             image_height = image.height
             image_array = numpy.asarray(image)[:, :, ::-1]
-        with self.cpu_processing_slots:
+        with self.processing_slots:
             with self.detection_slots:
                 detected_bounding_boxes, detected_keypoints = (
                     self.detection_model.detect(
                         image_array, max_num=0, metric="default"
                     )
                 )
-        with self.cpu_processing_slots:
+        with self.processing_slots:
             detected_faces = prepare_detected_faces(
                 detected_bounding_boxes,
                 detected_keypoints,
@@ -550,7 +550,7 @@ def main():
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--cpu-processing-concurrency", type=int, required=True)
+    parser.add_argument("--processing-concurrency", type=int, required=True)
     parser.add_argument("--model-concurrency", type=int, required=True)
     parser.add_argument("--input-root", required=True)
     parser.add_argument("--face-detection-size", type=int, required=True)
@@ -562,8 +562,8 @@ def main():
     parser.add_argument("--minimum-face-resolution-pixels", type=int, required=True)
     parser.add_argument("--face-parsing-model", required=True)
     arguments = parser.parse_args()
-    if arguments.cpu_processing_concurrency <= 0:
-        parser.error("--cpu-processing-concurrency must be positive")
+    if arguments.processing_concurrency <= 0:
+        parser.error("--processing-concurrency must be positive")
     if arguments.model_concurrency <= 0:
         parser.error("--model-concurrency must be positive")
     if arguments.face_detection_size not in SUPPORTED_FACE_DETECTION_SIZES:
@@ -583,7 +583,7 @@ def main():
         arguments.minimum_face_likelihood,
         arguments.minimum_face_resolution_pixels,
         arguments.face_detection_size,
-        arguments.cpu_processing_concurrency,
+        arguments.processing_concurrency,
         arguments.model_concurrency,
         arguments.recognition_batch_size,
         arguments.recognition_batch_wait_milliseconds,

@@ -160,7 +160,7 @@ class ImageAestheticsRuntime:
         clip_model_path: str,
         aesthetic_head_path: str,
         requested_device: str,
-        cpu_processing_concurrency: int,
+        processing_concurrency: int,
         model_concurrency: int,
         model_batch_wait_milliseconds: int,
     ) -> None:
@@ -179,13 +179,13 @@ class ImageAestheticsRuntime:
         self.aesthetic_head.load_state_dict(state, strict=True)
         self.aesthetic_head.eval().to(self.device)
         self.scenic_text_features = self._create_scenic_text_features(clip)
-        self.cpu_processing_slots = create_inference_slots(cpu_processing_concurrency)
+        self.processing_slots = create_inference_slots(processing_concurrency)
         self.model_batcher = DynamicBatcher(
             self._infer_model_batch, model_concurrency, model_batch_wait_milliseconds, "image-aesthetics-model-batcher"
         )
 
     def infer(self, image_source: Any) -> dict[str, float]:
-        with self.cpu_processing_slots:
+        with self.processing_slots:
             prepared_input = self._prepare_input(image_source)
         return self.model_batcher.infer([prepared_input])[0]
 
@@ -284,13 +284,13 @@ def main():
     parser.add_argument("--device", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--cpu-processing-concurrency", type=int, required=True)
+    parser.add_argument("--processing-concurrency", type=int, required=True)
     parser.add_argument("--model-concurrency", type=int, required=True)
     parser.add_argument("--model-batch-wait-milliseconds", type=int, required=True)
     parser.add_argument("--input-root", required=True)
     arguments = parser.parse_args()
-    if arguments.cpu_processing_concurrency <= 0:
-        parser.error("--cpu-processing-concurrency must be positive")
+    if arguments.processing_concurrency <= 0:
+        parser.error("--processing-concurrency must be positive")
     if arguments.model_concurrency <= 0:
         parser.error("--model-concurrency must be positive")
     if arguments.model_batch_wait_milliseconds < 0:
@@ -301,7 +301,7 @@ def main():
         arguments.clip_model,
         arguments.aesthetic_head,
         arguments.device,
-        arguments.cpu_processing_concurrency,
+        arguments.processing_concurrency,
         arguments.model_concurrency,
         arguments.model_batch_wait_milliseconds,
     )

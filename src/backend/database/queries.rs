@@ -416,21 +416,43 @@ pub mod ai_jobs {
     pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND claimed_at < datetime('now', '-5 minutes')";
     pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
-    pub const SELECT_ALL_STATUS_COUNTS: &str = r#"
+    pub const SELECT_LATEST_STATUS_COUNTS: &str = r#"
+    WITH ranked_jobs AS (
+        SELECT task
+             , status
+             , ROW_NUMBER() OVER (
+                   PARTITION BY media_id, task
+                   ORDER BY rowid DESC
+               ) AS recency
+          FROM llm_jobs
+    )
     SELECT task
          , status
          , COUNT(*)
-      FROM llm_jobs
+      FROM ranked_jobs
+     WHERE recency = 1
      GROUP BY task
             , status
      ORDER BY task
             , status
     "#;
-    pub const SELECT_ALL_FAILURES: &str = r#"
+    pub const SELECT_LATEST_FAILURES: &str = r#"
+    WITH ranked_jobs AS (
+        SELECT task
+             , status
+             , last_error
+             , updated_at
+             , ROW_NUMBER() OVER (
+                   PARTITION BY media_id, task
+                   ORDER BY rowid DESC
+               ) AS recency
+          FROM llm_jobs
+    )
     SELECT task
          , last_error
-      FROM llm_jobs
-     WHERE status = 'failed'
+      FROM ranked_jobs
+     WHERE recency = 1
+       AND status = 'failed'
        AND last_error IS NOT NULL
      ORDER BY task
             , updated_at DESC

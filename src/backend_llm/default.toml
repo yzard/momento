@@ -46,7 +46,7 @@ model_type = "image_clustering"
 startup_timeout_seconds = {{IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS}}
 request_timeout_seconds = {{IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS}}
 # CPU preparation slots; model_concurrency is the maximum dynamic CUDA batch size.
-cpu_processing_concurrency = {{IMAGE_CLUSTERING_CPU_PROCESSING_CONCURRENCY}}
+processing_concurrency = {{IMAGE_CLUSTERING_PROCESSING_CONCURRENCY}}
 model_concurrency = {{IMAGE_CLUSTERING_MODEL_CONCURRENCY}}
 model_batch_wait_milliseconds = {{IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS}}
 
@@ -57,7 +57,7 @@ model_type = "image_aesthetics"
 startup_timeout_seconds = {{IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS}}
 request_timeout_seconds = {{IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS}}
 # CPU preparation slots; model_concurrency is the maximum dynamic CUDA batch size.
-cpu_processing_concurrency = {{IMAGE_AESTHETICS_CPU_PROCESSING_CONCURRENCY}}
+processing_concurrency = {{IMAGE_AESTHETICS_PROCESSING_CONCURRENCY}}
 model_concurrency = {{IMAGE_AESTHETICS_MODEL_CONCURRENCY}}
 model_batch_wait_milliseconds = {{IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS}}
 
@@ -67,7 +67,7 @@ enabled = {{SERVICE_ENABLED}}
 model_type = "face_detection"
 startup_timeout_seconds = {{FACE_DETECTION_STARTUP_TIMEOUT_SECONDS}}
 request_timeout_seconds = {{FACE_DETECTION_REQUEST_TIMEOUT_SECONDS}}
-cpu_processing_concurrency = {{FACE_DETECTION_CPU_PROCESSING_CONCURRENCY}}
+processing_concurrency = {{FACE_DETECTION_PROCESSING_CONCURRENCY}}
 model_concurrency = {{FACE_DETECTION_MODEL_CONCURRENCY}}
 face_detection_size = {{FACE_DETECTION_SIZE}}
 recognition_batch_size = {{FACE_RECOGNITION_BATCH_SIZE}}
@@ -81,7 +81,7 @@ enabled = {{SERVICE_ENABLED}}
 model_type = "screenshot_detection"
 startup_timeout_seconds = {{SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS}}
 request_timeout_seconds = {{SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS}}
-cpu_processing_concurrency = {{SCREENSHOT_DETECTION_CPU_PROCESSING_CONCURRENCY}}
+processing_concurrency = {{SCREENSHOT_DETECTION_PROCESSING_CONCURRENCY}}
 model_concurrency = {{SCREENSHOT_DETECTION_MODEL_CONCURRENCY}}
 
 [[service]]
@@ -90,5 +90,5 @@ enabled = {{SERVICE_ENABLED}}
 model_type = "document_detection"
 startup_timeout_seconds = {{DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS}}
 request_timeout_seconds = {{DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS}}
-cpu_processing_concurrency = {{DOCUMENT_DETECTION_CPU_PROCESSING_CONCURRENCY}}
+processing_concurrency = {{DOCUMENT_DETECTION_PROCESSING_CONCURRENCY}}
 model_concurrency = {{DOCUMENT_DETECTION_MODEL_CONCURRENCY}}
