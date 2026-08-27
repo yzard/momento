@@ -44,6 +44,7 @@ struct BackupCapabilities {
 async fn get_capabilities(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Json<CapabilitiesResponse> {
+    let config = state.config.current();
     let mut supported_media_extensions = SUPPORTED_EXTENSIONS
         .iter()
         .map(|extension| (*extension).to_string())
@@ -55,20 +56,20 @@ async fn get_capabilities(
         api_version: 1,
         supported_media_extensions,
         features: FeatureFlags {
-            llm: state.config.llm.enabled,
-            image_tagging: state.config.llm.image_tagging_enabled,
-            deduplicate: state.config.llm.deduplicate_enabled,
-            face_detection: state.config.llm.face_detection_enabled,
-            image_aesthetics: state.config.llm.image_aesthetics_enabled,
-            screenshot_detection: state.config.llm.screenshot_detection_enabled,
-            document_detection: state.config.llm.document_detection_enabled,
+            llm: config.llm.enabled,
+            image_tagging: config.llm.enabled,
+            deduplicate: config.llm.enabled,
+            face_detection: config.llm.enabled,
+            image_aesthetics: config.llm.enabled,
+            screenshot_detection: config.llm.enabled,
+            document_detection: config.llm.enabled,
         },
         backup: BackupCapabilities {
             enabled: true,
-            max_upload_bytes: state.config.backup.max_upload_bytes,
-            max_chunk_bytes: state.config.backup.max_chunk_bytes,
-            max_active_uploads_per_user: state.config.backup.max_active_uploads_per_user,
-            session_expiry_hours: state.config.backup.session_expiry_hours,
+            max_upload_bytes: config.backup.max_upload_bytes,
+            max_chunk_bytes: config.backup.max_chunk_bytes,
+            max_active_uploads_per_user: config.backup.max_active_uploads_per_user,
+            session_expiry_hours: config.backup.session_expiry_hours,
         },
     })
 }

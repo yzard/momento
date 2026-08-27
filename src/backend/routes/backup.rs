@@ -57,10 +57,11 @@ async fn create_upload(
     current_user: CurrentUser,
     Json(request): Json<BackupUploadCreateRequest>,
 ) -> AppResult<Json<BackupUploadResponse>> {
+    let config = state.config.current();
     validate_identifier(&request.device_id, "deviceId")?;
     validate_identifier(&request.client_asset_id, "clientAssetId")?;
     validate_identifier(&request.operation_id, "operationId")?;
-    validate_upload_metadata(&request, state.config.backup.max_upload_bytes)?;
+    validate_upload_metadata(&request, config.backup.max_upload_bytes)?;
 
     let mut connection = state.pool.get().map_err(AppError::Pool)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -95,7 +96,7 @@ async fn create_upload(
         [current_user.id],
         |row| row.get(0),
     )?;
-    if active_uploads >= state.config.backup.max_active_uploads_per_user as i64 {
+    if active_uploads >= config.backup.max_active_uploads_per_user as i64 {
         return Err(AppError::Conflict(
             "maximum active backup uploads reached".to_string(),
         ));
@@ -125,7 +126,7 @@ async fn create_upload(
         ],
     )?;
     let asset_id = transaction.last_insert_rowid();
-    let expiry = format!("+{} hours", state.config.backup.session_expiry_hours);
+    let expiry = format!("+{} hours", config.backup.session_expiry_hours);
     transaction.execute(
         queries::backup::INSERT_SESSION,
         rusqlite::params![
@@ -266,9 +267,10 @@ async fn upload_chunk(
     headers: HeaderMap,
     body: Body,
 ) -> AppResult<Json<BackupUploadResponse>> {
+    let config = state.config.current();
     validate_identifier(&upload_id, "uploadId")?;
     let declared_length = content_length(&headers)?;
-    if declared_length == 0 || declared_length > state.config.backup.max_chunk_bytes {
+    if declared_length == 0 || declared_length > config.backup.max_chunk_bytes {
         return Err(AppError::BadRequest(
             "chunk exceeds the backup chunk limit".to_string(),
         ));
@@ -294,7 +296,7 @@ async fn upload_chunk(
             "upload offset or status does not accept this chunk".to_string(),
         ));
     }
-    if end >= total || total > state.config.backup.max_upload_bytes {
+    if end >= total || total > config.backup.max_upload_bytes {
         return Err(AppError::BadRequest("invalid Content-Range".to_string()));
     }
 

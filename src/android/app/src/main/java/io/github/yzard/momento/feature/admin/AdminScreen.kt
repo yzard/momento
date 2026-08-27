@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -56,10 +57,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.MomentoRepository
@@ -67,6 +70,8 @@ import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.data.SettingsStore
 import io.github.yzard.momento.core.data.ThemePreference
 import io.github.yzard.momento.core.model.AiStatusResponse
+import io.github.yzard.momento.core.model.AiFeatureSchedule
+import io.github.yzard.momento.core.model.AiJobCounts
 import io.github.yzard.momento.core.model.AiTaskStatus
 import io.github.yzard.momento.core.model.ImportStatus
 import io.github.yzard.momento.core.model.JobStatus
@@ -112,6 +117,13 @@ fun aiStatusSummary(status: AiTaskStatus): String =
     "${status.state}: ${status.jobs.queued} queued, ${status.jobs.submitting} submitting, ${status.jobs.submitted} submitted, ${status.jobs.completed} completed, ${status.jobs.failed} failed"
 
 fun isActiveAiState(state: String?): Boolean = state in setOf("queued", "submitting", "submitted", "running", "cancelling")
+
+internal fun aiJobCounts(status: AiStatusResponse?, feature: AdminAiFeature): AiJobCounts? =
+    if (feature == AdminAiFeature.DEDUPLICATE) {
+        status?.deduplicate?.jobs
+    } else {
+        status?.tasks?.firstOrNull { it.task == feature.identifier }?.jobs
+    }
 
 fun newUserValidation(username: String, email: String, password: String): String? = when {
     username.isBlank() -> "Username is required"
@@ -772,6 +784,11 @@ private fun AiAdministration(
                 actionError?.let { AdminError(it) }
             }
         }
+        item {
+            AdminPanel("AI work status", "Queued, submitting, submitted, failed, and completed jobs by feature.") {
+                AiStatusTable(status)
+            }
+        }
         items(controls, key = { it.second }) { (feature, label) ->
             val state = taskState(feature)
             val running = isActiveAiState(state)
@@ -829,6 +846,21 @@ private fun AiAdministration(
                             Text("Clean")
                         }
                     }
+                    if (feature != null) {
+                        status?.schedules?.firstOrNull { it.feature == feature.identifier }?.let { schedule ->
+                            AiScheduleEditor(
+                                label = label,
+                                schedule = schedule,
+                                busy = busyControl != null,
+                                save = { cronExpression ->
+                                    runAction("${controlKey}-schedule", "Save $label schedule") {
+                                        repository.updateAiSchedule(feature.identifier, cronExpression)
+                                        Unit
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -842,6 +874,86 @@ private fun AiAdministration(
             },
             dismiss = { pendingAction = null },
         )
+    }
+}
+
+@Composable
+private fun AiStatusTable(status: AiStatusResponse?) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .width(720.dp),
+    ) {
+        AiStatusRow("Feature", listOf("Queued", "Submitting", "Submitted", "Failed", "Completed"), true)
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        AdminAiFeature.entries.forEach { feature ->
+            val jobs = aiJobCounts(status, feature)
+            AiStatusRow(
+                feature.label,
+                listOf(
+                    jobs?.queued?.toString() ?: "0",
+                    jobs?.submitting?.toString() ?: "0",
+                    jobs?.submitted?.toString() ?: "0",
+                    jobs?.failed?.toString() ?: "0",
+                    jobs?.completed?.toString() ?: "0",
+                ),
+                false,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiStatusRow(label: String, values: List<String>, header: Boolean) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text(
+            label,
+            modifier = Modifier.width(180.dp),
+            fontWeight = if (header) FontWeight.Bold else FontWeight.SemiBold,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        values.forEach { value ->
+            Text(
+                value,
+                modifier = Modifier.width(108.dp),
+                textAlign = TextAlign.End,
+                fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiScheduleEditor(
+    label: String,
+    schedule: AiFeatureSchedule,
+    busy: Boolean,
+    save: (String) -> Unit,
+) {
+    var cronExpression by remember(schedule.cronExpression) { mutableStateOf(schedule.cronExpression) }
+    val normalizedExpression = cronExpression.trim().replace(Regex("\\s+"), " ")
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
+        Text("Schedule · five-field cron · system timezone", style = MaterialTheme.typography.labelSmall)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = cronExpression,
+                onValueChange = { cronExpression = it },
+                label = { Text("$label cron schedule") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(
+                onClick = { save(cronExpression) },
+                enabled = !busy && normalizedExpression.isNotEmpty() && normalizedExpression != schedule.cronExpression,
+            ) {
+                Text("Save")
+            }
+        }
     }
 }
 

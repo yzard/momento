@@ -5,15 +5,12 @@ use std::path::PathBuf;
 
 use momento_api::config::{
     apply_config_environment, consume_admin_password_reset, default_config_template, load_config,
-    resolve_config_environment, save_default_config, Config,
+    resolve_config_environment, save_default_config, Config, ConfigManager,
 };
 use tempfile::TempDir;
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
-    let contents = format!(
-        "{contents}\n[cronjob]\ntimezone = \"Etc/UTC\"\nocr_cron = \"0 1 * * *\"\nimage_tagging_cron = \"0 2 * * *\"\ndeduplicate_cron = \"0 3 * * *\"\nface_detection_cron = \"0 4 * * *\"\nimage_aesthetics_cron = \"0 5 * * *\"\nscreenshot_detection_cron = \"0 6 * * *\"\ndocument_detection_cron = \"0 7 * * *\"\n"
-    );
     std::fs::write(&path, contents).expect("Failed to write test config");
     path
 }
@@ -298,24 +295,59 @@ fn test_consume_admin_password_reset_does_not_rewrite_false_config() {
 }
 
 #[test]
-fn test_existing_cronjob_section_receives_new_schedule_defaults() {
+fn test_llm_section_owns_ai_schedules_and_defaults() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
-        "[cronjob]\ntimezone = \"Etc/UTC\"\ndeduplicate_cron = \"30 3 * * *\"\n",
-    )
-    .expect("Failed to write existing config");
+    std::fs::write(&path, "[llm]\ndeduplicate_cron = \"30 3 * * *\"\n")
+        .expect("Failed to write existing config");
 
-    let config = load_config(&path).expect("Existing cronjob config should remain valid");
+    let config = load_config(&path).expect("LLM schedules should be valid");
 
-    assert_eq!(config.cronjob.ocr_cron, "0 1 * * *");
-    assert_eq!(config.cronjob.image_tagging_cron, "0 2 * * *");
-    assert_eq!(config.cronjob.deduplicate_cron, "30 3 * * *");
-    assert_eq!(config.cronjob.face_detection_cron, "0 4 * * *");
-    assert_eq!(config.cronjob.image_aesthetics_cron, "0 5 * * *");
-    assert_eq!(config.cronjob.screenshot_detection_cron, "0 6 * * *");
-    assert_eq!(config.cronjob.document_detection_cron, "0 7 * * *");
+    assert_eq!(config.llm.ocr_cron, "0 1 * * *");
+    assert_eq!(config.llm.image_tagging_cron, "0 2 * * *");
+    assert_eq!(config.llm.deduplicate_cron, "30 3 * * *");
+    assert_eq!(config.llm.face_detection_cron, "0 4 * * *");
+    assert_eq!(config.llm.image_aesthetics_cron, "0 5 * * *");
+    assert_eq!(config.llm.screenshot_detection_cron, "0 6 * * *");
+    assert_eq!(config.llm.document_detection_cron, "0 7 * * *");
+}
+
+#[tokio::test]
+async fn config_manager_updates_ai_cron_and_preserves_config() {
+    let directory = TempDir::new().expect("temporary directory");
+    let path = write_config(
+        &directory,
+        "# keep this comment\n[server]\ndata_dir = \"/srv/momento\"\n\n[llm]\nocr_cron = \"0 1 * * *\"\nimage_tagging_cron = \"0 2 * * *\"\n",
+    );
+
+    let config = load_config(&path).expect("load config");
+    let config_manager = ConfigManager::new(path.clone(), config);
+    let mut config_updates = config_manager.subscribe();
+    config_manager
+        .update_llm_cron_expression("ocr_cron", "ocr", " 15  4 * * 1-5 ".to_string())
+        .await
+        .expect("update OCR cron");
+    config_updates
+        .changed()
+        .await
+        .expect("runtime config update");
+
+    let updated = std::fs::read_to_string(&path).expect("updated config");
+    assert!(updated.contains("# keep this comment"));
+    assert!(updated.contains("ocr_cron = \"15 4 * * 1-5\""));
+    assert!(updated.contains("image_tagging_cron = \"0 2 * * *\""));
+    let before_invalid_update = updated;
+    assert_eq!(config_manager.current().llm.ocr_cron, "15 4 * * 1-5");
+    assert_eq!(config_updates.borrow().llm.ocr_cron, "15 4 * * 1-5");
+    let error = config_manager
+        .update_llm_cron_expression("ocr_cron", "ocr", "not a cron".to_string())
+        .await
+        .expect_err("invalid cron must fail");
+    assert!(error.to_string().contains("invalid ocr cronjob"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("unchanged config"),
+        before_invalid_update
+    );
 }
 
 #[test]
@@ -522,7 +554,7 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.metadata.thumbnails_max_size, 1200);
 
     assert_eq!(generated, default_config_template());
-    assert!(generated.contains("# Five-field cron expressions"));
+    assert!(generated.contains("Five-field cron expressions"));
     let generated: toml::Value = toml::from_str(&generated).expect("Generated config must be TOML");
     assert!(generated["metadata_worker"].get("batch_size").is_none());
     assert!(generated["llm_result_worker"].get("batch_size").is_none());
@@ -589,30 +621,46 @@ fn test_load_config_rejects_removed_metadata_batch_size() {
 }
 
 #[test]
-fn test_load_config_uses_disabled_deduplicate_llm_default_when_section_is_missing() {
+fn test_load_config_uses_disabled_global_llm_default_when_section_is_missing() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "[server]\nport = 9001\n").expect("Failed to write test config");
 
-    let config = load_config(&path).expect("Missing deduplicate config should use safe defaults");
+    let config = load_config(&path).expect("Missing LLM config should use safe defaults");
 
-    assert!(!config.llm.deduplicate_enabled);
-    assert!(!config.llm.image_aesthetics_enabled);
-    assert!(!config.llm.screenshot_detection_enabled);
-    assert!(!config.llm.document_detection_enabled);
-    assert_eq!(config.llm.face_group_similarity_threshold, 0.41);
+    assert!(!config.llm.enabled);
+    assert_eq!(config.llm.ocr_cron, "0 1 * * *");
+    assert_eq!(config.face_group.similarity_threshold, 0.41);
+}
+
+#[test]
+fn test_load_config_rejects_removed_ai_feature_enablement_fields() {
+    for removed_field in [
+        "ocr_enabled",
+        "image_tagging_enabled",
+        "deduplicate_enabled",
+        "face_detection_enabled",
+        "image_aesthetics_enabled",
+        "screenshot_detection_enabled",
+        "document_detection_enabled",
+    ] {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = write_config(&dir, &format!("[llm]\n{removed_field} = true\n"));
+
+        let error = load_config(&path).expect_err("Removed feature switch must fail");
+
+        assert!(error.to_string().contains(removed_field), "{error}");
+    }
 }
 
 #[test]
 fn test_load_config_rejects_invalid_face_group_similarity_threshold() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let path = write_config(&dir, "[llm]\nface_group_similarity_threshold = 1.1\n");
+    let path = write_config(&dir, "[face_group]\nsimilarity_threshold = 1.1\n");
 
     let error = load_config(&path).expect_err("Invalid face similarity threshold must fail");
 
-    assert!(error
-        .to_string()
-        .contains("face_group_similarity_threshold"));
+    assert!(error.to_string().contains("similarity_threshold"));
 }
 
 #[test]
@@ -624,35 +672,28 @@ fn test_load_config_rejects_invalid_face_representative_weights() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = write_config(
             &dir,
-            &format!("[face_group_representative]\n{invalid_weights}"),
+            &format!("[face_group]\n{invalid_weights}"),
         );
 
         let error = load_config(&path).expect_err("Invalid representative weights must fail");
 
-        assert!(error.to_string().contains("face_group_representative"));
+        assert!(error.to_string().contains("face_group"));
     }
 }
 
 #[test]
 fn test_load_config_rejects_each_invalid_ai_schedule() {
-    for (field, expression) in [
-        ("ocr_cron", "0 1 * * *"),
-        ("image_tagging_cron", "0 2 * * *"),
-        ("deduplicate_cron", "0 3 * * *"),
-        ("face_detection_cron", "0 4 * * *"),
-        ("image_aesthetics_cron", "0 5 * * *"),
-        ("screenshot_detection_cron", "0 6 * * *"),
-        ("document_detection_cron", "0 7 * * *"),
+    for field in [
+        "ocr_cron",
+        "image_tagging_cron",
+        "deduplicate_cron",
+        "face_detection_cron",
+        "image_aesthetics_cron",
+        "screenshot_detection_cron",
+        "document_detection_cron",
     ] {
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = write_config(&dir, "");
-        let contents = std::fs::read_to_string(&path)
-            .expect("Failed to read config")
-            .replace(
-                &format!("{field} = \"{expression}\""),
-                &format!("{field} = \"invalid\""),
-            );
-        std::fs::write(&path, contents).expect("Failed to update config");
+        let path = write_config(&dir, &format!("[llm]\n{field} = \"invalid\"\n"));
 
         let error = load_config(&path).expect_err("Invalid schedule must fail");
         assert!(error.to_string().contains(field.trim_end_matches("_cron")));
@@ -668,15 +709,12 @@ fn playground_config_matches_the_generated_template() {
 }
 
 #[test]
-fn test_load_config_rejects_invalid_deduplicate_timezone() {
+fn test_load_config_rejects_removed_cronjob_section() {
     let dir = TempDir::new().expect("Failed to create temp dir");
-    let path = write_config(&dir, "");
-    let contents = std::fs::read_to_string(&path)
-        .expect("Failed to read config")
-        .replace("timezone = \"Etc/UTC\"", "timezone = \"Mars/Olympus\"");
-    std::fs::write(&path, contents).expect("Failed to update config");
+    let path = write_config(&dir, "[cronjob]\nocr_cron = \"0 1 * * *\"\n");
 
-    assert!(load_config(&path).is_err());
+    let error = load_config(&path).expect_err("Removed cronjob section must fail");
+    assert!(error.to_string().contains("cronjob"));
 }
 
 #[test]
@@ -768,7 +806,7 @@ fn test_load_config_rejects_removed_deduplicate_section() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(&dir, "[deduplicate]\nenabled = true\n");
 
-    let error = load_config(&path).expect_err("Deduplicate settings moved to llm and cronjob");
+    let error = load_config(&path).expect_err("Deduplicate settings moved to llm");
 
     assert!(error.to_string().contains("deduplicate"));
 }

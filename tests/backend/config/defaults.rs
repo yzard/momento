@@ -31,54 +31,54 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         Some(50 * 1024 * 1024 * 1024)
     );
 
-    let template_threshold = template["llm"]["face_group_similarity_threshold"]
+    let template_threshold = template["face_group"]["similarity_threshold"]
         .as_float()
         .expect("template threshold");
     assert!(
-        (template_threshold - f64::from(runtime_defaults.llm.face_group_similarity_threshold))
-            .abs()
+        (template_threshold - f64::from(runtime_defaults.face_group.similarity_threshold)).abs()
             < f64::from(f32::EPSILON)
     );
-    assert!(template["llm"]["screenshot_detection_enabled"]
-        .as_bool()
-        .expect("template screenshot detection enablement"));
-    assert!(template["llm"]["document_detection_enabled"]
-        .as_bool()
-        .expect("template document detection enablement"));
-    assert!(!runtime_defaults.llm.screenshot_detection_enabled);
-    assert!(!runtime_defaults.llm.document_detection_enabled);
+    assert_eq!(template["llm"]["enabled"].as_bool(), Some(true));
+    assert!(!runtime_defaults.llm.enabled);
+    for removed_field in [
+        "ocr_enabled",
+        "image_tagging_enabled",
+        "deduplicate_enabled",
+        "face_detection_enabled",
+        "image_aesthetics_enabled",
+        "screenshot_detection_enabled",
+        "document_detection_enabled",
+    ] {
+        assert!(template["llm"].get(removed_field).is_none());
+    }
     for (field, runtime_weight) in [
         (
             "confidence_weight",
-            runtime_defaults.face_group_representative.confidence_weight,
+            runtime_defaults.face_group.confidence_weight,
         ),
         (
             "face_size_weight",
-            runtime_defaults.face_group_representative.face_size_weight,
+            runtime_defaults.face_group.face_size_weight,
         ),
         (
             "center_proximity_weight",
-            runtime_defaults
-                .face_group_representative
-                .center_proximity_weight,
+            runtime_defaults.face_group.center_proximity_weight,
         ),
         (
             "frontality_weight",
-            runtime_defaults.face_group_representative.frontality_weight,
+            runtime_defaults.face_group.frontality_weight,
         ),
         (
             "visibility_weight",
-            runtime_defaults.face_group_representative.visibility_weight,
+            runtime_defaults.face_group.visibility_weight,
         ),
         (
             "feature_clarity_weight",
-            runtime_defaults
-                .face_group_representative
-                .feature_clarity_weight,
+            runtime_defaults.face_group.feature_clarity_weight,
         ),
     ] {
         assert_eq!(
-            template["face_group_representative"][field].as_float(),
+            template["face_group"][field].as_float(),
             Some(runtime_weight)
         );
     }
@@ -91,11 +91,11 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         )
     );
     assert_eq!(
-        template["cronjob"]["screenshot_detection_cron"].as_str(),
+        template["llm"]["screenshot_detection_cron"].as_str(),
         Some("0 6 * * *")
     );
     assert_eq!(
-        template["cronjob"]["document_detection_cron"].as_str(),
+        template["llm"]["document_detection_cron"].as_str(),
         Some("0 7 * * *")
     );
     assert!(!default_config_template().contains("{{"));

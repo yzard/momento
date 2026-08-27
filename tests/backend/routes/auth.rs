@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::http::header::AUTHORIZATION;
 use axum_test::TestServer;
 use base64::Engine;
@@ -9,8 +7,11 @@ use momento_api::{
     config::Config,
 };
 use serde_json::{json, Value};
+use std::sync::Arc;
 
-use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
+use crate::test_utils::{
+    create_test_config_manager, create_test_db, create_test_user, init_test_paths,
+};
 
 fn basic_credentials(username: &str, password: &str) -> String {
     let encoded =
@@ -34,8 +35,9 @@ fn create_admin_fixture() -> (momento_api::database::DbPool, i64) {
 
 fn create_server(pool: momento_api::database::DbPool, reset_user_id: Option<i64>) -> TestServer {
     init_test_paths();
+    let config_manager = create_test_config_manager(Config::default());
     let app = create_app(
-        Arc::new(Config::default()),
+        config_manager,
         pool,
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -51,8 +53,9 @@ async fn buffered_json_routes_enforce_the_configured_body_limit() {
     let mut config = Config::default();
     config.server.api_request_body_max_bytes = 16;
     config.server.request_log_body_max_bytes = 8;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool,
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),

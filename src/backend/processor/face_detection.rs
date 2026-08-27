@@ -8,7 +8,7 @@ use image::imageops::FilterType;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
-use crate::config::FaceGroupRepresentativeConfig;
+use crate::config::FaceGroupConfig;
 use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
@@ -505,11 +505,7 @@ pub fn start(pool: &DbPool, enabled: bool) -> AppResult<usize> {
     Ok(queued_jobs)
 }
 
-pub fn finalize_ready_runs(
-    pool: &DbPool,
-    group_similarity_threshold: f32,
-    representative_config: &FaceGroupRepresentativeConfig,
-) -> AppResult<()> {
+pub fn finalize_ready_runs(pool: &DbPool, config: &FaceGroupConfig) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let run = connection
         .query_row(queries::faces::SELECT_ACTIVE_RUN, [], |row| {
@@ -555,14 +551,14 @@ pub fn finalize_ready_runs(
         if let Some(group_id) = matching_manual_group(
             &manual_group_anchors,
             &embedding,
-            group_similarity_threshold,
+            config.similarity_threshold,
         ) {
             transaction.execute(queries::faces::INSERT_AUTOMATIC_MEMBER, [group_id, face_id])?;
             continue;
         }
         let matching = automatic_groups.iter().position(|(_, representative)| {
             cosine_similarity(&embedding, representative)
-                .is_some_and(|score| score >= group_similarity_threshold)
+                .is_some_and(|score| score >= config.similarity_threshold)
         });
         let group_id = if let Some(index) = matching {
             automatic_groups[index].0
@@ -579,7 +575,7 @@ pub fn finalize_ready_runs(
         .copied()
         .chain(automatic_groups.iter().map(|(group_id, _)| *group_id))
     {
-        update_group_representative(&transaction, group_id, representative_config)?;
+        update_group_representative(&transaction, group_id, config)?;
     }
     let completion_error = (failed_jobs > 0).then(|| {
         format!(
@@ -618,10 +614,7 @@ fn center_proximity(candidate: &FaceRepresentativeCandidate) -> f64 {
     (1.0 - 2.0 * (center_x_offset.powi(2) + center_y_offset.powi(2))).clamp(0.0, 1.0)
 }
 
-fn representative_score(
-    candidate: &FaceRepresentativeCandidate,
-    config: &FaceGroupRepresentativeConfig,
-) -> f64 {
+fn representative_score(candidate: &FaceRepresentativeCandidate, config: &FaceGroupConfig) -> f64 {
     config.confidence_weight * candidate.confidence
         + config.face_size_weight * candidate.face_size_score
         + config.center_proximity_weight * center_proximity(candidate)
@@ -632,7 +625,7 @@ fn representative_score(
 
 fn select_representative<'a>(
     candidates: &'a [FaceRepresentativeCandidate],
-    config: &FaceGroupRepresentativeConfig,
+    config: &FaceGroupConfig,
 ) -> Option<&'a FaceRepresentativeCandidate> {
     candidates.iter().max_by(|left, right| {
         representative_score(left, config)
@@ -644,7 +637,7 @@ fn select_representative<'a>(
 pub fn update_group_representative(
     connection: &Connection,
     group_id: i64,
-    config: &FaceGroupRepresentativeConfig,
+    config: &FaceGroupConfig,
 ) -> AppResult<()> {
     let candidates = connection
         .prepare(queries::faces::SELECT_GROUP_REPRESENTATIVE_CANDIDATES)?
@@ -660,7 +653,7 @@ pub fn update_group_representative(
 
 pub fn recompute_all_group_representatives(
     pool: &DbPool,
-    config: &FaceGroupRepresentativeConfig,
+    config: &FaceGroupConfig,
 ) -> AppResult<()> {
     let connection = pool.get().map_err(AppError::Pool)?;
     let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
@@ -679,7 +672,7 @@ pub fn visible_representative_crop(
     connection: &Connection,
     group_id: i64,
     user_id: i64,
-    config: &FaceGroupRepresentativeConfig,
+    config: &FaceGroupConfig,
 ) -> AppResult<Option<String>> {
     let stored_crop = connection
         .query_row(

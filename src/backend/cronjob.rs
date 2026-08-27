@@ -1,11 +1,10 @@
 use std::str::FromStr;
-use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use tracing::{info, warn};
 
-use crate::config::{Config, CronjobConfig};
+use crate::config::{Config, ConfigManager};
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::processor::ai::operation::{start_feature, AiFeature, AiStartSource};
@@ -47,44 +46,24 @@ impl ScheduledTask {
             Self::FaceDetection => "face_detection",
         }
     }
-
-    fn cron_expression(self, config: &CronjobConfig) -> &str {
-        match self {
-            Self::Ocr => &config.ocr_cron,
-            Self::ImageTagging => &config.image_tagging_cron,
-            Self::ImageAesthetics => &config.image_aesthetics_cron,
-            Self::ScreenshotDetection => &config.screenshot_detection_cron,
-            Self::DocumentDetection => &config.document_detection_cron,
-            Self::Deduplicate => &config.deduplicate_cron,
-            Self::FaceDetection => &config.face_detection_cron,
-        }
-    }
-
-    fn is_enabled(self, config: &Config) -> bool {
-        self.feature().is_enabled(config)
-    }
 }
 
 pub fn next_scheduled_at(
-    config: &CronjobConfig,
     cron_expression: &str,
     job_name: &str,
     after: DateTime<Utc>,
 ) -> AppResult<DateTime<Utc>> {
-    let timezone = config
-        .timezone
-        .parse::<chrono_tz::Tz>()
-        .map_err(|error| AppError::Validation(format!("invalid cronjob timezone: {error}")))?;
     let schedule = Schedule::from_str(&format!("0 {cron_expression} *"))
         .map_err(|error| AppError::Validation(format!("invalid {job_name} cronjob: {error}")))?;
     schedule
-        .after(&after.with_timezone(&timezone))
+        .after(&after.with_timezone(&Local))
         .next()
         .map(|date| date.with_timezone(&Utc))
         .ok_or_else(|| AppError::Validation(format!("{job_name} cronjob has no next occurrence")))
 }
 
-pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool, transport: TransportHandle) {
+pub async fn run_cronjobs(config_manager: ConfigManager, pool: DbPool, transport: TransportHandle) {
+    let config = config_manager.current();
     let mut cronjobs = tokio::task::JoinSet::new();
     for task in [
         ScheduledTask::Ocr,
@@ -95,20 +74,19 @@ pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool, transport: Transpor
         ScheduledTask::Deduplicate,
         ScheduledTask::FaceDetection,
     ] {
-        if !task.is_enabled(&config) {
+        if !config.llm.enabled {
             info!(task = task.name(), "Scheduled AI task is disabled");
             continue;
         }
-        let task_config = Arc::clone(&config);
+        let task_config_manager = config_manager.clone();
         let task_pool = pool.clone();
         let task_transport = transport.clone();
-        cronjobs.spawn(async move {
-            if task == ScheduledTask::Deduplicate {
-                run_deduplicate_cronjob(task_config, task_pool, task_transport).await;
-            } else {
-                run_task_cronjob(task_config, task_pool, task_transport, task).await;
-            }
-        });
+        cronjobs.spawn(run_task_cronjob(
+            task_config_manager,
+            task_pool,
+            task_transport,
+            task,
+        ));
     }
 
     while let Some(cronjob) = cronjobs.join_next().await {
@@ -119,19 +97,30 @@ pub async fn run_cronjobs(config: Arc<Config>, pool: DbPool, transport: Transpor
 }
 
 async fn run_task_cronjob(
-    config: Arc<Config>,
+    config_manager: ConfigManager,
     pool: DbPool,
     transport: TransportHandle,
     task: ScheduledTask,
 ) {
+    let mut config_updates = config_manager.subscribe();
+    if task == ScheduledTask::Deduplicate {
+        let deduplicate_cron = AiFeature::Deduplicate
+            .cron_expression(&config_updates.borrow().llm)
+            .to_string();
+        match run_startup_or_catch_up(&config_updates.borrow(), &pool, &deduplicate_cron) {
+            Ok(queued) if queued > 0 => transport.wake_submissions(),
+            Ok(_) => {}
+            Err(error) => warn!("Deduplicate startup scheduling failed: {error}"),
+        }
+    }
+
     loop {
         let now = Utc::now();
-        let next = match next_scheduled_at(
-            &config.cronjob,
-            task.cron_expression(&config.cronjob),
-            task.name(),
-            now,
-        ) {
+        let cron_expression = task
+            .feature()
+            .cron_expression(&config_updates.borrow().llm)
+            .to_string();
+        let next = match next_scheduled_at(&cron_expression, task.name(), now) {
             Ok(next) => next,
             Err(error) => {
                 warn!(task = task.name(), "Schedule evaluation failed: {error}");
@@ -141,8 +130,22 @@ async fn run_task_cronjob(
         let delay = (next - now)
             .to_std()
             .unwrap_or_else(|_| std::time::Duration::from_secs(1));
-        tokio::time::sleep(delay).await;
-        match run_scheduled_occurrence(&config, &pool, task, &next.to_rfc3339()) {
+        let schedule_delay = tokio::time::sleep(delay);
+        tokio::pin!(schedule_delay);
+        tokio::select! {
+            config_changed = config_updates.changed() => {
+                if config_changed.is_err() {
+                    return;
+                }
+                continue;
+            }
+            _ = &mut schedule_delay => {}
+        }
+        let scheduled_for = next.to_rfc3339();
+        if task == ScheduledTask::Deduplicate {
+            log_schedule_start(&scheduled_for);
+        }
+        match run_scheduled_occurrence(&config_updates.borrow(), &pool, task, &scheduled_for) {
             Ok(queued) => {
                 if queued > 0 {
                     transport.wake_submissions();
@@ -160,7 +163,7 @@ pub fn run_scheduled_occurrence(
     task: ScheduledTask,
     scheduled_for: &str,
 ) -> AppResult<usize> {
-    if !task.is_enabled(config) {
+    if !config.llm.enabled {
         return Ok(0);
     }
     start_feature(
@@ -171,46 +174,11 @@ pub fn run_scheduled_occurrence(
     )
 }
 
-async fn run_deduplicate_cronjob(config: Arc<Config>, pool: DbPool, transport: TransportHandle) {
-    match run_startup_or_catch_up(&config, &pool).await {
-        Ok(queued) if queued > 0 => transport.wake_submissions(),
-        Ok(_) => {}
-        Err(error) => warn!("Deduplicate startup scheduling failed: {}", error),
-    }
-
-    loop {
-        let now = Utc::now();
-        let next = match next_scheduled_at(
-            &config.cronjob,
-            &config.cronjob.deduplicate_cron,
-            "deduplicate",
-            now,
-        ) {
-            Ok(next) => next,
-            Err(error) => {
-                warn!("Deduplicate schedule evaluation failed: {}", error);
-                return;
-            }
-        };
-        let delay = (next - now)
-            .to_std()
-            .unwrap_or_else(|_| std::time::Duration::from_secs(1));
-        tokio::time::sleep(delay).await;
-        let scheduled_for = next.to_rfc3339();
-        log_schedule_start(&scheduled_for);
-        match run_scheduled_occurrence(&config, &pool, ScheduledTask::Deduplicate, &scheduled_for) {
-            Ok(queued) => {
-                if queued > 0 {
-                    transport.wake_submissions();
-                }
-                info!(queued, "Scheduled deduplicate jobs queued");
-            }
-            Err(error) => warn!("Could not queue scheduled deduplicate jobs: {error}"),
-        }
-    }
-}
-
-async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<usize> {
+fn run_startup_or_catch_up(
+    config: &Config,
+    pool: &DbPool,
+    deduplicate_cron: &str,
+) -> AppResult<usize> {
     if latest_run(pool)?.is_some_and(|run| run.status == "interrupted" || run.status == "failed") {
         return start_feature(
             config,
@@ -222,21 +190,11 @@ async fn run_startup_or_catch_up(config: &Config, pool: &DbPool) -> AppResult<us
     let last_scheduled = last_scheduled_for(pool)?;
     let now = Utc::now();
     let trigger = if let Some(last_scheduled) = last_scheduled {
-        let mut occurrence = next_scheduled_at(
-            &config.cronjob,
-            &config.cronjob.deduplicate_cron,
-            "deduplicate",
-            last_scheduled,
-        )?;
+        let mut occurrence = next_scheduled_at(deduplicate_cron, "deduplicate", last_scheduled)?;
         let mut latest_due = None;
         while occurrence <= now {
             latest_due = Some(occurrence);
-            occurrence = next_scheduled_at(
-                &config.cronjob,
-                &config.cronjob.deduplicate_cron,
-                "deduplicate",
-                occurrence,
-            )?;
+            occurrence = next_scheduled_at(deduplicate_cron, "deduplicate", occurrence)?;
         }
         let Some(latest_due) = latest_due else {
             return Ok(0);

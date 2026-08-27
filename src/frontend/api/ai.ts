@@ -57,6 +57,12 @@ export interface AiStatusResponse {
   tasks: AiTaskStatus[]
   deduplicate: DeduplicateStatus
   faceGroups: number
+  schedules: AiFeatureSchedule[]
+}
+
+export interface AiFeatureSchedule {
+  feature: AiFeature
+  cronExpression: string
 }
 
 export const aiApi = {
@@ -70,4 +76,6 @@ export const aiApi = {
     (await apiClient.post<AiActionResponse>(`/ai/${feature}/cancel`)).data,
   cleanFeature: async (feature: AiFeature): Promise<AiActionResponse> =>
     (await apiClient.post<AiActionResponse>(`/ai/${feature}/clean`)).data,
+  updateSchedule: async (feature: AiFeature, cronExpression: string): Promise<AiFeatureSchedule> =>
+    (await apiClient.post<AiFeatureSchedule>('/ai/schedule/update', { feature, cronExpression })).data,
 }

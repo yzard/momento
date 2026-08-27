@@ -100,12 +100,13 @@ async fn get_thumbnail(
     current_user: CurrentUser,
     Json(request): Json<FaceGroupRequest>,
 ) -> AppResult<Response> {
+    let config = state.config.current();
     let connection = state.pool.get().map_err(AppError::Pool)?;
     let crop_path = face_detection::visible_representative_crop(
         &connection,
         request.face_group_id,
         current_user.id,
-        &state.config.face_group_representative,
+        &config.face_group,
     )?
     .ok_or_else(|| AppError::NotFound("Face group thumbnail not found".to_string()))?;
     let path =
@@ -124,6 +125,7 @@ async fn merge_groups(
     RequireAdmin(_): RequireAdmin,
     Json(request): Json<FaceGroupsMergeRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    let config = state.config.current();
     let group_ids = request.face_group_ids.into_iter().collect::<HashSet<_>>();
     if group_ids.len() < 2 {
         return Err(AppError::BadRequest(
@@ -161,11 +163,7 @@ async fn merge_groups(
     for source_id in ordered_ids.into_iter().skip(1) {
         transaction.execute(queries::faces::DELETE_GROUP, [source_id])?;
     }
-    face_detection::update_group_representative(
-        &transaction,
-        target_id,
-        &state.config.face_group_representative,
-    )?;
+    face_detection::update_group_representative(&transaction, target_id, &config.face_group)?;
     let face_count: i64 =
         transaction.query_row(queries::faces::COUNT_GROUP_MEMBERS, [target_id], |row| {
             row.get(0)

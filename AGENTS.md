@@ -219,9 +219,9 @@ The Momento submission worker keeps a global `max_in_flight` rolling window. It 
 a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
 remains. This transport window is independent from every model runtime's inference concurrency.
 
-OCR eligibility is independent of image-tagging configuration. Tagging, clustering, aesthetics, and face
-detection are queued only through their enabled trigger or run paths. The submission worker sends
-existing queued jobs; it does not create task jobs. Submission reads the immutable
+All AI task types share global `[llm].enabled` gating but retain independent job eligibility and
+trigger/run paths. The submission worker sends existing queued jobs; it does not create task jobs.
+Submission reads the immutable
 `llm_job_inputs` snapshot created with each job rather than re-querying live `media_ai_inputs`.
 
 Cancellation commits the Momento terminal state, an all-task or task-specific
@@ -361,11 +361,13 @@ Cancellation prevents further creation and finalization. Startup marks interrupt
 schedules replacement work rather than resuming the same run record.
 
 Momento has independent five-field cron schedules for OCR, image tagging, deduplication, image
-aesthetics, face detection, screenshot detection, and document detection. They are evaluated in
-the configured IANA timezone and create work through the same durable processor operations as
+aesthetics, face detection, screenshot detection, and document detection. Each schedule lives in
+`[llm]`, uses the system timezone, and creates work through the same durable processor operations as
 manual triggers. The field remains `deduplicate_cron`, not
 `image_clustering_cron`, because it starts the complete deduplication pipeline; image clustering is
-only its inference stage. Global LLM enablement and each task's feature flag gate scheduled work.
+only its inference stage. `[llm].enabled` is the only Momento AI enablement switch: when it is true,
+all seven features and their schedules are active; when it is false, all are disabled. Per-feature
+`*_enabled` configuration fields do not exist.
 
 ### Adding an inference type
 
@@ -418,6 +420,16 @@ source contains named placeholders rather than duplicated values. The rendered t
 match `playground/config.toml` and `playground/config_llm.toml`, including their environment
 placeholders. Normal startup never generates or replaces a configuration file except when atomically
 consuming the one-shot administrator password-reset request described below.
+
+Momento constructs one `ConfigManager` from the exact CLI config path and the fully validated
+configuration. Runtime code reads immutable snapshots from that manager instead of retaining its
+own `Config` copy. Administrator configuration endpoints must accept typed fields, validate the
+prospective complete configuration, preserve unrelated TOML values and comments with `toml_edit`,
+atomically replace the same config path, then publish the new snapshot. A failed validation or
+write leaves both the file and live snapshot unchanged. The AI schedule endpoint currently updates
+the seven `[llm].*_cron` fields this way; active cron loops subscribe to the manager and reschedule
+immediately without restarting Momento. Other configuration fields remain startup-only until their
+runtime owners explicitly subscribe to changes.
 
 Momento has no `[admin]` configuration section. An empty database creates `admin` / `admin` with a
 required password change. Setting `[server].reset_admin_password = true` is a one-start recovery
@@ -499,7 +511,7 @@ decodes and crops it; conversion failures are logged and fail only the correspon
 
 Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
 seed embedding that first created each automatic group. A face joins the first automatic seed whose
-cosine similarity reaches `llm.face_group_similarity_threshold`; the default is `0.41`, lower values
+cosine similarity reaches `face_group.similarity_threshold`; the default is `0.41`, lower values
 are more tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use
 the thumbnail representative, compare every automatic member pair, apply transitive closure, or run
 a second group-to-group merge pass. A manual merge makes every face selected by that merge a fixed
@@ -511,7 +523,7 @@ and grouping tests, not just changing the thumbnail representative.
 
 `face_groups.representative_face_id` is a thumbnail choice, not the grouping seed. Select it only
 after automatic membership is complete and select it again after a manual merge. Rank each face by
-the six weights in `[face_group_representative]`: confidence, face size, center proximity,
+the six weights in `[face_group]`: confidence, face size, center proximity,
 frontality, visibility, and feature clarity. The weights must be non-negative and sum to `1`.
 Center proximity normalizes squared face-box-center distance from the media center to `[0, 1]`;
 higher weighted scores win and face ID ascending is the deterministic tie-breaker. Recompute all

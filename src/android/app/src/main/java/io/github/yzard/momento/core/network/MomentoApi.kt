@@ -56,6 +56,7 @@ interface MomentoApi {
     @POST("api/v1/ai/status") suspend fun aiStatus(): AiStatusResponse
     @POST("api/v1/ai/cancel") suspend fun cancelAi(): AiActionResponse
     @POST("api/v1/ai/clean") suspend fun cleanAi(): AiActionResponse
+    @POST("api/v1/ai/schedule/update") suspend fun updateAiSchedule(@Body request: AiScheduleUpdateRequest): AiFeatureSchedule
     @POST("api/v1/ai/{feature}/start") suspend fun startAiFeature(@Path("feature") feature: String): AiActionResponse
     @POST("api/v1/ai/{feature}/cancel") suspend fun cancelAiFeature(@Path("feature") feature: String): AiActionResponse
     @POST("api/v1/ai/{feature}/clean") suspend fun cleanAiFeature(@Path("feature") feature: String): AiActionResponse

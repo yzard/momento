@@ -148,23 +148,15 @@ fn verify_ai_inputs(pool: &DbPool, media_id: i64, config: &Config) -> Result<(),
             |row| row.get::<_, String>(1),
         )
         .map_err(|error| error.to_string())?;
-    let mut tasks = vec!["ocr"];
-    if config.llm.image_tagging_enabled {
-        tasks.push("image_tagging");
-    }
-    if config.llm.deduplicate_enabled {
-        tasks.push("image_clustering");
-    }
-    if config.llm.face_detection_enabled {
-        tasks.push("face_detection");
-    }
-    if config.llm.image_aesthetics_enabled {
-        tasks.push("image_aesthetics");
-    }
-    if media_type == "image" && config.llm.screenshot_detection_enabled {
+    let mut tasks = vec![
+        "ocr",
+        "image_tagging",
+        "image_clustering",
+        "face_detection",
+        "image_aesthetics",
+    ];
+    if media_type == "image" {
         tasks.push("screenshot_detection");
-    }
-    if media_type == "image" && config.llm.document_detection_enabled {
         tasks.push("document_detection");
     }
     for task in tasks {

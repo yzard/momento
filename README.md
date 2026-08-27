@@ -215,7 +215,7 @@ Search currently supports:
 
 ### Faces
 
-Momento detects faces and groups images containing similar people. Administrators can manually combine face groups when separate groups belong to the same person. The face runtime filters detections using the face service's `minimum_face_likelihood` and `minimum_face_resolution_pixels`; resolution is the minimum detected face-box width and height in the prepared input. `face_detection_size` selects the square SCRFD input and accepts only `640`, `960`, or `1280`. Detection uses `cpu_processing_concurrency` and `model_concurrency`, while accepted faces are aligned to the Buffalo L model's fixed 112x112 ArcFace input and combined across requests according to `recognition_batch_size` and `recognition_batch_wait_milliseconds`. One CUDA BiSeNet ResNet18 ONNX session dynamically batches those aligned faces at 512x512 and adds facial-feature visibility and clarity scores. Persisted 256x256 portrait crops retain their existing dimensions but are centered on the midpoint between the detected eyes. Momento groups embeddings when their cosine similarity reaches `[llm].face_group_similarity_threshold`; the default is `0.41`, lower values merge less-similar faces, and higher values require a closer match. After automatic grouping or a manual merge, the group thumbnail representative uses the configurable confidence, face size, center proximity, frontality, visibility, and feature clarity weights in `[face_group_representative]`; changed weights are applied to existing groups at the next startup.
+Momento detects faces and groups images containing similar people. Administrators can manually combine face groups when separate groups belong to the same person. The face runtime filters detections using the face service's `minimum_face_likelihood` and `minimum_face_resolution_pixels`; resolution is the minimum detected face-box width and height in the prepared input. `face_detection_size` selects the square SCRFD input and accepts only `640`, `960`, or `1280`. Detection uses `cpu_processing_concurrency` and `model_concurrency`, while accepted faces are aligned to the Buffalo L model's fixed 112x112 ArcFace input and combined across requests according to `recognition_batch_size` and `recognition_batch_wait_milliseconds`. One CUDA BiSeNet ResNet18 ONNX session dynamically batches those aligned faces at 512x512 and adds facial-feature visibility and clarity scores. Persisted 256x256 portrait crops retain their existing dimensions but are centered on the midpoint between the detected eyes. Momento groups embeddings when their cosine similarity reaches `[face_group].similarity_threshold`; the default is `0.41`, lower values merge less-similar faces, and higher values require a closer match. After automatic grouping or a manual merge, the group thumbnail representative uses the configurable confidence, face size, center proximity, frontality, visibility, and feature clarity weights in `[face_group]`; changed weights are applied to existing groups at the next startup.
 
 ### Places
 
@@ -295,10 +295,17 @@ Log locations are fixed: both services write plain daily files named
 process ID, while console output remains colorized by level. llm-service keeps its durable queue
 and runtime cache under `<data_dir>/llm/`; deployments may persist that subtree independently.
 
-The generated `[cronjob]` section contains independent schedules for OCR, image tagging,
-deduplication, face detection, image aesthetics, screenshot detection, and document detection.
+The generated `[llm]` section contains one global `enabled` switch and an independent five-field
+cron schedule for each AI feature. Schedules use the host or container system timezone; Momento
+does not configure a separate cron timezone. When global LLM processing is enabled, OCR, image
+tagging, deduplication, face detection, image aesthetics, screenshot detection, and document
+detection are all active; there are no per-feature enablement switches.
 `deduplicate_cron` intentionally keeps its feature name because it starts the complete
 deduplication pipeline; `image_clustering` is only that pipeline's inference stage.
+Administrators can edit these schedules from the AI section in either the web or Android client.
+Momento validates the complete prospective configuration, atomically updates the original
+`config.toml` while preserving comments and unrelated values, and reschedules the affected cron
+loop immediately without a service restart.
 
 GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
 snapshot embedded in the Momento API binary. No external geocoding service or runtime network

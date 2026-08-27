@@ -43,6 +43,21 @@ pub struct AiStatusResponse {
     pub tasks: Vec<AiTaskStatusResponse>,
     pub deduplicate: crate::models::DeduplicateStatusResponse,
     pub face_groups: i64,
+    pub schedules: Vec<AiFeatureScheduleResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiScheduleUpdateRequest {
+    pub feature: String,
+    pub cron_expression: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFeatureScheduleResponse {
+    pub feature: String,
+    pub cron_expression: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -19,4 +19,11 @@ class ModelsTest {
             Json.encodeToString(response),
         )
     }
+
+    @Test fun aiScheduleUpdateUsesTheSharedCamelCaseContract() {
+        assertEquals(
+            "{\"feature\":\"ocr\",\"cronExpression\":\"15 1 * * 1-5\"}",
+            Json.encodeToString(AiScheduleUpdateRequest("ocr", "15 1 * * 1-5")),
+        )
+    }
 }

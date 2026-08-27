@@ -7,6 +7,7 @@ import io.github.yzard.momento.core.model.AlbumIdRequest
 import io.github.yzard.momento.core.model.AlbumUpdateRequest
 import io.github.yzard.momento.core.model.MapClustersRequest
 import io.github.yzard.momento.core.model.EmptyRequest
+import io.github.yzard.momento.core.model.AiScheduleUpdateRequest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -46,11 +47,13 @@ class MomentoApiContractTest {
         val startAi = MomentoApi::class.java.getMethod("startAi", kotlin.coroutines.Continuation::class.java)
         val aiStatus = MomentoApi::class.java.getMethod("aiStatus", kotlin.coroutines.Continuation::class.java)
         val startFeature = MomentoApi::class.java.getMethod("startAiFeature", String::class.java, kotlin.coroutines.Continuation::class.java)
+        val updateSchedule = MomentoApi::class.java.getMethod("updateAiSchedule", AiScheduleUpdateRequest::class.java, kotlin.coroutines.Continuation::class.java)
         val duplicates = MomentoApi::class.java.getMethod("duplicates", io.github.yzard.momento.core.model.PageRequest::class.java, kotlin.coroutines.Continuation::class.java)
 
         assertEquals("api/v1/ai/start", requireNotNull(startAi.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/ai/status", requireNotNull(aiStatus.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/ai/{feature}/start", requireNotNull(startFeature.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/ai/schedule/update", requireNotNull(updateSchedule.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/duplicates/list", requireNotNull(duplicates.getAnnotation(POST::class.java)).value)
     }
 

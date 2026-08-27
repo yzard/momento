@@ -71,7 +71,7 @@ fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
 }
 
 #[test]
-fn start_all_keeps_ocr_independent_of_optional_tasks() {
+fn start_all_queues_only_features_with_prepared_work() {
     let (_application, pool) = create_test_app();
     let media_id = create_test_media(&pool, "ocr-input.jpg");
     let connection = pool.get().expect("connection");
@@ -93,7 +93,7 @@ fn start_all_keeps_ocr_independent_of_optional_tasks() {
 }
 
 #[test]
-fn image_aesthetics_queueing_uses_its_result_table_and_enablement() {
+fn image_aesthetics_queueing_uses_its_result_table_and_explicit_eligibility() {
     let (_application, pool) = create_test_app();
     let media_id = create_test_media(&pool, "aesthetics-input.jpg");
     let connection = pool.get().expect("connection");

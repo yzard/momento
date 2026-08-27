@@ -73,16 +73,17 @@ async fn login(
         return Err(AppError::Authentication("User is inactive".to_string()));
     }
 
+    let config = state.config.current();
     let access_token = create_access_token(
         user.id,
         &user.username,
         &user.role,
-        &state.config,
+        &config,
         temporary_admin_reset
             .as_ref()
             .map(|(_, reset_id)| reset_id.as_str()),
     )?;
-    let (raw_refresh, token_hash, expires_at) = create_refresh_token(user.id, &state.config);
+    let (raw_refresh, token_hash, expires_at) = create_refresh_token(user.id, &config);
 
     if !temporary_admin_login {
         insert_returning_id(
@@ -148,15 +149,16 @@ async fn refresh(
         return Err(AppError::Authentication("User is inactive".to_string()));
     }
 
+    let config = state.config.current();
     let access_token = create_access_token(
         token_row.user_id,
         &token_row.username,
         &token_row.role,
-        &state.config,
+        &config,
         None,
     )?;
     let (raw_refresh, new_token_hash, expires_at) =
-        create_refresh_token(token_row.user_id, &state.config);
+        create_refresh_token(token_row.user_id, &config);
 
     let consumed = transaction.execute(
         queries::auth::REVOKE_REFRESH_TOKEN,

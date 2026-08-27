@@ -51,7 +51,7 @@ fn inaccessible_representative_uses_weighted_visible_face_score() {
         &connection,
         group_id,
         viewer_id,
-        &Config::default().face_group_representative,
+        &Config::default().face_group,
     )
     .expect("visible representative query")
     .expect("visible representative crop");
@@ -216,7 +216,7 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
         &connection,
         1,
         viewer_id,
-        &Config::default().face_group_representative,
+        &Config::default().face_group,
     )
     .expect("viewer representative query")
     .expect("viewer crop");
@@ -224,7 +224,7 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
         &connection,
         1,
         administrator_id,
-        &Config::default().face_group_representative,
+        &Config::default().face_group,
     )
     .expect("administrator representative query")
     .expect("administrator crop");

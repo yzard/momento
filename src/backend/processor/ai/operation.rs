@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use rusqlite::OptionalExtension;
 use tracing::warn;
 
-use crate::config::Config;
+use crate::config::{Config, LlmConfig};
 use crate::constants::{
     DOCUMENT_DETECTION_MODEL_TYPE, FACE_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
     IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
@@ -11,8 +11,8 @@ use crate::constants::{
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AiActionResponse, AiFeatureActionResult, AiJobCounts, AiStatusResponse, AiTaskStatusResponse,
-    DeduplicateStatusResponse,
+    AiActionResponse, AiFeatureActionResult, AiFeatureScheduleResponse, AiJobCounts,
+    AiStatusResponse, AiTaskStatusResponse, DeduplicateStatusResponse,
 };
 use crate::processor::{deduplicator, face_detection};
 
@@ -81,18 +81,27 @@ impl AiFeature {
         }
     }
 
-    pub fn is_enabled(self, config: &Config) -> bool {
-        if !config.llm.enabled {
-            return false;
-        }
+    pub fn cron_config_field(self) -> &'static str {
         match self {
-            Self::Ocr => true,
-            Self::ImageTagging => config.llm.image_tagging_enabled,
-            Self::ImageAesthetics => config.llm.image_aesthetics_enabled,
-            Self::ScreenshotDetection => config.llm.screenshot_detection_enabled,
-            Self::DocumentDetection => config.llm.document_detection_enabled,
-            Self::FaceDetection => config.llm.face_detection_enabled,
-            Self::Deduplicate => config.llm.deduplicate_enabled,
+            Self::Ocr => "ocr_cron",
+            Self::ImageTagging => "image_tagging_cron",
+            Self::ImageAesthetics => "image_aesthetics_cron",
+            Self::ScreenshotDetection => "screenshot_detection_cron",
+            Self::DocumentDetection => "document_detection_cron",
+            Self::FaceDetection => "face_detection_cron",
+            Self::Deduplicate => "deduplicate_cron",
+        }
+    }
+
+    pub fn cron_expression(self, config: &LlmConfig) -> &str {
+        match self {
+            Self::Ocr => &config.ocr_cron,
+            Self::ImageTagging => &config.image_tagging_cron,
+            Self::ImageAesthetics => &config.image_aesthetics_cron,
+            Self::ScreenshotDetection => &config.screenshot_detection_cron,
+            Self::DocumentDetection => &config.document_detection_cron,
+            Self::FaceDetection => &config.face_detection_cron,
+            Self::Deduplicate => &config.deduplicate_cron,
         }
     }
 }
@@ -110,9 +119,9 @@ pub fn start_feature(
     feature: AiFeature,
     source: AiStartSource<'_>,
 ) -> AppResult<usize> {
-    if !feature.is_enabled(config) {
+    if !config.llm.enabled {
         return Err(AppError::Validation(format!(
-            "{} is disabled in LLM configuration",
+            "{} is unavailable because LLM is disabled",
             feature.name()
         )));
     }
@@ -134,13 +143,13 @@ pub fn start_all_features(
     pool: &DbPool,
     source: AiStartSource<'_>,
 ) -> AppResult<usize> {
+    if !config.llm.enabled {
+        return Err(AppError::Validation("LLM is disabled".to_string()));
+    }
     let mut queued_jobs = 0;
     let mut successful_features = 0;
     let mut first_error = None;
     for feature in AiFeature::ALL {
-        if !feature.is_enabled(config) {
-            continue;
-        }
         match start_feature(config, pool, feature, source) {
             Ok(feature_jobs) => {
                 successful_features += 1;
@@ -190,7 +199,7 @@ pub fn start_all_actions(config: &Config, pool: &DbPool) -> Vec<AiFeatureActionR
     AiFeature::ALL
         .into_iter()
         .map(|feature| {
-            if !feature.is_enabled(config) {
+            if !config.llm.enabled {
                 return AiFeatureActionResult {
                     feature: feature.name().to_string(),
                     outcome: "disabled".to_string(),
@@ -336,7 +345,11 @@ pub fn clean_all_actions(pool: &DbPool) -> Vec<AiFeatureActionResult> {
         .collect()
 }
 
-pub fn status(config: &Config, pool: &DbPool) -> AppResult<AiStatusResponse> {
+pub fn status(
+    config: &Config,
+    pool: &DbPool,
+    schedules: Vec<AiFeatureScheduleResponse>,
+) -> AppResult<AiStatusResponse> {
     let connection = pool.get()?;
     let transaction = connection.unchecked_transaction()?;
     let mut counts_by_task = HashMap::<String, AiJobCounts>::new();
@@ -374,7 +387,7 @@ pub fn status(config: &Config, pool: &DbPool) -> AppResult<AiStatusResponse> {
             let jobs = counts_by_task.remove(task).unwrap_or_default();
             AiTaskStatusResponse {
                 task: task.to_string(),
-                enabled: feature.is_enabled(config),
+                enabled: config.llm.enabled,
                 state: task_state(&jobs).to_string(),
                 jobs,
                 errors: errors_by_task.remove(task).unwrap_or_default(),
@@ -412,6 +425,7 @@ pub fn status(config: &Config, pool: &DbPool) -> AppResult<AiStatusResponse> {
         tasks,
         deduplicate: deduplicate_status(run, ensembled_media, deduplicate_jobs),
         face_groups,
+        schedules,
     })
 }
 

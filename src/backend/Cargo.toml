@@ -41,7 +41,6 @@ image = "0.25"
 # Utils
 num_cpus = "1.16"
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 cron = "0.15"
 indexmap = "2"
 uuid = { version = "1", features = ["v4"] }

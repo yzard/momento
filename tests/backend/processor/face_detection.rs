@@ -1,5 +1,5 @@
 use base64::Engine;
-use momento_api::config::FaceGroupRepresentativeConfig;
+use momento_api::config::FaceGroupConfig;
 use momento_api::database::queries;
 use momento_api::processor::face_detection;
 use momento_common::llm::JobInputResult;
@@ -11,6 +11,13 @@ fn embedding() -> String {
         .flat_map(|index| (if index == 0 { 1.0_f32 } else { 0.0_f32 }).to_le_bytes())
         .collect::<Vec<_>>();
     base64::engine::general_purpose::STANDARD.encode(values)
+}
+
+fn face_group_config(similarity_threshold: f32) -> FaceGroupConfig {
+    FaceGroupConfig {
+        similarity_threshold,
+        ..FaceGroupConfig::default()
+    }
 }
 
 fn insert_face(
@@ -188,8 +195,7 @@ fn failed_face_jobs_still_group_successful_results() {
         )
         .expect("failed face job");
     drop(connection);
-    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
-        .expect("finalize");
+    face_detection::finalize_ready_runs(&pool, &face_group_config(0.55)).expect("finalize");
     let connection = pool.get().expect("connection");
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM face_group_members", [], |row| {
@@ -247,8 +253,7 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
         .expect("strict grouping run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.7, &FaceGroupRepresentativeConfig::default())
-        .expect("strict grouping");
+    face_detection::finalize_ready_runs(&pool, &face_group_config(0.7)).expect("strict grouping");
     let connection = pool.get().expect("connection");
     let strict_groups: i64 = connection
         .query_row("SELECT COUNT(*) FROM face_groups", [], |row| row.get(0))
@@ -259,7 +264,7 @@ fn face_group_similarity_threshold_controls_matching_tolerance() {
         .expect("tolerant grouping run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
+    face_detection::finalize_ready_runs(&pool, &face_group_config(0.55))
         .expect("tolerant grouping");
     let tolerant_groups: i64 = pool
         .get()
@@ -324,7 +329,7 @@ fn face_group_representative_weights_frontality_over_center_proximity() {
         .expect("grouping run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
+    face_detection::finalize_ready_runs(&pool, &face_group_config(0.55))
         .expect("finalize grouping");
     let connection = pool.get().expect("connection");
     let frontality_dominant_representative: i64 = connection
@@ -399,13 +404,14 @@ fn face_group_representative_recomputes_from_configured_visibility_and_clarity_w
             )
             .expect("member");
     }
-    let visibility_config = FaceGroupRepresentativeConfig {
+    let visibility_config = FaceGroupConfig {
         confidence_weight: 0.0,
         face_size_weight: 0.0,
         center_proximity_weight: 0.0,
         frontality_weight: 0.0,
         visibility_weight: 1.0,
         feature_clarity_weight: 0.0,
+        ..FaceGroupConfig::default()
     };
     face_detection::update_group_representative(&connection, group_id, &visibility_config)
         .expect("visibility representative");
@@ -419,13 +425,14 @@ fn face_group_representative_recomputes_from_configured_visibility_and_clarity_w
     assert_eq!(representative_face_id, face_ids[0]);
     drop(connection);
 
-    let clarity_config = FaceGroupRepresentativeConfig {
+    let clarity_config = FaceGroupConfig {
         confidence_weight: 0.0,
         face_size_weight: 0.0,
         center_proximity_weight: 0.0,
         frontality_weight: 0.0,
         visibility_weight: 0.0,
         feature_clarity_weight: 1.0,
+        ..FaceGroupConfig::default()
     };
     face_detection::recompute_all_group_representatives(&pool, &clarity_config)
         .expect("clarity representative recomputation");
@@ -592,8 +599,7 @@ fn automatic_regrouping_attaches_new_faces_to_any_matching_manual_anchor() {
         .expect("run");
     drop(connection);
 
-    face_detection::finalize_ready_runs(&pool, 0.55, &FaceGroupRepresentativeConfig::default())
-        .expect("finalize");
+    face_detection::finalize_ready_runs(&pool, &face_group_config(0.55)).expect("finalize");
 
     let connection = pool.get().expect("connection");
     for face_id in &face_ids[..2] {

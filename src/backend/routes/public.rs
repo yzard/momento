@@ -57,7 +57,8 @@ fn validate_share_access(
     let session_token = cookie_value(headers, SHARE_SESSION_COOKIE_NAME).ok_or_else(|| {
         AppError::Authentication("Share password verification is required".to_string())
     })?;
-    let claims = decode_share_session_token(&session_token, &state.config)
+    let config = state.config.current();
+    let claims = decode_share_session_token(&session_token, &config)
         .ok_or_else(|| AppError::Authentication("Invalid or expired share session".to_string()))?;
     if claims.share_id != share.id || claims.share_token_hash != share_token_hash(token) {
         return Err(AppError::Authentication(
@@ -210,8 +211,9 @@ async fn verify_share_password(
     }
 
     let share_expiration = parse_share_expiration(share.expires_at.as_deref())?;
+    let config = state.config.current();
     let (session_token, expires_at) =
-        create_share_session_token(share.id, &token, share_expiration, &state.config)?;
+        create_share_session_token(share.id, &token, share_expiration, &config)?;
     let maximum_age = (expires_at - Utc::now()).num_seconds().max(1);
     let cookie = format!(
         "{SHARE_SESSION_COOKIE_NAME}={session_token}; Path=/api/v1/public/share/{token}; Max-Age={maximum_age}; HttpOnly; Secure; SameSite=Strict"

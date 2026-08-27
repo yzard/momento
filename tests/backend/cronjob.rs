@@ -1,5 +1,5 @@
-use chrono::{TimeZone, Utc};
-use momento_api::config::{Config, CronjobConfig};
+use chrono::{Local, TimeZone, Timelike, Utc};
+use momento_api::config::Config;
 use momento_api::cronjob::{next_scheduled_at, run_scheduled_occurrence, ScheduledTask};
 use momento_api::database::DbPool;
 
@@ -29,51 +29,24 @@ fn prepare_task_input(pool: &DbPool, task: &str, filename: &str) {
 }
 
 #[test]
-fn schedule_uses_configured_iana_timezone() {
-    let config = CronjobConfig {
-        timezone: "America/New_York".to_string(),
-        deduplicate_cron: "0 3 * * *".to_string(),
-        ..CronjobConfig::default()
-    };
+fn schedule_uses_system_timezone() {
     let after = Utc
         .with_ymd_and_hms(2026, 1, 10, 0, 0, 0)
         .single()
         .expect("Valid date");
 
-    let next = next_scheduled_at(&config, &config.deduplicate_cron, "deduplicate", after)
-        .expect("Schedule should resolve");
+    let next =
+        next_scheduled_at("0 3 * * *", "deduplicate", after).expect("Schedule should resolve");
+    let local = next.with_timezone(&Local);
 
-    assert_eq!(next, Utc.with_ymd_and_hms(2026, 1, 10, 8, 0, 0).unwrap());
-}
-
-#[test]
-fn schedule_skips_nonexistent_spring_forward_time() {
-    let config = CronjobConfig {
-        timezone: "America/New_York".to_string(),
-        deduplicate_cron: "30 2 * * *".to_string(),
-        ..CronjobConfig::default()
-    };
-    let after = Utc
-        .with_ymd_and_hms(2026, 3, 8, 5, 0, 0)
-        .single()
-        .expect("Valid date");
-
-    let next = next_scheduled_at(&config, &config.deduplicate_cron, "deduplicate", after)
-        .expect("Schedule should resolve");
-
-    assert_eq!(next, Utc.with_ymd_and_hms(2026, 3, 9, 6, 30, 0).unwrap());
+    assert!(next > after);
+    assert_eq!((local.hour(), local.minute(), local.second()), (3, 0, 0));
 }
 
 #[test]
 fn schedules_dispatch_through_the_correct_run_abstractions() {
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_tagging_enabled = true;
-    config.llm.deduplicate_enabled = true;
-    config.llm.face_detection_enabled = true;
-    config.llm.image_aesthetics_enabled = true;
-    config.llm.screenshot_detection_enabled = true;
-    config.llm.document_detection_enabled = true;
     let scheduled_for = "2026-08-17T03:00:00Z";
 
     let text_pool = create_test_db();
@@ -169,8 +142,6 @@ fn schedules_dispatch_through_the_correct_run_abstractions() {
 fn classification_schedules_queue_their_exact_durable_tasks() {
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.screenshot_detection_enabled = true;
-    config.llm.document_detection_enabled = true;
     let pool = create_test_db();
     prepare_task_input(&pool, "screenshot_detection", "screenshot.jpg");
     prepare_task_input(&pool, "document_detection", "document.jpg");
@@ -209,9 +180,8 @@ fn classification_schedules_queue_their_exact_durable_tasks() {
 }
 
 #[test]
-fn disabled_classification_features_do_not_queue_scheduled_tasks() {
-    let mut config = Config::default();
-    config.llm.enabled = true;
+fn disabled_global_llm_does_not_queue_classification_schedules() {
+    let config = Config::default();
     let pool = create_test_db();
     prepare_task_input(&pool, "screenshot_detection", "screenshot.jpg");
     prepare_task_input(&pool, "document_detection", "document.jpg");
@@ -236,9 +206,7 @@ fn disabled_classification_features_do_not_queue_scheduled_tasks() {
 
 #[test]
 fn disabled_global_llm_prevents_every_scheduled_task() {
-    let mut config = Config::default();
-    config.llm.deduplicate_enabled = true;
-    config.llm.face_detection_enabled = true;
+    let config = Config::default();
     let pool = create_test_db();
 
     for task in [
@@ -274,7 +242,6 @@ fn disabled_global_llm_prevents_every_scheduled_task() {
 fn one_scheduled_feature_does_not_wait_for_another_feature_result() {
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_tagging_enabled = true;
     let pool = create_test_db();
     prepare_task_input(&pool, "ocr", "long-running-ocr.jpg");
     prepare_task_input(&pool, "image_tagging", "scheduled-tagging.jpg");

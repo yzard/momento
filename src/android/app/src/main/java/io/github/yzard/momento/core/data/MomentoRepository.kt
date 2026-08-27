@@ -97,6 +97,8 @@ class MomentoRepository(
     suspend fun aiStatus(): AiStatusResponse = api().aiStatus()
     suspend fun cancelAi(): AiActionResponse = api().cancelAi()
     suspend fun cleanAi(): AiActionResponse = api().cleanAi()
+    suspend fun updateAiSchedule(feature: String, cronExpression: String): AiFeatureSchedule =
+        api().updateAiSchedule(AiScheduleUpdateRequest(feature, cronExpression))
     suspend fun startAiFeature(feature: String): AiActionResponse = api().startAiFeature(feature)
     suspend fun cancelAiFeature(feature: String): AiActionResponse = api().cancelAiFeature(feature)
     suspend fun cleanAiFeature(feature: String): AiActionResponse = api().cleanAiFeature(feature)

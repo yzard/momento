@@ -9,7 +9,9 @@ use base64::Engine;
 use momento_api::{app::create_app, auth::hash_password, config::Config, constants::paths};
 use tower::ServiceExt;
 
-use crate::test_utils::{create_test_db, create_test_user, init_test_paths, lock_webdav_test};
+use crate::test_utils::{
+    create_test_config_manager, create_test_db, create_test_user, init_test_paths, lock_webdav_test,
+};
 
 #[tokio::test]
 async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload() {
@@ -36,9 +38,10 @@ async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload()
     config.webdav.mount_path = "/photos".to_string();
     config.webdav.max_upload_bytes = 11;
     config.webdav.max_concurrent_requests = 1;
+    let config_manager = create_test_config_manager(config);
     let readiness_pool = pool.clone();
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool,
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(1)),

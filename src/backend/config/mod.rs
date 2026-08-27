@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use momento_common::config_file::{replace_config, write_new_config};
+use tokio::sync::{watch, Mutex};
 use tokio_tungstenite::tungstenite::http::uri::Authority;
 use toml_edit::{value, DocumentMut};
 
@@ -316,27 +317,6 @@ pub struct LlmConfig {
     pub client_id: String,
     #[serde(default = "defaults::llm_api_key")]
     pub api_key: String,
-    #[serde(default = "defaults::image_tagging_enabled")]
-    pub image_tagging_enabled: bool,
-    #[serde(default = "defaults::deduplicate_enabled")]
-    pub deduplicate_enabled: bool,
-    #[serde(default = "defaults::face_detection_enabled")]
-    pub face_detection_enabled: bool,
-    #[serde(default = "defaults::image_aesthetics_enabled")]
-    pub image_aesthetics_enabled: bool,
-    #[serde(default = "defaults::screenshot_detection_enabled")]
-    pub screenshot_detection_enabled: bool,
-    #[serde(default = "defaults::document_detection_enabled")]
-    pub document_detection_enabled: bool,
-    #[serde(default = "defaults::face_group_similarity_threshold")]
-    pub face_group_similarity_threshold: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CronjobConfig {
-    #[serde(default = "defaults::cronjob_timezone")]
-    pub timezone: String,
     #[serde(default = "defaults::ocr_cron")]
     pub ocr_cron: String,
     #[serde(default = "defaults::image_tagging_cron")]
@@ -353,44 +333,6 @@ pub struct CronjobConfig {
     pub document_detection_cron: String,
 }
 
-impl Default for CronjobConfig {
-    fn default() -> Self {
-        Self {
-            timezone: defaults::cronjob_timezone(),
-            ocr_cron: defaults::ocr_cron(),
-            image_tagging_cron: defaults::image_tagging_cron(),
-            deduplicate_cron: defaults::deduplicate_cron(),
-            face_detection_cron: defaults::face_detection_cron(),
-            image_aesthetics_cron: defaults::image_aesthetics_cron(),
-            screenshot_detection_cron: defaults::screenshot_detection_cron(),
-            document_detection_cron: defaults::document_detection_cron(),
-        }
-    }
-}
-
-impl CronjobConfig {
-    fn validate(&self) -> std::io::Result<()> {
-        self.timezone
-            .parse::<chrono_tz::Tz>()
-            .map_err(|error| std::io::Error::other(format!("invalid cronjob timezone: {error}")))?;
-        for (name, expression) in [
-            ("ocr", &self.ocr_cron),
-            ("image_tagging", &self.image_tagging_cron),
-            ("deduplicate", &self.deduplicate_cron),
-            ("face_detection", &self.face_detection_cron),
-            ("image_aesthetics", &self.image_aesthetics_cron),
-            ("screenshot_detection", &self.screenshot_detection_cron),
-            ("document_detection", &self.document_detection_cron),
-        ] {
-            let normalized_cron = format!("0 {expression} *");
-            normalized_cron.parse::<cron::Schedule>().map_err(|error| {
-                std::io::Error::other(format!("invalid {name} cronjob: {error}"))
-            })?;
-        }
-        Ok(())
-    }
-}
-
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -398,13 +340,13 @@ impl Default for LlmConfig {
             server_address: defaults::llm_server_address(),
             client_id: defaults::fallback::LLM_CLIENT_ID.to_string(),
             api_key: defaults::fallback::LLM_API_KEY.to_string(),
-            image_tagging_enabled: defaults::fallback::IMAGE_TAGGING_ENABLED,
-            deduplicate_enabled: defaults::fallback::DEDUPLICATE_ENABLED,
-            face_detection_enabled: defaults::fallback::FACE_DETECTION_ENABLED,
-            image_aesthetics_enabled: defaults::fallback::IMAGE_AESTHETICS_ENABLED,
-            screenshot_detection_enabled: defaults::fallback::SCREENSHOT_DETECTION_ENABLED,
-            document_detection_enabled: defaults::fallback::DOCUMENT_DETECTION_ENABLED,
-            face_group_similarity_threshold: defaults::FACE_GROUP_SIMILARITY_THRESHOLD,
+            ocr_cron: defaults::ocr_cron(),
+            image_tagging_cron: defaults::image_tagging_cron(),
+            deduplicate_cron: defaults::deduplicate_cron(),
+            face_detection_cron: defaults::face_detection_cron(),
+            image_aesthetics_cron: defaults::image_aesthetics_cron(),
+            screenshot_detection_cron: defaults::screenshot_detection_cron(),
+            document_detection_cron: defaults::document_detection_cron(),
         }
     }
 }
@@ -469,12 +411,16 @@ impl LlmResultWorkerConfig {
 
 impl LlmConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if !self.face_group_similarity_threshold.is_finite()
-            || !(0.0..=1.0).contains(&self.face_group_similarity_threshold)
-        {
-            return Err(std::io::Error::other(
-                "llm face_group_similarity_threshold must be within [0, 1]",
-            ));
+        for (name, expression) in [
+            ("ocr", &self.ocr_cron),
+            ("image_tagging", &self.image_tagging_cron),
+            ("deduplicate", &self.deduplicate_cron),
+            ("face_detection", &self.face_detection_cron),
+            ("image_aesthetics", &self.image_aesthetics_cron),
+            ("screenshot_detection", &self.screenshot_detection_cron),
+            ("document_detection", &self.document_detection_cron),
+        ] {
+            validate_ai_cron_expression(name, expression)?;
         }
         if !self.enabled {
             return Ok(());
@@ -511,7 +457,9 @@ impl LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FaceGroupRepresentativeConfig {
+pub struct FaceGroupConfig {
+    #[serde(default = "defaults::face_group_similarity_threshold")]
+    pub similarity_threshold: f32,
     #[serde(default = "defaults::face_representative_confidence_weight")]
     pub confidence_weight: f64,
     #[serde(default = "defaults::face_representative_face_size_weight")]
@@ -526,9 +474,10 @@ pub struct FaceGroupRepresentativeConfig {
     pub feature_clarity_weight: f64,
 }
 
-impl Default for FaceGroupRepresentativeConfig {
+impl Default for FaceGroupConfig {
     fn default() -> Self {
         Self {
+            similarity_threshold: defaults::FACE_GROUP_SIMILARITY_THRESHOLD,
             confidence_weight: defaults::FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT,
             face_size_weight: defaults::FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT,
             center_proximity_weight: defaults::FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT,
@@ -539,8 +488,15 @@ impl Default for FaceGroupRepresentativeConfig {
     }
 }
 
-impl FaceGroupRepresentativeConfig {
+impl FaceGroupConfig {
     fn validate(&self) -> std::io::Result<()> {
+        if !self.similarity_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.similarity_threshold)
+        {
+            return Err(std::io::Error::other(
+                "face_group similarity_threshold must be within [0, 1]",
+            ));
+        }
         let weights = [
             ("confidence_weight", self.confidence_weight),
             ("face_size_weight", self.face_size_weight),
@@ -552,15 +508,13 @@ impl FaceGroupRepresentativeConfig {
         for &(name, weight) in &weights {
             if !weight.is_finite() || weight < 0.0 {
                 return Err(std::io::Error::other(format!(
-                    "face_group_representative {name} must be finite and non-negative"
+                    "face_group {name} must be finite and non-negative"
                 )));
             }
         }
         let total_weight = weights.iter().map(|(_, weight)| weight).sum::<f64>();
         if (total_weight - 1.0).abs() > 1e-6 {
-            return Err(std::io::Error::other(
-                "face_group_representative weights must sum to 1",
-            ));
+            return Err(std::io::Error::other("face_group weights must sum to 1"));
         }
         Ok(())
     }
@@ -590,9 +544,61 @@ pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
-    pub face_group_representative: FaceGroupRepresentativeConfig,
-    #[serde(default)]
-    pub cronjob: CronjobConfig,
+    pub face_group: FaceGroupConfig,
+}
+
+#[derive(Clone)]
+pub struct ConfigManager {
+    config_path: Arc<PathBuf>,
+    config_sender: watch::Sender<Arc<Config>>,
+    update_lock: Arc<Mutex<()>>,
+}
+
+impl ConfigManager {
+    pub fn new(config_path: PathBuf, config: Config) -> Self {
+        let (config_sender, _) = watch::channel(Arc::new(config));
+        Self {
+            config_path: Arc::new(config_path),
+            config_sender,
+            update_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub fn current(&self) -> Arc<Config> {
+        Arc::clone(&self.config_sender.borrow())
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Arc<Config>> {
+        self.config_sender.subscribe()
+    }
+
+    pub async fn update_llm_cron_expression(
+        &self,
+        config_field_name: &'static str,
+        feature_name: &'static str,
+        cron_expression: String,
+    ) -> std::io::Result<String> {
+        let cron_expression = cron_expression
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        validate_ai_cron_expression(feature_name, &cron_expression)?;
+        let _update_guard = self.update_lock.lock().await;
+        let config_path = Arc::clone(&self.config_path);
+        let saved_expression = cron_expression.clone();
+        let updated_config = tokio::task::spawn_blocking(move || {
+            update_llm_cron_config(
+                &config_path,
+                config_field_name,
+                feature_name,
+                &saved_expression,
+            )
+        })
+        .await
+        .map_err(|error| std::io::Error::other(format!("config update task failed: {error}")))??;
+        self.config_sender.send_replace(Arc::new(updated_config));
+        Ok(cron_expression)
+    }
 }
 
 /// Reads and parses the config file. A missing or malformed file is an error: silently
@@ -606,12 +612,16 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     }
 
     let content = fs::read_to_string(config_path)?;
+    parse_config_contents(config_path, &content)
+}
+
+fn parse_config_contents(config_path: &Path, content: &str) -> std::io::Result<Config> {
     let llm_service_address = read_environment_variable("LLM_SERVICE_ADDRESS")?;
     let reset_admin_password = read_environment_variable("RESET_ADMIN_PASSWORD")?;
     let secret_key = read_environment_variable("SECRET_KEY")?;
     let api_key = read_environment_variable("LLM_SERVICE_API_KEY")?;
     let content = resolve_config_environment(
-        &content,
+        content,
         llm_service_address.as_deref(),
         reset_admin_password.as_deref(),
         secret_key.as_deref(),
@@ -632,10 +642,9 @@ pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
     config.webdav.validate()?;
     config.backup.validate()?;
     config.llm.validate()?;
-    config.face_group_representative.validate()?;
+    config.face_group.validate()?;
     config.llm_submission_worker.validate()?;
     config.llm_result_worker.validate()?;
-    config.cronjob.validate()?;
     Ok(config)
 }
 
@@ -748,6 +757,45 @@ fn replace_toml_string_placeholder(content: &str, placeholder: &str, value: &str
 
 pub fn save_default_config(config_path: &Path) -> std::io::Result<()> {
     write_new_config(config_path, default_config_template())
+}
+
+pub fn validate_ai_cron_expression(
+    feature_name: &str,
+    cron_expression: &str,
+) -> std::io::Result<()> {
+    let normalized_cron = format!("0 {cron_expression} *");
+    normalized_cron
+        .parse::<cron::Schedule>()
+        .map(|_| ())
+        .map_err(|error| std::io::Error::other(format!("invalid {feature_name} cronjob: {error}")))
+}
+
+fn update_llm_cron_config(
+    config_path: &Path,
+    config_field_name: &str,
+    feature_name: &str,
+    cron_expression: &str,
+) -> std::io::Result<Config> {
+    validate_ai_cron_expression(feature_name, cron_expression)?;
+    let contents = fs::read_to_string(config_path)?;
+    let mut document = contents.parse::<DocumentMut>().map_err(|error| {
+        std::io::Error::other(format!(
+            "invalid config at {}: {error}",
+            config_path.display()
+        ))
+    })?;
+    if !document.contains_key("llm") {
+        document["llm"] = toml_edit::table();
+    }
+    let llm = document
+        .get_mut("llm")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| std::io::Error::other("config llm section must be a table"))?;
+    llm[config_field_name] = value(cron_expression);
+    let updated_contents = document.to_string();
+    let updated_config = parse_config_contents(config_path, &updated_contents)?;
+    replace_config(config_path, &updated_contents)?;
+    Ok(updated_config)
 }
 
 pub fn consume_admin_password_reset(

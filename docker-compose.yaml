@@ -19,11 +19,11 @@ services:
     networks:
       - momento
     depends_on:
-      momento-llm-service:
+      momento-llm-service-debug:
         condition: service_started
 
-  momento-llm-service:
-    container_name: momento-llm-service
+  momento-llm-service-debug:
+    container_name: momento-llm-service-debug
     image: zhuoyin/momento-llm-service:latest
     restart: unless-stopped
     environment:

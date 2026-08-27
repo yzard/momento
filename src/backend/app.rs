@@ -8,13 +8,12 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
-use std::sync::Arc;
 use tower::ServiceExt;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::{password_change_guard, AdminPasswordReset, AppState};
-use crate::config::Config;
+use crate::config::ConfigManager;
 use crate::database::DbPool;
 use crate::logging::request_logger;
 use crate::routes::api_router;
@@ -39,14 +38,15 @@ async fn api_not_found() -> StatusCode {
 }
 
 pub fn create_app(
-    config: Arc<Config>,
+    config_manager: ConfigManager,
     pool: DbPool,
     llm_transport: crate::processor::ai::transport::TransportHandle,
     webdav_request_gate: crate::webdav::WebDAVRequestGate,
     admin_password_reset_user_id: Option<i64>,
 ) -> Router {
+    let config = config_manager.current();
     let state = AppState {
-        config: config.clone(),
+        config: config_manager,
         pool,
         llm_transport,
         webdav_request_gate,

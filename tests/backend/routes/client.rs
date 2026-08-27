@@ -18,7 +18,17 @@ async fn capabilities_exposes_version_extensions_features_and_backup_limits() {
         .expect("extensions")
         .iter()
         .any(|extension| extension == ".jpg"));
-    assert!(body["features"]["imageTagging"].is_boolean());
+    for feature in [
+        "llm",
+        "imageTagging",
+        "deduplicate",
+        "faceDetection",
+        "imageAesthetics",
+        "screenshotDetection",
+        "documentDetection",
+    ] {
+        assert_eq!(body["features"][feature], false);
+    }
     assert_eq!(body["backup"]["enabled"], true);
     assert!(body["backup"]["maxUploadBytes"].as_u64().is_some());
     assert!(body["backup"]["maxChunkBytes"].as_u64().is_some());

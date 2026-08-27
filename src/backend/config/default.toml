@@ -78,16 +78,18 @@ server_address = "{{LLM_SERVER_ADDRESS}}"
 client_id = "{{LLM_CLIENT_ID}}"
 # This must exactly match server.api_key in config_llm.toml.
 api_key = "${LLM_SERVICE_API_KEY}"
-image_tagging_enabled = {{IMAGE_TAGGING_ENABLED}}
-deduplicate_enabled = {{DEDUPLICATE_ENABLED}}
-face_detection_enabled = {{FACE_DETECTION_ENABLED}}
-image_aesthetics_enabled = {{IMAGE_AESTHETICS_ENABLED}}
-screenshot_detection_enabled = {{SCREENSHOT_DETECTION_ENABLED}}
-document_detection_enabled = {{DOCUMENT_DETECTION_ENABLED}}
-# Lower values group less-similar faces; higher values require closer matches.
-face_group_similarity_threshold = {{FACE_GROUP_SIMILARITY_THRESHOLD}}
+# All AI features are active when llm.enabled is true. Five-field cron expressions use the system timezone.
+ocr_cron = "{{OCR_CRON}}"
+image_tagging_cron = "{{IMAGE_TAGGING_CRON}}"
+deduplicate_cron = "{{DEDUPLICATE_CRON}}"
+face_detection_cron = "{{FACE_DETECTION_CRON}}"
+image_aesthetics_cron = "{{IMAGE_AESTHETICS_CRON}}"
+screenshot_detection_cron = "{{SCREENSHOT_DETECTION_CRON}}"
+document_detection_cron = "{{DOCUMENT_DETECTION_CRON}}"
 
-[face_group_representative]
+[face_group]
+# Lower values group less-similar faces; higher values require closer matches.
+similarity_threshold = {{FACE_GROUP_SIMILARITY_THRESHOLD}}
 # These six weights must be non-negative and sum to 1.
 confidence_weight = {{FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT}}
 face_size_weight = {{FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT}}
@@ -95,19 +97,3 @@ center_proximity_weight = {{FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT}}
 frontality_weight = {{FACE_REPRESENTATIVE_FRONTALITY_WEIGHT}}
 visibility_weight = {{FACE_REPRESENTATIVE_VISIBILITY_WEIGHT}}
 feature_clarity_weight = {{FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT}}
-
-[cronjob]
-# Five-field cron expressions are evaluated in this IANA timezone.
-timezone = "{{CRONJOB_TIMEZONE}}"
-# OCR and image tagging enqueue their own inference jobs.
-ocr_cron = "{{OCR_CRON}}"
-image_tagging_cron = "{{IMAGE_TAGGING_CRON}}"
-# Deduplication uses image_clustering inference, then generates duplicate groups.
-deduplicate_cron = "{{DEDUPLICATE_CRON}}"
-# Face detection inference is followed by automatic face grouping.
-face_detection_cron = "{{FACE_DETECTION_CRON}}"
-# Image aesthetics selects representative covers for Places.
-image_aesthetics_cron = "{{IMAGE_AESTHETICS_CRON}}"
-# Screenshot and document detection classify imported images.
-screenshot_detection_cron = "{{SCREENSHOT_DETECTION_CRON}}"
-document_detection_cron = "{{DOCUMENT_DETECTION_CRON}}"

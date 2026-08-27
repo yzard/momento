@@ -2,6 +2,9 @@ package io.github.yzard.momento.feature.admin
 
 import io.github.yzard.momento.core.model.AiJobCounts
 import io.github.yzard.momento.core.model.AiTaskStatus
+import io.github.yzard.momento.core.model.AiFeatureSchedule
+import io.github.yzard.momento.core.model.AiStatusResponse
+import io.github.yzard.momento.core.model.DeduplicateStatusResponse
 import io.github.yzard.momento.core.model.ImportStatus
 import io.github.yzard.momento.core.model.JobStatus
 import org.junit.Assert.assertEquals
@@ -81,6 +84,23 @@ class AdminScreenTest {
         assertTrue(isActiveAiState("submitted"))
         assertTrue(isActiveAiState("cancelling"))
         assertFalse(isActiveAiState("completed"))
+    }
+
+    @Test
+    fun selectsJobCountsForTaskAndDeduplicationRows() {
+        val taskJobs = AiJobCounts(1, 2, 3, 4, 5, 6)
+        val deduplicateJobs = AiJobCounts(7, 8, 9, 10, 11, 12)
+        val status = AiStatusResponse(
+            tasks = listOf(AiTaskStatus("ocr", true, "queued", taskJobs, emptyList())),
+            deduplicate = DeduplicateStatusResponse(
+                "running", null, null, null, null, null, 0, 0, 0, 0, null, deduplicateJobs,
+            ),
+            faceGroups = 0,
+            schedules = listOf(AiFeatureSchedule("ocr", "0 2 * * *")),
+        )
+
+        assertEquals(taskJobs, aiJobCounts(status, AdminAiFeature.OCR))
+        assertEquals(deduplicateJobs, aiJobCounts(status, AdminAiFeature.DEDUPLICATE))
     }
 
     @Test

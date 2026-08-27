@@ -6,7 +6,9 @@ use momento_common::logging::init_logging;
 
 use momento_api::app::create_app;
 use momento_api::auth::{ensure_default_admin, prepare_admin_password_reset};
-use momento_api::config::{consume_admin_password_reset, load_config, save_default_config};
+use momento_api::config::{
+    consume_admin_password_reset, load_config, save_default_config, ConfigManager,
+};
 use momento_api::constants::{init_paths, paths};
 use momento_api::cronjob::run_cronjobs;
 use momento_api::database::{create_pool, init_database};
@@ -39,21 +41,22 @@ fn init_directories() -> std::io::Result<()> {
 }
 
 fn start_background_tasks(
-    config: Arc<momento_api::config::Config>,
+    config_manager: ConfigManager,
     pool: momento_api::database::DbPool,
     llm_transport: momento_api::processor::ai::transport::TransportHandle,
     webdav_request_gate: momento_api::webdav::WebDAVRequestGate,
 ) {
-    let config_clone = Arc::clone(&config);
+    let config = config_manager.current();
     let pool_clone = pool.clone();
     let cronjob_transport = llm_transport.clone();
+    let cronjob_config = config_manager.clone();
 
     tokio::spawn(async move {
         if let Ok(conn) = pool_clone.get() {
             let _ = cleanup_expired_trash(&conn);
         }
 
-        run_cronjobs(config_clone, pool_clone, cronjob_transport).await;
+        run_cronjobs(cronjob_config, pool_clone, cronjob_transport).await;
     });
 
     let metadata_config = Arc::clone(&config);
@@ -104,15 +107,13 @@ fn start_background_tasks(
     });
 
     let face_pool = pool.clone();
-    let face_group_similarity_threshold = config.llm.face_group_similarity_threshold;
-    let face_representative_config = config.face_group_representative.clone();
+    let face_group_config = config.face_group.clone();
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(5);
         loop {
             if let Err(error) = momento_api::processor::face_detection::finalize_ready_runs(
                 &face_pool,
-                face_group_similarity_threshold,
-                &face_representative_config,
+                &face_group_config,
             ) {
                 tracing::warn!("face grouping finalization failed: {error}");
             }
@@ -201,7 +202,7 @@ async fn main() {
         .expect("Failed to recover interrupted face grouping scans");
     momento_api::processor::face_detection::recompute_all_group_representatives(
         &pool,
-        &config.face_group_representative,
+        &config.face_group,
     )
     .expect("Failed to recompute face group representatives");
     recover_interrupted_imports(&pool).expect("Failed to recover interrupted imports");
@@ -223,7 +224,8 @@ async fn main() {
     } else {
         None
     };
-    let config = Arc::new(config);
+    let config_manager = ConfigManager::new(config_path, config);
+    let config = config_manager.current();
 
     let llm_transport = momento_api::processor::ai::transport::TransportHandle::default();
     let webdav_request_gate = Arc::new(tokio::sync::Semaphore::new(
@@ -232,7 +234,7 @@ async fn main() {
 
     // Start background tasks
     start_background_tasks(
-        Arc::clone(&config),
+        config_manager.clone(),
         pool.clone(),
         llm_transport.clone(),
         Arc::clone(&webdav_request_gate),
@@ -240,7 +242,7 @@ async fn main() {
 
     // Create the application
     let app = create_app(
-        config.clone(),
+        config_manager,
         pool,
         llm_transport,
         webdav_request_gate,

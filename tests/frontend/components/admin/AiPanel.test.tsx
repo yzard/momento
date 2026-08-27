@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   startFeature: vi.fn(),
   cancelFeature: vi.fn(),
   cleanFeature: vi.fn(),
+  updateSchedule: vi.fn(),
 }))
 
 vi.mock('../../../../src/frontend/api/ai', () => ({
@@ -22,6 +23,7 @@ vi.mock('../../../../src/frontend/api/ai', () => ({
     startFeature: mocks.startFeature,
     cancelFeature: mocks.cancelFeature,
     cleanFeature: mocks.cleanFeature,
+    updateSchedule: mocks.updateSchedule,
   },
 }))
 
@@ -71,6 +73,15 @@ function statusFixture(overrides: Record<string, string> = {}) {
       jobs: { ...emptyJobs },
     },
     faceGroups: 6,
+    schedules: [
+      ['ocr', '0 2 * * *'],
+      ['image_tagging', '0 3 * * *'],
+      ['screenshot_detection', '0 4 * * *'],
+      ['document_detection', '0 5 * * *'],
+      ['image_aesthetics', '0 6 * * *'],
+      ['deduplicate', '0 7 * * *'],
+      ['face_detection', '0 8 * * *'],
+    ].map(([feature, cronExpression]) => ({ feature, cronExpression })),
   }
 }
 
@@ -92,6 +103,7 @@ describe('AiPanel', () => {
     mocks.startFeature.mockResolvedValue(action)
     mocks.cancelFeature.mockResolvedValue({ ...action, action: 'cancel' })
     mocks.cleanFeature.mockResolvedValue({ ...action, action: 'clean' })
+    mocks.updateSchedule.mockImplementation(async (feature: string, cronExpression: string) => ({ feature, cronExpression }))
   })
 
   afterEach(() => {
@@ -100,26 +112,40 @@ describe('AiPanel', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders every metric from one aggregate status response', async () => {
+  it('renders one status-table row per feature with the five requested job states', async () => {
+    const fixture = statusFixture()
+    fixture.tasks[0].jobs = {
+      queued: 1,
+      submitting: 2,
+      submitted: 3,
+      failed: 4,
+      completed: 12,
+      cancelled: 5,
+    }
+    mocks.status.mockResolvedValue(fixture)
     renderPanel()
 
-    expect(await screen.findByText('12')).toBeTruthy()
-    for (const value of ['9', '11', '10', '8', '30', '44', '5', '7', '6']) {
-      expect(screen.getByText(value)).toBeTruthy()
+    await screen.findByRole('cell', { name: '12' })
+    const table = screen.getByRole('table')
+    for (const column of ['Queued', 'Submitting', 'Submitted', 'Failed', 'Completed']) {
+      expect(within(table).getByRole('columnheader', { name: column })).toBeTruthy()
     }
+    const rows = within(table).getAllByRole('row')
+    expect(rows).toHaveLength(8)
+    expect(within(within(table).getByRole('row', { name: 'OCR 1 2 3 4 12' })).getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['1', '2', '3', '4', '12'])
     expect(mocks.status).toHaveBeenCalledOnce()
   })
 
   it('starts global and exact named feature controls independently', async () => {
     renderPanel()
-    await screen.findByText('12')
+    await screen.findByRole('cell', { name: '12' })
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: 'All AI Jobs' }))
+    await user.click(screen.getByRole('button', { name: 'Start All AI Jobs' }))
     await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce())
-    await user.click(screen.getByRole('button', { name: 'Deduplicate' }))
+    await user.click(screen.getByRole('button', { name: 'Start Deduplicate' }))
     await waitFor(() => expect(mocks.startFeature).toHaveBeenCalledWith('deduplicate'))
-    await user.click(screen.getByRole('button', { name: 'Face Detection' }))
+    await user.click(screen.getByRole('button', { name: 'Start Face Detection' }))
     await waitFor(() => expect(mocks.startFeature).toHaveBeenCalledWith('face_detection'))
   })
 
@@ -129,17 +155,17 @@ describe('AiPanel', () => {
       document_detection: 'queued',
     }))
     renderPanel()
-    await screen.findByText('12')
+    await screen.findByRole('cell', { name: '12' })
 
-    await userEvent.click(screen.getByRole('button', { name: 'Screenshot Detection' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel Screenshot Detection' }))
     await waitFor(() => expect(mocks.cancelFeature).toHaveBeenCalledWith('screenshot_detection'))
-    await userEvent.click(screen.getByRole('button', { name: 'Document Detection' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel Document Detection' }))
     await waitFor(() => expect(mocks.cancelFeature).toHaveBeenCalledWith('document_detection'))
   })
 
   it('exposes cleanup for each feature and calls the generic contract', async () => {
     renderPanel()
-    await screen.findByText('12')
+    await screen.findByRole('cell', { name: '12' })
 
     expect(screen.getByRole('button', { name: 'Clean All AI Data' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Clean OCR Data' })).toBeTruthy()
@@ -152,6 +178,19 @@ describe('AiPanel', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Clean Face Detection Data' }))
     await waitFor(() => expect(mocks.cleanFeature).toHaveBeenCalledWith('face_detection'))
+  })
+
+  it('edits and saves each feature cron schedule', async () => {
+    renderPanel()
+    const input = await screen.findByRole('textbox', { name: 'OCR cron schedule' })
+    const user = userEvent.setup()
+
+    expect((input as HTMLInputElement).value).toBe('0 2 * * *')
+    await user.clear(input)
+    await user.type(input, '15 1 * * 1-5')
+    await user.click(screen.getByRole('button', { name: 'Save OCR cron schedule' }))
+
+    await waitFor(() => expect(mocks.updateSchedule).toHaveBeenCalledWith('ocr', '15 1 * * 1-5'))
   })
 
   it('polls only the aggregate status endpoint', async () => {

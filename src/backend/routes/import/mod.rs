@@ -1,5 +1,4 @@
 use axum::{extract::State, routing::post, Json, Router};
-use std::sync::Arc;
 
 use crate::auth::{AppState, RequireAdmin};
 use crate::database::queries;
@@ -19,7 +18,7 @@ async fn trigger_local_import(
     State(state): State<AppState>,
     RequireAdmin(admin): RequireAdmin,
 ) -> AppResult<Json<ImportTriggerResponse>> {
-    let config = Arc::clone(&state.config);
+    let config = state.config.current();
     let pool = state.pool.clone();
     let user_id = admin.id;
     let settings = ImportSettings {

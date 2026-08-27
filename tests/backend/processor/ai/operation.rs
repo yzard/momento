@@ -30,7 +30,6 @@ fn a_scheduled_feature_starts_while_another_feature_is_submitted() {
     prepare_input(&pool, media_id, "image_tagging");
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_tagging_enabled = true;
 
     assert_eq!(
         start_feature(&config, &pool, AiFeature::Ocr, AiStartSource::Manual)
@@ -82,7 +81,6 @@ fn a_scheduled_feature_starts_while_another_feature_is_submitted() {
 fn deduplicate_manual_and_scheduled_starts_share_the_operation() {
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.deduplicate_enabled = true;
 
     let manual_pool = create_test_db();
     start_feature(
@@ -146,8 +144,6 @@ fn an_active_deduplicate_run_does_not_block_other_features() {
         .expect("active deduplicate run");
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_tagging_enabled = true;
-    config.llm.deduplicate_enabled = true;
 
     assert_eq!(
         start_all_features(&config, &pool, AiStartSource::Manual).expect("global start"),
@@ -175,7 +171,6 @@ fn one_start_failure_does_not_prevent_or_hide_other_queued_features() {
         .expect("break only image aesthetics persistence");
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_aesthetics_enabled = true;
 
     assert_eq!(
         start_all_features(&config, &pool, AiStartSource::Manual)
@@ -195,14 +190,14 @@ fn one_start_failure_does_not_prevent_or_hide_other_queued_features() {
 }
 
 #[test]
-fn a_disabled_feature_is_rejected_by_every_start_caller() {
+fn globally_disabled_llm_rejects_every_feature_start() {
     let config = Config::default();
     let pool = create_test_db();
 
     let error = start_feature(&config, &pool, AiFeature::Ocr, AiStartSource::Manual)
-        .expect_err("disabled OCR must fail");
+        .expect_err("globally disabled LLM must reject OCR");
     assert_eq!(
         error.to_string(),
-        "Validation error: ocr is disabled in LLM configuration"
+        "Validation error: ocr is unavailable because LLM is disabled"
     );
 }

@@ -7,7 +7,7 @@ use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use momento_api::app::create_app;
-use momento_api::config::Config;
+use momento_api::config::{Config, ConfigManager};
 use momento_api::constants::init_paths;
 use momento_api::database::{init_database, DbPool};
 
@@ -49,15 +49,23 @@ pub fn create_test_db() -> DbPool {
 pub fn create_test_app() -> (Router, DbPool) {
     init_test_paths();
     let pool = create_test_db();
-    let config = Arc::new(Config::default());
+    let config_manager = create_test_config_manager(Config::default());
     let app = create_app(
-        config,
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
         None,
     );
     (app, pool)
+}
+
+pub fn create_test_config_manager(config: Config) -> ConfigManager {
+    let config_path =
+        std::env::temp_dir().join(format!("momento-test-config-{}.toml", uuid::Uuid::new_v4()));
+    let config_contents = toml::to_string(&config).expect("serialize test config");
+    std::fs::write(&config_path, config_contents).expect("write test config");
+    ConfigManager::new(config_path, config)
 }
 
 pub fn create_test_user(pool: &DbPool, username: &str, email: &str) -> i64 {

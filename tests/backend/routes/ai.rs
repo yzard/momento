@@ -1,13 +1,15 @@
 use crate::test_utils::{
-    create_test_app, create_test_db, create_test_media, create_test_user, init_test_paths,
+    create_test_app, create_test_config_manager, create_test_db, create_test_media,
+    create_test_user, init_test_paths,
 };
 use axum::http::{header::AUTHORIZATION, StatusCode};
 use axum_test::TestServer;
 use momento_api::app::create_app;
 use momento_api::auth::create_access_token;
-use momento_api::config::Config;
+use momento_api::config::{Config, ConfigManager};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tempfile::TempDir;
 
 fn admin_token(user_id: i64) -> String {
     create_access_token(user_id, "admin", "admin", &Config::default(), None)
@@ -34,6 +36,15 @@ fn task_status<'a>(body: &'a Value, task: &str) -> &'a Value {
         .expect("task status")
 }
 
+fn feature_schedule<'a>(body: &'a Value, feature: &str) -> &'a Value {
+    body["schedules"]
+        .as_array()
+        .expect("feature schedules")
+        .iter()
+        .find(|schedule| schedule["feature"] == feature)
+        .expect("feature schedule")
+}
+
 #[tokio::test]
 async fn aggregate_status_requires_an_administrator() {
     let (app, pool) = create_test_app();
@@ -47,6 +58,86 @@ async fn aggregate_status_requires_an_administrator() {
         .add_header(AUTHORIZATION, format!("Bearer {token}"))
         .await
         .assert_status_forbidden();
+    server
+        .post("/api/v1/ai/schedule/update")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&json!({"feature": "ocr", "cronExpression": "0 3 * * *"}))
+        .await
+        .assert_status_forbidden();
+}
+
+#[tokio::test]
+async fn administrator_updates_a_live_ai_schedule_and_persists_config() {
+    init_test_paths();
+    let directory = TempDir::new().expect("temporary config directory");
+    let config_path = directory.path().join("config.toml");
+    let config = Config::default();
+    std::fs::write(
+        &config_path,
+        format!(
+            "# retain schedule comment\n{}",
+            toml::to_string(&config).expect("serialize config")
+        ),
+    )
+    .expect("write config");
+    let config_manager = ConfigManager::new(config_path.clone(), config);
+    let pool = create_test_db();
+    let app = create_app(
+        config_manager.clone(),
+        pool.clone(),
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let user_id = create_test_user(&pool, "schedule-admin", "schedule-admin@example.com");
+    pool.get()
+        .expect("database")
+        .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+        .expect("administrator");
+    let authorization = format!("Bearer {}", admin_token(user_id));
+    let server = TestServer::new(app).expect("server");
+
+    let initial_status = server
+        .post("/api/v1/ai/status")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await;
+    initial_status.assert_status_ok();
+    let initial_status = initial_status.json::<Value>();
+    assert_eq!(initial_status["schedules"].as_array().unwrap().len(), 7);
+    assert_eq!(
+        feature_schedule(&initial_status, "ocr")["cronExpression"],
+        config_manager.current().llm.ocr_cron
+    );
+
+    let update = server
+        .post("/api/v1/ai/schedule/update")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({"feature": "ocr", "cronExpression": " 15  4 * * 1-5 "}))
+        .await;
+    update.assert_status_ok();
+    assert_eq!(update.json::<Value>()["cronExpression"], "15 4 * * 1-5");
+    assert_eq!(config_manager.current().llm.ocr_cron, "15 4 * * 1-5");
+    let saved_config = std::fs::read_to_string(&config_path).expect("saved config");
+    assert!(saved_config.contains("# retain schedule comment"));
+    assert!(saved_config.contains("ocr_cron = \"15 4 * * 1-5\""));
+
+    let updated_status = server
+        .post("/api/v1/ai/status")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await;
+    updated_status.assert_status_ok();
+    assert_eq!(
+        feature_schedule(&updated_status.json::<Value>(), "ocr")["cronExpression"],
+        "15 4 * * 1-5"
+    );
+
+    server
+        .post("/api/v1/ai/schedule/update")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({"feature": "ocr", "cronExpression": "invalid"}))
+        .await
+        .assert_status_bad_request();
+    assert_eq!(config_manager.current().llm.ocr_cron, "15 4 * * 1-5");
 }
 
 #[tokio::test]
@@ -186,9 +277,9 @@ async fn start_succeeds_when_deduplicate_is_already_running() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.deduplicate_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -309,9 +400,9 @@ async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_aesthetics_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -441,10 +532,9 @@ async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.screenshot_detection_enabled = true;
-    config.llm.document_detection_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -545,9 +635,9 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.face_detection_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -618,8 +708,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
         .assert_status_ok();
     momento_api::processor::face_detection::finalize_ready_runs(
         &pool,
-        0.55,
-        &Config::default().face_group_representative,
+        &Config::default().face_group,
     )
     .expect("finalize cancel");
     let connection = pool.get().expect("connection");
@@ -659,9 +748,9 @@ async fn different_ai_features_start_independently() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_tagging_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -783,9 +872,9 @@ async fn aggregate_status_reports_exact_independent_job_states_without_a_body() 
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.image_tagging_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),
@@ -827,7 +916,16 @@ async fn aggregate_status_reports_exact_independent_job_states_without_a_body() 
     assert_eq!(task_status(&body, "ocr")["jobs"]["submitting"], 1);
     assert_eq!(task_status(&body, "image_tagging")["state"], "submitted");
     assert_eq!(task_status(&body, "image_tagging")["jobs"]["submitted"], 1);
-    assert_eq!(task_status(&body, "document_detection")["enabled"], false);
+    for task in [
+        "ocr",
+        "image_tagging",
+        "image_aesthetics",
+        "screenshot_detection",
+        "document_detection",
+        "face_detection",
+    ] {
+        assert_eq!(task_status(&body, task)["enabled"], true);
+    }
     assert_eq!(body["deduplicate"]["ensembledMedia"], 1);
 }
 
@@ -837,9 +935,9 @@ async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.deduplicate_enabled = true;
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
-        Arc::new(config),
+        config_manager,
         pool.clone(),
         Default::default(),
         Arc::new(tokio::sync::Semaphore::new(16)),

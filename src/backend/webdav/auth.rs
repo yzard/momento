@@ -22,6 +22,7 @@ pub async fn basic_auth_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    let config = state.config.current();
     let auth_header = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -33,7 +34,7 @@ pub async fn basic_auth_middleware(
             "WebDAV auth failed: missing Authorization header from {}",
             client_ip
         );
-        return unauthorized_response(&state.config.webdav.realm);
+        return unauthorized_response(&config.webdav.realm);
     };
 
     let Some(credentials) = auth_value.strip_prefix("Basic ") else {
@@ -41,7 +42,7 @@ pub async fn basic_auth_middleware(
             "WebDAV auth failed: unsupported auth scheme from {}",
             client_ip
         );
-        return unauthorized_response(&state.config.webdav.realm);
+        return unauthorized_response(&config.webdav.realm);
     };
 
     let decoded = match base64::engine::general_purpose::STANDARD.decode(credentials) {
@@ -51,7 +52,7 @@ pub async fn basic_auth_middleware(
                 "WebDAV auth failed: invalid base64 credentials from {}",
                 client_ip
             );
-            return unauthorized_response(&state.config.webdav.realm);
+            return unauthorized_response(&config.webdav.realm);
         }
     };
 
@@ -62,7 +63,7 @@ pub async fn basic_auth_middleware(
                 "WebDAV auth failed: credentials not valid UTF-8 from {}",
                 client_ip
             );
-            return unauthorized_response(&state.config.webdav.realm);
+            return unauthorized_response(&config.webdav.realm);
         }
     };
 
@@ -71,7 +72,7 @@ pub async fn basic_auth_middleware(
             "WebDAV auth failed: credentials missing separator from {}",
             client_ip
         );
-        return unauthorized_response(&state.config.webdav.realm);
+        return unauthorized_response(&config.webdav.realm);
     };
 
     let conn = match state.pool.get() {
@@ -103,7 +104,7 @@ pub async fn basic_auth_middleware(
             "WebDAV auth failed: unknown user {} from {}",
             username, client_ip
         );
-        return unauthorized_response(&state.config.webdav.realm);
+        return unauthorized_response(&config.webdav.realm);
     };
 
     if is_active == 0 || !verify_password(password, &hash) {
@@ -111,7 +112,7 @@ pub async fn basic_auth_middleware(
             "WebDAV auth failed: invalid credentials for user {} from {}",
             db_username, client_ip
         );
-        return unauthorized_response(&state.config.webdav.realm);
+        return unauthorized_response(&config.webdav.realm);
     }
 
     request.extensions_mut().insert(WebDAVUser {

@@ -926,18 +926,15 @@ async fn create_media_access_ticket(
     current_user: CurrentUser,
     Json(request): Json<MediaAccessTicketRequest>,
 ) -> AppResult<Response> {
+    let config = state.config.current();
     load_binary_media_info(
         &state,
         current_user.id,
         request.media_id,
         queries::media::SELECT_BINARY_MEDIA_INFO,
     )?;
-    let (ticket, expires_at) = sign_media_access_ticket(
-        current_user.id,
-        request.media_id,
-        request.resource,
-        &state.config,
-    )?;
+    let (ticket, expires_at) =
+        sign_media_access_ticket(current_user.id, request.media_id, request.resource, &config)?;
     let url = format!(
         "/api/v1/media/{}/{}?ticket={}",
         request.media_id,

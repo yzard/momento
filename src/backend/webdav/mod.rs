@@ -27,6 +27,7 @@ use handler::{
 pub type WebDAVRequestGate = Arc<Semaphore>;
 
 async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -> Response {
+    let config = state.config.current();
     let user = request.extensions().get::<WebDAVUser>().cloned();
     let Some(user) = user else {
         return (StatusCode::UNAUTHORIZED, "Not authenticated").into_response();
@@ -40,7 +41,7 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
     if let Err(status) = validate_upload_size(
         request.method(),
         request.headers(),
-        state.config.webdav.max_upload_bytes,
+        config.webdav.max_upload_bytes,
     ) {
         return status.into_response();
     }
@@ -59,13 +60,13 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
         request.method(),
         request.headers(),
         &request_path,
-        &state.config.webdav.mount_path,
+        &config.webdav.mount_path,
     );
     let completed_path = completed_upload_path(
         request.method(),
         request.headers(),
         &request_path,
-        &state.config.webdav.mount_path,
+        &config.webdav.mount_path,
     );
     if !invalidated_paths.is_empty() {
         let Ok(connection) = state.pool.get() else {
@@ -107,13 +108,13 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
     }
 
     let user_root = paths().webdav.join(&user.username);
-    let dav_handler = create_dav_handler(&user_root, &state.config.webdav.mount_path);
+    let dav_handler = create_dav_handler(&user_root, &config.webdav.mount_path);
     let mut response = handle_webdav_request(
         dav_handler,
         request,
         &user_root,
-        &state.config.webdav.mount_path,
-        state.config.webdav.max_upload_bytes,
+        &config.webdav.mount_path,
+        config.webdav.max_upload_bytes,
     )
     .await;
     if response.status().is_success() {
@@ -140,7 +141,7 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
 }
 
 pub fn webdav_router(app_state: AppState) -> Router<AppState> {
-    let mount_path = app_state.config.webdav.mount_path.clone();
+    let mount_path = app_state.config.current().webdav.mount_path.clone();
     let mount_path_with_slash = format!("{mount_path}/");
     let mount_path_with_wildcard = format!("{mount_path}/*path");
     tracing::info!(

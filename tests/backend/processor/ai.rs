@@ -79,8 +79,6 @@ fn classifier_queueing_allows_overlap_and_skips_completed_results() {
 
     let mut config = Config::default();
     config.llm.enabled = true;
-    config.llm.screenshot_detection_enabled = true;
-    config.llm.document_detection_enabled = true;
     assert_eq!(
         start_all_features(&config, &pool, AiStartSource::Manual).expect("start classifiers"),
         2

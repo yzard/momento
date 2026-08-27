@@ -37,4 +37,13 @@ describe('aiApi', () => {
       ['/ai/deduplicate/clean'],
     ])
   })
+
+  it('updates one exact feature schedule with its five-field cron expression', async () => {
+    await aiApi.updateSchedule('ocr', '15 1 * * 1-5')
+
+    expect(post).toHaveBeenCalledWith('/ai/schedule/update', {
+      feature: 'ocr',
+      cronExpression: '15 1 * * 1-5',
+    })
+  })
 })

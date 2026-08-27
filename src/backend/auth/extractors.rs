@@ -2,7 +2,7 @@ use crate::auth::{
     jwt::{decode_access_token, decode_media_access_ticket},
     AdminPasswordReset,
 };
-use crate::config::Config;
+use crate::config::ConfigManager;
 use crate::database::{fetch_one, queries, DbPool};
 use crate::error::AppError;
 use crate::models::MediaAccessResource;
@@ -14,7 +14,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
-use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct CurrentUser {
@@ -27,7 +26,7 @@ pub struct CurrentUser {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<Config>,
+    pub config: ConfigManager,
     pub pool: DbPool,
     pub llm_transport: crate::processor::ai::transport::TransportHandle,
     pub webdav_request_gate: crate::webdav::WebDAVRequestGate,
@@ -49,8 +48,8 @@ where
         }
 
         let token = bearer_token(parts)?;
-
-        let claims = decode_access_token(token, &app_state.config)
+        let config = app_state.config.current();
+        let claims = decode_access_token(token, &config)
             .ok_or_else(|| AppError::Authentication("Invalid or expired token".to_string()))?;
 
         let user_id: i64 = claims
@@ -106,10 +105,10 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         if let Some(ticket) = media_access_ticket(parts.uri.query())? {
-            let claims =
-                decode_media_access_ticket(&ticket, &app_state.config).ok_or_else(|| {
-                    AppError::Authentication("Invalid or expired media access ticket".to_string())
-                })?;
+            let config = app_state.config.current();
+            let claims = decode_media_access_ticket(&ticket, &config).ok_or_else(|| {
+                AppError::Authentication("Invalid or expired media access ticket".to_string())
+            })?;
             let user_id = claims
                 .sub
                 .parse::<i64>()
