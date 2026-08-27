@@ -41,8 +41,9 @@ class RoutesTest {
         assertEquals(listOf(Destination.DEDUPLICATE), utilityDrawerDestinations)
     }
 
-    @Test fun settingsOwnsItsScrollableTitle() {
+    @Test fun settingsAndAdminOwnTheirPageTitles() {
         assertTrue(Destination.SETTINGS.hasFloatingTitle().not())
+        assertTrue(Destination.ADMIN.hasFloatingTitle().not())
         assertTrue(Destination.PLACES.hasFloatingTitle())
     }
 }

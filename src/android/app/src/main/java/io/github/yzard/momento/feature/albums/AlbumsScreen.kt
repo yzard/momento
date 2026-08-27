@@ -1,12 +1,21 @@
 package io.github.yzard.momento.feature.albums
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -20,16 +29,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Album
 import io.github.yzard.momento.core.model.AlbumDetail
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.feature.media.MediaGrid
+import io.github.yzard.momento.feature.media.toggleMediaSelection
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
@@ -41,6 +57,7 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
     var selectedAlbumId by remember { mutableStateOf<Long?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var albumPendingDeletion by remember { mutableStateOf<Album?>(null) }
     var working by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -71,7 +88,10 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
             Text(error!!, color = MaterialTheme.colorScheme.error)
             TextButton({ scope.launch { loadAlbums() } }) { Text("Retry") }
         }
-        else -> LazyColumn(Modifier.fillMaxSize()) {
+        else -> LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
+        ) {
             item {
                 Button(
                     onClick = { creating = true },
@@ -86,18 +106,11 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
                 ListItem(
                     headlineContent = { Text(album.name) },
                     supportingContent = { Text("${album.mediaCount} items") },
+                    leadingContent = { AlbumCoverThumbnail(album, repository) },
                     trailingContent = {
                         TextButton(
                             enabled = !working,
-                            onClick = {
-                                scope.launch {
-                                    if (working) return@launch
-                                    working = true
-                                    val deleted = executeAlbumOperation { repository.deleteAlbum(album.id) }
-                                    if (deleted) loadAlbums() else error = "Could not delete album"
-                                    working = false
-                                }
-                            },
+                            onClick = { albumPendingDeletion = album },
                         ) { Text("Delete") }
                     },
                     modifier = Modifier.clickable(enabled = !working) { selectedAlbumId = album.id },
@@ -130,8 +143,41 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
             dismiss = { creating = false },
         )
     }
+    albumPendingDeletion?.let { album ->
+        AlertDialog(
+            onDismissRequest = { if (!working) albumPendingDeletion = null },
+            title = { Text("Delete ${album.name}?") },
+            text = { Text("Media remains in your library.") },
+            confirmButton = {
+                TextButton(
+                    enabled = !working,
+                    onClick = {
+                        scope.launch {
+                            if (working) return@launch
+                            working = true
+                            val deleted = executeAlbumOperation { repository.deleteAlbum(album.id) }
+                            if (deleted) {
+                                albumPendingDeletion = null
+                                loadAlbums()
+                            } else {
+                                error = "Could not delete album"
+                            }
+                            working = false
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !working,
+                    onClick = { albumPendingDeletion = null },
+                ) { Text("Cancel") }
+            },
+        )
+    }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AlbumDetailScreen(
     repository: MomentoRepository,
@@ -144,6 +190,7 @@ private fun AlbumDetailScreen(
     var selecting by remember(albumId) { mutableStateOf(false) }
     var editing by remember(albumId) { mutableStateOf(false) }
     var deleting by remember(albumId) { mutableStateOf(false) }
+    var removingSelected by remember(albumId) { mutableStateOf(false) }
     var error by remember(albumId) { mutableStateOf<String?>(null) }
     var working by remember(albumId) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -179,32 +226,98 @@ private fun AlbumDetailScreen(
         return succeeded
     }
 
-    Column(Modifier.fillMaxSize()) {
-        TextButton(close, enabled = !working) { Text("Back") }
-        Text(album.name, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(horizontal = 16.dp))
-        album.description?.let { Text(it, modifier = Modifier.padding(horizontal = 16.dp)) }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-        TextButton({ editing = true }, enabled = !working) { Text("Edit") }
-        TextButton({ selecting = !selecting; if (!selecting) selectedIds = emptySet() }, enabled = !working) {
-            Text(if (selecting) "Cancel selection" else "Select media")
-        }
-        if (selectedIds.isNotEmpty()) {
-            TextButton({ scope.launch { runMutation("Could not remove media") { repository.removeAlbumMedia(albumId, selectedIds.toList()) } } }, enabled = !working) { Text("Remove selected") }
-            selectedIds.singleOrNull()?.let { selectedId ->
-                TextButton({ scope.launch { runMutation("Could not update album cover") { repository.updateAlbum(albumId, null, null, selectedId) } } }, enabled = !working) { Text("Use as cover") }
-                TextButton({ scope.launch { runMutation("Could not reorder media") { repository.reorderAlbumMedia(albumId, reorderAlbumIds(album.media.map { it.id }, selectedId, -1)) } } }, enabled = !working) { Text("Move earlier") }
-                TextButton({ scope.launch { runMutation("Could not reorder media") { repository.reorderAlbumMedia(albumId, reorderAlbumIds(album.media.map { it.id }, selectedId, 1)) } } }, enabled = !working) { Text("Move later") }
+    MediaGrid(
+        media = album.media,
+        repository = repository,
+        selectedMediaIds = selectedIds,
+        contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
+        headerContent = {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                TextButton(close, enabled = !working) { Text("Back") }
+                Text(album.name, style = MaterialTheme.typography.headlineSmall)
+                album.description?.let { description -> Text(description) }
+                error?.let { message ->
+                    Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.padding(top = 8.dp),
+                ) {
+                    TextButton({ editing = true }, enabled = !working) { Text("Edit") }
+                    TextButton(
+                        onClick = {
+                            selecting = !selecting
+                            if (!selecting) selectedIds = emptySet()
+                        },
+                        enabled = !working,
+                    ) {
+                        Text(if (selecting) "Cancel selection" else "Select media")
+                    }
+                    if (selectedIds.isNotEmpty()) {
+                        TextButton(
+                            onClick = { removingSelected = true },
+                            enabled = !working,
+                        ) { Text("Remove ${selectedIds.size}") }
+                        selectedIds.singleOrNull()?.let { selectedId ->
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        runMutation("Could not update album cover") {
+                                            repository.updateAlbum(albumId, null, null, selectedId)
+                                        }
+                                    }
+                                },
+                                enabled = !working,
+                            ) { Text("Use as cover") }
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        runMutation("Could not reorder media") {
+                                            repository.reorderAlbumMedia(
+                                                albumId,
+                                                reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
+                                            )
+                                        }
+                                    }
+                                },
+                                enabled = !working,
+                            ) { Text("Move earlier") }
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        runMutation("Could not reorder media") {
+                                            repository.reorderAlbumMedia(
+                                                albumId,
+                                                reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
+                                            )
+                                        }
+                                    }
+                                },
+                                enabled = !working,
+                            ) { Text("Move later") }
+                        }
+                    }
+                    TextButton({ deleting = true }, enabled = !working) { Text("Delete album") }
+                }
+                if (selecting) {
+                    Text(
+                        "${selectedIds.size} selected",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
             }
-        }
-        TextButton({ deleting = true }, enabled = !working) { Text("Delete album") }
-        MediaGrid(album.media, repository) { media ->
+        },
+        footerContent = null,
+        modifier = Modifier.fillMaxSize(),
+    ) { media ->
             if (selecting) {
-                selectedIds = if (media.id in selectedIds) selectedIds - media.id else selectedIds + media.id
+                selectedIds = toggleMediaSelection(selectedIds, media.id)
             } else {
                 openMedia(album.media, album.media.indexOf(media))
             }
         }
-    }
 
     if (editing) {
         AlbumEditorDialog(
@@ -248,6 +361,32 @@ private fun AlbumDetailScreen(
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton({ deleting = false }, enabled = !working) { Text("Cancel") } },
+        )
+    }
+    if (removingSelected) {
+        AlertDialog(
+            onDismissRequest = { if (!working) removingSelected = false },
+            title = { Text("Remove ${selectedIds.size} media?") },
+            text = { Text("The selected media remains in your library.") },
+            confirmButton = {
+                TextButton(
+                    enabled = !working && selectedIds.isNotEmpty(),
+                    onClick = {
+                        scope.launch {
+                            val removed = runMutation("Could not remove media") {
+                                repository.removeAlbumMedia(albumId, selectedIds.toList())
+                            }
+                            if (removed) removingSelected = false
+                        }
+                    },
+                ) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !working,
+                    onClick = { removingSelected = false },
+                ) { Text("Cancel") }
+            },
         )
     }
 }
@@ -299,7 +438,7 @@ fun AlbumAddMediaSheet(
         when {
             albums == null -> CircularProgressIndicator(Modifier.padding(20.dp))
             else -> {
-                LazyColumn {
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
                     items(albums.orEmpty(), key = { it.id }) { album ->
                         ListItem(
                             headlineContent = { Text(album.name) },
@@ -338,6 +477,31 @@ fun AlbumAddMediaSheet(
             },
             dismiss = { creating = false },
         )
+    }
+}
+
+@Composable
+private fun AlbumCoverThumbnail(album: Album, repository: MomentoRepository) {
+    val context = LocalContext.current
+    val url by produceState<String?>(null, album.coverMediaId) {
+        value = album.coverMediaId?.let { mediaId -> repository.thumbnailUrl(mediaId, true) }
+    }
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        modifier = Modifier
+            .size(64.dp)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        url?.let { thumbnailUrl ->
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(thumbnailUrl).build(),
+                imageLoader = repository.authenticatedImageLoader(context),
+                contentDescription = "${album.name} cover",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
 }
 

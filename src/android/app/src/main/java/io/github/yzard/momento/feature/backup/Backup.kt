@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.net.ConnectivityManager
@@ -12,6 +13,7 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -22,6 +24,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.await
 import io.github.yzard.momento.core.data.EncryptedTokenStore
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.data.SettingsStore
@@ -49,23 +52,72 @@ import java.util.concurrent.TimeUnit
 class MediaStoreScanner(private val context: Context, private val assets: BackupAssetDao) {
     suspend fun scan(cameraOnly: Boolean) {
         val collection = MediaStore.Files.getContentUri("external")
-        val projection = arrayOf(MediaStore.Files.FileColumns._ID, MediaStore.Files.FileColumns.DISPLAY_NAME, MediaStore.Files.FileColumns.MIME_TYPE, MediaStore.Files.FileColumns.SIZE, MediaStore.Files.FileColumns.DATE_MODIFIED, MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME)
-        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)" + if (cameraOnly) " AND ${MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME} = ?" else ""
-        val arguments = buildList {
-            add(MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString())
-            add(MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString())
-            if (cameraOnly) add("Camera")
+        val projection = buildList {
+            add(MediaStore.Files.FileColumns._ID)
+            add(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            add(MediaStore.Files.FileColumns.MIME_TYPE)
+            add(MediaStore.Files.FileColumns.SIZE)
+            add(MediaStore.Files.FileColumns.DATE_MODIFIED)
+            add(MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(MediaStore.MediaColumns.RELATIVE_PATH)
+            }
         }.toTypedArray()
+        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
+        val arguments = arrayOf(
+            MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
+        )
         context.contentResolver.query(collection, projection, selection, arguments, "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC")?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            val displayNameColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val mimeTypeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
+            val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            val modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
+            val bucketColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME)
+            val relativePathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+            } else {
+                -1
+            }
             while (cursor.moveToNext()) {
-                val mimeType = cursor.getString(2) ?: continue
-                val asset = discoveredAsset(ContentUris.withAppendedId(collection, cursor.getLong(0)).toString(), cursor.getLong(0), cursor.getString(1) ?: "media", mimeType, cursor.getLong(3), cursor.getLong(4), cursor.getString(5) ?: "")
+                val mimeType = cursor.getString(mimeTypeColumn) ?: continue
+                val bucketName = cursor.getString(bucketColumn)
+                val relativePath = relativePathColumn.takeIf { it >= 0 }?.let(cursor::getString)
+                val cameraMedia = isCameraMediaFolder(bucketName, relativePath)
+                if (cameraOnly && !cameraMedia) continue
+                val mediaStoreId = cursor.getLong(idColumn)
+                val asset = discoveredAsset(
+                    uri = ContentUris.withAppendedId(collection, mediaStoreId).toString(),
+                    mediaStoreId = mediaStoreId,
+                    displayName = cursor.getString(displayNameColumn) ?: "media",
+                    mimeType = mimeType,
+                    byteSize = cursor.getLong(sizeColumn),
+                    modifiedAt = cursor.getLong(modifiedColumn),
+                    folder = if (cameraMedia) CAMERA_FOLDER else relativePath ?: bucketName.orEmpty(),
+                )
                 if (assets.insertDiscovered(asset) == -1L) {
                     assets.reconcileDiscovered(asset.uri, asset.clientAssetId, asset.operationId, asset.displayName, asset.mimeType, asset.byteSize, asset.modifiedAt, asset.folder)
                 }
             }
         }
     }
+}
+
+internal fun isCameraMediaFolder(bucketName: String?, relativePath: String?): Boolean {
+    val normalizedPath = relativePath
+        ?.replace('\\', '/')
+        ?.trim('/')
+        ?.lowercase()
+    if (normalizedPath != null) {
+        val pathSegments = normalizedPath.split('/')
+        if (pathSegments.any { it in CAMERA_DIRECTORY_EXCLUSIONS }) return false
+        if (pathSegments.firstOrNull() == "dcim") return true
+        return pathSegments.firstOrNull() == "pictures" && pathSegments.getOrNull(1) in KNOWN_CAMERA_BUCKETS
+    }
+
+    val normalizedBucket = bucketName?.trim()?.lowercase() ?: return false
+    return normalizedBucket in KNOWN_CAMERA_BUCKETS || normalizedBucket.endsWith(" camera")
 }
 
 internal fun discoveredAsset(uri: String, mediaStoreId: Long, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, folder: String): BackupAssetEntity =
@@ -90,6 +142,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
             val settings = settingsStore.settings.first()
             if (!tokenStore.isAuthenticated.value || settings.origin == null) return Result.failure()
+            if (currentBackupMediaAccess(applicationContext) == BackupMediaAccess.DENIED) return Result.success()
             if (!isBackupNetworkAllowed(applicationContext, settings.mobileDataEnabled)) return Result.retry()
 
             setForeground(progress("Preparing backup"))
@@ -360,26 +413,123 @@ fun observeBackupNetworkAllowed(context: Context, allowMobileData: Boolean): Flo
         awaitClose { connectivityManager.unregisterNetworkCallback(callback) }
     }.distinctUntilChanged()
 
-private const val BACKUP_CHANNEL = "backup"
-private const val BACKUP_WORK = "momento_backup"
-private const val BACKUP_CANCELLATION_WORK = "momento_backup_cancellation"
-
-fun backupReadPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) arrayOf(android.Manifest.permission.READ_MEDIA_IMAGES, android.Manifest.permission.READ_MEDIA_VIDEO, android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(android.Manifest.permission.READ_MEDIA_IMAGES, android.Manifest.permission.READ_MEDIA_VIDEO)
-} else arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
-
-fun scheduleBackup(context: Context, allowMobileData: Boolean, immediate: Boolean) {
-    context.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(BACKUP_CHANNEL, "Momento backup", NotificationManager.IMPORTANCE_LOW))
-    val constraints = Constraints.Builder().setRequiredNetworkType(if (allowMobileData) NetworkType.CONNECTED else NetworkType.UNMETERED).build()
-    val workManager = WorkManager.getInstance(context)
-    if (immediate) workManager.enqueueUniqueWork(BACKUP_WORK, ExistingWorkPolicy.KEEP, OneTimeWorkRequestBuilder<BackupWorker>().setConstraints(constraints).build())
-    else workManager.enqueueUniquePeriodicWork(BACKUP_WORK, ExistingPeriodicWorkPolicy.UPDATE, PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS).setConstraints(constraints).build())
+enum class BackupMediaAccess {
+    FULL,
+    PARTIAL,
+    DENIED,
 }
 
-suspend fun requestBackupCancellation(context: Context, assets: BackupAssetDao) {
+internal const val IMMEDIATE_BACKUP_WORK_NAME = "momento_backup_now"
+internal const val PERIODIC_BACKUP_WORK_NAME = "momento_backup_periodic"
+internal const val LEGACY_BACKUP_WORK_NAME = "momento_backup"
+private const val BACKUP_CHANNEL = "backup"
+private const val BACKUP_CANCELLATION_WORK = "momento_backup_cancellation"
+private const val CAMERA_FOLDER = "Camera"
+private val CAMERA_DIRECTORY_EXCLUSIONS = setOf(
+    ".thumbnails",
+    "screen recordings",
+    "screen_recordings",
+    "screenrecorder",
+    "screenrecords",
+    "screenshots",
+)
+private val KNOWN_CAMERA_BUCKETS = setOf("camera", "camera roll", "100andro", "100media", "dcim")
+
+fun backupReadPermissions(sdkVersion: Int): Array<String> = when {
+    sdkVersion >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
+        android.Manifest.permission.READ_MEDIA_IMAGES,
+        android.Manifest.permission.READ_MEDIA_VIDEO,
+        android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+    )
+    sdkVersion >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+        android.Manifest.permission.READ_MEDIA_IMAGES,
+        android.Manifest.permission.READ_MEDIA_VIDEO,
+    )
+    else -> arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+}
+
+fun backupMediaAccess(sdkVersion: Int, grantedPermissions: Set<String>): BackupMediaAccess {
+    if (sdkVersion < Build.VERSION_CODES.TIRAMISU) {
+        return if (android.Manifest.permission.READ_EXTERNAL_STORAGE in grantedPermissions) {
+            BackupMediaAccess.FULL
+        } else {
+            BackupMediaAccess.DENIED
+        }
+    }
+
+    val imagesGranted = android.Manifest.permission.READ_MEDIA_IMAGES in grantedPermissions
+    val videosGranted = android.Manifest.permission.READ_MEDIA_VIDEO in grantedPermissions
+    if (imagesGranted && videosGranted) return BackupMediaAccess.FULL
+    if (imagesGranted || videosGranted) return BackupMediaAccess.PARTIAL
+    if (
+        sdkVersion >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+        android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED in grantedPermissions
+    ) {
+        return BackupMediaAccess.PARTIAL
+    }
+    return BackupMediaAccess.DENIED
+}
+
+fun currentBackupMediaAccess(context: Context): BackupMediaAccess {
+    val grantedPermissions = backupReadPermissions(Build.VERSION.SDK_INT)
+        .filterTo(mutableSetOf()) { permission ->
+            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
+    return backupMediaAccess(Build.VERSION.SDK_INT, grantedPermissions)
+}
+
+fun backupMediaAccessLabel(access: BackupMediaAccess): String = when (access) {
+    BackupMediaAccess.FULL -> "All photos and videos are available for backup"
+    BackupMediaAccess.PARTIAL -> "Only selected photos or media types are available for backup"
+    BackupMediaAccess.DENIED -> "Photo and video access is required before backup can run"
+}
+
+private fun backupConstraints(allowMobileData: Boolean): Constraints = Constraints.Builder()
+    .setRequiredNetworkType(if (allowMobileData) NetworkType.CONNECTED else NetworkType.UNMETERED)
+    .build()
+
+private fun ensureBackupNotificationChannel(context: Context) {
+    context.getSystemService(NotificationManager::class.java).createNotificationChannel(
+        NotificationChannel(BACKUP_CHANNEL, "Momento backup", NotificationManager.IMPORTANCE_LOW),
+    )
+}
+
+fun scheduleImmediateBackup(context: Context, allowMobileData: Boolean) {
+    ensureBackupNotificationChannel(context)
+    WorkManager.getInstance(context).enqueueUniqueWork(
+        IMMEDIATE_BACKUP_WORK_NAME,
+        ExistingWorkPolicy.KEEP,
+        OneTimeWorkRequestBuilder<BackupWorker>()
+            .setConstraints(backupConstraints(allowMobileData))
+            .build(),
+    )
+}
+
+fun schedulePeriodicBackup(context: Context, allowMobileData: Boolean) {
+    ensureBackupNotificationChannel(context)
+    val workManager = WorkManager.getInstance(context)
+    workManager.cancelUniqueWork(LEGACY_BACKUP_WORK_NAME)
+    workManager.enqueueUniquePeriodicWork(
+        PERIODIC_BACKUP_WORK_NAME,
+        ExistingPeriodicWorkPolicy.UPDATE,
+        PeriodicWorkRequestBuilder<BackupWorker>(24, TimeUnit.HOURS)
+            .setInitialDelay(24, TimeUnit.HOURS)
+            .setConstraints(backupConstraints(allowMobileData))
+            .build(),
+    )
+}
+
+suspend fun requestBackupCancellation(
+    context: Context,
+    assets: BackupAssetDao,
+    allowMobileData: Boolean,
+) {
     assets.requestCancellation()
     val workManager = WorkManager.getInstance(context)
-    workManager.cancelUniqueWork(BACKUP_WORK)
+    workManager.cancelUniqueWork(IMMEDIATE_BACKUP_WORK_NAME).await()
+    workManager.cancelUniqueWork(PERIODIC_BACKUP_WORK_NAME).await()
+    workManager.cancelUniqueWork(LEGACY_BACKUP_WORK_NAME).await()
+    schedulePeriodicBackup(context, allowMobileData)
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
     workManager.enqueueUniqueWork(
         BACKUP_CANCELLATION_WORK,

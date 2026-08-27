@@ -21,6 +21,7 @@ import {
 import { cn } from '../../lib/utils'
 import { MOMENTO_VERSION } from '../../lib/version'
 import { useAuth } from '../../hooks/useAuth'
+import AndroidAppDownloadLink from './AndroidAppDownloadLink'
 
 interface NavItem {
   to: string
@@ -185,22 +186,18 @@ export default function Sidebar({ isCollapsed, isMobileOpen, toggleCollapse, onN
       </nav>
 
       <div className={cn("border-t border-border/50", isCollapsed ? "flex flex-col items-center gap-3 p-3" : "space-y-3 p-6")}>
-        {!isCollapsed ? (
-          <div className="flex items-center gap-2 animate-fade-in">
+        {isCollapsed ? (
+          <AndroidAppDownloadLink compact />
+        ) : (
+          <div className="space-y-2 animate-fade-in">
             <div className="px-3 py-2 bg-primary/5 rounded-xl border border-primary/10">
               <p className="text-xs text-primary/80 font-medium text-center">
                 v{MOMENTO_VERSION}
               </p>
             </div>
-            <a
-              href="/momento-android.apk"
-              download="momento-android.apk"
-              className="px-3 py-2 rounded-xl border border-border text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-            >
-              Android
-            </a>
+            <AndroidAppDownloadLink compact={false} />
           </div>
-        ) : null}
+        )}
 
         <div className={cn("flex items-center", isCollapsed ? "flex-col gap-3" : "gap-2")}>
           <NavLink

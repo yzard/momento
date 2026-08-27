@@ -30,4 +30,4 @@ fun Destination.isTimelinePage(): Boolean = when (this) {
     else -> false
 }
 
-fun Destination.hasFloatingTitle(): Boolean = this != Destination.SETTINGS
+fun Destination.hasFloatingTitle(): Boolean = this != Destination.SETTINGS && this != Destination.ADMIN

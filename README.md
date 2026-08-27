@@ -30,10 +30,11 @@ Grant the requested photo/video media permission to back up content. Android 13 
 system photo/video permissions; older Android versions use storage-read permission. Notifications
 are requested for visible foreground backup progress.
 
-On first run, enter the complete Momento server origin and authenticate. Use HTTPS outside a
-trusted local network. The current client permits HTTP for trusted local-network development only;
-HTTP exposes credentials and media traffic to the network and should not be used on untrusted
-networks.
+On first run, enter the complete Momento server origin and authenticate. Signed release APKs require
+HTTPS and Android also blocks release cleartext traffic at the platform level. Debug builds permit
+HTTP after an explicit warning so an emulator can reach `http://10.0.2.2:<port>` and a development
+device can reach a trusted local server. An HTTPS reverse proxy may use HTTP on its private upstream
+connection because the Android client connects only to the proxy's HTTPS origin.
 
 All Android compilation, debugging, and tests run in Docker. The host needs only Docker:
 
@@ -149,10 +150,11 @@ Build both images locally with the tags used by Compose, or explicitly publish t
 ./build_docker.sh publish docker zhuoyin /secure/path/to/keystore-directory
 ```
 
-The build calls `build_android_client.sh release`, creates the signed Android release first, and
-embeds its APK in the Momento image. It does not run Android development or test commands. Signed-in
-users can download that APK from the `Android` link beside the web sidebar version, which serves
-`/momento-android.apk` from the same Momento instance.
+The build calls `build_android_client.sh release`, creates and verifies the signed Android release
+first, requires exactly one non-empty APK, and embeds it in the Momento image. It does not run Android
+development or test commands. Signed-in users can download that APK from the Android download action
+in the web sidebar or account settings; both serve `/momento-android.apk` from the same Momento
+instance. Android may require the user to allow installs from the browser used for the download.
 
 Compose supplies one `LLM_SERVICE_API_KEY` to both services, `SECRET_KEY` to Momento, and
 `RESET_ADMIN_PASSWORD=false` by default. Set strong `LLM_SERVICE_API_KEY` and `SECRET_KEY` environment values

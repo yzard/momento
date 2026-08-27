@@ -92,6 +92,20 @@ fi
 
 "$ROOT_DIR/build_android_client.sh" release --keystore-dir "$KEYSTORE_DIR"
 
+release_apk() {
+    shopt -s nullglob
+    local apk_candidates=("$ROOT_DIR"/dist/android/*.apk)
+    shopt -u nullglob
+    if (( ${#apk_candidates[@]} != 1 )) || [[ ! -s "${apk_candidates[0]:-}" ]]; then
+        printf 'Expected exactly one non-empty signed release APK in dist/android\n' >&2
+        exit 1
+    fi
+    printf '%s\n' "${apk_candidates[0]}"
+}
+
+ANDROID_RELEASE_APK=$(release_apk)
+printf 'Embedding signed Android release: %s\n' "$(basename "$ANDROID_RELEASE_APK")"
+
 TAG=${TAG:-$VERSION}
 SOURCE_REPOSITORY=${SOURCE_REPOSITORY:-https://github.com/yzard/momento}
 if [[ -n "$REGISTRY" ]]; then

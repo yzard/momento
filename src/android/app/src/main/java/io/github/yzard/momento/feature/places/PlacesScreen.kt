@@ -312,20 +312,31 @@ private fun PlaceDetailScreen(
     when {
         media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
         media == null -> LoadingState()
-        else -> Column(Modifier.fillMaxSize().padding(top = 64.dp, bottom = 88.dp)) {
-            MediaGrid(media!!, repository) { item -> openMedia(media!!, media!!.indexOf(item)) }
-            if (more && nextCursor != null) {
-                Text(
-                    if (loading) "Loading more..." else if (error == null) "Load more" else "Retry loading more",
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .align(Alignment.CenterHorizontally)
-                        .clickable(enabled = !loading) {
-                            if (error == null) requestCursor = nextCursor else retryVersion += 1
-                        }
-                        .padding(16.dp),
-                )
-            }
+        else -> MediaGrid(
+            media = media!!,
+            repository = repository,
+            selectedMediaIds = emptySet(),
+            contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
+            headerContent = null,
+            footerContent = if (more && nextCursor != null) {
+                {
+                    Text(
+                        if (loading) "Loading more..." else if (error == null) "Load more" else "Retry loading more",
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !loading) {
+                                if (error == null) requestCursor = nextCursor else retryVersion += 1
+                            }
+                            .padding(16.dp),
+                    )
+                }
+            } else {
+                null
+            },
+            modifier = Modifier.fillMaxSize(),
+        ) { mediaItem ->
+            openMedia(media!!, media!!.indexOf(mediaItem))
         }
     }
 }

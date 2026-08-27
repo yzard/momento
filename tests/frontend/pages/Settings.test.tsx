@@ -44,6 +44,15 @@ function renderSettings() {
 }
 
 describe('Settings', () => {
+  it('offers the server-bundled Android release', () => {
+    renderSettings()
+
+    const downloadLink = screen.getByRole('link', { name: 'Download Android app' })
+    expect(downloadLink.getAttribute('href')).toBe('/momento-android.apk')
+    expect(downloadLink.getAttribute('download')).toBe('momento-android.apk')
+    expect(screen.getByText(/Install the release APK provided by this Momento server/)).toBeTruthy()
+  })
+
   it('attributes the bundled local location data', () => {
     renderSettings()
 

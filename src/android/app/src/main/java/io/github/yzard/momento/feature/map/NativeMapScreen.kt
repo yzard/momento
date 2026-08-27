@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.graphics.withClip
+import androidx.core.content.edit
 import androidx.core.view.doOnLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -54,7 +55,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.yield
 import kotlinx.serialization.SerializationException
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapListener
@@ -69,6 +69,8 @@ import org.osmdroid.views.overlay.Marker
 import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 fun initializeOpenStreetMap(context: Context) {
     val baseDirectory = File(context.cacheDir, "osmdroid")
@@ -103,19 +105,74 @@ fun mapViewport(
     return MapViewport(bounds, zoom)
 }
 
-fun clusterClickZoom(currentZoom: Int, mediaCount: Long, maximumZoom: Int): Int {
-    if (mediaCount <= 1) return currentZoom
-    return (currentZoom + CLUSTER_ZOOM_STEP).coerceAtMost(maximumZoom)
-}
-
 private data class MapClusterSelection(
     val cluster: MapCluster,
     val bounds: BoundingBox,
+    val viewportRequest: MapViewportRequest,
 )
 
 data class MapViewport(
     val bounds: BoundingBox,
     val zoom: Int,
+)
+
+data class MapViewportRequest(
+    val generation: Long,
+    val viewport: MapViewport,
+)
+
+class MapViewportRequestTracker {
+    private val latestGeneration = AtomicLong(0)
+
+    fun createRequest(viewport: MapViewport): MapViewportRequest =
+        MapViewportRequest(latestGeneration.incrementAndGet(), viewport)
+
+    fun isCurrent(request: MapViewportRequest): Boolean =
+        request.generation == latestGeneration.get()
+}
+
+data class MapClusterChanges(
+    val removedIds: Set<String>,
+    val addedIds: Set<String>,
+    val retainedIds: Set<String>,
+)
+
+fun mapClusterChanges(currentIds: Set<String>, incomingIds: Set<String>): MapClusterChanges =
+    MapClusterChanges(
+        removedIds = currentIds - incomingIds,
+        addedIds = incomingIds - currentIds,
+        retainedIds = currentIds intersect incomingIds,
+    )
+
+data class MapPosition(
+    val latitude: Double,
+    val longitude: Double,
+    val zoom: Int,
+)
+
+fun parseMapPosition(serializedPosition: String?): MapPosition? {
+    val fields = serializedPosition?.split(',')
+    if (fields?.size != 3) return null
+    val latitude = fields[0].toDoubleOrNull() ?: return null
+    val longitude = fields[1].toDoubleOrNull() ?: return null
+    val zoom = fields[2].toIntOrNull() ?: return null
+    if (!latitude.isFinite() || latitude !in -90.0..90.0) return null
+    if (!longitude.isFinite() || longitude !in -180.0..180.0) return null
+    if (zoom !in MINIMUM_MAP_ZOOM..MAXIMUM_MAP_ZOOM) return null
+    return MapPosition(latitude, longitude, zoom)
+}
+
+fun serializeMapPosition(position: MapPosition): String =
+    "${position.latitude},${position.longitude},${position.zoom}"
+
+fun normalizedMapZoom(zoom: Double): Int? {
+    if (!zoom.isFinite()) return null
+    return zoom.roundToInt().coerceIn(MINIMUM_MAP_ZOOM, MAXIMUM_MAP_ZOOM)
+}
+
+private data class RenderedMapCluster(
+    val cluster: MapCluster,
+    val marker: Marker,
 )
 
 private data class OwnedMapView(
@@ -128,11 +185,18 @@ private data class OwnedMapView(
 fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
-    val viewportRequests = remember { Channel<MapViewport>(Channel.CONFLATED) }
+    val viewportRequests = remember { Channel<MapViewportRequest>(Channel.CONFLATED) }
+    val viewportRequestTracker = remember { MapViewportRequestTracker() }
     val clusterSelections = remember { Channel<MapClusterSelection>(Channel.CONFLATED) }
     val currentShowMedia by rememberUpdatedState(showMedia)
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    fun requestViewport(viewport: MapViewport) {
+        viewportRequests.trySend(viewportRequestTracker.createRequest(viewport))
+    }
+
     val ownedMapView = remember(context) {
+        val savedPosition = loadMapPosition(context) ?: DEFAULT_MAP_POSITION
         val view = MapView(context).apply {
             setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
@@ -145,8 +209,8 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
             )
             minZoomLevel = MINIMUM_MAP_ZOOM.toDouble()
             maxZoomLevel = MAXIMUM_MAP_ZOOM.toDouble()
-            controller.setZoom(INITIAL_MAP_ZOOM.toDouble())
-            controller.setCenter(GeoPoint(20.0, 0.0))
+            controller.setZoom(savedPosition.zoom.toDouble())
+            controller.setCenter(GeoPoint(savedPosition.latitude, savedPosition.longitude))
             overlays.add(
                 CopyrightOverlay(context).apply {
                     setAlignRight(true)
@@ -156,26 +220,27 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
         }
         val listener = object : MapListener {
             override fun onScroll(event: ScrollEvent): Boolean {
-                view.viewport()?.let(viewportRequests::trySend)
+                view.viewport()?.let(::requestViewport)
                 return false
             }
 
             override fun onZoom(event: ZoomEvent): Boolean {
-                view.viewport()?.let(viewportRequests::trySend)
+                view.viewport()?.let(::requestViewport)
                 return false
             }
         }
         view.addMapListener(listener)
-        view.doOnLayout { view.viewport()?.let(viewportRequests::trySend) }
+        view.doOnLayout { view.viewport()?.let(::requestViewport) }
         OwnedMapView(view, listener)
     }
     val mapView = ownedMapView.view
+    val renderedClusters = remember(mapView) { mutableMapOf<String, RenderedMapCluster>() }
 
     LaunchedEffect(mapView) {
         repeat(INITIAL_VIEWPORT_RETRIES) {
             val viewport = mapView.viewport()
             if (viewport != null) {
-                viewportRequests.send(viewport)
+                viewportRequests.send(viewportRequestTracker.createRequest(viewport))
                 return@LaunchedEffect
             }
             delay(INITIAL_VIEWPORT_RETRY_DELAY_MS)
@@ -183,51 +248,78 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
     }
 
     LaunchedEffect(repository, mapView) {
-        viewportRequests.receiveAsFlow().debounce(300).collectLatest { viewport ->
+        viewportRequests.receiveAsFlow().debounce(VIEWPORT_DEBOUNCE_MS).collectLatest { request ->
+            val viewport = request.viewport
+            mapView.position()?.let { position -> saveMapPosition(context, position) }
             try {
                 val clusters = repository.mapClusters(viewport.bounds, viewport.zoom).clusters
-                val clusterMarkers = mutableListOf<Pair<MapCluster, Marker>>()
-                clusters.chunked(MARKER_RENDER_BATCH_SIZE).forEach { clusterBatch ->
-                    clusterBatch.forEach { cluster ->
-                        val marker = Marker(mapView).apply {
-                            position = GeoPoint(cluster.lat, cluster.lng)
-                            title = "${cluster.count} photos"
-                            icon = clusterMarkerDrawable(context, null, cluster.count)
-                            setAnchor(CLUSTER_MARKER_ANCHOR_X, CLUSTER_MARKER_ANCHOR_Y)
-                            setOnMarkerClickListener { _, _ ->
-                                val nextZoom = clusterClickZoom(
-                                    currentZoom = mapView.zoomLevelDouble.toInt(),
-                                    mediaCount = cluster.count,
-                                    maximumZoom = MAXIMUM_MAP_ZOOM,
-                                )
-                                if (nextZoom > mapView.zoomLevelDouble.toInt()) {
-                                    mapView.controller.setCenter(position)
-                                    mapView.controller.setZoom(nextZoom.toDouble())
-                                }
-                                clusterSelections.trySend(MapClusterSelection(cluster, viewport.bounds))
-                                true
-                            }
-                        }
-                        clusterMarkers += cluster to marker
+                if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
+
+                val incomingClusters = clusters.associateBy { cluster -> cluster.id }
+                val changes = mapClusterChanges(renderedClusters.keys, incomingClusters.keys)
+                changes.removedIds.forEach { clusterId ->
+                    renderedClusters.remove(clusterId)?.let { renderedCluster ->
+                        mapView.overlays.remove(renderedCluster.marker)
                     }
-                    yield()
                 }
-                mapView.overlays.removeAll { it is Marker }
-                mapView.overlays.addAll(clusterMarkers.map { it.second })
+
+                val markersNeedingThumbnails = mutableListOf<RenderedMapCluster>()
+                incomingClusters.forEach { (clusterId, cluster) ->
+                    val existing = renderedClusters[clusterId]
+                    val marker = existing?.marker ?: Marker(mapView).also { newMarker ->
+                        newMarker.setAnchor(CLUSTER_MARKER_ANCHOR_X, CLUSTER_MARKER_ANCHOR_Y)
+                        mapView.overlays.add(newMarker)
+                    }
+                    val thumbnailChanged = existing == null ||
+                        existing.cluster.representativeId != cluster.representativeId ||
+                        existing.cluster.count != cluster.count
+                    marker.position = GeoPoint(cluster.lat, cluster.lng)
+                    marker.title = "${cluster.count} photos"
+                    if (thumbnailChanged) {
+                        marker.icon = clusterMarkerDrawable(context, null, cluster.count)
+                    }
+                    marker.setOnMarkerClickListener { _, _ ->
+                        if (!viewportRequestTracker.isCurrent(request)) return@setOnMarkerClickListener true
+                        clusterSelections.trySend(
+                            MapClusterSelection(
+                                cluster = cluster,
+                                bounds = viewport.bounds,
+                                viewportRequest = request,
+                            ),
+                        )
+                        true
+                    }
+                    val renderedCluster = RenderedMapCluster(cluster, marker)
+                    renderedClusters[clusterId] = renderedCluster
+                    if (thumbnailChanged) markersNeedingThumbnails += renderedCluster
+                }
                 mapView.invalidate()
                 error = null
 
-                clusterMarkers.chunked(THUMBNAIL_LOAD_BATCH_SIZE).forEach { markerBatch ->
-                    coroutineScope {
-                        markerBatch.map { (cluster, marker) ->
+                markersNeedingThumbnails.chunked(THUMBNAIL_LOAD_BATCH_SIZE).forEach { markerBatch ->
+                    val loadedThumbnails = coroutineScope {
+                        markerBatch.map { renderedCluster ->
                             async {
-                                val thumbnail = loadClusterThumbnail(context, repository, cluster.representativeId)
-                                marker.icon = clusterMarkerDrawable(context, thumbnail, cluster.count)
+                                val thumbnail = loadClusterThumbnail(
+                                    context,
+                                    repository,
+                                    renderedCluster.cluster.representativeId,
+                                )
+                                renderedCluster to thumbnail
                             }
                         }.awaitAll()
                     }
+                    if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
+                    loadedThumbnails.forEach thumbnailLoop@{ (renderedCluster, thumbnail) ->
+                        val currentCluster = renderedClusters[renderedCluster.cluster.id]
+                        if (currentCluster?.marker !== renderedCluster.marker) return@thumbnailLoop
+                        renderedCluster.marker.icon = clusterMarkerDrawable(
+                            context,
+                            thumbnail,
+                            renderedCluster.cluster.count,
+                        )
+                    }
                     mapView.invalidate()
-                    yield()
                 }
             } catch (_: IOException) {
                 error = "Could not load map photos"
@@ -243,6 +335,7 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
         clusterSelections.receiveAsFlow().collectLatest { selection ->
             try {
                 val media = repository.mapMedia(selection.bounds, clusterPrefixes(selection.cluster.id))
+                if (!viewportRequestTracker.isCurrent(selection.viewportRequest)) return@collectLatest
                 if (media.isNotEmpty()) currentShowMedia(media)
                 error = null
             } catch (_: IOException) {
@@ -273,7 +366,7 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
                 shape = MaterialTheme.shapes.large,
                 shadowElevation = 4.dp,
             ) {
-                TextButton(onClick = { error = null; mapView.viewport()?.let(viewportRequests::trySend) }) {
+                TextButton(onClick = { error = null; mapView.viewport()?.let(::requestViewport) }) {
                     Text("$message. Retry")
                 }
             }
@@ -301,7 +394,25 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
 
 private fun MapView.viewport(): MapViewport? {
     val box = boundingBox
-    return mapViewport(box.latNorth, box.latSouth, box.lonEast, box.lonWest, zoomLevelDouble.toInt())
+    val zoom = normalizedMapZoom(zoomLevelDouble) ?: return null
+    return mapViewport(box.latNorth, box.latSouth, box.lonEast, box.lonWest, zoom)
+}
+
+private fun MapView.position(): MapPosition? {
+    val center = mapCenter
+    val zoom = normalizedMapZoom(zoomLevelDouble) ?: return null
+    return parseMapPosition("${center.latitude},${center.longitude},$zoom")
+}
+
+private fun loadMapPosition(context: Context): MapPosition? =
+    parseMapPosition(
+        context.getSharedPreferences(MAP_PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(MAP_POSITION_KEY, null),
+    )
+
+private fun saveMapPosition(context: Context, position: MapPosition) {
+    context.getSharedPreferences(MAP_PREFERENCES_NAME, Context.MODE_PRIVATE)
+        .edit { putString(MAP_POSITION_KEY, serializeMapPosition(position)) }
 }
 
 fun clusterPrefixes(clusterId: String): List<String> = listOf(clusterId)
@@ -427,12 +538,9 @@ fun centerCropBounds(width: Int, height: Int): CropBounds {
     return CropBounds(0, top, width, top + width)
 }
 
-private const val MARKER_RENDER_BATCH_SIZE = 50
 private const val THUMBNAIL_LOAD_BATCH_SIZE = 12
 private const val MINIMUM_MAP_ZOOM = 2
-private const val INITIAL_MAP_ZOOM = 3
 private const val MAXIMUM_MAP_ZOOM = 20
-private const val CLUSTER_ZOOM_STEP = 2
 private const val CLUSTER_MARKER_WIDTH_DP = 68f
 private const val CLUSTER_MARKER_HEIGHT_DP = 60f
 private const val CLUSTER_THUMBNAIL_SIZE_DP = 52f
@@ -443,3 +551,7 @@ private const val CLUSTER_MARKER_ANCHOR_X = 26f / CLUSTER_MARKER_WIDTH_DP
 private const val CLUSTER_MARKER_ANCHOR_Y = 34f / CLUSTER_MARKER_HEIGHT_DP
 private const val INITIAL_VIEWPORT_RETRIES = 20
 private const val INITIAL_VIEWPORT_RETRY_DELAY_MS = 50L
+private const val VIEWPORT_DEBOUNCE_MS = 300L
+private const val MAP_PREFERENCES_NAME = "momento_map"
+private const val MAP_POSITION_KEY = "viewport"
+private val DEFAULT_MAP_POSITION = MapPosition(latitude = 20.0, longitude = 0.0, zoom = 3)

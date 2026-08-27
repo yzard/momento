@@ -3,6 +3,8 @@ package io.github.yzard.momento.feature.viewer
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.fadeIn
@@ -14,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -79,15 +82,18 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -157,18 +163,42 @@ fun mediaMetadataRows(media: Media): List<Pair<String, String>> = listOfNotNull(
     media.fileSize?.let { "File size" to formatFileSize(it) },
     media.durationSeconds?.let { "Duration" to formatDuration(it) },
     media.dateTaken?.let { "Captured" to it },
+    listOfNotNull(media.cameraMake, media.cameraModel).takeIf { it.isNotEmpty() }?.let { "Camera" to it.joinToString(" ") },
+    listOfNotNull(media.lensMake, media.lensModel).takeIf { it.isNotEmpty() }?.let { "Lens" to it.joinToString(" ") },
+    media.iso?.let { "ISO" to it.toString() },
+    media.exposureTime?.let { "Exposure" to it },
+    media.fNumber?.let { "Aperture" to "f/$it" },
+    media.focalLength?.let { "Focal length" to "$it mm" },
+    media.focalLength35mm?.let { "35 mm equivalent" to "$it mm" },
     media.locationCity?.let { city ->
         "Location" to listOfNotNull(city, media.locationState, media.locationCountry).joinToString(", ")
     },
     media.gpsLatitude?.let { latitude ->
         media.gpsLongitude?.let { longitude -> "Coordinates" to "$latitude, $longitude" }
     },
+    media.gpsAltitude?.let { "Altitude" to "$it m" },
+    media.videoCodec?.let { "Video codec" to it },
+    media.keywords?.takeIf { it.isNotBlank() }?.let { "Keywords" to it },
+    media.contentHash?.takeIf { it.isNotBlank() }?.let { "Content hash" to it },
     "Created" to media.createdAt,
 )
 
 fun shareCacheFilename(media: Media): String {
     val safeName = media.originalFilename.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { media.filename }
     return "${media.id}-$safeName"
+}
+
+fun isExpiredShareCacheFile(lastModifiedMillis: Long, nowMillis: Long): Boolean =
+    lastModifiedMillis <= 0 || nowMillis - lastModifiedMillis >= SHARE_CACHE_EXPIRY_MILLIS
+
+fun boundedViewerPan(offset: Offset, viewportSize: IntSize, scale: Float): Offset {
+    if (scale <= 1f || viewportSize.width <= 0 || viewportSize.height <= 0) return Offset.Zero
+    val maximumX = viewportSize.width * (scale - 1f) / 2f
+    val maximumY = viewportSize.height * (scale - 1f) / 2f
+    return Offset(
+        x = offset.x.coerceIn(-maximumX, maximumX),
+        y = offset.y.coerceIn(-maximumY, maximumY),
+    )
 }
 
 fun shouldToggleViewerChrome(maxPointerCount: Int, movedBeyondTouchSlop: Boolean): Boolean =
@@ -210,10 +240,17 @@ fun ViewerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var chromeVisible by remember { mutableStateOf(true) }
     var activeVideoPlayer by remember { mutableStateOf<Pair<Long, ExoPlayer>?>(null) }
+    var zoomedMediaId by remember { mutableStateOf<Long?>(null) }
+    var pendingShareFile by remember { mutableStateOf<File?>(null) }
     val context = LocalContext.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val shareLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        pendingShareFile?.delete()
+        pendingShareFile = null
+        sharing = false
+    }
     val mediaLift by animateDpAsState(
         targetValue = when {
             activeSheet == null -> 0.dp
@@ -232,16 +269,28 @@ fun ViewerScreen(
     val item = items[index]
     val timestamp = remember(item.id, item.dateTaken, item.createdAt) { viewerTimestamp(item) }
 
+    LaunchedEffect(item.id) { zoomedMediaId = null }
+    LaunchedEffect(context.cacheDir) {
+        val shareDirectory = File(context.cacheDir, SHARE_CACHE_DIRECTORY)
+        val nowMillis = System.currentTimeMillis()
+        shareDirectory.listFiles()?.forEach { cachedFile ->
+            if (isExpiredShareCacheFile(cachedFile.lastModified(), nowMillis)) cachedFile.delete()
+        }
+    }
+
     suspend fun shareCurrent() {
         if (sharing) return
         sharing = true
+        var sharedFile: File? = null
+        var launched = false
         try {
-            val sharedFile = File(File(context.cacheDir, "shared_media"), shareCacheFilename(item))
-            repository.downloadOriginal(item.id, sharedFile)
+            sharedFile = File(File(context.cacheDir, SHARE_CACHE_DIRECTORY), shareCacheFilename(item))
+            repository.downloadOriginal(item.id, requireNotNull(sharedFile))
+            requireNotNull(sharedFile).setLastModified(System.currentTimeMillis())
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
-                sharedFile,
+                requireNotNull(sharedFile),
             )
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = item.mimeType ?: if (item.mediaType == "video") "video/*" else "image/*"
@@ -249,13 +298,20 @@ fun ViewerScreen(
                 putExtra(Intent.EXTRA_TITLE, item.originalFilename)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            context.startActivity(Intent.createChooser(intent, "Share media"))
+            pendingShareFile = sharedFile
+            shareLauncher.launch(Intent.createChooser(intent, "Share media"))
+            launched = true
         } catch (_: IOException) {
+            sharedFile?.delete()
             error = "Could not prepare this media for sharing"
         } catch (_: ActivityNotFoundException) {
+            sharedFile?.delete()
             error = "No application is available to share this media"
         } finally {
-            sharing = false
+            if (!launched) {
+                pendingShareFile = null
+                sharing = false
+            }
         }
     }
 
@@ -290,7 +346,7 @@ fun ViewerScreen(
         HorizontalPager(
             state = pagerState,
             key = { page -> items[page].id },
-            userScrollEnabled = activeSheet == null,
+            userScrollEnabled = activeSheet == null && zoomedMediaId == null,
             modifier = Modifier.fillMaxSize().padding(bottom = mediaLift),
         ) { page ->
             ViewerMedia(
@@ -298,6 +354,14 @@ fun ViewerScreen(
                 repository = repository,
                 active = page == index,
                 toggleChrome = { chromeVisible = !chromeVisible },
+                zoomChanged = { zoomed ->
+                    val pageMediaId = items[page].id
+                    if (zoomed && page == index) {
+                        zoomedMediaId = pageMediaId
+                    } else if (zoomedMediaId == pageMediaId) {
+                        zoomedMediaId = null
+                    }
+                },
                 playerChanged = { mediaId, player ->
                     if (player == null) {
                         if (activeVideoPlayer?.first == mediaId) activeVideoPlayer = null
@@ -391,10 +455,12 @@ private fun ViewerMedia(
     repository: MomentoRepository,
     active: Boolean,
     toggleChrome: () -> Unit,
+    zoomChanged: (Boolean) -> Unit,
     playerChanged: (Long, ExoPlayer?) -> Unit,
     modifier: Modifier,
 ) {
     if (media.mediaType == "video") {
+        LaunchedEffect(media.id, active) { if (active) zoomChanged(false) }
         VideoViewer(media, repository, active, toggleChrome, playerChanged, modifier)
         return
     }
@@ -402,6 +468,16 @@ private fun ViewerMedia(
     val context = LocalContext.current
     val url by produceState<String?>(null, media.id) { value = repository.previewUrl(media.id) }
     var scale by remember(media.id) { mutableFloatStateOf(1f) }
+    var panOffset by remember(media.id) { mutableStateOf(Offset.Zero) }
+    var viewportSize by remember(media.id) { mutableStateOf(IntSize.Zero) }
+    LaunchedEffect(media.id, active) {
+        if (!active) {
+            scale = 1f
+            panOffset = Offset.Zero
+            zoomChanged(false)
+        }
+    }
+    DisposableEffect(media.id) { onDispose { zoomChanged(false) } }
     AsyncImage(
         model = url?.let { ImageRequest.Builder(context).data(it).build() },
         imageLoader = repository.authenticatedImageLoader(context),
@@ -409,20 +485,38 @@ private fun ViewerMedia(
         contentScale = ContentScale.Fit,
         modifier = modifier
             .viewerChromeToggle(toggleChrome)
+            .onSizeChanged { viewportSize = it }
             .pointerInput(media.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     var event: PointerEvent
                     do {
                         event = awaitPointerEvent()
-                        if (event.changes.count { it.pressed } >= 2) {
-                            scale = (scale * event.calculateZoom()).coerceIn(1f, 5f)
+                        val pointerCount = event.changes.count { it.pressed }
+                        if (pointerCount >= 2 || scale > 1f) {
+                            val nextScale = if (pointerCount >= 2) {
+                                (scale * event.calculateZoom()).coerceIn(1f, 5f)
+                            } else {
+                                scale
+                            }
+                            panOffset = if (nextScale <= 1f) {
+                                Offset.Zero
+                            } else {
+                                boundedViewerPan(panOffset + event.calculatePan(), viewportSize, nextScale)
+                            }
+                            scale = nextScale
+                            zoomChanged(scale > 1.01f)
                             event.changes.forEach { it.consume() }
                         }
                     } while (event.changes.any { it.pressed })
                 }
             }
-            .graphicsLayer(scaleX = scale, scaleY = scale),
+            .graphicsLayer(
+                scaleX = scale,
+                scaleY = scale,
+                translationX = panOffset.x,
+                translationY = panOffset.y,
+            ),
     )
 }
 
@@ -818,3 +912,6 @@ private fun formatDuration(seconds: Double): String {
     val totalSeconds = seconds.toLong().coerceAtLeast(0)
     return "%d:%02d".format(Locale.ENGLISH, totalSeconds / 60, totalSeconds % 60)
 }
+
+private const val SHARE_CACHE_DIRECTORY = "shared_media"
+private const val SHARE_CACHE_EXPIRY_MILLIS = 24L * 60 * 60 * 1_000

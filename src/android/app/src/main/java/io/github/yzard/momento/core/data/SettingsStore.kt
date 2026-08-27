@@ -18,6 +18,7 @@ import java.security.KeyStore
 import java.util.Base64
 import java.util.UUID
 import java.net.URI
+import java.net.URISyntaxException
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 
@@ -53,7 +54,9 @@ class SettingsStore(private val context: Context) {
             themePreference = parseThemePreference(it[themeKey]),
         )
     }
-    suspend fun setOrigin(origin: String) = context.preferences.edit { it[originKey] = normalizeServerOrigin(origin) }
+    suspend fun setOrigin(origin: String, allowCleartextTraffic: Boolean) = context.preferences.edit {
+        it[originKey] = normalizeServerOrigin(origin, allowCleartextTraffic)
+    }
     suspend fun setMobileDataEnabled(enabled: Boolean) = context.preferences.edit { it[mobileKey] = enabled }
     suspend fun setCameraOnly(enabled: Boolean) = context.preferences.edit { it[cameraKey] = enabled }
     suspend fun setThemePreference(themePreference: ThemePreference) = context.preferences.edit {
@@ -70,18 +73,44 @@ class SettingsStore(private val context: Context) {
     }
 }
 
-fun normalizeServerOrigin(input: String): String {
+fun normalizeServerOrigin(input: String, allowCleartextTraffic: Boolean): String {
     val candidate = input.trim().removeSuffix("/")
-    require(candidate.startsWith("https://") || candidate.startsWith("http://")) { "Server address must start with https:// or http://" }
-    val uri = URI(candidate)
-    require(!uri.host.isNullOrBlank() && uri.path.isNullOrBlank()) { "Enter a server origin without a path" }
+    val uri = try {
+        URI(candidate)
+    } catch (exception: URISyntaxException) {
+        throw IllegalArgumentException("Enter a valid server origin", exception)
+    }
+    val scheme = uri.scheme?.lowercase()
+    val validScheme = scheme == "https" || (allowCleartextTraffic && scheme == "http")
+    require(validScheme) {
+        if (allowCleartextTraffic) {
+            "Server address must start with https:// or http://"
+        } else {
+            "HTTPS is required in release builds"
+        }
+    }
+    require(!uri.host.isNullOrBlank()) { "Enter a valid server origin" }
+    require(uri.path.isNullOrBlank()) { "Enter a server origin without a path" }
+    require(uri.userInfo == null && uri.query == null && uri.fragment == null) {
+        "Enter a server origin without credentials, a query, or a fragment"
+    }
     return candidate
 }
 
 class EncryptedTokenStore(context: Context) {
     private val storage = context.getSharedPreferences("momento_secure", Context.MODE_PRIVATE)
     private val keyAlias = "momento_tokens"
-    private val authenticationState = AuthenticationState(storage.getString("access", null) != null)
+    private val authenticationCompleteKey = "authentication_complete"
+    private val authenticationState = AuthenticationState(
+        authenticationCompleted(
+            encryptedAccessToken = storage.getString("access", null),
+            storedCompletion = if (storage.contains(authenticationCompleteKey)) {
+                storage.getBoolean(authenticationCompleteKey, false)
+            } else {
+                null
+            },
+        ),
+    )
     val isAuthenticated: StateFlow<Boolean> = authenticationState.isAuthenticated
     private fun key(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -101,10 +130,20 @@ class EncryptedTokenStore(context: Context) {
         return cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString()
     }
     fun saveTokens(tokens: TokenPair) {
-        storage.edit().putString("access", encrypt(tokens.accessToken)).putString("refresh", encrypt(tokens.refreshToken)).apply()
+        storage.edit()
+            .putString("access", encrypt(tokens.accessToken))
+            .putString("refresh", encrypt(tokens.refreshToken))
+            .putBoolean(authenticationCompleteKey, false)
+            .apply()
+        authenticationState.signedOut()
     }
     fun markAuthenticated() {
+        storage.edit().putBoolean(authenticationCompleteKey, true).apply()
         authenticationState.signedIn()
+    }
+    fun markAuthenticationIncomplete() {
+        storage.edit().putBoolean(authenticationCompleteKey, false).apply()
+        authenticationState.signedOut()
     }
     fun accessToken(): String? = storage.getString("access", null)?.let(::decrypt)
     fun refreshToken(): String? = storage.getString("refresh", null)?.let(::decrypt)
@@ -112,4 +151,9 @@ class EncryptedTokenStore(context: Context) {
         storage.edit().clear().apply()
         authenticationState.signedOut()
     }
+}
+
+fun authenticationCompleted(encryptedAccessToken: String?, storedCompletion: Boolean?): Boolean {
+    if (encryptedAccessToken == null) return false
+    return storedCompletion ?: true
 }

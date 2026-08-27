@@ -74,7 +74,7 @@ where
 
 #[derive(Deserialize)]
 struct MediaAccessTicketQuery {
-    ticket: String,
+    ticket: Option<String>,
 }
 
 pub struct MediaAccessAuthorization {
@@ -105,6 +105,26 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
+        if let Some(ticket) = media_access_ticket(parts.uri.query())? {
+            let claims =
+                decode_media_access_ticket(&ticket, &app_state.config).ok_or_else(|| {
+                    AppError::Authentication("Invalid or expired media access ticket".to_string())
+                })?;
+            let user_id = claims
+                .sub
+                .parse::<i64>()
+                .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
+            let current_user = load_current_user(&app_state, user_id)?;
+            if current_user.must_change_password {
+                return Err(AppError::Forbidden("Password change required".to_string()));
+            }
+
+            return Ok(Self {
+                user_id,
+                ticket_scope: Some((claims.media_id, claims.resource)),
+            });
+        }
+
         if parts.headers.contains_key(AUTHORIZATION) {
             let current_user = CurrentUser::from_request_parts(parts, state).await?;
             return Ok(Self {
@@ -113,29 +133,19 @@ where
             });
         }
 
-        let query = parts.uri.query().ok_or_else(|| {
-            AppError::Authentication("Media access ticket is required".to_string())
-        })?;
-        let ticket_query = serde_urlencoded::from_str::<MediaAccessTicketQuery>(query)
-            .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
-        let claims = decode_media_access_ticket(&ticket_query.ticket, &app_state.config)
-            .ok_or_else(|| {
-                AppError::Authentication("Invalid or expired media access ticket".to_string())
-            })?;
-        let user_id = claims
-            .sub
-            .parse::<i64>()
-            .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
-        let current_user = load_current_user(&app_state, user_id)?;
-        if current_user.must_change_password {
-            return Err(AppError::Forbidden("Password change required".to_string()));
-        }
-
-        Ok(Self {
-            user_id,
-            ticket_scope: Some((claims.media_id, claims.resource)),
-        })
+        Err(AppError::Authentication(
+            "Media access ticket is required".to_string(),
+        ))
     }
+}
+
+fn media_access_ticket(query: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    let ticket_query = serde_urlencoded::from_str::<MediaAccessTicketQuery>(query)
+        .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
+    Ok(ticket_query.ticket)
 }
 
 fn bearer_token(parts: &Parts) -> Result<&str, AppError> {

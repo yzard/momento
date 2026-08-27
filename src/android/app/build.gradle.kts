@@ -43,7 +43,7 @@ android {
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     sourceSets {
-        getByName("test").java.srcDir("../../../tests/android")
+        getByName("test").java.srcDir("../../../tests/android/io")
         getByName("androidTest").java.srcDir("../../../tests/android/instrumented")
     }
 
@@ -57,7 +57,13 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "ALLOW_CLEARTEXT_TRAFFIC", "true")
+            manifestPlaceholders["momentoUsesCleartextTraffic"] = "true"
+        }
         getByName("release") {
+            buildConfigField("boolean", "ALLOW_CLEARTEXT_TRAFFIC", "false")
+            manifestPlaceholders["momentoUsesCleartextTraffic"] = "false"
             signingConfig = signingConfigs.getByName("release")
         }
     }
@@ -118,4 +124,5 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext)
     androidTestImplementation(libs.espresso)
     debugImplementation(libs.compose.ui.tooling)
+    debugImplementation(libs.compose.ui.test.manifest)
 }

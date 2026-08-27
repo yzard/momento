@@ -52,6 +52,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material3.MaterialTheme
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import io.github.yzard.momento.BuildConfig
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.data.Settings
@@ -61,15 +63,24 @@ import io.github.yzard.momento.core.database.BackupDatabase
 import io.github.yzard.momento.core.database.BackupQueueCount
 import io.github.yzard.momento.core.model.BackupState
 import io.github.yzard.momento.core.model.User
+import io.github.yzard.momento.feature.backup.BackupMediaAccess
+import io.github.yzard.momento.feature.backup.PERIODIC_BACKUP_WORK_NAME
+import io.github.yzard.momento.feature.backup.backupMediaAccessLabel
 import io.github.yzard.momento.feature.backup.backupReadPermissions
+import io.github.yzard.momento.feature.backup.currentBackupMediaAccess
 import io.github.yzard.momento.feature.backup.isBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.observeBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.requestBackupCancellation
-import io.github.yzard.momento.feature.backup.scheduleBackup
+import io.github.yzard.momento.feature.backup.scheduleImmediateBackup
+import io.github.yzard.momento.feature.backup.schedulePeriodicBackup
+import io.github.yzard.momento.feature.auth.PasswordChangeFields
+import io.github.yzard.momento.feature.auth.validateNewPassword
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.io.IOException
 import java.io.File
+import java.text.DateFormat
+import java.util.Date
 
 enum class AndroidUpdateDecision { INVALID_PACKAGE, UP_TO_DATE, UPDATE_AVAILABLE }
 
@@ -119,10 +130,12 @@ fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): Stri
     return "$uploaded/$total media uploaded, uploading..."
 }
 
-fun validateNewPassword(newPassword: String, confirmation: String): String? = when {
-    newPassword.length < 8 -> "New password must be at least 8 characters"
-    newPassword != confirmation -> "New passwords do not match"
-    else -> null
+enum class BackupScheduleStatus { NOT_SCHEDULED, WAITING, RUNNING }
+
+fun backupScheduleSummary(status: BackupScheduleStatus, nextScheduledAt: String?): String = when (status) {
+    BackupScheduleStatus.NOT_SCHEDULED -> "Daily backup is not scheduled"
+    BackupScheduleStatus.RUNNING -> "Daily backup is running now"
+    BackupScheduleStatus.WAITING -> nextScheduledAt?.let { "Next daily backup: $it" } ?: "Daily backup is scheduled"
 }
 
 fun themePreferenceLabel(themePreference: ThemePreference): String = when (themePreference) {
@@ -145,6 +158,13 @@ fun SettingsScreen(
     val queueCounts by remember(database, settings.cameraOnly) {
         database.backupAssetDao().observeCounts(settings.cameraOnly)
     }.collectAsState(initial = emptyList())
+    val latestBackupError by remember(database) {
+        database.backupAssetDao().observeLatestError()
+    }.collectAsState(initial = null)
+    val workManager = remember(context) { WorkManager.getInstance(context.applicationContext) }
+    val periodicWorkInfos by remember(workManager) {
+        workManager.getWorkInfosForUniqueWorkFlow(PERIODIC_BACKUP_WORK_NAME)
+    }.collectAsState(initial = emptyList())
     val networkAllowed by remember(context, settings.mobileDataEnabled) {
         observeBackupNetworkAllowed(context.applicationContext, settings.mobileDataEnabled)
     }.collectAsState(
@@ -156,7 +176,19 @@ fun SettingsScreen(
     var updateBusy by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf("Check the signed-in host for a newer Android release") }
     var pendingUpdatePath by rememberSaveable { mutableStateOf<String?>(null) }
+    var mediaAccess by remember { mutableStateOf(currentBackupMediaAccess(context)) }
     val scope = rememberCoroutineScope()
+    val activePeriodicWork = periodicWorkInfos.firstOrNull { !it.state.isFinished }
+    val backupScheduleStatus = when (activePeriodicWork?.state) {
+        WorkInfo.State.RUNNING -> BackupScheduleStatus.RUNNING
+        null -> BackupScheduleStatus.NOT_SCHEDULED
+        else -> BackupScheduleStatus.WAITING
+    }
+    val nextScheduledAt = activePeriodicWork?.nextScheduleTimeMillis
+        ?.takeIf { it > 0 && it < Long.MAX_VALUE }
+        ?.let { scheduledAt ->
+            DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(scheduledAt))
+        }
     val canCancelBackup = queueCounts.any { (state, count) ->
         count > 0 && state in setOf(
             BackupState.QUEUED,
@@ -167,8 +199,12 @@ fun SettingsScreen(
             BackupState.CANCELLING,
         )
     }
-    val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-        if (permissions.values.all { it }) scheduleBackup(context, settings.mobileDataEnabled, true)
+    val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        mediaAccess = currentBackupMediaAccess(context)
+        if (mediaAccess != BackupMediaAccess.DENIED) {
+            schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
+            scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
+        }
     }
     val installerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pendingUpdatePath?.let(::File)?.delete()
@@ -341,20 +377,27 @@ fun SettingsScreen(
             SettingsSwitch("Camera folder only", settings.cameraOnly) { enabled ->
                 scope.launch {
                     settingsStore.setCameraOnly(enabled)
-                    scheduleBackup(context, settings.mobileDataEnabled, false)
+                    if (mediaAccess != BackupMediaAccess.DENIED) {
+                        schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
+                    }
                 }
             }
             SettingsSwitch("Use mobile data", settings.mobileDataEnabled) { enabled ->
                 scope.launch {
                     settingsStore.setMobileDataEnabled(enabled)
-                    scheduleBackup(context, enabled, false)
+                    if (mediaAccess != BackupMediaAccess.DENIED) {
+                        schedulePeriodicBackup(context.applicationContext, enabled)
+                    }
                 }
             }
             ListItem(
                 headlineContent = { Text("Back up this device") },
                 supportingContent = {
                     Column {
+                        Text(backupMediaAccessLabel(mediaAccess))
                         Text(backupSummary(queueCounts, networkAllowed))
+                        Text(backupScheduleSummary(backupScheduleStatus, nextScheduledAt))
+                        latestBackupError?.let { Text("Recent issue: $it") }
                         Text("Metadata and AI processing run separately on the server schedule.")
                     }
                 },
@@ -368,6 +411,7 @@ fun SettingsScreen(
                                         requestBackupCancellation(
                                             context.applicationContext,
                                             database.backupAssetDao(),
+                                            settings.mobileDataEnabled,
                                         )
                                     }
                                 },
@@ -375,7 +419,17 @@ fun SettingsScreen(
                                 Text("Cancel")
                             }
                         }
-                        TextButton(onClick = { permissionRequest.launch(backupReadPermissions()) }) {
+                        TextButton(
+                            onClick = {
+                                mediaAccess = currentBackupMediaAccess(context)
+                                if (mediaAccess == BackupMediaAccess.DENIED) {
+                                    permissionRequest.launch(backupReadPermissions(Build.VERSION.SDK_INT))
+                                } else {
+                                    schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
+                                    scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
+                                }
+                            },
+                        ) {
                             Text("Backup Now")
                         }
                     }
@@ -485,27 +539,35 @@ private fun PasswordDialog(repository: MomentoRepository, dismiss: () -> Unit) {
     var newPassword by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var submitting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text("Change password") },
         text = {
-            Column {
-                OutlinedTextField(currentPassword, { currentPassword = it }, label = { Text("Current password") }, visualTransformation = PasswordVisualTransformation())
-                OutlinedTextField(newPassword, { newPassword = it }, label = { Text("New password") }, visualTransformation = PasswordVisualTransformation())
-                OutlinedTextField(confirmation, { confirmation = it }, label = { Text("Confirm new password") }, visualTransformation = PasswordVisualTransformation())
-                error?.let { Text(it) }
-            }
+            PasswordChangeFields(
+                currentPassword = currentPassword,
+                newPassword = newPassword,
+                confirmation = confirmation,
+                changeCurrentPassword = { currentPassword = it },
+                changeNewPassword = { newPassword = it },
+                changeConfirmation = { confirmation = it },
+                enabled = !submitting,
+                errorMessage = error,
+                modifier = Modifier,
+            )
         },
         confirmButton = {
             TextButton({
+                if (submitting) return@TextButton
                 val validation = validateNewPassword(newPassword, confirmation)
                 if (validation != null) {
                     error = validation
                     return@TextButton
                 }
                 scope.launch {
+                    submitting = true
                     try {
                         repository.changePassword(currentPassword, newPassword)
                         dismiss()
@@ -513,10 +575,12 @@ private fun PasswordDialog(repository: MomentoRepository, dismiss: () -> Unit) {
                         error = "Could not change password"
                     } catch (_: IOException) {
                         error = "Could not reach the server"
+                    } finally {
+                        submitting = false
                     }
                 }
-            }) { Text("Save") }
+            }, enabled = !submitting) { Text(if (submitting) "Saving" else "Save") }
         },
-        dismissButton = { TextButton(dismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(dismiss, enabled = !submitting) { Text("Cancel") } },
     )
 }

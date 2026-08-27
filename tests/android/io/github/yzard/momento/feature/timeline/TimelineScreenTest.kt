@@ -34,6 +34,17 @@ class TimelineScreenTest {
     }
 
     @Test
+    fun createsIndependentScrollKeysForFilters() {
+        assertEquals("TIMELINE:DAY:", timelineScrollKey(TimelinePage.TIMELINE, TimelinePeriod.DAY, ""))
+        assertEquals("PHOTOS:MONTH:receipt", timelineScrollKey(TimelinePage.PHOTOS, TimelinePeriod.MONTH, "receipt"))
+    }
+
+    @Test
+    fun dateJumpUsesTheEndOfTheSelectedUtcDate() {
+        assertEquals("2026-08-26T23:59:59.999Z", datePickerAnchorDate(1_787_702_400_000L))
+    }
+
+    @Test
     fun appendsWhenScrollApproachesEnd() {
         assertTrue(shouldAppendTimeline(8, 10, hasOlder = true, appending = false))
         assertFalse(shouldAppendTimeline(8, 10, hasOlder = true, appending = true))

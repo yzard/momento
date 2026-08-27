@@ -6,7 +6,7 @@ import org.junit.Test
 
 class MomentoRepositoryTest {
     @Test fun createsUnfilteredDailyTimelineRequest() {
-        val request = timelineRequest(null, "day", "", null, null, "2026-01-01T00:00:00Z")
+        val request = timelineRequest(null, "day", "", null, null, "older", "2026-01-01T00:00:00Z")
         assertEquals(100, request.limit)
         assertNull(request.cursor)
         assertEquals("day", request.groupBy)
@@ -23,6 +23,7 @@ class MomentoRepositoryTest {
             "receipt",
             "image",
             "screenshot",
+            "newer",
             "2026-01-01T00:00:00Z",
         )
         assertEquals("cursor", request.cursor)
@@ -30,6 +31,7 @@ class MomentoRepositoryTest {
         assertEquals("receipt", request.search)
         assertEquals("image", request.mediaType)
         assertEquals("screenshot", request.classification)
+        assertEquals("newer", request.direction)
         assertEquals("2026-01-01T00:00:00Z", request.anchorDate)
     }
 

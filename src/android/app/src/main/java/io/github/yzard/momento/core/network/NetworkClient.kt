@@ -54,7 +54,11 @@ class NetworkClient(private val tokenStore: EncryptedTokenStore) {
     suspend fun refresh(origin: String, rejectedToken: String): Boolean = refreshMutex.withLock {
         val currentToken = tokenStore.accessToken()
         if (currentToken != null && currentToken != rejectedToken) return@withLock true
-        val refreshToken = tokenStore.refreshToken() ?: return@withLock false
+        val refreshToken = tokenStore.refreshToken()
+        if (refreshToken == null) {
+            tokenStore.clear()
+            return@withLock false
+        }
         try {
             tokenStore.saveTokens(createApi(origin, OkHttpClient()).refresh(RefreshTokenRequest(refreshToken)))
             true

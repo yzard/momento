@@ -2,7 +2,9 @@ package io.github.yzard.momento.feature.map
 
 import io.github.yzard.momento.core.model.BoundingBox
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativeMapScreenTest {
@@ -33,10 +35,47 @@ class NativeMapScreenTest {
         assertNull(mapViewport(0.0, 0.0, 0.0, 0.0, 2))
     }
 
-    @Test fun multiMediaClustersZoomInWithoutExceedingTheMaximum() {
-        assertEquals(10, clusterClickZoom(currentZoom = 8, mediaCount = 3, maximumZoom = 20))
-        assertEquals(20, clusterClickZoom(currentZoom = 19, mediaCount = 3, maximumZoom = 20))
-        assertEquals(8, clusterClickZoom(currentZoom = 8, mediaCount = 1, maximumZoom = 20))
+    @Test fun onlyTheNewestViewportRequestCanUpdateMarkers() {
+        val tracker = MapViewportRequestTracker()
+        val first = tracker.createRequest(
+            MapViewport(BoundingBox(52.0, 51.0, 5.0, 4.0), 8),
+        )
+        val second = tracker.createRequest(
+            MapViewport(BoundingBox(53.0, 52.0, 6.0, 5.0), 9),
+        )
+
+        assertFalse(tracker.isCurrent(first))
+        assertTrue(tracker.isCurrent(second))
+    }
+
+    @Test fun calculatesStableClusterOverlayChanges() {
+        assertEquals(
+            MapClusterChanges(
+                removedIds = setOf("old"),
+                addedIds = setOf("new"),
+                retainedIds = setOf("stable"),
+            ),
+            mapClusterChanges(
+                currentIds = setOf("old", "stable"),
+                incomingIds = setOf("stable", "new"),
+            ),
+        )
+    }
+
+    @Test fun roundsAnimatedZoomAndKeepsItInsideTheServerRange() {
+        assertEquals(9, normalizedMapZoom(8.6))
+        assertEquals(2, normalizedMapZoom(1.4))
+        assertEquals(20, normalizedMapZoom(24.0))
+        assertNull(normalizedMapZoom(Double.NaN))
+    }
+
+    @Test fun savesAndValidatesTheLastMapPosition() {
+        val position = MapPosition(40.7128, -74.006, 12)
+        assertEquals(position, parseMapPosition(serializeMapPosition(position)))
+        assertNull(parseMapPosition("91.0,0.0,12"))
+        assertNull(parseMapPosition("0.0,181.0,12"))
+        assertNull(parseMapPosition("0.0,0.0,99"))
+        assertNull(parseMapPosition("broken"))
     }
 
     @Test fun cropsClusterThumbnailsFromTheCenter() {

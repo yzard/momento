@@ -2,17 +2,16 @@ package io.github.yzard.momento.feature.media
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.Icon
@@ -30,54 +29,77 @@ import coil.request.ImageRequest
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Media
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun MediaGrid(media: List<Media>, repository: MomentoRepository, select: (Media) -> Unit) {
-    BoxWithConstraints {
-        val columns = adaptiveGridColumns(maxWidth.value.toInt())
-        val cellWidth = mediaCellWidth(maxWidth.value, columns, 1f).dp
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            media.chunked(columns).forEach { row ->
-                MediaRow(row, repository, columns, cellWidth, select)
+fun MediaGrid(
+    media: List<Media>,
+    repository: MomentoRepository,
+    selectedMediaIds: Set<Long>,
+    contentPadding: PaddingValues,
+    headerContent: (@Composable () -> Unit)?,
+    footerContent: (@Composable () -> Unit)?,
+    modifier: Modifier,
+    select: (Media) -> Unit,
+) {
+    LazyMediaGrid(
+        entries = media,
+        entryKey = { mediaItem -> mediaItem.id },
+        entrySelected = { mediaItem -> mediaItem.id in selectedMediaIds },
+        contentPadding = contentPadding,
+        headerContent = headerContent,
+        footerContent = footerContent,
+        modifier = modifier,
+    ) { mediaItem, selected ->
+        SelectableMediaThumbnail(
+            media = mediaItem,
+            repository = repository,
+            trashed = false,
+            selected = selected,
+            modifier = Modifier
+                .aspectRatio(1f)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { select(mediaItem) },
+        )
+    }
+}
+
+@Composable
+internal fun <GridEntry> LazyMediaGrid(
+    entries: List<GridEntry>,
+    entryKey: (GridEntry) -> Any,
+    entrySelected: (GridEntry) -> Boolean,
+    contentPadding: PaddingValues,
+    headerContent: (@Composable () -> Unit)?,
+    footerContent: (@Composable () -> Unit)?,
+    modifier: Modifier,
+    entryContent: @Composable (GridEntry, Boolean) -> Unit,
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(MINIMUM_MEDIA_CELL_SIZE),
+        modifier = modifier,
+        contentPadding = contentPadding,
+        horizontalArrangement = Arrangement.spacedBy(1.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        headerContent?.let { header ->
+            item(
+                key = MEDIA_GRID_HEADER_KEY,
+                span = { GridItemSpan(maxLineSpan) },
+            ) {
+                header()
+            }
+        }
+        items(entries, key = entryKey) { gridEntry ->
+            entryContent(gridEntry, entrySelected(gridEntry))
+        }
+        footerContent?.let { footer ->
+            item(
+                key = MEDIA_GRID_FOOTER_KEY,
+                span = { GridItemSpan(maxLineSpan) },
+            ) {
+                footer()
             }
         }
     }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-fun MediaRow(
-    media: List<Media>,
-    repository: MomentoRepository,
-    columns: Int,
-    cellWidth: androidx.compose.ui.unit.Dp,
-    select: (Media) -> Unit,
-) {
-    FlowRow(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(1.dp),
-        maxItemsInEachRow = columns,
-    ) {
-        media.forEach { item ->
-            MediaThumbnail(
-                media = item,
-                repository = repository,
-                trashed = false,
-                modifier = Modifier
-                    .width(cellWidth)
-                    .aspectRatio(1f)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .clickable { select(item) },
-            )
-        }
-    }
-}
-
-fun mediaRows(ids: List<Long>, columns: Int): List<List<Long>> = ids.chunked(columns)
-
-fun mediaCellWidth(containerWidth: Float, columns: Int, gap: Float): Float {
-    require(columns > 0) { "columns must be positive" }
-    return ((containerWidth - gap * (columns - 1)) / columns).coerceAtLeast(0f)
 }
 
 @Composable
@@ -119,3 +141,7 @@ fun SelectableMediaThumbnail(
 
 fun toggleMediaSelection(selectedIds: Set<Long>, mediaId: Long): Set<Long> =
     if (mediaId in selectedIds) selectedIds - mediaId else selectedIds + mediaId
+
+private val MINIMUM_MEDIA_CELL_SIZE = 112.dp
+private const val MEDIA_GRID_HEADER_KEY = "media-grid-header"
+private const val MEDIA_GRID_FOOTER_KEY = "media-grid-footer"

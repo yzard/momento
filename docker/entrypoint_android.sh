@@ -207,7 +207,7 @@ stop_emulator() {
 
 case "$command_name" in
     verify)
-        run_gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+        run_gradle :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug
         ;;
     assemble-debug)
         run_gradle :app:assembleDebug

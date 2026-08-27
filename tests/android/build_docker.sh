@@ -39,7 +39,9 @@ set -euo pipefail
 [[ "$2" == --keystore-dir ]]
 [[ -d "$3" ]]
 mkdir -p "$(dirname "$0")/dist/android"
-: > "$(dirname "$0")/dist/android/Momento-Release-1.0.0.apk"
+if [[ "${MOMENTO_TEST_SKIP_ANDROID_APK:-false}" != true ]]; then
+    printf 'signed-release-apk\n' > "$(dirname "$0")/dist/android/Momento-Release-1.0.0.apk"
+fi
 printf 'android:%s\n' "$*" >> "$MOMENTO_TEST_INVOCATIONS"
 ANDROID
 chmod +x "$workspace/build_android_client.sh"
@@ -66,6 +68,8 @@ expect_failure "Usage:" run_script
 help_output=$(run_script --help)
 [[ "$help_output" == *"Cargo's release profile"* ]] || fail "help did not explain Rust release behavior"
 [[ "$help_output" == *"SOURCE_REPOSITORY"* ]] || fail "help did not explain environment options"
+MOMENTO_TEST_SKIP_ANDROID_APK=true expect_failure "exactly one non-empty signed release APK" run_script "$keystore_dir"
+: > "$invocation_log"
 run_script "$keystore_dir"
 mapfile -t local_invocations < "$invocation_log"
 [[ "${local_invocations[0]}" == "android:release --keystore-dir $keystore_dir" ]] || fail "Android release did not run first with the keystore directory"

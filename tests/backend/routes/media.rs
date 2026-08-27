@@ -159,10 +159,20 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
     ticket_range.assert_status(StatusCode::PARTIAL_CONTENT);
     ticket_range.assert_header(CONTENT_RANGE, "bytes 1-3/6");
     ticket_range.assert_header("referrer-policy", "no-referrer");
+    server
+        .get(ticket_url)
+        .add_header(AUTHORIZATION, "Basic cached-browser-credential")
+        .await
+        .assert_status_ok();
 
     let (ticket_prefix, ticket) = ticket_url.split_once("?ticket=").expect("ticket query");
     server
         .get(&format!("{ticket_prefix}?ticket={ticket}tampered"))
+        .await
+        .assert_status_unauthorized();
+    server
+        .get(&format!("{ticket_prefix}?ticket={ticket}tampered"))
+        .add_header(AUTHORIZATION, authorization.clone())
         .await
         .assert_status_unauthorized();
     server

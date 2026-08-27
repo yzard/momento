@@ -2,11 +2,33 @@ package io.github.yzard.momento.feature.faces
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -17,6 +39,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.FaceGroup
@@ -25,10 +52,13 @@ import io.github.yzard.momento.feature.media.EmptyState
 import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.media.MediaGrid
+import io.github.yzard.momento.feature.media.adaptiveGridColumns
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 import java.io.IOException
+
+fun canMergeFaceGroups(selectedIds: Set<Long>, working: Boolean): Boolean = selectedIds.size >= 2 && !working
 
 @Composable
 fun FacesScreen(
@@ -43,6 +73,7 @@ fun FacesScreen(
     var detail by remember(repository) { mutableStateOf<FaceGroup?>(null) }
     var loading by remember(repository) { mutableStateOf(false) }
     var working by remember(repository) { mutableStateOf(false) }
+    var confirmMerge by remember(repository) { mutableStateOf(false) }
     var error by remember(repository) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -102,19 +133,19 @@ fun FacesScreen(
         groups == null && error != null -> ErrorState(error!!) { scope.launch { loadGroups(true) } }
         groups == null -> LoadingState()
         groups!!.isEmpty() -> EmptyState("No faces yet")
-        else -> Column {
-            if (isAdmin && selectedIds.size >= 2) {
-                Button(
-                    onClick = { scope.launch { mergeSelected() } },
-                    enabled = !working,
-                ) {
-                    Text(if (working) "Merging..." else "Merge selected")
+        else -> BoxWithConstraints(Modifier.fillMaxSize()) {
+            val columns = adaptiveGridColumns(maxWidth.value.toInt())
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                contentPadding = PaddingValues(top = 64.dp, start = 10.dp, end = 10.dp, bottom = 160.dp),
+            ) {
+                if (error != null) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Text(requireNotNull(error), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
+                    }
                 }
-            }
-            error?.let { Text(it) }
-            LazyColumn {
-                items(groups!!, key = { it.faceGroupId }) { group ->
-                    FaceRow(
+                items(requireNotNull(groups), key = { it.faceGroupId }) { group ->
+                    FaceCard(
                         group = group,
                         repository = repository,
                         selected = group.faceGroupId in selectedIds,
@@ -130,17 +161,51 @@ fun FacesScreen(
                     )
                 }
                 if (hasMore) {
-                    item {
-                        TextButton(
-                            onClick = { scope.launch { loadGroups(false) } },
-                            enabled = !loading,
-                        ) {
-                            Text(if (loading) "Loading more..." else "Load more")
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            TextButton(
+                                onClick = { scope.launch { loadGroups(false) } },
+                                enabled = !loading,
+                            ) { Text(if (loading) "Loading more..." else "Load more people") }
+                        }
+                    }
+                }
+            }
+            if (isAdmin && selectedIds.isNotEmpty()) {
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shape = RoundedCornerShape(18.dp),
+                    shadowElevation = 8.dp,
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("${selectedIds.size} people selected", fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { selectedIds = emptySet() }, enabled = !working) { Text("Clear") }
+                        Button(onClick = { confirmMerge = true }, enabled = canMergeFaceGroups(selectedIds, working)) {
+                            Text(if (working) "Merging" else "Merge")
                         }
                     }
                 }
             }
         }
+    }
+
+    if (confirmMerge) {
+        AlertDialog(
+            onDismissRequest = { if (!working) confirmMerge = false },
+            title = { Text("Merge ${selectedIds.size} people?") },
+            text = { Text("Their face groups will become one person. Media files are not changed.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmMerge = false
+                    scope.launch { mergeSelected() }
+                }, enabled = !working) { Text("Merge") }
+            },
+            dismissButton = { TextButton(onClick = { confirmMerge = false }, enabled = !working) { Text("Cancel") } },
+        )
     }
 }
 
@@ -152,8 +217,9 @@ private fun FaceGroupDetailScreen(
 ) {
     var media by remember(repository, group.faceGroupId) { mutableStateOf<List<Media>?>(null) }
     var error by remember(repository, group.faceGroupId) { mutableStateOf<String?>(null) }
+    var retryVersion by remember(repository, group.faceGroupId) { mutableStateOf(0) }
 
-    LaunchedEffect(repository, group.faceGroupId) {
+    LaunchedEffect(repository, group.faceGroupId, retryVersion) {
         try {
             media = repository.faceGroup(group.faceGroupId).media
             error = null
@@ -167,17 +233,29 @@ private fun FaceGroupDetailScreen(
     }
 
     when {
-        media == null && error != null -> ErrorState(error!!) {}
+        media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
         media == null -> LoadingState()
-        else -> Column {
-            Text("Person ${group.faceGroupId}")
-            MediaGrid(media!!, repository) { item -> openMedia(media!!, media!!.indexOf(item)) }
+        else -> MediaGrid(
+            media = media!!,
+            repository = repository,
+            selectedMediaIds = emptySet(),
+            contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
+            headerContent = {
+                Text(
+                    "Person ${group.faceGroupId}",
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                )
+            },
+            footerContent = null,
+            modifier = Modifier.fillMaxSize(),
+        ) { mediaItem ->
+            openMedia(media!!, media!!.indexOf(mediaItem))
         }
     }
 }
 
 @Composable
-private fun FaceRow(
+private fun FaceCard(
     group: FaceGroup,
     repository: MomentoRepository,
     selected: Boolean,
@@ -197,21 +275,41 @@ private fun FaceRow(
             null
         }
     }
-    ListItem(
-        headlineContent = { Text("Person ${group.faceGroupId}") },
-        supportingContent = { Text("${group.mediaCount} photos") },
-        leadingContent = { AsyncImage(image, null) },
-        trailingContent = if (selectable) {
-            {
-                TextButton(onClick = toggleSelection) {
-                    Text(if (selected) "Selected" else "Select")
+    Card(
+        modifier = Modifier.padding(6.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+    ) {
+        Box {
+            if (image == null) {
+                Box(
+                    Modifier.fillMaxWidth().aspectRatio(1f).background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Default.Face, "No face thumbnail") }
+            } else {
+                AsyncImage(
+                    model = image,
+                    contentDescription = "Person ${group.faceGroupId}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(1f).clickable(onClick = open),
+                )
+            }
+            if (selectable) {
+                IconButton(onClick = toggleSelection, modifier = Modifier.align(Alignment.TopEnd)) {
+                    Icon(
+                        if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                        if (selected) "Deselect person ${group.faceGroupId}" else "Select person ${group.faceGroupId}",
+                        tint = if (selected) MaterialTheme.colorScheme.primary else Color.White,
+                    )
                 }
             }
-        } else {
-            null
-        },
-        modifier = Modifier.clickable(onClick = open),
-    )
+        }
+        Column(Modifier.fillMaxWidth().clickable(onClick = open).padding(12.dp)) {
+            Text("Person ${group.faceGroupId}", style = MaterialTheme.typography.titleSmall)
+            Text("${group.mediaCount} media · ${group.faceCount} faces", style = MaterialTheme.typography.bodySmall)
+        }
+    }
 }
 
 fun appendFaceGroups(existing: List<FaceGroup>, page: List<FaceGroup>): List<FaceGroup> =

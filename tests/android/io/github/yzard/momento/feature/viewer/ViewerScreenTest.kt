@@ -1,5 +1,7 @@
 package io.github.yzard.momento.feature.viewer
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntSize
 import io.github.yzard.momento.core.model.Media
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -34,15 +36,52 @@ class ViewerScreenTest {
 
     @Test
     fun exposesAvailableMetadataWithoutPlaceholderRows() {
-        val rows = media(1).copy(width = 1200, height = 800, fileSize = 2048).let(::mediaMetadataRows)
+        val rows = media(1).copy(
+            width = 1200,
+            height = 800,
+            fileSize = 2048,
+            cameraMake = "Canon",
+            cameraModel = "R5",
+            lensModel = "RF 24-70mm",
+            iso = 400,
+            exposureTime = "1/250",
+            fNumber = 2.8,
+            focalLength = 50.0,
+            videoCodec = "h265",
+            keywords = "vacation,beach",
+            contentHash = "abc123",
+        ).let(::mediaMetadataRows)
 
         assertTrue("Dimensions" to "1200 x 800" in rows)
         assertTrue("File size" to "2.0 KiB" in rows)
+        assertTrue("Camera" to "Canon R5" in rows)
+        assertTrue("Lens" to "RF 24-70mm" in rows)
+        assertTrue("ISO" to "400" in rows)
+        assertTrue("Exposure" to "1/250" in rows)
+        assertTrue("Aperture" to "f/2.8" in rows)
+        assertTrue("Focal length" to "50.0 mm" in rows)
+        assertTrue("Video codec" to "h265" in rows)
+        assertTrue("Keywords" to "vacation,beach" in rows)
+        assertTrue("Content hash" to "abc123" in rows)
     }
 
     @Test
     fun createsAProviderSafeShareFilename() {
         assertEquals("9-my_photo_.jpg", shareCacheFilename(media(9).copy(originalFilename = "my photo?.jpg")))
+    }
+
+    @Test
+    fun expiresOldShareFilesButKeepsRecentFiles() {
+        val now = 2L * 24 * 60 * 60 * 1_000
+        assertTrue(isExpiredShareCacheFile(0, now))
+        assertTrue(isExpiredShareCacheFile(now - 24L * 60 * 60 * 1_000, now))
+        assertFalse(isExpiredShareCacheFile(now - 1_000, now))
+    }
+
+    @Test
+    fun clampsImagePanToTheScaledViewport() {
+        assertEquals(Offset.Zero, boundedViewerPan(Offset(100f, 100f), IntSize(200, 100), 1f))
+        assertEquals(Offset(100f, -50f), boundedViewerPan(Offset(500f, -500f), IntSize(200, 100), 2f))
     }
 
     @Test

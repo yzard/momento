@@ -50,24 +50,26 @@ interface BackupAssetDao {
     suspend fun requestCancellation(): Int
 
     @Query("SELECT * FROM backup_assets ORDER BY modifiedAt DESC") fun observeAll(): Flow<List<BackupAssetEntity>>
+    @Query("SELECT errorMessage FROM backup_assets WHERE errorMessage IS NOT NULL AND errorMessage != '' ORDER BY modifiedAt DESC LIMIT 1")
+    fun observeLatestError(): Flow<String?>
     @Query("SELECT state, COUNT(*) AS count FROM backup_assets WHERE :cameraOnly = 0 OR folder = 'Camera' GROUP BY state")
     fun observeCounts(cameraOnly: Boolean): Flow<List<BackupQueueCount>>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertDiscovered(asset: BackupAssetEntity): Long
 
     @Query("""
         UPDATE backup_assets SET
-            clientAssetId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN :clientAssetId ELSE clientAssetId END,
-            operationId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN :operationId ELSE operationId END,
+            clientAssetId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN :clientAssetId ELSE clientAssetId END,
+            operationId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN :operationId ELSE operationId END,
             displayName = :displayName,
             mimeType = :mimeType,
             byteSize = :byteSize,
             modifiedAt = :modifiedAt,
             folder = :folder,
-            state = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN 'QUEUED' ELSE state END,
-            uploadId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN NULL ELSE uploadId END,
-            uploadedBytes = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN 0 ELSE uploadedBytes END,
-            mediaId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN NULL ELSE mediaId END,
-            errorMessage = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt THEN NULL ELSE errorMessage END
+            state = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN 'QUEUED' ELSE state END,
+            uploadId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN NULL ELSE uploadId END,
+            uploadedBytes = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN 0 ELSE uploadedBytes END,
+            mediaId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN NULL ELSE mediaId END,
+            errorMessage = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN NULL ELSE errorMessage END
         WHERE uri = :uri
     """)
     suspend fun reconcileDiscovered(uri: String, clientAssetId: String, operationId: String, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, folder: String)

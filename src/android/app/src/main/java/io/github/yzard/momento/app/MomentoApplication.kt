@@ -104,6 +104,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
+import io.github.yzard.momento.BuildConfig
 import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
@@ -123,6 +124,13 @@ import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.admin.AdminScreen
 import io.github.yzard.momento.feature.albums.AlbumsScreen
+import io.github.yzard.momento.feature.auth.LoginRequirement
+import io.github.yzard.momento.feature.auth.PasswordChangeFields
+import io.github.yzard.momento.feature.auth.loginRequirement
+import io.github.yzard.momento.feature.auth.validateNewPassword
+import io.github.yzard.momento.feature.backup.BackupMediaAccess
+import io.github.yzard.momento.feature.backup.currentBackupMediaAccess
+import io.github.yzard.momento.feature.backup.schedulePeriodicBackup
 import io.github.yzard.momento.feature.deduplicate.DeduplicateScreen
 import io.github.yzard.momento.feature.faces.FacesScreen
 import io.github.yzard.momento.feature.map.NativeMapScreen
@@ -147,10 +155,12 @@ fun MomentoApplication(
     repository: MomentoRepository,
     tokenStore: EncryptedTokenStore,
 ) {
+    val context = LocalContext.current
     val settingsFlow: Flow<Settings?> = remember(settingsStore) { settingsStore.settings.map { it } }
     val settings by settingsFlow.collectAsState(initial = null)
     val authenticated by tokenStore.isAuthenticated.collectAsState()
     var user by remember { mutableStateOf<User?>(null) }
+    var passwordChangeUser by remember { mutableStateOf<User?>(null) }
     val loadedSettings = settings
 
     if (loadedSettings == null) {
@@ -158,11 +168,41 @@ fun MomentoApplication(
         return
     }
 
+    LaunchedEffect(authenticated, loadedSettings.origin, loadedSettings.mobileDataEnabled) {
+        if (
+            authenticated &&
+            loadedSettings.origin != null &&
+            currentBackupMediaAccess(context) != BackupMediaAccess.DENIED
+        ) {
+            schedulePeriodicBackup(context.applicationContext, loadedSettings.mobileDataEnabled)
+        }
+    }
+
     MomentoTheme(loadedSettings.themePreference) {
         when {
             loadedSettings.origin == null -> ServerScreen(settingsStore, repository)
-            !authenticated -> LoginScreen(repository) { user = it }
-            else -> MainShell(repository, settingsStore, user) { user = it }
+            passwordChangeUser != null -> ForcedPasswordChangeScreen(
+                repository = repository,
+                username = requireNotNull(passwordChangeUser).username,
+                passwordChanged = {
+                    passwordChangeUser = null
+                    user = null
+                },
+            )
+            !authenticated -> LoginScreen(
+                repository = repository,
+                signedIn = { loadedUser -> user = loadedUser },
+                passwordChangeRequired = { loadedUser -> passwordChangeUser = loadedUser },
+            )
+            else -> MainShell(repository, settingsStore, user) { loadedUser ->
+                if (loginRequirement(loadedUser) == LoginRequirement.CHANGE_PASSWORD) {
+                    repository.requirePasswordChange()
+                    user = null
+                    passwordChangeUser = loadedUser
+                } else {
+                    user = loadedUser
+                }
+            }
         }
     }
 }
@@ -196,8 +236,19 @@ private fun ServerScreen(settingsStore: SettingsStore, repository: MomentoReposi
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
             Button(
                 onClick = {
-                    if (origin.startsWith("http://")) insecureWarning = true
-                    else scope.launch { connect(origin, settingsStore, repository) { error = it } }
+                    if (shouldConfirmCleartextOrigin(origin, BuildConfig.ALLOW_CLEARTEXT_TRAFFIC)) {
+                        insecureWarning = true
+                    } else {
+                        scope.launch {
+                            connect(
+                                origin = origin,
+                                allowCleartextTraffic = BuildConfig.ALLOW_CLEARTEXT_TRAFFIC,
+                                settingsStore = settingsStore,
+                                repository = repository,
+                                onError = { error = it },
+                            )
+                        }
+                    }
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
             ) { Text("Connect") }
@@ -211,7 +262,15 @@ private fun ServerScreen(settingsStore: SettingsStore, repository: MomentoReposi
             confirmButton = {
                 TextButton({
                     insecureWarning = false
-                    scope.launch { connect(origin, settingsStore, repository) { error = it } }
+                    scope.launch {
+                        connect(
+                            origin = origin,
+                            allowCleartextTraffic = BuildConfig.ALLOW_CLEARTEXT_TRAFFIC,
+                            settingsStore = settingsStore,
+                            repository = repository,
+                            onError = { error = it },
+                        )
+                    }
                 }) { Text("Use HTTP") }
             },
             dismissButton = { TextButton({ insecureWarning = false }) { Text("Cancel") } },
@@ -219,16 +278,22 @@ private fun ServerScreen(settingsStore: SettingsStore, repository: MomentoReposi
     }
 }
 
+internal fun shouldConfirmCleartextOrigin(origin: String, allowCleartextTraffic: Boolean): Boolean {
+    if (!allowCleartextTraffic) return false
+    return origin.trim().startsWith("http://", ignoreCase = true)
+}
+
 private suspend fun connect(
     origin: String,
+    allowCleartextTraffic: Boolean,
     settingsStore: SettingsStore,
     repository: MomentoRepository,
     onError: (String) -> Unit,
 ) {
     try {
-        val normalized = normalizeServerOrigin(origin)
+        val normalized = normalizeServerOrigin(origin, allowCleartextTraffic)
         repository.capabilities(normalized)
-        settingsStore.setOrigin(normalized)
+        settingsStore.setOrigin(normalized, allowCleartextTraffic)
     } catch (exception: IllegalArgumentException) {
         onError(exception.message ?: "Invalid server")
     } catch (_: IOException) {
@@ -241,7 +306,11 @@ private suspend fun connect(
 @OptIn(ExperimentalComposeUiApi::class)
 @Suppress("DEPRECATION")
 @Composable
-private fun LoginScreen(repository: MomentoRepository, signedIn: (User) -> Unit) {
+private fun LoginScreen(
+    repository: MomentoRepository,
+    signedIn: (User) -> Unit,
+    passwordChangeRequired: (User) -> Unit,
+) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
@@ -283,8 +352,13 @@ private fun LoginScreen(repository: MomentoRepository, signedIn: (User) -> Unit)
             try {
                 val user = repository.login(username, password)
                 context.getSystemService(AutofillManager::class.java)?.commit()
-                signedIn(user)
-                repository.completeLogin()
+                when (loginRequirement(user)) {
+                    LoginRequirement.CHANGE_PASSWORD -> passwordChangeRequired(user)
+                    LoginRequirement.COMPLETE_SESSION -> {
+                        signedIn(user)
+                        repository.completeLogin()
+                    }
+                }
             } catch (_: HttpException) {
                 error = "Incorrect username or password"
             } catch (_: IOException) {
@@ -338,6 +412,84 @@ private fun LoginScreen(repository: MomentoRepository, signedIn: (User) -> Unit)
                 enabled = !signingIn,
                 modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
             ) { Text("Sign in") }
+        }
+    }
+}
+
+@Composable
+private fun ForcedPasswordChangeScreen(
+    repository: MomentoRepository,
+    username: String,
+    passwordChanged: () -> Unit,
+) {
+    var currentPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var submitting by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun submit() {
+        if (submitting) return
+        val validation = validateNewPassword(newPassword, confirmation)
+        if (validation != null) {
+            error = validation
+            return
+        }
+
+        scope.launch {
+            submitting = true
+            try {
+                repository.changePassword(currentPassword, newPassword)
+                passwordChanged()
+            } catch (_: HttpException) {
+                error = "Could not change password. Check your current password."
+            } catch (_: IOException) {
+                error = "Could not reach the server"
+            } catch (_: kotlinx.serialization.SerializationException) {
+                error = "Server returned an invalid response"
+            } finally {
+                submitting = false
+            }
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().imePadding().padding(28.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                "Change your password",
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "$username must choose a new password before using Momento.",
+                modifier = Modifier.padding(top = 12.dp, bottom = 20.dp),
+            )
+            PasswordChangeFields(
+                currentPassword = currentPassword,
+                newPassword = newPassword,
+                confirmation = confirmation,
+                changeCurrentPassword = { currentPassword = it },
+                changeNewPassword = { newPassword = it },
+                changeConfirmation = { confirmation = it },
+                enabled = !submitting,
+                errorMessage = error,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { submit() },
+                enabled = !submitting,
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            ) {
+                Text(if (submitting) "Changing password" else "Change password")
+            }
         }
     }
 }
@@ -638,13 +790,22 @@ private fun ShellOverlay(
                 .imePadding(),
         ) {
             if (destination.hasFloatingTitle()) {
-                Text(
-                    destination.label,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
-                )
+                val floatingColors = momentoFloatingControlColors()
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = floatingColors.container,
+                    contentColor = floatingColors.content,
+                    shadowElevation = 0.dp,
+                    tonalElevation = 0.dp,
+                ) {
+                    Text(
+                        destination.label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    )
+                }
             }
 
             MomentoFloatingButton(
@@ -865,9 +1026,9 @@ private fun ShellDestination(
         Destination.MAP -> NativeMapScreen(repository) { media -> openMedia(media, 0) }
         Destination.PLACES -> PlacesScreen(repository, openMedia)
         Destination.FACES -> FacesScreen(repository, user?.role == "admin", openMedia)
-        Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin")
+        Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin", openMedia)
         Destination.TRASH -> TrashScreen(repository)
-        Destination.ADMIN -> AdminScreen(repository)
+        Destination.ADMIN -> AdminScreen(repository, settingsStore)
         Destination.VIEWER -> Unit
     }
 }

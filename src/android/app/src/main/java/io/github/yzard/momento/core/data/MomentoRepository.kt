@@ -42,6 +42,7 @@ class MomentoRepository(
         }
     }
     fun completeLogin() = tokenStore.markAuthenticated()
+    fun requirePasswordChange() = tokenStore.markAuthenticationIncomplete()
     suspend fun currentUser(): User = api().currentUser()
     suspend fun logout() {
         val refresh = tokenStore.refreshToken()
@@ -57,9 +58,10 @@ class MomentoRepository(
         search: String,
         mediaType: String?,
         classification: String?,
+        direction: String,
         anchorDate: String,
     ): TimelineResponse = api().timeline(
-        timelineRequest(cursor, groupBy, search, mediaType, classification, anchorDate),
+        timelineRequest(cursor, groupBy, search, mediaType, classification, direction, anchorDate),
     )
     suspend fun albums(): List<Album> = api().albums().albums
     suspend fun createAlbum(name: String, description: String?): AlbumDetail = api().createAlbum(AlbumCreateRequest(name, description))
@@ -80,10 +82,7 @@ class MomentoRepository(
     suspend fun restore(ids: List<Long>): MessageResponse = api().restore(MediaIdsRequest(ids))
     suspend fun deleteForever(ids: List<Long>): MessageResponse = api().deleteForever(MediaIdsRequest(ids))
     suspend fun emptyTrash(): MessageResponse = api().emptyTrash()
-    suspend fun duplicateGroups(): List<DeduplicateGroup> = api().duplicates(PageRequest(null, 100)).groups
-    suspend fun startDeduplicate(): AiActionResponse = api().startAiFeature("deduplicate")
-    suspend fun cancelDeduplicate(): AiActionResponse = api().cancelAiFeature("deduplicate")
-    suspend fun cleanDeduplicate(): AiActionResponse = api().cleanAiFeature("deduplicate")
+    suspend fun duplicateGroups(cursor: String?): DeduplicateGroupsResponse = api().duplicates(PageRequest(cursor, 20))
     suspend fun moveToTrash(ids: List<Long>): MessageResponse = api().moveToTrash(MediaIdsRequest(ids))
     suspend fun users(): List<User> = api().users().users
     suspend fun createUser(username: String, email: String, password: String, role: String?): User = api().createUser(AdminUserCreateRequest(username, email, password, role))
@@ -98,9 +97,16 @@ class MomentoRepository(
     suspend fun aiStatus(): AiStatusResponse = api().aiStatus()
     suspend fun cancelAi(): AiActionResponse = api().cancelAi()
     suspend fun cleanAi(): AiActionResponse = api().cleanAi()
+    suspend fun startAiFeature(feature: String): AiActionResponse = api().startAiFeature(feature)
+    suspend fun cancelAiFeature(feature: String): AiActionResponse = api().cancelAiFeature(feature)
+    suspend fun cleanAiFeature(feature: String): AiActionResponse = api().cleanAiFeature(feature)
     suspend fun mapClusters(bounds: BoundingBox, zoom: Int): MapClustersResponse = api().mapClusters(MapClustersRequest(bounds, zoom))
     suspend fun mapMedia(bounds: BoundingBox, prefixes: List<String>): List<Media> = api().mapMedia(MapMediaRequest(bounds, prefixes)).items
-    suspend fun changePassword(current: String, updated: String): MessageResponse = api().changePassword(ChangePasswordRequest(current, updated))
+    suspend fun changePassword(current: String, updated: String): MessageResponse {
+        val response = api().changePassword(ChangePasswordRequest(current, updated))
+        tokenStore.clear()
+        return response
+    }
     suspend fun originalUrl(mediaId: Long): String = mediaUrl(mediaId, "original")
     suspend fun previewUrl(mediaId: Long): String = mediaUrl(mediaId, "preview")
     suspend fun thumbnailUrl(mediaId: Long, tiny: Boolean): String = mediaUrl(mediaId, if (tiny) "thumbnail/tiny" else "thumbnail")
@@ -145,6 +151,7 @@ fun timelineRequest(
     search: String,
     mediaType: String?,
     classification: String?,
+    direction: String,
     anchorDate: String,
 ): TimelineRequest = TimelineRequest(
     cursor,
@@ -153,7 +160,7 @@ fun timelineRequest(
     search,
     mediaType,
     classification,
-    "older",
+    direction,
     anchorDate,
 )
 

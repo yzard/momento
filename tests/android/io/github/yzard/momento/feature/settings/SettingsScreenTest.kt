@@ -60,10 +60,23 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun validatesNewPasswordLengthAndConfirmation() {
-        assertEquals("New password must be at least 8 characters", validateNewPassword("short", "short"))
-        assertEquals("New passwords do not match", validateNewPassword("longenough", "different"))
-        assertNull(validateNewPassword("longenough", "longenough"))
+    fun summarizesDailyBackupSchedule() {
+        assertEquals(
+            "Daily backup is not scheduled",
+            backupScheduleSummary(BackupScheduleStatus.NOT_SCHEDULED, null),
+        )
+        assertEquals(
+            "Daily backup is running now",
+            backupScheduleSummary(BackupScheduleStatus.RUNNING, null),
+        )
+        assertEquals(
+            "Next daily backup: Aug 27, 9:00 AM",
+            backupScheduleSummary(BackupScheduleStatus.WAITING, "Aug 27, 9:00 AM"),
+        )
+        assertEquals(
+            "Daily backup is scheduled",
+            backupScheduleSummary(BackupScheduleStatus.WAITING, null),
+        )
     }
 
     @Test

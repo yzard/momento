@@ -8,6 +8,7 @@ import ImportPanel from '../components/admin/ImportPanel'
 import MetadataPanel from '../components/admin/MetadataPanel'
 import UserManagement from '../components/admin/UserManagement'
 import AiPanel from '../components/admin/AiPanel'
+import AndroidAppDownloadLink from '../components/layout/AndroidAppDownloadLink'
 
 export default function Settings() {
   const { user, changePassword } = useAuth()
@@ -90,6 +91,18 @@ export default function Settings() {
               </button>
             )
           })}
+        </div>
+      </section>
+
+      <section className="mb-8 overflow-hidden rounded-xl border border-border bg-card shadow-sm" aria-labelledby="android-app-title">
+        <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
+          <div className="max-w-xl">
+            <h2 id="android-app-title" className="text-xl font-display font-semibold text-foreground">Android app</h2>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              Install the release APK provided by this Momento server. Android may ask you to allow installs from your browser.
+            </p>
+          </div>
+          <AndroidAppDownloadLink compact={false} />
         </div>
       </section>
 
