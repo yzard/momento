@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   batchLoad: vi.fn(),
   getCachedThumbnailUrl: vi.fn(),
   reorder: vi.fn(),
+  removeMedia: vi.fn(),
   album: {
     id: 7,
     name: 'Trip',
@@ -34,6 +35,13 @@ vi.mock('../../../../src/frontend/hooks/useAlbums', () => ({
     error: null,
   }),
   useReorderAlbum: () => ({ mutateAsync: mocks.reorder, isPending: false }),
+  useRemoveAlbumMedia: () => ({
+    mutate: (variables: { albumId: number; mediaIds: number[] }, callbacks: { onSuccess: () => void }) => {
+      mocks.removeMedia(variables)
+      callbacks.onSuccess()
+    },
+    isPending: false,
+  }),
 }))
 
 import AlbumView from '../../../../src/frontend/components/albums/AlbumView'
@@ -59,6 +67,24 @@ describe('AlbumView', () => {
     mocks.getCachedThumbnailUrl.mockReturnValue(null)
     mocks.batchLoad.mockResolvedValue('batched-thumbnail')
     mocks.reorder.mockResolvedValue(undefined)
+    mocks.removeMedia.mockResolvedValue(undefined)
+  })
+
+  it('selects multiple media and removes only those items from the album', async () => {
+    render(<AlbumView albumId={7} onBack={vi.fn()} onPhotoClick={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Select first.jpg' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select third.jpg' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from album' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove from album' }))
+
+    await waitFor(() => expect(mocks.removeMedia).toHaveBeenCalledWith({
+      albumId: 7,
+      mediaIds: [42, 44],
+    }))
+    expect(screen.queryByRole('img', { name: 'first.jpg' })).toBeNull()
+    expect(screen.getByRole('img', { name: 'second.jpg' })).toBeTruthy()
   })
 
   afterEach(() => {

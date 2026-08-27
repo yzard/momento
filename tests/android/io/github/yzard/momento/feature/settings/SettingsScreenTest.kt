@@ -80,6 +80,27 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun clearsBackupHistoryOnlyWhenRecordsExistAndBackupIsIdle() {
+        val completed = listOf(BackupQueueCount(BackupState.COMPLETED, 12))
+        assertEquals(true, backupHistoryCanBeCleared(completed, BackupScheduleStatus.WAITING))
+        assertEquals(false, backupHistoryCanBeCleared(emptyList(), BackupScheduleStatus.WAITING))
+        assertEquals(false, backupHistoryCanBeCleared(completed, BackupScheduleStatus.RUNNING))
+        assertEquals(
+            false,
+            backupHistoryCanBeCleared(
+                completed + BackupQueueCount(BackupState.UPLOADING, 1),
+                BackupScheduleStatus.WAITING,
+            ),
+        )
+    }
+
+    @Test
+    fun detectsActiveBackupRecordsAcrossTheWholeDevice() {
+        assertEquals(false, backupHasActiveRecords(listOf(BackupQueueCount(BackupState.COMPLETED, 4))))
+        assertEquals(true, backupHasActiveRecords(listOf(BackupQueueCount(BackupState.CANCELLING, 1))))
+    }
+
+    @Test
     fun labelsThemeChoices() {
         assertEquals("Follow system", themePreferenceLabel(ThemePreference.SYSTEM))
         assertEquals("Light", themePreferenceLabel(ThemePreference.LIGHT))

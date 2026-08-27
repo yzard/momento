@@ -43,7 +43,7 @@ describe('TimelineView classification empty state', () => {
   })
 
   it('shows screenshot-specific empty copy and propagates classification', () => {
-    render(<TimelineView onPhotoClick={vi.fn()} groupBy="day" search="" mediaType="image" classification="screenshot" />)
+    render(<TimelineView onPhotoClick={vi.fn()} selection={null} groupBy="day" search="" mediaType="image" classification="screenshot" />)
 
     expect(screen.getByText('No screenshots yet')).toBeTruthy()
     expect(screen.getByText('Screenshots identified by Screenshot Detection will appear here.')).toBeTruthy()
@@ -52,7 +52,7 @@ describe('TimelineView classification empty state', () => {
   })
 
   it('shows document-specific search empty copy', () => {
-    render(<TimelineView onPhotoClick={vi.fn()} groupBy="day" search="invoice" mediaType="image" classification="document" />)
+    render(<TimelineView onPhotoClick={vi.fn()} selection={null} groupBy="day" search="invoice" mediaType="image" classification="document" />)
 
     expect(screen.getByText('No matching documents')).toBeTruthy()
     expect(screen.getByText('No documents matched "invoice".')).toBeTruthy()

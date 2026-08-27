@@ -192,7 +192,7 @@ function PlaceDetail({ placeId }: { placeId: string }) {
               <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">{place.city}, {place.country}</h1>
               <p className="mt-1 text-sm text-muted-foreground">{place.mediaCount} media in this place.</p>
             </div>
-            {media.length > 0 ? <PhotoGrid media={media} onPhotoClick={openMedia} /> : <PageState icon={<ImageOff className="h-10 w-10 text-muted-foreground/60" />} title="No associated media" description="This place has no accessible media." />}
+            {media.length > 0 ? <PhotoGrid media={media} onPhotoClick={openMedia} selection={null} /> : <PageState icon={<ImageOff className="h-10 w-10 text-muted-foreground/60" />} title="No associated media" description="This place has no accessible media." />}
           </>
         ) : null}
 

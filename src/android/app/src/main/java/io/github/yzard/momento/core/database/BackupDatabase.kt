@@ -49,6 +49,12 @@ interface BackupAssetDao {
     @Query("UPDATE backup_assets SET state = 'CANCELLING', errorMessage = NULL WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING')")
     suspend fun requestCancellation(): Int
 
+    @Query("SELECT COUNT(*) FROM backup_assets WHERE state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING', 'CANCELLING')")
+    suspend fun activeRecordCount(): Int
+
+    @Query("DELETE FROM backup_assets")
+    suspend fun deleteAll(): Int
+
     @Query("SELECT * FROM backup_assets ORDER BY modifiedAt DESC") fun observeAll(): Flow<List<BackupAssetEntity>>
     @Query("SELECT errorMessage FROM backup_assets WHERE errorMessage IS NOT NULL AND errorMessage != '' ORDER BY modifiedAt DESC LIMIT 1")
     fun observeLatestError(): Flow<String?>

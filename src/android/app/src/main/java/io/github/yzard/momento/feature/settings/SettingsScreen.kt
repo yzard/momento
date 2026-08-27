@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteException
 import android.os.Build
 import android.provider.Settings as AndroidSettings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,10 +24,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,9 +67,11 @@ import io.github.yzard.momento.core.database.BackupQueueCount
 import io.github.yzard.momento.core.model.BackupState
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.backup.BackupMediaAccess
+import io.github.yzard.momento.feature.backup.BackupHistoryClearResult
 import io.github.yzard.momento.feature.backup.PERIODIC_BACKUP_WORK_NAME
 import io.github.yzard.momento.feature.backup.backupMediaAccessLabel
 import io.github.yzard.momento.feature.backup.backupReadPermissions
+import io.github.yzard.momento.feature.backup.clearBackupHistory
 import io.github.yzard.momento.feature.backup.currentBackupMediaAccess
 import io.github.yzard.momento.feature.backup.isBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.observeBackupNetworkAllowed
@@ -132,6 +137,25 @@ fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): Stri
 
 enum class BackupScheduleStatus { NOT_SCHEDULED, WAITING, RUNNING }
 
+private val ACTIVE_BACKUP_STATES = setOf(
+    BackupState.QUEUED,
+    BackupState.FAILED,
+    BackupState.UPLOADING,
+    BackupState.COMPLETING,
+    BackupState.SERVER_PROCESSING,
+    BackupState.CANCELLING,
+)
+
+fun backupHasActiveRecords(counts: List<BackupQueueCount>): Boolean =
+    counts.any { (state, count) -> count > 0 && state in ACTIVE_BACKUP_STATES }
+
+fun backupHistoryCanBeCleared(
+    counts: List<BackupQueueCount>,
+    scheduleStatus: BackupScheduleStatus,
+): Boolean = counts.sumOf { it.count } > 0 &&
+    !backupHasActiveRecords(counts) &&
+    scheduleStatus != BackupScheduleStatus.RUNNING
+
 fun backupScheduleSummary(status: BackupScheduleStatus, nextScheduledAt: String?): String = when (status) {
     BackupScheduleStatus.NOT_SCHEDULED -> "Daily backup is not scheduled"
     BackupScheduleStatus.RUNNING -> "Daily backup is running now"
@@ -158,6 +182,9 @@ fun SettingsScreen(
     val queueCounts by remember(database, settings.cameraOnly) {
         database.backupAssetDao().observeCounts(settings.cameraOnly)
     }.collectAsState(initial = emptyList())
+    val allQueueCounts by remember(database) {
+        database.backupAssetDao().observeCounts(cameraOnly = false)
+    }.collectAsState(initial = emptyList())
     val latestBackupError by remember(database) {
         database.backupAssetDao().observeLatestError()
     }.collectAsState(initial = null)
@@ -173,6 +200,9 @@ fun SettingsScreen(
     var passwordDialog by remember { mutableStateOf(false) }
     var themeDialog by remember { mutableStateOf(false) }
     var logoutDialog by remember { mutableStateOf(false) }
+    var clearBackupHistoryDialog by remember { mutableStateOf(false) }
+    var clearBackupHistoryBusy by remember { mutableStateOf(false) }
+    var backupHistoryStatus by remember { mutableStateOf<String?>(null) }
     var updateBusy by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf("Check the signed-in host for a newer Android release") }
     var pendingUpdatePath by rememberSaveable { mutableStateOf<String?>(null) }
@@ -189,15 +219,13 @@ fun SettingsScreen(
         ?.let { scheduledAt ->
             DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(scheduledAt))
         }
-    val canCancelBackup = queueCounts.any { (state, count) ->
-        count > 0 && state in setOf(
-            BackupState.QUEUED,
-            BackupState.FAILED,
-            BackupState.UPLOADING,
-            BackupState.COMPLETING,
-            BackupState.SERVER_PROCESSING,
-            BackupState.CANCELLING,
-        )
+    val canCancelBackup = backupHasActiveRecords(allQueueCounts)
+    val backupHistoryRecordCount = allQueueCounts.sumOf { it.count }
+    val canClearBackupHistory = backupHistoryCanBeCleared(allQueueCounts, backupScheduleStatus)
+    val backupHistoryDescription = backupHistoryStatus ?: when {
+        backupHistoryRecordCount == 0L -> "No local backup history"
+        canClearBackupHistory -> "$backupHistoryRecordCount local records. Clear them to back up the selected range again."
+        else -> "$backupHistoryRecordCount local records. Finish or cancel the current backup before clearing."
     }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         mediaAccess = currentBackupMediaAccess(context)
@@ -406,6 +434,7 @@ fun SettingsScreen(
                     Row {
                         if (canCancelBackup) {
                             TextButton(
+                                enabled = !clearBackupHistoryBusy,
                                 onClick = {
                                     scope.launch {
                                         requestBackupCancellation(
@@ -420,6 +449,7 @@ fun SettingsScreen(
                             }
                         }
                         TextButton(
+                            enabled = !clearBackupHistoryBusy,
                             onClick = {
                                 mediaAccess = currentBackupMediaAccess(context)
                                 if (mediaAccess == BackupMediaAccess.DENIED) {
@@ -432,6 +462,22 @@ fun SettingsScreen(
                         ) {
                             Text("Backup Now")
                         }
+                    }
+                },
+            )
+            ListItem(
+                headlineContent = { Text("Backup history") },
+                supportingContent = { Text(backupHistoryDescription) },
+                leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
+                trailingContent = {
+                    TextButton(
+                        onClick = { clearBackupHistoryDialog = true },
+                        enabled = canClearBackupHistory && !clearBackupHistoryBusy,
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Text(if (clearBackupHistoryBusy) "Clearing" else "Clear")
                     }
                 },
             )
@@ -476,6 +522,65 @@ fun SettingsScreen(
                 ) { Text("Log out") }
             },
             dismissButton = { TextButton(onClick = { logoutDialog = false }) { Text("Cancel") } },
+        )
+    }
+    if (clearBackupHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!clearBackupHistoryBusy) clearBackupHistoryDialog = false
+            },
+            title = { Text("Clear backup history?") },
+            text = {
+                Text(
+                    "This clears every backup record stored on this device. Photos already stored on the server are not deleted. The next backup will upload every photo and video in the currently selected range again.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !clearBackupHistoryBusy,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    onClick = {
+                        scope.launch {
+                            if (clearBackupHistoryBusy) return@launch
+                            clearBackupHistoryBusy = true
+                            try {
+                                when (
+                                    val result = clearBackupHistory(
+                                        context.applicationContext,
+                                        database.backupAssetDao(),
+                                        settingsStore,
+                                        settings.mobileDataEnabled,
+                                    )
+                                ) {
+                                    is BackupHistoryClearResult.Cleared -> {
+                                        backupHistoryStatus =
+                                            "Cleared ${result.recordCount} local records. Backup Now will upload the selected range again."
+                                    }
+                                    BackupHistoryClearResult.ActiveBackup -> {
+                                        backupHistoryStatus =
+                                            "Backup history was not cleared because a backup is still active."
+                                    }
+                                }
+                            } catch (_: IOException) {
+                                backupHistoryStatus = "Could not clear backup history. Try again."
+                            } catch (_: SQLiteException) {
+                                backupHistoryStatus = "Could not clear backup history. Try again."
+                            } finally {
+                                clearBackupHistoryBusy = false
+                                clearBackupHistoryDialog = false
+                            }
+                        }
+                    },
+                ) { Text(if (clearBackupHistoryBusy) "Clearing" else "Clear records") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !clearBackupHistoryBusy,
+                    onClick = { clearBackupHistoryDialog = false },
+                ) { Text("Cancel") }
+            },
         )
     }
 }

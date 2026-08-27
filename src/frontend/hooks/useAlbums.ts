@@ -61,3 +61,16 @@ export function useReorderAlbum() {
     },
   })
 }
+
+export function useRemoveAlbumMedia() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ albumId, mediaIds }: { albumId: number; mediaIds: number[] }) =>
+      albumsApi.removeMedia(albumId, mediaIds),
+    onSuccess: (_, { albumId }) => {
+      void queryClient.invalidateQueries({ queryKey: ['albums'] })
+      return queryClient.invalidateQueries({ queryKey: ['album', albumId] })
+    },
+  })
+}

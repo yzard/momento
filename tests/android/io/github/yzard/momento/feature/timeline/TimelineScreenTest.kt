@@ -53,6 +53,12 @@ class TimelineScreenTest {
     }
 
     @Test
+    fun selectionActionsStateTheirDestination() {
+        assertEquals("Add to album (3)", addToAlbumSelectionLabel(3))
+        assertEquals("Trash (3)", trashSelectionLabel(3))
+    }
+
+    @Test
     fun mergesCursorPagesWithoutRepeatingMedia() {
         val existing = listOf(TimelineGroup("Today", listOf(media(1))))
         val next = listOf(

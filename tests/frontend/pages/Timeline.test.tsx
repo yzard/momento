@@ -1,15 +1,33 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ timelineView: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  timelineView: vi.fn(),
+  deleteMedia: vi.fn(),
+}))
 
 vi.mock('../../../src/frontend/components/timeline/TimelineView', () => ({
-  default: (props: unknown) => {
+  default: (props: { selection: { toggleSelection: (mediaId: number) => void } | null }) => {
     mocks.timelineView(props)
-    return <div>Timeline content</div>
+    return (
+      <div>
+        Timeline content
+        {props.selection && (
+          <button type="button" onClick={() => props.selection?.toggleSelection(42)}>Select mock media</button>
+        )}
+      </div>
+    )
   },
+}))
+
+vi.mock('../../../src/frontend/components/albums/AddToAlbumModal', () => ({
+  default: ({ mediaIds }: { mediaIds: number[] }) => <div>Album picker: {mediaIds.join(',')}</div>,
+}))
+
+vi.mock('../../../src/frontend/api/media', () => ({
+  mediaApi: { delete: mocks.deleteMedia },
 }))
 
 import Timeline from '../../../src/frontend/pages/Timeline'
@@ -29,6 +47,28 @@ describe('Timeline classification UI', () => {
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+  })
+
+  it('selects timeline media and opens the batch album picker', () => {
+    renderTimeline('screenshot')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select mock media' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to album' }))
+
+    expect(screen.getByText('Album picker: 42')).toBeTruthy()
+  })
+
+  it('confirms before moving selected timeline media to Trash', async () => {
+    mocks.deleteMedia.mockResolvedValue(undefined)
+    renderTimeline('document')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select mock media' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Move to Trash' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Move to Trash' }))
+
+    await waitFor(() => expect(mocks.deleteMedia).toHaveBeenCalledWith([42], expect.anything()))
   })
 
   it.each([

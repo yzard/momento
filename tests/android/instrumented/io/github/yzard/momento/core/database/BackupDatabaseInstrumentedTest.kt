@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yzard.momento.core.model.BackupState
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -57,4 +58,57 @@ class BackupDatabaseInstrumentedTest {
             database.close()
         }
     }
+
+    @Test
+    fun deletesEveryTerminalBackupRecordWhenIdle() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
+        try {
+            val assets = database.backupAssetDao()
+            for ((index, state) in listOf(
+                BackupState.COMPLETED,
+                BackupState.TERMINAL_FAILED,
+                BackupState.CANCELLED,
+            ).withIndex()) {
+                assets.insertDiscovered(backupAsset(index, state))
+            }
+
+            assertEquals(0, assets.activeRecordCount())
+            assertEquals(3, assets.deleteAll())
+            assertEquals(emptyList<BackupAssetEntity>(), assets.observeAll().first())
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
+    fun reportsActiveBackupRecordsBeforeHistoryCanBeCleared() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
+        try {
+            val assets = database.backupAssetDao()
+            assets.insertDiscovered(backupAsset(1, BackupState.COMPLETED))
+            assets.insertDiscovered(backupAsset(2, BackupState.UPLOADING))
+
+            assertEquals(1, assets.activeRecordCount())
+        } finally {
+            database.close()
+        }
+    }
+
+    private fun backupAsset(index: Int, state: BackupState): BackupAssetEntity = BackupAssetEntity(
+        uri = "content://media/$index",
+        clientAssetId = "media_$index",
+        operationId = "operation-$index",
+        displayName = "IMG_$index.jpg",
+        mimeType = "image/jpeg",
+        byteSize = 100,
+        modifiedAt = 1_700_000_000L + index,
+        folder = "Camera",
+        state = state,
+        uploadId = if (state == BackupState.COMPLETED) "upload-$index" else null,
+        uploadedBytes = if (state == BackupState.COMPLETED) 100 else 0,
+        mediaId = if (state == BackupState.COMPLETED) index.toLong() else null,
+        errorMessage = null,
+    )
 }

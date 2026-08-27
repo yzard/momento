@@ -22,6 +22,10 @@ class AlbumsScreenTest {
         assertEquals("4 memories", albumMemoryCountLabel(4))
     }
 
+    @Test fun identifiesRemovalAsAnAlbumOnlyAction() {
+        assertEquals("Remove from album (2)", removeFromAlbumSelectionLabel(2))
+    }
+
     @Test fun movesSelectedAlbumMediaEarlier() {
         assertEquals(listOf(2L, 1L, 3L), reorderAlbumIds(listOf(1, 2, 3), 2, -1))
     }

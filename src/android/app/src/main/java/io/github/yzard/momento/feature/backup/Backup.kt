@@ -49,7 +49,11 @@ import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-class MediaStoreScanner(private val context: Context, private val assets: BackupAssetDao) {
+class MediaStoreScanner(
+    private val context: Context,
+    private val assets: BackupAssetDao,
+    private val backupGeneration: String?,
+) {
     suspend fun scan(cameraOnly: Boolean) {
         val collection = MediaStore.Files.getContentUri("external")
         val projection = buildList {
@@ -90,6 +94,7 @@ class MediaStoreScanner(private val context: Context, private val assets: Backup
                 val asset = discoveredAsset(
                     uri = ContentUris.withAppendedId(collection, mediaStoreId).toString(),
                     mediaStoreId = mediaStoreId,
+                    backupGeneration = backupGeneration,
                     displayName = cursor.getString(displayNameColumn) ?: "media",
                     mimeType = mimeType,
                     byteSize = cursor.getLong(sizeColumn),
@@ -120,8 +125,33 @@ internal fun isCameraMediaFolder(bucketName: String?, relativePath: String?): Bo
     return normalizedBucket in KNOWN_CAMERA_BUCKETS || normalizedBucket.endsWith(" camera")
 }
 
-internal fun discoveredAsset(uri: String, mediaStoreId: Long, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, folder: String): BackupAssetEntity =
-    BackupAssetEntity(uri, "media_$mediaStoreId", UUID.randomUUID().toString(), displayName, mimeType, byteSize, modifiedAt, folder, BackupState.QUEUED, null, 0, null, null)
+internal fun backupClientAssetId(mediaStoreId: Long, backupGeneration: String?): String =
+    backupGeneration?.let { "media_${it}_$mediaStoreId" } ?: "media_$mediaStoreId"
+
+internal fun discoveredAsset(
+    uri: String,
+    mediaStoreId: Long,
+    backupGeneration: String?,
+    displayName: String,
+    mimeType: String,
+    byteSize: Long,
+    modifiedAt: Long,
+    folder: String,
+): BackupAssetEntity = BackupAssetEntity(
+    uri,
+    backupClientAssetId(mediaStoreId, backupGeneration),
+    UUID.randomUUID().toString(),
+    displayName,
+    mimeType,
+    byteSize,
+    modifiedAt,
+    folder,
+    BackupState.QUEUED,
+    null,
+    0,
+    null,
+    null,
+)
 
 internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER }
 
@@ -148,7 +178,11 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             setForeground(progress("Preparing backup"))
             val deviceId = settingsStore.deviceId()
             repository.registerBackupDevice(deviceId, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
-            MediaStoreScanner(applicationContext, assets).scan(settings.cameraOnly)
+            MediaStoreScanner(
+                applicationContext,
+                assets,
+                settingsStore.backupGeneration(),
+            ).scan(settings.cameraOnly)
             val chunkSize = repository.capabilities(settings.origin).backup.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
             var waitingForServer = false
             for (asset in assets.pending(settings.cameraOnly)) {
@@ -519,6 +553,36 @@ fun schedulePeriodicBackup(context: Context, allowMobileData: Boolean) {
     )
 }
 
+sealed interface BackupHistoryClearResult {
+    data class Cleared(val recordCount: Int) : BackupHistoryClearResult
+    data object ActiveBackup : BackupHistoryClearResult
+}
+
+private suspend fun stopScheduledBackupWork(workManager: WorkManager) {
+    workManager.cancelUniqueWork(IMMEDIATE_BACKUP_WORK_NAME).await()
+    workManager.cancelUniqueWork(PERIODIC_BACKUP_WORK_NAME).await()
+    workManager.cancelUniqueWork(LEGACY_BACKUP_WORK_NAME).await()
+}
+
+suspend fun clearBackupHistory(
+    context: Context,
+    assets: BackupAssetDao,
+    settingsStore: SettingsStore,
+    allowMobileData: Boolean,
+): BackupHistoryClearResult {
+    val workManager = WorkManager.getInstance(context)
+    stopScheduledBackupWork(workManager)
+    if (assets.activeRecordCount() > 0) {
+        schedulePeriodicBackup(context, allowMobileData)
+        return BackupHistoryClearResult.ActiveBackup
+    }
+
+    settingsStore.rotateBackupGeneration()
+    val deletedRecords = assets.deleteAll()
+    schedulePeriodicBackup(context, allowMobileData)
+    return BackupHistoryClearResult.Cleared(deletedRecords)
+}
+
 suspend fun requestBackupCancellation(
     context: Context,
     assets: BackupAssetDao,
@@ -526,9 +590,7 @@ suspend fun requestBackupCancellation(
 ) {
     assets.requestCancellation()
     val workManager = WorkManager.getInstance(context)
-    workManager.cancelUniqueWork(IMMEDIATE_BACKUP_WORK_NAME).await()
-    workManager.cancelUniqueWork(PERIODIC_BACKUP_WORK_NAME).await()
-    workManager.cancelUniqueWork(LEGACY_BACKUP_WORK_NAME).await()
+    stopScheduledBackupWork(workManager)
     schedulePeriodicBackup(context, allowMobileData)
     val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
     workManager.enqueueUniqueWork(

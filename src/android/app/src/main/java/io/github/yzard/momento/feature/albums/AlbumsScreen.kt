@@ -82,6 +82,9 @@ fun albumCollageLayout(thumbnailCount: Int): AlbumCollageLayout = when (thumbnai
 fun albumMemoryCountLabel(mediaCount: Long): String =
     "$mediaCount ${if (mediaCount == 1L) "memory" else "memories"}"
 
+fun removeFromAlbumSelectionLabel(selectedCount: Int): String =
+    "Remove from album ($selectedCount)"
+
 @Composable
 fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
     var albums by remember { mutableStateOf<List<Album>?>(null) }
@@ -288,7 +291,7 @@ private fun AlbumDetailScreen(
                         TextButton(
                             onClick = { removingSelected = true },
                             enabled = !working,
-                        ) { Text("Remove ${selectedIds.size}") }
+                        ) { Text(removeFromAlbumSelectionLabel(selectedIds.size)) }
                         selectedIds.singleOrNull()?.let { selectedId ->
                             TextButton(
                                 onClick = {

@@ -11,10 +11,25 @@ import org.junit.Test
 
 class BackupTest {
     @Test fun discoveredAssetsStartQueuedWithStableClientId() {
-        val asset = discoveredAsset("content://media/42", 42, "IMG_0042.jpg", "image/jpeg", 12, 100, "Camera")
+        val asset = discoveredAsset(
+            "content://media/42",
+            42,
+            null,
+            "IMG_0042.jpg",
+            "image/jpeg",
+            12,
+            100,
+            "Camera",
+        )
         assertEquals("media_42", asset.clientAssetId)
         assertEquals(BackupState.QUEUED, asset.state)
         assertTrue(asset.operationId.isNotBlank())
+    }
+
+    @Test fun backupResetGenerationProducesANewServerClientAssetId() {
+        assertEquals("media_42", backupClientAssetId(42, null))
+        assertEquals("media_reset123_42", backupClientAssetId(42, "reset123"))
+        assertFalse(backupClientAssetId(42, null) == backupClientAssetId(42, "reset123"))
     }
 
     @Test fun retriesOnlyTransientHttpResponses() {

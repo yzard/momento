@@ -1,15 +1,19 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
-import { Play, Plus, Trash2 } from 'lucide-react'
+import { Check, Circle, Play } from 'lucide-react'
 import { batchLoader } from '../../utils/batcher'
 import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
+
+export interface PhotoGridSelection {
+  selectedMediaIds: ReadonlySet<number>
+  toggleSelection: (mediaId: number) => void
+}
 
 interface PhotoGridProps {
   media: Media[]
   onPhotoClick: (media: Media) => void
-  onAddToAlbum?: (media: Media) => void
-  onDelete?: (media: Media) => void
+  selection: PhotoGridSelection | null
 }
 
 function getFormatBadge(mimeType: string | null, filename: string, mediaType: 'image' | 'video'): string | null {
@@ -42,7 +46,7 @@ function getFormatBadge(mimeType: string | null, filename: string, mediaType: 'i
   return null
 }
 
-export default function PhotoGrid({ media, onPhotoClick, onAddToAlbum, onDelete }: PhotoGridProps) {
+export default function PhotoGrid({ media, onPhotoClick, selection }: PhotoGridProps) {
   return (
     <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 px-1 pb-8">
       {media.map((item) => (
@@ -50,8 +54,7 @@ export default function PhotoGrid({ media, onPhotoClick, onAddToAlbum, onDelete 
           key={item.id}
           item={item}
           onPhotoClick={onPhotoClick}
-          onAddToAlbum={onAddToAlbum}
-          onDelete={onDelete}
+          selection={selection}
         />
       ))}
     </div>
@@ -61,11 +64,10 @@ export default function PhotoGrid({ media, onPhotoClick, onAddToAlbum, onDelete 
 interface MediaItemProps {
   item: Media
   onPhotoClick: (media: Media) => void
-  onAddToAlbum?: (media: Media) => void
-  onDelete?: (media: Media) => void
+  selection: PhotoGridSelection | null
 }
 
-function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProps) {
+function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
   const [isHovering, setIsHovering] = useState(false)
   const [showVideo, setShowVideo] = useState(false)
   const [isVideoPlaying, setIsVideoPlaying] = useState(false)
@@ -80,6 +82,8 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
   const isVideo = item.mediaType === 'video'
   const isGif = item.mimeType?.toLowerCase().includes('gif') || item.originalFilename.toLowerCase().endsWith('.gif')
   const shouldPreview = isVideo || isGif
+  const selectionMode = selection !== null
+  const selected = selection?.selectedMediaIds.has(item.id) ?? false
   const formatBadge = getFormatBadge(item.mimeType, item.originalFilename, item.mediaType)
   const {
     streamURL: previewUrl,
@@ -151,16 +155,36 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
     }
   }, [])
 
-  const handleActionClick = useCallback((e: React.MouseEvent, action: () => void) => {
-    e.stopPropagation()
-    action()
-  }, [])
+  const activateMedia = useCallback(() => {
+    if (selection) {
+      selection.toggleSelection(item.id)
+      return
+    }
+    onPhotoClick(item)
+  }, [item, onPhotoClick, selection])
+
+  const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    activateMedia()
+  }, [activateMedia])
 
   return (
     <div
       ref={containerRef}
-      className="aspect-square relative cursor-pointer group overflow-hidden bg-muted rounded-lg transition-all duration-300 hover:z-10 hover:ring-4 hover:ring-background hover:shadow-xl hover:scale-105"
-      onClick={() => onPhotoClick(item)}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selectionMode ? selected : undefined}
+      aria-label={selectionMode ? `${selected ? 'Deselect' : 'Select'} ${item.originalFilename}` : `Open ${item.originalFilename}`}
+      className={`aspect-square relative cursor-pointer group overflow-hidden bg-muted rounded-lg outline-none transition-[box-shadow,transform] duration-200 motion-reduce:transition-none ${
+        selected
+          ? 'z-10 ring-4 ring-primary ring-offset-2 ring-offset-background shadow-lg'
+          : selectionMode
+            ? 'hover:ring-2 hover:ring-primary/50 active:scale-[0.98]'
+            : 'hover:z-10 hover:ring-2 hover:ring-background hover:shadow-lg active:scale-[0.98]'
+      }`}
+      onClick={activateMedia}
+      onKeyDown={handleKeyDown}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
@@ -168,10 +192,22 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         <img
           src={thumbnailUrl}
           alt={item.originalFilename}
-          className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${isVideoPlaying ? 'opacity-0' : 'opacity-100'}`}
+          className={`w-full h-full object-cover transition-opacity duration-200 motion-reduce:transition-none ${isVideoPlaying ? 'opacity-0' : 'opacity-100'}`}
         />
       ) : (
         <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
+      )}
+
+      {selectionMode && (
+        <div className={`absolute inset-0 transition-colors duration-150 motion-reduce:transition-none ${selected ? 'bg-primary/25' : 'bg-black/10'}`}>
+          <span className={`absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full border-2 shadow-sm transition-colors duration-150 ${
+            selected
+              ? 'border-primary bg-primary text-primary-foreground'
+              : 'border-white/90 bg-black/35 text-white'
+          }`}>
+            {selected ? <Check className="h-4 w-4" strokeWidth={3} /> : <Circle className="h-4 w-4" />}
+          </span>
+        </div>
       )}
 
       {isHovering && showVideo && shouldPreview && previewUrl && (
@@ -222,29 +258,6 @@ function MediaItem({ item, onPhotoClick, onAddToAlbum, onDelete }: MediaItemProp
         </div>
       )}
 
-      {/* Hover action buttons - bottom */}
-      {isHovering && (onAddToAlbum || onDelete) && (
-        <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          {onAddToAlbum && (
-            <button
-              onClick={(e) => handleActionClick(e, () => onAddToAlbum(item))}
-              className="p-2 rounded-full bg-black/50 backdrop-blur-sm text-white hover:bg-black/70 transition-colors border border-white/20"
-              title="Add to album"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          )}
-          {onDelete && (
-            <button
-              onClick={(e) => handleActionClick(e, () => onDelete(item))}
-              className="p-2 rounded-full bg-black/50 backdrop-blur-sm text-white hover:bg-red-500/70 transition-colors border border-white/20"
-              title="Move to trash"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      )}
     </div>
   )
 }

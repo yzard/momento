@@ -111,6 +111,10 @@ fun shouldAppendTimeline(
     appending: Boolean,
 ): Boolean = hasOlder && !appending && totalItemsCount > 0 && lastVisibleItemIndex >= totalItemsCount - 3
 
+fun addToAlbumSelectionLabel(selectedCount: Int): String = "Add to album ($selectedCount)"
+
+fun trashSelectionLabel(selectedCount: Int): String = "Trash ($selectedCount)"
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TimelineScreen(
@@ -518,13 +522,13 @@ private fun TimelineSelectionControl(
                 TextButton(
                     onClick = requestAddToAlbum,
                     colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                ) { Text("Album $selectedCount") }
+                ) { Text(addToAlbumSelectionLabel(selectedCount)) }
                 TextButton(
                     onClick = requestTrash,
                     colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
                 ) {
                     Icon(Icons.Default.Delete, "Move selected media to Trash")
-                    Text("$selectedCount")
+                    Text(trashSelectionLabel(selectedCount))
                 }
             }
             if (selecting) {

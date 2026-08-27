@@ -43,7 +43,7 @@ describe('PhotoGrid', () => {
   })
 
   it('requests a stream ticket only after the hover preview delay', async () => {
-    const view = render(<PhotoGrid media={[video]} onPhotoClick={vi.fn()} />)
+    const view = render(<PhotoGrid media={[video]} onPhotoClick={vi.fn()} selection={null} />)
     const thumbnail = view.getByRole('img', { name: 'preview.mp4' })
 
     fireEvent.mouseEnter(thumbnail.parentElement as HTMLElement)
@@ -58,5 +58,22 @@ describe('PhotoGrid', () => {
     expect(view.container.querySelector('video')?.getAttribute('src')).toBe(
       '/stream/5?ticket=signed',
     )
+  })
+
+  it('toggles media instead of opening it while selection is active', () => {
+    const openMedia = vi.fn()
+    const toggleSelection = vi.fn()
+    const view = render(
+      <PhotoGrid
+        media={[video]}
+        onPhotoClick={openMedia}
+        selection={{ selectedMediaIds: new Set([5]), toggleSelection }}
+      />,
+    )
+
+    fireEvent.click(view.getByRole('button', { name: 'Deselect preview.mp4' }))
+
+    expect(toggleSelection).toHaveBeenCalledWith(5)
+    expect(openMedia).not.toHaveBeenCalled()
   })
 })

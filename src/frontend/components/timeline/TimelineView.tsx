@@ -4,14 +4,13 @@ import type { GroupBy, MediaTypeFilter, TimelineClassification, TimelineMarker }
 import type { Media } from '../../api/types'
 import { useTimelineMarkers, useTimelineWindow } from '../../hooks/useTimeline'
 import DateHeader from './DateHeader'
-import PhotoGrid from './PhotoGrid'
+import PhotoGrid, { type PhotoGridSelection } from './PhotoGrid'
 
 const EMPTY_MARKERS: TimelineMarker[] = []
 
 interface TimelineViewProps {
   onPhotoClick: (media: Media, allMedia: Media[]) => void
-  onAddToAlbum?: (media: Media) => void
-  onDelete?: (media: Media) => void
+  selection: PhotoGridSelection | null
   groupBy: GroupBy
   search: string
   mediaType: MediaTypeFilter | null
@@ -137,7 +136,7 @@ function TimelineScrubber({ markers, activeMarkerIndex, onMarkerSelect, onWheel 
   )
 }
 
-export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, groupBy, search, mediaType, classification }: TimelineViewProps) {
+export default function TimelineView({ onPhotoClick, selection, groupBy, search, mediaType, classification }: TimelineViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const userInteractedRef = useRef(false)
   const pendingNewerRef = useRef(false)
@@ -310,7 +309,11 @@ export default function TimelineView({ onPhotoClick, onAddToAlbum, onDelete, gro
         {timelineGroups.map((group) => (
           <section key={group.date} data-timeline-group={group.date} className="mb-2">
             <DateHeader date={group.date} count={group.media.length} groupBy={groupBy} />
-            <PhotoGrid media={group.media} onPhotoClick={(media) => onPhotoClick(media, allMedia)} onAddToAlbum={onAddToAlbum} onDelete={onDelete} />
+            <PhotoGrid
+              media={group.media}
+              onPhotoClick={(media) => onPhotoClick(media, allMedia)}
+              selection={selection}
+            />
           </section>
         ))}
         {isLoadingOlder && <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>}

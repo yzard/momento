@@ -33,6 +33,8 @@ enum class ThemePreference {
 fun parseThemePreference(value: String?): ThemePreference =
     ThemePreference.entries.firstOrNull { it.name == value } ?: ThemePreference.SYSTEM
 
+internal fun newBackupGeneration(): String = UUID.randomUUID().toString().replace("-", "")
+
 data class Settings(
     val origin: String?,
     val mobileDataEnabled: Boolean,
@@ -45,6 +47,7 @@ class SettingsStore(private val context: Context) {
     private val mobileKey = booleanPreferencesKey("mobile_data_enabled")
     private val cameraKey = booleanPreferencesKey("camera_only")
     private val deviceIdKey = stringPreferencesKey("backup_device_id")
+    private val backupGenerationKey = stringPreferencesKey("backup_generation")
     private val themeKey = stringPreferencesKey("theme")
     val settings: Flow<Settings> = context.preferences.data.map {
         Settings(
@@ -70,6 +73,14 @@ class SettingsStore(private val context: Context) {
             if (preferences[deviceIdKey] == null) preferences[deviceIdKey] = generated
         }
         return context.preferences.data.map { it[deviceIdKey] }.first() ?: generated
+    }
+    suspend fun backupGeneration(): String? =
+        context.preferences.data.map { it[backupGenerationKey] }.first()
+
+    suspend fun rotateBackupGeneration(): String {
+        val generation = newBackupGeneration()
+        context.preferences.edit { it[backupGenerationKey] = generation }
+        return generation
     }
 }
 

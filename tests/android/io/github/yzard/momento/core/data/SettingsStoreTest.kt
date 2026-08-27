@@ -47,6 +47,13 @@ class SettingsStoreTest {
     @Test fun storedThemeIsParsed() { assertEquals(ThemePreference.DARK, parseThemePreference("DARK")) }
     @Test fun invalidThemeFollowsSystem() { assertEquals(ThemePreference.SYSTEM, parseThemePreference("sepia")) }
 
+    @Test fun backupGenerationsAreServerSafeAndUnique() {
+        val first = newBackupGeneration()
+        val second = newBackupGeneration()
+        assertEquals(true, first.matches(Regex("^[a-f0-9]{32}$")))
+        assertEquals(false, first == second)
+    }
+
     @Test
     fun incompleteAuthenticationDoesNotSurviveAProcessRestart() {
         assertEquals(false, authenticationCompleted("encrypted-token", storedCompletion = false))

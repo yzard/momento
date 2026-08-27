@@ -4,9 +4,12 @@ import { useSearchParams } from 'react-router-dom'
 import TimelineView from '../components/timeline/TimelineView'
 import Lightbox from '../components/viewer/Lightbox'
 import AddToAlbumModal from '../components/albums/AddToAlbumModal'
+import ConfirmationDialog from '../components/common/ConfirmationDialog'
+import MediaSelectionToolbar, { MediaSelectButton } from '../components/media/MediaSelectionToolbar'
 import { mediaApi, type GroupBy, type MediaTypeFilter, type TimelineClassification } from '../api/media'
 import type { Media } from '../api/types'
 import { Calendar, ChevronDown, Search } from 'lucide-react'
+import { useMediaSelection } from '../hooks/useMediaSelection'
 
 const groupByOptions: { value: GroupBy; label: string }[] = [
   { value: 'day', label: 'Day' },
@@ -25,13 +28,23 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [initialIndex, setInitialIndex] = useState(0)
   const [mediaIds, setMediaIds] = useState<number[]>([])
-  const [addToAlbumMedia, setAddToAlbumMedia] = useState<Media | null>(null)
+  const [showAlbumPicker, setShowAlbumPicker] = useState(false)
+  const [showTrashConfirmation, setShowTrashConfirmation] = useState(false)
+  const [selectionError, setSelectionError] = useState<string | null>(null)
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
   const [showGroupByMenu, setShowGroupByMenu] = useState(false)
   const [searchParams, setSearchParams] = useSearchParams()
   const searchParameter = searchParams.get('search') ?? ''
   const [searchInput, setSearchInput] = useState(searchParameter)
   const [search, setSearch] = useState(searchParameter)
+  const {
+    selectionMode,
+    selectedMediaIds,
+    startSelection,
+    clearSelection,
+    cancelSelection,
+    toggleSelection,
+  } = useMediaSelection()
 
   useEffect(() => {
     setSearchInput(searchParameter)
@@ -56,13 +69,26 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
     return () => window.clearTimeout(timeoutId)
   }, [searchInput, setSearchParams])
 
+  useEffect(() => {
+    cancelSelection()
+    setShowAlbumPicker(false)
+    setShowTrashConfirmation(false)
+    setSelectionError(null)
+  }, [cancelSelection, classification, groupBy, mediaType, search])
+
   const deleteMutation = useMutation({
     mutationFn: mediaApi.delete,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['timeline'] })
-      queryClient.invalidateQueries({ queryKey: ['media'] })
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
-      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
+      void queryClient.invalidateQueries({ queryKey: ['timeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['media'] })
+      void queryClient.invalidateQueries({ queryKey: ['trash'] })
+      void queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
+      setShowTrashConfirmation(false)
+      cancelSelection()
+    },
+    onError: () => {
+      setShowTrashConfirmation(false)
+      setSelectionError('Could not move the selected media to Trash. Nothing was removed from this view.')
     },
   })
 
@@ -73,14 +99,6 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
     setLightboxOpen(true)
   }
 
-  const handleAddToAlbum = (media: Media) => {
-    setAddToAlbumMedia(media)
-  }
-
-  const handleDelete = (media: Media) => {
-    deleteMutation.mutate([media.id])
-  }
-
   const currentGroupByLabel = groupByOptions.find((o) => o.value === groupBy)?.label || 'Day'
   const title = classification === 'screenshot' ? 'Screenshots' : classification === 'document' ? 'Documents' : mediaType === 'image' ? 'Photos' : mediaType === 'video' ? 'Videos' : 'Timeline'
   const searchPlaceholder = classification === 'screenshot' ? 'Search screenshots...' : classification === 'document' ? 'Search documents...' : mediaType === 'image' ? 'Search photos...' : mediaType === 'video' ? 'Search videos...' : 'Search media...'
@@ -89,7 +107,10 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
     <div className="flex-1 flex flex-col min-h-0">
       <div className="container max-w-[1800px] mx-auto px-6 md:px-10 pt-6 md:pt-10">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">{title}</h1>
+          <div className="flex items-center justify-between gap-3 sm:justify-start">
+            <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">{title}</h1>
+            {!selectionMode && <MediaSelectButton onClick={startSelection} />}
+          </div>
           <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
             <label className="relative block sm:w-72 lg:w-96">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -139,12 +160,29 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
             </div>
           </div>
         </div>
+        {selectionMode && (
+          <div className="mb-4">
+            <MediaSelectionToolbar
+              selectedCount={selectedMediaIds.size}
+              isProcessing={deleteMutation.isPending}
+              onClear={clearSelection}
+              onDone={cancelSelection}
+              onAddToAlbum={() => setShowAlbumPicker(true)}
+              onRemoveFromAlbum={null}
+              onMoveToTrash={() => setShowTrashConfirmation(true)}
+            />
+          </div>
+        )}
+        {selectionError && (
+          <p role="alert" className="mb-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {selectionError}
+          </p>
+        )}
       </div>
       <div className="flex-1 min-h-0">
         <TimelineView
           onPhotoClick={handlePhotoClick}
-          onAddToAlbum={handleAddToAlbum}
-          onDelete={handleDelete}
+          selection={selectionMode ? { selectedMediaIds, toggleSelection } : null}
            groupBy={groupBy}
            search={search}
            mediaType={mediaType}
@@ -159,10 +197,24 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
           onIndexChange={setInitialIndex}
         />
       )}
-      {addToAlbumMedia && (
+      {showAlbumPicker && selectedMediaIds.size > 0 && (
         <AddToAlbumModal
-          mediaId={addToAlbumMedia.id}
-          onClose={() => setAddToAlbumMedia(null)}
+          mediaIds={Array.from(selectedMediaIds)}
+          onClose={() => {
+            setShowAlbumPicker(false)
+            cancelSelection()
+          }}
+        />
+      )}
+      {showTrashConfirmation && (
+        <ConfirmationDialog
+          title={`Move ${selectedMediaIds.size} selected item${selectedMediaIds.size === 1 ? '' : 's'} to Trash?`}
+          description="The selected media will leave your timelines and albums. You can restore it from Trash."
+          confirmLabel="Move to Trash"
+          isProcessing={deleteMutation.isPending}
+          destructive
+          onConfirm={() => deleteMutation.mutate(Array.from(selectedMediaIds))}
+          onCancel={() => setShowTrashConfirmation(false)}
         />
       )}
     </div>
