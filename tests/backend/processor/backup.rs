@@ -10,6 +10,20 @@ use momento_api::{
 
 use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
 
+fn insert_lossless_manifest(connection: &rusqlite::Connection, asset_id: i64, content_hash: &str) {
+    connection
+        .execute(
+            queries::backup::INSERT_MANIFEST,
+            rusqlite::params![
+                asset_id,
+                2_i64,
+                content_hash,
+                r#"{"momentoBackup":{"schemaVersion":2,"source":"androidMediaStore"}}"#,
+            ],
+        )
+        .expect("lossless manifest");
+}
+
 #[tokio::test]
 async fn recovery_truncates_writing_file_to_durable_offset() {
     init_test_paths();
@@ -44,6 +58,11 @@ async fn recovery_truncates_writing_file_to_durable_offset() {
         )
         .expect("asset");
     let asset_id = connection.last_insert_rowid();
+    insert_lossless_manifest(
+        &connection,
+        asset_id,
+        "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225",
+    );
     connection
         .execute(
             queries::backup::INSERT_SESSION,
@@ -108,6 +127,7 @@ async fn recovery_completes_backup_after_import_commits_before_asset_completion(
         )
         .expect("asset");
     let asset_id = connection.last_insert_rowid();
+    insert_lossless_manifest(&connection, asset_id, &content_hash);
     connection
         .execute(
             queries::backup::INSERT_SESSION,
@@ -214,6 +234,11 @@ async fn cancelled_queued_backup_is_never_claimed_for_finalization() {
         )
         .expect("asset");
     let asset_id = connection.last_insert_rowid();
+    insert_lossless_manifest(
+        &connection,
+        asset_id,
+        "7a0d202a03185ab2b795f149414ca69a55815793f4e4089e1e3cf6ee103b12d4",
+    );
     connection
         .execute(
             queries::backup::INSERT_SESSION,
@@ -292,6 +317,11 @@ async fn recovery_fails_missing_nonzero_staging_file_without_resuming() {
         )
         .expect("asset");
     let asset_id = connection.last_insert_rowid();
+    insert_lossless_manifest(
+        &connection,
+        asset_id,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
     connection
         .execute(
             queries::backup::INSERT_SESSION,
@@ -326,6 +356,7 @@ async fn worker_finalizes_queued_backup_and_records_media() {
     let file_path = paths().backups.join(&staged_path);
     std::fs::create_dir_all(file_path.parent().expect("parent")).expect("staging parent");
     std::fs::write(&file_path, b"backup image bytes").expect("staged bytes");
+    let expected_content_hash = calculate_file_hash(&file_path).await.expect("content hash");
 
     let connection = pool.get().expect("database connection");
     connection
@@ -351,6 +382,7 @@ async fn worker_finalizes_queued_backup_and_records_media() {
         )
         .expect("asset");
     let asset_id = connection.last_insert_rowid();
+    insert_lossless_manifest(&connection, asset_id, &expected_content_hash);
     connection
         .execute(
             queries::backup::INSERT_SESSION,
@@ -409,5 +441,17 @@ async fn worker_finalizes_queued_backup_and_records_media() {
     assert_eq!(created_at, "2020-01-02 03:04:05");
     assert_eq!(metadata_status, "queued");
     assert_eq!(access_count, 1);
-    std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
+    let imported_path = paths().originals.join(media_path);
+    let imported_filename = imported_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("imported filename");
+    let metadata_path =
+        imported_path.with_file_name(format!("{imported_filename}.supplemental-metadata.json"));
+    assert_eq!(
+        std::fs::read_to_string(&metadata_path).expect("preserved Android metadata"),
+        r#"{"momentoBackup":{"schemaVersion":2,"source":"androidMediaStore"}}"#,
+    );
+    std::fs::remove_file(imported_path).expect("remove imported original");
+    std::fs::remove_file(metadata_path).expect("remove imported metadata");
 }

@@ -131,18 +131,8 @@ class MapViewportRequestTracker {
         request.generation == latestGeneration.get()
 }
 
-data class MapClusterChanges(
-    val removedIds: Set<String>,
-    val addedIds: Set<String>,
-    val retainedIds: Set<String>,
-)
-
-fun mapClusterChanges(currentIds: Set<String>, incomingIds: Set<String>): MapClusterChanges =
-    MapClusterChanges(
-        removedIds = currentIds - incomingIds,
-        addedIds = incomingIds - currentIds,
-        retainedIds = currentIds intersect incomingIds,
-    )
+fun removedMapClusterIds(currentIds: Set<String>, incomingIds: Set<String>): Set<String> =
+    currentIds - incomingIds
 
 fun mapClusterThumbnailChanged(existing: MapCluster?, incoming: MapCluster): Boolean =
     existing == null ||
@@ -194,7 +184,6 @@ private data class OwnedMapView(
 @Composable
 fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int) -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
-    var updating by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val viewportRequests = remember { Channel<MapViewportRequest>(Channel.CONFLATED) }
     val viewportRequestTracker = remember { MapViewportRequestTracker() }
@@ -262,7 +251,6 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
         viewportRequests.receiveAsFlow().debounce(VIEWPORT_DEBOUNCE_MS).collectLatest { request ->
             val viewport = request.viewport
             mapView.position()?.let { position -> saveMapPosition(context, position) }
-            updating = true
             try {
                 val clusters = repository.mapClusters(viewport.bounds, viewport.zoom).clusters
                 if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
@@ -287,8 +275,7 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
                 // Commit the new viewport only after its marker visuals are ready. A cancelled
                 // zoom request therefore leaves the previous complete marker set on screen.
                 if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
-                val changes = mapClusterChanges(renderedClusters.keys, incomingClusters.keys)
-                changes.removedIds.forEach { clusterId ->
+                removedMapClusterIds(renderedClusters.keys, incomingClusters.keys).forEach { clusterId ->
                     renderedClusters.remove(clusterId)?.let { renderedCluster ->
                         mapView.overlays.remove(renderedCluster.marker)
                     }
@@ -328,8 +315,6 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
                 error = "Could not load map photos"
             } catch (_: SerializationException) {
                 error = "The server returned invalid map data"
-            } finally {
-                if (viewportRequestTracker.isCurrent(request)) updating = false
             }
         }
     }
@@ -374,15 +359,6 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
                 TextButton(onClick = { error = null; mapView.viewport()?.let(::requestViewport) }) {
                     Text("$message. Retry")
                 }
-            }
-        }
-        if (updating && error == null) {
-            Surface(
-                modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
-                shape = MaterialTheme.shapes.large,
-            ) {
-                Text("Updating map…", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
             }
         }
     }

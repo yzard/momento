@@ -41,5 +41,6 @@ class PlacesScreenTest {
     fun formatsTheSameRegionOverlayAsTheWebCard() {
         val place = Place("opaque", "Paris", null, "France", 12)
         assertEquals("France", placeRegion(place))
+        assertEquals("France · 12 media", placeDetailSubtitle(place))
     }
 }

@@ -142,7 +142,7 @@ class MomentoRepository(
     suspend fun registerBackupDevice(deviceId: String, deviceName: String): BackupDeviceRegisterResponse = api().registerDevice(BackupDeviceRegisterRequest(deviceId, deviceName))
     suspend fun createBackupUpload(request: BackupUploadCreateRequest): BackupUploadResponse = api().createUpload(request)
     suspend fun backupUploadStatus(uploadId: String): BackupUploadResponse = api().uploadStatus(BackupUploadIdRequest(uploadId))
-    suspend fun uploadBackupChunk(uploadId: String, range: String, body: RequestBody): BackupUploadResponse = api().uploadChunk(uploadId, range, body)
+    suspend fun uploadBackupChunk(uploadId: String, range: String, contentHash: String, body: RequestBody): BackupUploadResponse = api().uploadChunk(uploadId, range, contentHash, body)
     suspend fun completeBackupUpload(uploadId: String): BackupUploadResponse = api().completeUpload(BackupUploadIdRequest(uploadId))
     suspend fun cancelBackupUpload(uploadId: String): BackupUploadResponse = api().cancelUpload(BackupUploadIdRequest(uploadId))
 }

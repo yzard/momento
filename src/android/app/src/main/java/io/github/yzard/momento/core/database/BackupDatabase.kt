@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -11,6 +12,8 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import io.github.yzard.momento.core.model.BackupState
 import kotlinx.coroutines.flow.Flow
 
@@ -22,12 +25,14 @@ class BackupConverters {
 @Entity(tableName = "backup_assets")
 data class BackupAssetEntity(
     @androidx.room.PrimaryKey val uri: String,
+    @ColumnInfo(defaultValue = "'external'") val volumeName: String,
     val clientAssetId: String,
     val operationId: String,
     val displayName: String,
     val mimeType: String,
     val byteSize: Long,
     val modifiedAt: Long,
+    @ColumnInfo(defaultValue = "0") val generationModified: Long,
     val folder: String,
     val state: BackupState,
     val uploadId: String?,
@@ -64,33 +69,43 @@ interface BackupAssetDao {
 
     @Query("""
         UPDATE backup_assets SET
-            clientAssetId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN :clientAssetId ELSE clientAssetId END,
-            operationId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN :operationId ELSE operationId END,
+            volumeName = :volumeName,
+            clientAssetId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN :clientAssetId ELSE clientAssetId END,
+            operationId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN :operationId ELSE operationId END,
             displayName = :displayName,
             mimeType = :mimeType,
             byteSize = :byteSize,
             modifiedAt = :modifiedAt,
+            generationModified = :generationModified,
             folder = :folder,
-            state = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN 'QUEUED' ELSE state END,
-            uploadId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN NULL ELSE uploadId END,
-            uploadedBytes = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN 0 ELSE uploadedBytes END,
-            mediaId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN NULL ELSE mediaId END,
-            errorMessage = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR state = 'CANCELLED' THEN NULL ELSE errorMessage END
+            state = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN 'QUEUED' ELSE state END,
+            uploadId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE uploadId END,
+            uploadedBytes = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN 0 ELSE uploadedBytes END,
+            mediaId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE mediaId END,
+            errorMessage = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE errorMessage END
         WHERE uri = :uri
     """)
-    suspend fun reconcileDiscovered(uri: String, clientAssetId: String, operationId: String, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, folder: String)
+    suspend fun reconcileDiscovered(uri: String, volumeName: String, clientAssetId: String, operationId: String, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, generationModified: Long, folder: String)
 
     @Query("UPDATE backup_assets SET state = :state, uploadedBytes = :uploadedBytes, uploadId = :uploadId, mediaId = :mediaId, errorMessage = :errorMessage WHERE uri = :uri")
     suspend fun updateTransfer(uri: String, state: BackupState, uploadedBytes: Long, uploadId: String?, mediaId: Long?, errorMessage: String?)
 }
 
-@Database(entities = [BackupAssetEntity::class], version = 3, exportSchema = true)
+@Database(entities = [BackupAssetEntity::class], version = 4, exportSchema = true)
 @TypeConverters(BackupConverters::class)
 abstract class BackupDatabase : RoomDatabase() {
     abstract fun backupAssetDao(): BackupAssetDao
 
     companion object {
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE backup_assets ADD COLUMN volumeName TEXT NOT NULL DEFAULT 'external'")
+                db.execSQL("ALTER TABLE backup_assets ADD COLUMN generationModified INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun create(context: Context): BackupDatabase = Room.databaseBuilder(context, BackupDatabase::class.java, "momento-backup.db")
+            .addMigrations(MIGRATION_3_4)
             .build()
     }
 }

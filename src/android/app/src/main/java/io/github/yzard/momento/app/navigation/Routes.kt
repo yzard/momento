@@ -34,6 +34,7 @@ fun Destination.isTimelinePage(): Boolean = when (this) {
 
 fun Destination.hasShellPageTitle(): Boolean = this != Destination.SETTINGS &&
     this != Destination.ALBUMS &&
+    this != Destination.PLACES &&
     this != Destination.ADMIN
 
 fun Destination.isAvailable(capabilities: Capabilities?): Boolean {

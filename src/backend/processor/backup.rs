@@ -2,7 +2,7 @@ use chrono::DateTime;
 use filetime::{set_file_mtime, FileTime};
 use futures::{stream, StreamExt};
 use rusqlite::OptionalExtension;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +19,8 @@ struct ClaimedAsset {
     user_id: i64,
     staged_path: String,
     source_modified_at: String,
+    expected_content_hash: String,
+    metadata_json: String,
 }
 
 struct ProcessingAsset {
@@ -156,27 +158,45 @@ fn claim_queued_asset(pool: &DbPool) -> AppResult<Option<ClaimedAsset>> {
     let transaction = connection.unchecked_transaction()?;
     let claimed_asset = transaction
         .query_row(queries::backup::CLAIM_QUEUED, [], |row| {
-            Ok(ClaimedAsset {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                staged_path: row.get(2)?,
-                source_modified_at: row.get(3)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })
         .optional()?;
     let Some(claimed_asset) = claimed_asset else {
         transaction.commit()?;
         return Ok(None);
     };
+    let (expected_content_hash, metadata_json) = transaction
+        .query_row(
+            queries::backup::SELECT_MANIFEST_FOR_ASSET,
+            [claimed_asset.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| {
+            AppError::Conflict(format!(
+                "backup asset is missing its lossless manifest: {error}"
+            ))
+        })?;
     let session_claimed =
-        transaction.execute(queries::backup::MARK_SESSION_PROCESSING, [claimed_asset.id])?;
+        transaction.execute(queries::backup::MARK_SESSION_PROCESSING, [claimed_asset.0])?;
     if session_claimed != 1 {
         return Err(AppError::Conflict(
             "backup upload changed while claiming work".to_string(),
         ));
     }
     transaction.commit()?;
-    Ok(Some(claimed_asset))
+    Ok(Some(ClaimedAsset {
+        id: claimed_asset.0,
+        user_id: claimed_asset.1,
+        staged_path: claimed_asset.2,
+        source_modified_at: claimed_asset.3,
+        expected_content_hash,
+        metadata_json,
+    }))
 }
 
 async fn process_claimed_asset(pool: &DbPool, asset: ClaimedAsset) -> AppResult<()> {
@@ -184,6 +204,12 @@ async fn process_claimed_asset(pool: &DbPool, asset: ClaimedAsset) -> AppResult<
     let result = async {
         set_source_modified_time(&source_path, &asset.source_modified_at)?;
         let content_hash = calculate_file_hash(&source_path).await?;
+        if content_hash != asset.expected_content_hash {
+            return Err(AppError::Conflict(
+                "staged backup no longer matches the Android original".to_string(),
+            ));
+        }
+        write_supplemental_metadata(&source_path, &asset.metadata_json).await?;
         let connection = pool.get().map_err(AppError::Pool)?;
         let stored = connection.execute(
             queries::backup::STORE_CONTENT_HASH,
@@ -302,6 +328,11 @@ async fn truncate_to_durable_offset(path: &Path, uploaded_size: u64) -> AppResul
 }
 
 async fn cleanup_staged_file(path: &Path) {
+    cleanup_file(&supplemental_metadata_path(path)).await;
+    cleanup_file(path).await;
+}
+
+async fn cleanup_file(path: &Path) {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -309,4 +340,37 @@ async fn cleanup_staged_file(path: &Path) {
             tracing::warn!(path = %path.display(), "backup staging cleanup failed: {error}")
         }
     }
+}
+
+async fn write_supplemental_metadata(source_path: &Path, metadata_json: &str) -> AppResult<()> {
+    let _: serde_json::Value = serde_json::from_str(metadata_json)?;
+    let destination_path = supplemental_metadata_path(source_path);
+    let parent = destination_path.parent().ok_or_else(|| {
+        AppError::Internal("backup supplemental metadata path has no parent".to_string())
+    })?;
+    let pending_path =
+        destination_path.with_extension(format!("json.pending-{}", uuid::Uuid::new_v4().simple()));
+    let mut pending_file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&pending_path)
+        .await?;
+    use tokio::io::AsyncWriteExt;
+    pending_file.write_all(metadata_json.as_bytes()).await?;
+    pending_file.sync_all().await?;
+    drop(pending_file);
+    if let Err(error) = tokio::fs::rename(&pending_path, &destination_path).await {
+        let _ = tokio::fs::remove_file(&pending_path).await;
+        return Err(error.into());
+    }
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn supplemental_metadata_path(source_path: &Path) -> PathBuf {
+    let filename = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("backup-media");
+    source_path.with_file_name(format!("{filename}.supplemental-metadata.json"))
 }

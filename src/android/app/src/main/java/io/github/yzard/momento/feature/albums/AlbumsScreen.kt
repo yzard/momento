@@ -7,8 +7,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -17,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -30,11 +29,15 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,7 +67,11 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import io.github.yzard.momento.app.designsystem.MomentoActionChip
+import io.github.yzard.momento.app.designsystem.MomentoDetailPageHeader
+import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
 import io.github.yzard.momento.app.designsystem.MomentoPageHeader
+import io.github.yzard.momento.app.designsystem.momentoDetailMediaContentPadding
+import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Album
 import io.github.yzard.momento.core.model.AlbumDetail
@@ -92,6 +99,9 @@ fun albumMemoryCountLabel(mediaCount: Long): String =
 
 fun removeFromAlbumSelectionLabel(selectedCount: Int): String =
     "Remove from album ($selectedCount)"
+
+fun albumDetailSubtitle(album: AlbumDetail): String =
+    listOfNotNull(albumMemoryCountLabel(album.media.size.toLong()), album.description).joinToString(" · ")
 
 @Composable
 fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
@@ -229,7 +239,6 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AlbumDetailScreen(
     repository: MomentoRepository,
@@ -267,7 +276,14 @@ private fun AlbumDetailScreen(
                     TextButton({ scope.launch { loadAlbum() } }) { Text("Retry") }
                 }
             }
-            AlbumDetailPageHeader("Album", null, working, close)
+            MomentoDetailPageHeader(
+                title = "Album",
+                subtitle = null,
+                backContentDescription = "Back to albums",
+                enabled = !working,
+                onBack = close,
+                modifier = Modifier.align(Alignment.TopStart),
+            )
         }
         return
     }
@@ -286,75 +302,8 @@ private fun AlbumDetailScreen(
             media = album.media,
             repository = repository,
             selectedMediaIds = selectedIds,
-            contentPadding = PaddingValues(top = 88.dp, bottom = 88.dp),
-            headerContent = {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                    album.description?.let { description ->
-                        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    error?.let { message ->
-                        Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
-                    }
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier.padding(top = 8.dp),
-                    ) {
-                        TextButton({ editing = true }, enabled = !working) { Text("Edit") }
-                        TextButton(
-                            onClick = {
-                                selecting = !selecting
-                                if (!selecting) selectedIds = emptySet()
-                            },
-                            enabled = !working,
-                        ) {
-                            Text(if (selecting) "Cancel selection" else "Select media")
-                        }
-                        if (selectedIds.isNotEmpty()) {
-                            TextButton(
-                                onClick = { removingSelected = true },
-                                enabled = !working,
-                            ) { Text(removeFromAlbumSelectionLabel(selectedIds.size)) }
-                            selectedIds.singleOrNull()?.let { selectedId ->
-                                TextButton(
-                                    onClick = {
-                                        scope.launch {
-                                            runMutation("Could not reorder media") {
-                                                repository.reorderAlbumMedia(
-                                                    albumId,
-                                                    reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
-                                                )
-                                            }
-                                        }
-                                    },
-                                    enabled = !working,
-                                ) { Text("Move earlier") }
-                                TextButton(
-                                    onClick = {
-                                        scope.launch {
-                                            runMutation("Could not reorder media") {
-                                                repository.reorderAlbumMedia(
-                                                    albumId,
-                                                    reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
-                                                )
-                                            }
-                                        }
-                                    },
-                                    enabled = !working,
-                                ) { Text("Move later") }
-                            }
-                        }
-                        TextButton({ deleting = true }, enabled = !working) { Text("Delete album") }
-                    }
-                    if (selecting) {
-                        Text(
-                            "${selectedIds.size} selected",
-                            style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.padding(bottom = 8.dp),
-                        )
-                    }
-                }
-            },
+            contentPadding = momentoDetailMediaContentPadding,
+            headerContent = null,
             footerContent = null,
             modifier = Modifier.fillMaxSize(),
         ) { media ->
@@ -364,12 +313,64 @@ private fun AlbumDetailScreen(
                 openMedia(album.media, album.media.indexOf(media))
             }
         }
-        AlbumDetailPageHeader(
+        MomentoDetailPageHeader(
             title = album.name,
-            subtitle = albumMemoryCountLabel(album.media.size.toLong()),
-            working = working,
-            close = close,
+            subtitle = albumDetailSubtitle(album),
+            backContentDescription = "Back to albums",
+            enabled = !working,
+            onBack = close,
+            modifier = Modifier.align(Alignment.TopStart),
         )
+        error?.let { message ->
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 92.dp, start = 20.dp, end = 20.dp),
+            )
+        }
+        if (selecting) {
+            AlbumSelectionActionDock(
+                selectedCount = selectedIds.size,
+                working = working,
+                remove = { removingSelected = true },
+                moveEarlier = {
+                    val selectedId = selectedIds.singleOrNull() ?: return@AlbumSelectionActionDock
+                    scope.launch {
+                        runMutation("Could not reorder media") {
+                            repository.reorderAlbumMedia(
+                                albumId,
+                                reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
+                            )
+                        }
+                    }
+                },
+                moveLater = {
+                    val selectedId = selectedIds.singleOrNull() ?: return@AlbumSelectionActionDock
+                    scope.launch {
+                        runMutation("Could not reorder media") {
+                            repository.reorderAlbumMedia(
+                                albumId,
+                                reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
+                            )
+                        }
+                    }
+                },
+                finish = {
+                    selecting = false
+                    selectedIds = emptySet()
+                },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        } else {
+            AlbumPrimaryActionDock(
+                enabled = !working,
+                select = { selecting = true },
+                edit = { editing = true },
+                delete = { deleting = true },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+        }
     }
 
     if (editing) {
@@ -540,23 +541,67 @@ fun AlbumAddMediaSheet(
 }
 
 @Composable
-private fun AlbumDetailPageHeader(
-    title: String,
-    subtitle: String?,
-    working: Boolean,
-    close: () -> Unit,
+internal fun AlbumPrimaryActionDock(
+    enabled: Boolean,
+    select: () -> Unit,
+    edit: () -> Unit,
+    delete: () -> Unit,
+    modifier: Modifier,
 ) {
-    MomentoPageHeader(
-        title = title,
-        subtitle = subtitle,
-        modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars),
-        leadingContent = {
-            IconButton(onClick = close, enabled = !working) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to albums")
-            }
-        },
-        trailingContent = null,
-    )
+    val floatingColors = momentoFloatingControlColors()
+    MomentoFloatingDock(
+        modifier = modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 12.dp),
+    ) {
+        TextButton(
+            onClick = select,
+            enabled = enabled,
+            colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+        ) { Text("Select") }
+        TextButton(
+            onClick = edit,
+            enabled = enabled,
+            colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+        ) { Text("Edit") }
+        TextButton(
+            onClick = delete,
+            enabled = enabled,
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        ) { Text("Delete") }
+    }
+}
+
+@Composable
+private fun AlbumSelectionActionDock(
+    selectedCount: Int,
+    working: Boolean,
+    remove: () -> Unit,
+    moveEarlier: () -> Unit,
+    moveLater: () -> Unit,
+    finish: () -> Unit,
+    modifier: Modifier,
+) {
+    val floatingColors = momentoFloatingControlColors()
+    MomentoFloatingDock(
+        modifier = modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 12.dp),
+    ) {
+        Text(
+            text = "$selectedCount selected",
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.padding(start = 10.dp),
+        )
+        IconButton(onClick = remove, enabled = !working && selectedCount > 0) {
+            Icon(Icons.Default.RemoveCircleOutline, "Remove selected media from album")
+        }
+        IconButton(onClick = moveEarlier, enabled = !working && selectedCount == 1) {
+            Icon(Icons.Default.ArrowUpward, "Move selected media earlier")
+        }
+        IconButton(onClick = moveLater, enabled = !working && selectedCount == 1) {
+            Icon(Icons.Default.ArrowDownward, "Move selected media later")
+        }
+        IconButton(onClick = finish, enabled = !working) {
+            Icon(Icons.Default.Done, "Finish selecting media", tint = floatingColors.content)
+        }
+    }
 }
 
 @Composable

@@ -7,13 +7,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -22,9 +23,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,6 +47,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import io.github.yzard.momento.app.designsystem.MomentoDetailPageHeader
+import io.github.yzard.momento.app.designsystem.MomentoPageHeader
+import io.github.yzard.momento.app.designsystem.momentoDetailMediaContentPadding
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.Place
@@ -84,6 +86,9 @@ fun decodePlaceThumbnail(dataUrl: String?): ByteArray? {
 }
 
 fun placeRegion(place: Place): String = listOfNotNull(place.state, place.country).joinToString(", ")
+
+fun placeDetailSubtitle(place: Place): String =
+    listOf(placeRegion(place), "${place.mediaCount} media").filter { it.isNotEmpty() }.joinToString(" · ")
 
 @Composable
 fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
@@ -129,17 +134,26 @@ fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
         return
     }
 
-    when {
-        places == null && error != null -> ErrorState(error!!) { scope.launch { loadPlaces(true) } }
-        places == null -> LoadingState()
-        places!!.isEmpty() -> EmptyState("No places yet")
-        else -> PlaceTiles(
-            places = places!!,
-            repository = repository,
-            hasMore = hasMore,
-            loading = loading,
-            loadMore = { scope.launch { loadPlaces(false) } },
-            select = { selectedPlaceId = it.placeId },
+    Box(Modifier.fillMaxSize()) {
+        when {
+            places == null && error != null -> ErrorState(error!!) { scope.launch { loadPlaces(true) } }
+            places == null -> LoadingState()
+            places!!.isEmpty() -> EmptyState("No places yet")
+            else -> PlaceTiles(
+                places = places!!,
+                repository = repository,
+                hasMore = hasMore,
+                loading = loading,
+                loadMore = { scope.launch { loadPlaces(false) } },
+                select = { selectedPlaceId = it.placeId },
+            )
+        }
+        MomentoPageHeader(
+            title = "Places",
+            subtitle = null,
+            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.statusBars),
+            leadingContent = null,
+            trailingContent = null,
         )
     }
 }
@@ -170,7 +184,7 @@ private fun PlaceTiles(
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
             state = gridState,
-            contentPadding = PaddingValues(start = 10.dp, top = 72.dp, end = 10.dp, bottom = 92.dp),
+            contentPadding = PaddingValues(start = 10.dp, top = 88.dp, end = 10.dp, bottom = 92.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -279,52 +293,45 @@ private fun PlaceDetailScreen(
         }
     }
 
-    when {
-        media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
-        media == null -> LoadingState()
-        else -> MediaGrid(
-            media = media!!,
-            repository = repository,
-            selectedMediaIds = emptySet(),
-            contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
-            headerContent = {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = close) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to places")
-                    }
-                    Column(Modifier.padding(start = 4.dp)) {
-                        Text(place.city, style = MaterialTheme.typography.titleLarge)
+    Box(Modifier.fillMaxSize()) {
+        when {
+            media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
+            media == null -> LoadingState()
+            else -> MediaGrid(
+                media = media!!,
+                repository = repository,
+                selectedMediaIds = emptySet(),
+                contentPadding = momentoDetailMediaContentPadding,
+                headerContent = null,
+                footerContent = if (more && nextCursor != null) {
+                    {
                         Text(
-                            "${placeRegion(place)} · ${place.mediaCount} media",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            if (loading) "Loading more..." else if (error == null) "Load more" else "Retry loading more",
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !loading) {
+                                    if (error == null) requestCursor = nextCursor else retryVersion += 1
+                                }
+                                .padding(16.dp),
                         )
                     }
-                }
-            },
-            footerContent = if (more && nextCursor != null) {
-                {
-                    Text(
-                        if (loading) "Loading more..." else if (error == null) "Load more" else "Retry loading more",
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !loading) {
-                                if (error == null) requestCursor = nextCursor else retryVersion += 1
-                            }
-                            .padding(16.dp),
-                    )
-                }
-            } else {
-                null
-            },
-            modifier = Modifier.fillMaxSize(),
-        ) { mediaItem ->
-            openMedia(media!!, media!!.indexOf(mediaItem))
+                } else {
+                    null
+                },
+                modifier = Modifier.fillMaxSize(),
+            ) { mediaItem ->
+                openMedia(media!!, media!!.indexOf(mediaItem))
+            }
         }
+        MomentoDetailPageHeader(
+            title = place.city,
+            subtitle = placeDetailSubtitle(place),
+            backContentDescription = "Back to places",
+            enabled = true,
+            onBack = close,
+            modifier = Modifier.align(Alignment.TopStart),
+        )
     }
 }
 

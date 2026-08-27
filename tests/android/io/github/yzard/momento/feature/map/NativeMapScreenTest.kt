@@ -56,14 +56,10 @@ class NativeMapScreenTest {
         assertTrue(tracker.isCurrent(second))
     }
 
-    @Test fun calculatesStableClusterOverlayChanges() {
+    @Test fun removesOnlyClustersOutsideTheNewestViewport() {
         assertEquals(
-            MapClusterChanges(
-                removedIds = setOf("old"),
-                addedIds = setOf("new"),
-                retainedIds = setOf("stable"),
-            ),
-            mapClusterChanges(
+            setOf("old"),
+            removedMapClusterIds(
                 currentIds = setOf("old", "stable"),
                 incomingIds = setOf("stable", "new"),
             ),

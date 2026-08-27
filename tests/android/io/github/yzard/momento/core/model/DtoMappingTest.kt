@@ -28,12 +28,13 @@ class DtoMappingTest {
     }
 
     @Test fun decodesBackupUploadContract() {
-        val response = Json.decodeFromString<BackupUploadResponse>("{\"uploadId\":\"abc\",\"status\":\"uploading\",\"uploadedSize\":12,\"expectedSize\":42,\"mediaId\":null,\"error\":null}")
+        val response = Json.decodeFromString<BackupUploadResponse>("{\"uploadId\":\"abc\",\"status\":\"uploading\",\"uploadedSize\":12,\"expectedSize\":42,\"contentHash\":\"abc123\",\"mediaId\":null,\"error\":null}")
         assertEquals(12, response.uploadedSize)
+        assertEquals("abc123", response.contentHash)
     }
 
     @Test fun decodesCapabilitiesContract() {
-        val capabilities = Json.decodeFromString<Capabilities>("{\"appVersion\":\"1.0\",\"apiVersion\":1,\"supportedMediaExtensions\":[\".jpg\"],\"features\":{\"llm\":false,\"imageTagging\":false,\"deduplicate\":true,\"faceDetection\":false,\"imageAesthetics\":false,\"screenshotDetection\":false,\"documentDetection\":false},\"backup\":{\"enabled\":true,\"maxUploadBytes\":100,\"maxChunkBytes\":10,\"maxActiveUploadsPerUser\":2,\"sessionExpiryHours\":24}}")
+        val capabilities = Json.decodeFromString<Capabilities>("{\"appVersion\":\"1.0\",\"apiVersion\":1,\"supportedMediaExtensions\":[\".jpg\"],\"features\":{\"llm\":false,\"imageTagging\":false,\"deduplicate\":true,\"faceDetection\":false,\"imageAesthetics\":false,\"screenshotDetection\":false,\"documentDetection\":false},\"backup\":{\"enabled\":true,\"protocolVersion\":2,\"maxUploadBytes\":100,\"maxChunkBytes\":10,\"maxActiveUploadsPerUser\":2,\"sessionExpiryHours\":24}}")
         assertEquals(10, capabilities.backup.maxChunkBytes)
     }
 

@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.ContentUris
 import android.content.Context
+import android.database.Cursor
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
@@ -12,6 +13,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.provider.MediaStore
+import android.system.Os
+import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.Constraints
@@ -41,11 +44,28 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.HttpException
 import java.io.FileNotFoundException
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -56,7 +76,16 @@ class MediaStoreScanner(
     private val backupGeneration: String?,
 ) {
     suspend fun scan(cameraOnly: Boolean) {
-        val collection = MediaStore.Files.getContentUri("external")
+        val volumeNames = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.getExternalVolumeNames(context).sorted()
+        } else {
+            listOf("external")
+        }
+        volumeNames.forEach { volumeName -> scanVolume(volumeName, cameraOnly) }
+    }
+
+    private suspend fun scanVolume(volumeName: String, cameraOnly: Boolean) {
+        val collection = MediaStore.Files.getContentUri(volumeName)
         val projection = buildList {
             add(MediaStore.Files.FileColumns._ID)
             add(MediaStore.Files.FileColumns.DISPLAY_NAME)
@@ -66,6 +95,9 @@ class MediaStoreScanner(
             add(MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.MediaColumns.RELATIVE_PATH)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                add(MediaStore.MediaColumns.GENERATION_MODIFIED)
             }
         }.toTypedArray()
         val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
@@ -85,6 +117,11 @@ class MediaStoreScanner(
             } else {
                 -1
             }
+            val generationModifiedColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.GENERATION_MODIFIED)
+            } else {
+                -1
+            }
             while (cursor.moveToNext()) {
                 val mimeType = cursor.getString(mimeTypeColumn) ?: continue
                 val bucketName = cursor.getString(bucketColumn)
@@ -95,15 +132,20 @@ class MediaStoreScanner(
                 val asset = discoveredAsset(
                     uri = ContentUris.withAppendedId(collection, mediaStoreId).toString(),
                     mediaStoreId = mediaStoreId,
+                    volumeName = volumeName,
                     backupGeneration = backupGeneration,
                     displayName = cursor.getString(displayNameColumn) ?: "media",
                     mimeType = mimeType,
                     byteSize = cursor.getLong(sizeColumn),
                     modifiedAt = cursor.getLong(modifiedColumn),
+                    generationModified = generationModifiedColumn
+                        .takeIf { columnIndex -> columnIndex >= 0 }
+                        ?.let(cursor::getLong)
+                        ?: 0,
                     folder = if (cameraMedia) CAMERA_FOLDER else relativePath ?: bucketName.orEmpty(),
                 )
                 if (assets.insertDiscovered(asset) == -1L) {
-                    assets.reconcileDiscovered(asset.uri, asset.clientAssetId, asset.operationId, asset.displayName, asset.mimeType, asset.byteSize, asset.modifiedAt, asset.folder)
+                    assets.reconcileDiscovered(asset.uri, asset.volumeName, asset.clientAssetId, asset.operationId, asset.displayName, asset.mimeType, asset.byteSize, asset.modifiedAt, asset.generationModified, asset.folder)
                 }
             }
         }
@@ -126,26 +168,40 @@ internal fun isCameraMediaFolder(bucketName: String?, relativePath: String?): Bo
     return normalizedBucket in KNOWN_CAMERA_BUCKETS || normalizedBucket.endsWith(" camera")
 }
 
-internal fun backupClientAssetId(mediaStoreId: Long, backupGeneration: String?): String =
-    backupGeneration?.let { "media_${it}_$mediaStoreId" } ?: "media_$mediaStoreId"
+internal fun backupClientAssetId(
+    mediaStoreId: Long,
+    volumeName: String,
+    backupGeneration: String?,
+): String {
+    val volumeToken = volumeName.map { character ->
+        if (character.isLetterOrDigit()) character else '_'
+    }.joinToString("")
+    val generationToken = backupGeneration?.let { generation -> "${generation}_" }.orEmpty()
+    val volumePrefix = if (volumeName == "external") "" else "${volumeToken}_"
+    return "media_${generationToken}${volumePrefix}$mediaStoreId"
+}
 
 internal fun discoveredAsset(
     uri: String,
     mediaStoreId: Long,
+    volumeName: String,
     backupGeneration: String?,
     displayName: String,
     mimeType: String,
     byteSize: Long,
     modifiedAt: Long,
+    generationModified: Long,
     folder: String,
 ): BackupAssetEntity = BackupAssetEntity(
     uri,
-    backupClientAssetId(mediaStoreId, backupGeneration),
+    volumeName,
+    backupClientAssetId(mediaStoreId, volumeName, backupGeneration),
     UUID.randomUUID().toString(),
     displayName,
     mimeType,
     byteSize,
     modifiedAt,
+    generationModified,
     folder,
     BackupState.QUEUED,
     null,
@@ -156,7 +212,8 @@ internal fun discoveredAsset(
 
 internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER }
 
-internal fun backupCanRun(capabilities: BackupCapabilities): Boolean = capabilities.enabled
+internal fun backupCanRun(capabilities: BackupCapabilities): Boolean =
+    capabilities.enabled && capabilities.protocolVersion == LOSSLESS_BACKUP_PROTOCOL_VERSION
 
 private class TerminalBackupException(message: String) : Exception(message)
 
@@ -193,10 +250,17 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
             var waitingForServer = false
             for (asset in assets.pending(settings.cameraOnly)) {
-                if (
-                    transfer(asset, assets, repository, deviceId, chunkSize, locationMetadataAccess) ==
-                    BackupProgress.WAITING_FOR_SERVER
-                ) {
+                val backupProgress = transfer(
+                    asset,
+                    assets,
+                    repository,
+                    deviceId,
+                    chunkSize,
+                    locationMetadataAccess,
+                )
+                if (backupProgress == BackupProgress.COMPLETED) {
+                    deleteBackupSnapshot(applicationContext, asset.operationId)
+                } else {
                     waitingForServer = true
                 }
             }
@@ -224,14 +288,34 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             if (asset.state == BackupState.CANCELLING) {
                 return cancelBackupAsset(asset, assets, repository)
             }
+            val snapshot = prepareBackupSnapshot(applicationContext, asset, locationMetadataAccess)
+            val createRequest = BackupUploadCreateRequest(
+                protocolVersion = LOSSLESS_BACKUP_PROTOCOL_VERSION,
+                deviceId = deviceId,
+                clientAssetId = asset.clientAssetId,
+                operationId = asset.operationId,
+                originalFilename = asset.displayName,
+                mimeType = asset.mimeType,
+                byteSize = snapshot.byteSize,
+                contentHash = snapshot.contentHash,
+                sourceModifiedAt = Instant.ofEpochSecond(asset.modifiedAt).toString(),
+                metadata = snapshot.metadata,
+            )
             val existing = asset.uploadId?.let { repository.backupUploadStatus(it) }
+            if (existing?.contentHash != null && existing.contentHash != snapshot.contentHash) {
+                throw TerminalBackupException("Server upload does not match this original snapshot")
+            }
+            val upload = when {
+                existing == null -> repository.createBackupUpload(createRequest)
+                existing.contentHash == null -> repository.createBackupUpload(createRequest)
+                else -> existing
+            }
             if (existing != null) {
-                val progress = recordServerStatus(asset, existing, assets)
+                val progress = recordServerStatus(asset, upload, assets)
                 if (asset.state == BackupState.SERVER_PROCESSING || progress == BackupProgress.COMPLETED) return progress
-                if (asset.state == BackupState.COMPLETING && existing.status != "uploading") return progress
+                if (asset.state == BackupState.COMPLETING && upload.status != "uploading") return progress
             }
 
-            val upload = existing ?: repository.createBackupUpload(BackupUploadCreateRequest(deviceId, asset.clientAssetId, asset.operationId, asset.displayName, asset.mimeType, asset.byteSize, Instant.ofEpochSecond(asset.modifiedAt).toString()))
             activeUploadId = upload.uploadId
             durableUploadedBytes = upload.uploadedSize
             if (upload.status != "uploading") return recordServerStatus(asset, upload, assets)
@@ -239,31 +323,31 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             var offset = upload.uploadedSize
             assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, upload.uploadId, null, null)
             val mediaStream = try {
-                val mediaUri = backupMediaUri(
-                    Uri.parse(asset.uri),
-                    Build.VERSION.SDK_INT,
-                    locationMetadataAccess,
-                )
-                applicationContext.contentResolver.openInputStream(mediaUri)
+                snapshot.file.inputStream()
             } catch (error: FileNotFoundException) {
                 throw TerminalBackupException(error.message ?: "Media asset is no longer available")
             }
             mediaStream.use { stream ->
-                if (stream == null) throw TerminalBackupException("Media asset is no longer available")
                 skipFully(stream, offset)
                 val buffer = ByteArray(chunkSize)
-                while (offset < asset.byteSize) {
+                while (offset < snapshot.byteSize) {
                     val read = stream.read(buffer)
                     if (read <= 0) break
                     val end = offset + read - 1
-                    val response = repository.uploadBackupChunk(upload.uploadId, "bytes $offset-$end/${asset.byteSize}", buffer.copyOf(read).toRequestBody(asset.mimeType.toMediaTypeOrNull()))
+                    val chunkHash = sha256Hex(buffer, read)
+                    val response = repository.uploadBackupChunk(
+                        upload.uploadId,
+                        "bytes $offset-$end/${snapshot.byteSize}",
+                        chunkHash,
+                        buffer.copyOf(read).toRequestBody(asset.mimeType.toMediaTypeOrNull()),
+                    )
                     offset = response.uploadedSize
                     durableUploadedBytes = offset
                     assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, response.uploadId, response.mediaId, response.error)
                     setForeground(progress("Uploading ${asset.displayName}"))
                 }
             }
-            if (offset != asset.byteSize) throw TerminalBackupException("Upload ended before source file")
+            if (offset != snapshot.byteSize) throw TerminalBackupException("Upload ended before source file")
             assets.updateTransfer(asset.uri, BackupState.COMPLETING, offset, upload.uploadId, null, null)
             return recordServerStatus(asset, repository.completeBackupUpload(upload.uploadId), assets)
         } catch (error: HttpException) {
@@ -421,6 +505,8 @@ class BackupCancellationWorker(context: Context, parameters: WorkerParameters) :
             for (asset in database.backupAssetDao().cancellationPending()) {
                 if (cancelBackupAsset(asset, database.backupAssetDao(), repository) == BackupProgress.WAITING_FOR_SERVER) {
                     waiting = true
+                } else {
+                    deleteBackupSnapshot(applicationContext, asset.operationId)
                 }
             }
             if (waiting) Result.retry() else Result.success()
@@ -487,6 +573,8 @@ internal const val PERIODIC_BACKUP_WORK_NAME = "momento_backup_periodic"
 internal const val LEGACY_BACKUP_WORK_NAME = "momento_backup"
 private const val BACKUP_CHANNEL = "backup"
 private const val BACKUP_CANCELLATION_WORK = "momento_backup_cancellation"
+internal const val LOSSLESS_BACKUP_PROTOCOL_VERSION = 2
+private const val BACKUP_SNAPSHOT_DIRECTORY = "backup-snapshots"
 private const val CAMERA_FOLDER = "Camera"
 private val CAMERA_DIRECTORY_EXCLUSIONS = setOf(
     ".thumbnails",
@@ -596,6 +684,274 @@ private fun backupMediaUri(
     return MediaStore.setRequireOriginal(uri)
 }
 
+private data class BackupSnapshot(
+    val file: File,
+    val byteSize: Long,
+    val contentHash: String,
+    val metadata: JsonObject,
+)
+
+private data class MediaStoreMetadata(
+    val columns: JsonObject,
+    val dateTakenMilliseconds: Long?,
+)
+
+private suspend fun prepareBackupSnapshot(
+    context: Context,
+    asset: BackupAssetEntity,
+    locationMetadataAccess: BackupLocationMetadataAccess,
+): BackupSnapshot = withContext(Dispatchers.IO) {
+    val snapshotDirectory = File(context.noBackupFilesDir, BACKUP_SNAPSHOT_DIRECTORY)
+    if (!snapshotDirectory.isDirectory && !snapshotDirectory.mkdirs()) {
+        throw IOException("Could not create the protected backup snapshot directory")
+    }
+    val snapshotFile = File(snapshotDirectory, "${asset.operationId}.original")
+    val metadataFile = File(snapshotDirectory, "${asset.operationId}.metadata.json")
+    if (snapshotFile.isFile && snapshotFile.length() != asset.byteSize) {
+        Files.delete(snapshotFile.toPath())
+        Files.deleteIfExists(metadataFile.toPath())
+    }
+    if (!snapshotFile.isFile) {
+        Files.deleteIfExists(metadataFile.toPath())
+        createBackupSnapshotFile(context, asset, locationMetadataAccess, snapshotFile)
+    }
+
+    val contentHash = sha256Hex(snapshotFile)
+    val metadata = if (metadataFile.isFile) {
+        Json.parseToJsonElement(metadataFile.readText()).jsonObject
+    } else {
+        val mediaStoreMetadata = captureMediaStoreMetadata(context, asset)
+        val capturedMetadata = backupMetadataEnvelope(context, asset, contentHash, mediaStoreMetadata)
+        writeBackupMetadataFile(metadataFile, capturedMetadata)
+        capturedMetadata
+    }
+    val declaredContentHash = metadata["momentoBackup"]
+        ?.jsonObject
+        ?.get("contentHash")
+        ?.jsonPrimitive
+        ?.content
+    if (declaredContentHash != contentHash) {
+        throw TerminalBackupException("Protected backup metadata does not match its original snapshot")
+    }
+    BackupSnapshot(
+        file = snapshotFile,
+        byteSize = snapshotFile.length(),
+        contentHash = contentHash,
+        metadata = metadata,
+    )
+}
+
+private fun writeBackupMetadataFile(metadataFile: File, metadata: JsonObject) {
+    val pendingFile = File(metadataFile.parentFile, "${metadataFile.name}.pending")
+    Files.deleteIfExists(pendingFile.toPath())
+    var moved = false
+    try {
+        FileOutputStream(pendingFile).use { output ->
+            output.write(metadata.toString().toByteArray(Charsets.UTF_8))
+            output.fd.sync()
+        }
+        moveSnapshotAtomically(pendingFile, metadataFile)
+        moved = true
+    } finally {
+        if (!moved) Files.deleteIfExists(pendingFile.toPath())
+    }
+}
+
+private fun createBackupSnapshotFile(
+    context: Context,
+    asset: BackupAssetEntity,
+    locationMetadataAccess: BackupLocationMetadataAccess,
+    snapshotFile: File,
+) {
+    val pendingFile = File(snapshotFile.parentFile, "${asset.operationId}.pending")
+    Files.deleteIfExists(pendingFile.toPath())
+    var moved = false
+    try {
+        val mediaUri = backupMediaUri(
+            Uri.parse(asset.uri),
+            Build.VERSION.SDK_INT,
+            locationMetadataAccess,
+        )
+        val mediaStream = try {
+            context.contentResolver.openInputStream(mediaUri)
+        } catch (error: FileNotFoundException) {
+            throw TerminalBackupException(error.message ?: "Media asset is no longer available")
+        } ?: throw TerminalBackupException("Media asset is no longer available")
+        var copiedBytes = 0L
+        mediaStream.use { input ->
+            FileOutputStream(pendingFile).use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val readBytes = input.read(buffer)
+                    if (readBytes < 0) break
+                    if (readBytes == 0) continue
+                    output.write(buffer, 0, readBytes)
+                    copiedBytes += readBytes
+                }
+                output.fd.sync()
+            }
+        }
+        if (copiedBytes != asset.byteSize) {
+            throw TerminalBackupException(
+                "Original media changed while the protected snapshot was being created",
+            )
+        }
+        moveSnapshotAtomically(pendingFile, snapshotFile)
+        moved = true
+    } finally {
+        if (!moved) Files.deleteIfExists(pendingFile.toPath())
+    }
+}
+
+private fun moveSnapshotAtomically(pendingFile: File, snapshotFile: File) {
+    try {
+        Files.move(
+            pendingFile.toPath(),
+            snapshotFile.toPath(),
+            StandardCopyOption.ATOMIC_MOVE,
+            StandardCopyOption.REPLACE_EXISTING,
+        )
+    } catch (_: AtomicMoveNotSupportedException) {
+        Files.move(
+            pendingFile.toPath(),
+            snapshotFile.toPath(),
+            StandardCopyOption.REPLACE_EXISTING,
+        )
+    }
+    val parentDirectory = requireNotNull(snapshotFile.parentFile)
+    val directoryDescriptor = Os.open(
+        parentDirectory.absolutePath,
+        OsConstants.O_RDONLY,
+        0,
+    )
+    try {
+        Os.fsync(directoryDescriptor)
+    } finally {
+        Os.close(directoryDescriptor)
+    }
+}
+
+private fun captureMediaStoreMetadata(context: Context, asset: BackupAssetEntity): MediaStoreMetadata {
+    var dateTakenMilliseconds: Long? = null
+    val columns = context.contentResolver.query(Uri.parse(asset.uri), null, null, null, null)?.use { cursor ->
+        if (!cursor.moveToFirst()) return@use JsonObject(emptyMap())
+        buildJsonObject {
+            cursor.columnNames.forEachIndexed { columnIndex, columnName ->
+                put(columnName, cursorMetadataValue(cursor, columnIndex))
+                if (columnName == MediaStore.MediaColumns.DATE_TAKEN && !cursor.isNull(columnIndex)) {
+                    dateTakenMilliseconds = cursor.getLong(columnIndex).takeIf { timestamp -> timestamp > 0 }
+                }
+            }
+        }
+    } ?: JsonObject(emptyMap())
+    return MediaStoreMetadata(columns, dateTakenMilliseconds)
+}
+
+private fun cursorMetadataValue(cursor: Cursor, columnIndex: Int): JsonObject = buildJsonObject {
+    when (cursor.getType(columnIndex)) {
+        Cursor.FIELD_TYPE_NULL -> {
+            put("type", "null")
+            put("value", JsonNull)
+        }
+        Cursor.FIELD_TYPE_INTEGER -> {
+            put("type", "integer")
+            put("value", cursor.getLong(columnIndex))
+        }
+        Cursor.FIELD_TYPE_FLOAT -> {
+            put("type", "float")
+            put("value", cursor.getDouble(columnIndex))
+        }
+        Cursor.FIELD_TYPE_BLOB -> {
+            put("type", "base64")
+            put("value", android.util.Base64.encodeToString(cursor.getBlob(columnIndex), android.util.Base64.NO_WRAP))
+        }
+        else -> {
+            put("type", "string")
+            put("value", cursor.getString(columnIndex))
+        }
+    }
+}
+
+private fun backupMetadataEnvelope(
+    context: Context,
+    asset: BackupAssetEntity,
+    contentHash: String,
+    mediaStoreMetadata: MediaStoreMetadata,
+): JsonObject = buildJsonObject {
+    put("momentoBackup", buildJsonObject {
+        put("schemaVersion", LOSSLESS_BACKUP_PROTOCOL_VERSION)
+        put("capturedAt", Instant.now().toString())
+        put("source", "androidMediaStore")
+        put("sourceUri", asset.uri)
+        put("originalFilename", asset.displayName)
+        put("mimeType", asset.mimeType)
+        put("byteSize", asset.byteSize)
+        put("contentHash", contentHash)
+        put("sourceModifiedAt", Instant.ofEpochSecond(asset.modifiedAt).toString())
+        put("folder", asset.folder)
+        put("device", buildJsonObject {
+            put("manufacturer", Build.MANUFACTURER)
+            put("model", Build.MODEL)
+            put("androidSdk", Build.VERSION.SDK_INT)
+        })
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put("mediaStoreVersion", MediaStore.getVersion(context))
+            put(
+                "mediaStoreVolumeNames",
+                JsonArray(
+                    MediaStore.getExternalVolumeNames(context)
+                        .sorted()
+                        .map(::JsonPrimitive),
+                ),
+            )
+        }
+        put("mediaStoreColumns", mediaStoreMetadata.columns)
+    })
+    mediaStoreMetadata.dateTakenMilliseconds?.let { timestamp ->
+        put("photoTakenTime", buildJsonObject {
+            put("timestamp", (timestamp / 1000L).toString())
+        })
+    }
+}
+
+internal fun sha256Hex(bytes: ByteArray, length: Int): String {
+    require(length in 0..bytes.size) { "length must be within the byte array" }
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update(bytes, 0, length)
+    return digest.digest().toHexString()
+}
+
+private fun sha256Hex(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().buffered().use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val readBytes = input.read(buffer)
+            if (readBytes < 0) break
+            if (readBytes > 0) digest.update(buffer, 0, readBytes)
+        }
+    }
+    return digest.digest().toHexString()
+}
+
+private fun ByteArray.toHexString(): String = joinToString("") { byte ->
+    (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+}
+
+private fun deleteBackupSnapshot(context: Context, operationId: String) {
+    val snapshotDirectory = File(context.noBackupFilesDir, BACKUP_SNAPSHOT_DIRECTORY)
+    Files.deleteIfExists(File(snapshotDirectory, "$operationId.original").toPath())
+    Files.deleteIfExists(File(snapshotDirectory, "$operationId.pending").toPath())
+    Files.deleteIfExists(File(snapshotDirectory, "$operationId.metadata.json").toPath())
+    Files.deleteIfExists(File(snapshotDirectory, "$operationId.metadata.json.pending").toPath())
+}
+
+private fun deleteAllBackupSnapshots(context: Context) {
+    val snapshotDirectory = File(context.noBackupFilesDir, BACKUP_SNAPSHOT_DIRECTORY)
+    snapshotDirectory.listFiles()?.forEach { snapshot -> Files.deleteIfExists(snapshot.toPath()) }
+    Files.deleteIfExists(snapshotDirectory.toPath())
+}
+
 fun backupMediaAccessLabel(access: BackupMediaAccess): String = when (access) {
     BackupMediaAccess.FULL -> "All photos and videos are available for backup"
     BackupMediaAccess.PARTIAL -> "Only selected photos or media types are available for backup"
@@ -668,6 +1024,7 @@ suspend fun clearBackupHistory(
 
     settingsStore.rotateBackupGeneration()
     val deletedRecords = assets.deleteAll()
+    deleteAllBackupSnapshots(context)
     schedulePeriodicBackup(context, allowMobileData)
     return BackupHistoryClearResult.Cleared(deletedRecords)
 }

@@ -34,6 +34,21 @@ fn creates_current_schema_without_removed_tables() {
 }
 
 #[test]
+fn creates_lossless_backup_manifest_table() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("database connection");
+    let table_name: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["backup_asset_manifests"],
+            |row| row.get(0),
+        )
+        .expect("lossless backup manifest table");
+
+    assert_eq!(table_name, "backup_asset_manifests");
+}
+
+#[test]
 fn creates_durable_metadata_and_ai_job_tables() {
     let pool = create_test_db();
     let connection = pool.get().expect("Failed to get database connection");

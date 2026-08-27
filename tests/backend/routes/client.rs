@@ -30,6 +30,7 @@ async fn capabilities_exposes_version_extensions_features_and_backup_limits() {
         assert_eq!(body["features"][feature], false);
     }
     assert_eq!(body["backup"]["enabled"], true);
+    assert_eq!(body["backup"]["protocolVersion"], 2);
     assert!(body["backup"]["maxUploadBytes"].as_u64().is_some());
     assert!(body["backup"]["maxChunkBytes"].as_u64().is_some());
 }

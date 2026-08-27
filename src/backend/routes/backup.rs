@@ -8,6 +8,7 @@ use axum::{
 use chrono::DateTime;
 use futures::StreamExt;
 use rusqlite::{OptionalExtension, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use std::path::Path as FilePath;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -69,8 +70,14 @@ async fn create_upload(
     if let Some(upload) =
         select_upload_by_operation(&transaction, current_user.id, &request.operation_id)?
     {
+        validate_idempotent_create(&transaction, current_user.id, &upload.upload_id, &request)?;
+        let upgraded_upload =
+            select_upload_by_operation(&transaction, current_user.id, &request.operation_id)?
+                .ok_or_else(|| {
+                    AppError::Internal("upgraded backup upload disappeared".to_string())
+                })?;
         transaction.commit()?;
-        return Ok(Json(upload));
+        return Ok(Json(upgraded_upload));
     }
     if let Some(upload) = select_upload_by_client_asset(
         &transaction,
@@ -78,8 +85,16 @@ async fn create_upload(
         &request.device_id,
         &request.client_asset_id,
     )? {
+        validate_idempotent_create(&transaction, current_user.id, &upload.upload_id, &request)?;
+        let upgraded_upload = select_upload_by_client_asset(
+            &transaction,
+            current_user.id,
+            &request.device_id,
+            &request.client_asset_id,
+        )?
+        .ok_or_else(|| AppError::Internal("upgraded backup upload disappeared".to_string()))?;
         transaction.commit()?;
-        return Ok(Json(upload));
+        return Ok(Json(upgraded_upload));
     }
 
     let device_exists: bool = transaction.query_row(
@@ -137,6 +152,15 @@ async fn create_upload(
             expiry
         ],
     )?;
+    transaction.execute(
+        queries::backup::INSERT_MANIFEST,
+        rusqlite::params![
+            asset_id,
+            request.protocol_version,
+            request.content_hash,
+            serde_json::to_string(&request.metadata)?,
+        ],
+    )?;
     transaction.commit()?;
 
     Ok(Json(BackupUploadResponse {
@@ -144,6 +168,7 @@ async fn create_upload(
         status: "uploading".to_string(),
         uploaded_size: 0,
         expected_size: request.byte_size as i64,
+        content_hash: Some(request.content_hash),
         media_id: None,
         error: None,
     }))
@@ -168,15 +193,15 @@ async fn complete_upload(
     Json(request): Json<BackupUploadIdRequest>,
 ) -> AppResult<Json<BackupUploadResponse>> {
     validate_identifier(&request.upload_id, "uploadId")?;
-    let mut connection = state.pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let upload = select_upload(&transaction, current_user.id, &request.upload_id)?;
+    let upload = {
+        let connection = state.pool.get().map_err(AppError::Pool)?;
+        select_upload(&connection, current_user.id, &request.upload_id)?
+    };
 
     if matches!(
         upload.status.as_str(),
         "queued" | "processing" | "completed"
     ) {
-        transaction.commit()?;
         return Ok(Json(upload.response()));
     }
     if upload.status != "uploading" || upload.uploaded_size != upload.expected_size {
@@ -184,7 +209,19 @@ async fn complete_upload(
             "backup upload is not ready to complete".to_string(),
         ));
     }
+    let expected_content_hash = upload.content_hash.as_deref().ok_or_else(|| {
+        AppError::Conflict("backup upload is missing a lossless manifest".to_string())
+    })?;
+    let staged_path = resolve_storage_path(&paths().backups, &upload.staged_path)?;
+    let actual_content_hash = crate::utils::hash::calculate_file_hash(&staged_path).await?;
+    if actual_content_hash != expected_content_hash {
+        return Err(AppError::Conflict(
+            "backup upload content hash does not match the original".to_string(),
+        ));
+    }
 
+    let mut connection = state.pool.get().map_err(AppError::Pool)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = transaction.execute(
         queries::backup::QUEUE_SESSION,
         rusqlite::params![request.upload_id, current_user.id],
@@ -270,6 +307,7 @@ async fn upload_chunk(
     let config = state.config.current();
     validate_identifier(&upload_id, "uploadId")?;
     let declared_length = content_length(&headers)?;
+    let expected_chunk_hash = content_hash_header(&headers, "X-Content-SHA256")?;
     if declared_length == 0 || declared_length > config.backup.max_chunk_bytes {
         return Err(AppError::BadRequest(
             "chunk exceeds the backup chunk limit".to_string(),
@@ -310,7 +348,14 @@ async fn upload_chunk(
         ));
     }
 
-    let write_result = write_chunk(&upload.staged_path, start, declared_length, body).await;
+    let write_result = write_chunk(
+        &upload.staged_path,
+        start,
+        declared_length,
+        &expected_chunk_hash,
+        body,
+    )
+    .await;
     if let Err(error) = write_result {
         let _ = connection.execute(
             queries::backup::ABANDON_CHUNK,
@@ -336,6 +381,7 @@ async fn write_chunk(
     staged_path: &str,
     start: u64,
     declared_length: u64,
+    expected_chunk_hash: &str,
     body: Body,
 ) -> AppResult<()> {
     let path = resolve_storage_path(&paths().backups, staged_path)?;
@@ -359,6 +405,7 @@ async fn write_chunk(
     file.seek(std::io::SeekFrom::Start(start)).await?;
 
     let mut written = 0_u64;
+    let mut hasher = Sha256::new();
     let mut stream = body.into_data_stream();
     while let Some(frame) = stream.next().await {
         let chunk =
@@ -367,15 +414,28 @@ async fn write_chunk(
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| AppError::BadRequest("chunk body exceeds Content-Length".to_string()))?;
         if written > declared_length {
+            file.set_len(start).await?;
+            file.sync_data().await?;
             return Err(AppError::BadRequest(
                 "chunk body exceeds Content-Length".to_string(),
             ));
         }
+        hasher.update(&chunk);
         file.write_all(&chunk).await?;
     }
     if written != declared_length {
+        file.set_len(start).await?;
+        file.sync_data().await?;
         return Err(AppError::BadRequest(
             "chunk body does not match Content-Length".to_string(),
+        ));
+    }
+    let actual_chunk_hash = format!("{:x}", hasher.finalize());
+    if actual_chunk_hash != expected_chunk_hash {
+        file.set_len(start).await?;
+        file.sync_data().await?;
+        return Err(AppError::BadRequest(
+            "chunk content hash does not match X-Content-SHA256".to_string(),
         ));
     }
     file.sync_data().await?;
@@ -414,6 +474,22 @@ fn validate_upload_metadata(
     request: &BackupUploadCreateRequest,
     maximum_upload_bytes: u64,
 ) -> AppResult<()> {
+    if request.protocol_version != 2 {
+        return Err(AppError::BadRequest(
+            "protocolVersion must be 2".to_string(),
+        ));
+    }
+    validate_content_hash(&request.content_hash, "contentHash")?;
+    if !request.metadata.is_object() {
+        return Err(AppError::BadRequest(
+            "metadata must be an object".to_string(),
+        ));
+    }
+    if serde_json::to_vec(&request.metadata)?.len() > 1024 * 1024 {
+        return Err(AppError::BadRequest(
+            "metadata exceeds the 1 MiB limit".to_string(),
+        ));
+    }
     if request.byte_size == 0 || request.byte_size > maximum_upload_bytes {
         return Err(AppError::BadRequest(
             "byteSize exceeds the backup upload limit".to_string(),
@@ -474,6 +550,29 @@ fn validate_upload_metadata(
     Ok(())
 }
 
+fn validate_content_hash(value: &str, name: &str) -> AppResult<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(format!(
+            "{name} must be a 64-character SHA-256 hash"
+        )));
+    }
+    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(AppError::BadRequest(format!(
+            "{name} must use lowercase hexadecimal"
+        )));
+    }
+    Ok(())
+}
+
+fn content_hash_header(headers: &HeaderMap, name: &str) -> AppResult<String> {
+    let value = headers
+        .get(name)
+        .and_then(|header_value| header_value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest(format!("{name} is required")))?;
+    validate_content_hash(value, name)?;
+    Ok(value.to_string())
+}
+
 fn content_length(headers: &HeaderMap) -> AppResult<u64> {
     headers
         .get(header::CONTENT_LENGTH)
@@ -523,6 +622,7 @@ struct UploadRow {
     uploaded_size: i64,
     expected_size: i64,
     staged_path: String,
+    content_hash: Option<String>,
     media_id: Option<i64>,
     error: Option<String>,
 }
@@ -534,6 +634,7 @@ impl UploadRow {
             status: self.status.clone(),
             uploaded_size: self.uploaded_size,
             expected_size: self.expected_size,
+            content_hash: self.content_hash.clone(),
             media_id: self.media_id,
             error: self.error.clone(),
         }
@@ -546,6 +647,7 @@ fn upload_response_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackupU
         status: row.get(1)?,
         uploaded_size: row.get(2)?,
         expected_size: row.get(3)?,
+        content_hash: row.get(6)?,
         media_id: row.get(4)?,
         error: row.get(5)?,
     })
@@ -571,11 +673,71 @@ fn select_upload(
                     staged_path: row.get(6)?,
                     media_id: row.get(7)?,
                     error: row.get(8)?,
+                    content_hash: row.get(9)?,
                 })
             },
         )
         .optional()?
         .ok_or_else(|| AppError::NotFound("backup upload not found".to_string()))
+}
+
+fn validate_idempotent_create(
+    connection: &rusqlite::Connection,
+    user_id: i64,
+    upload_id: &str,
+    request: &BackupUploadCreateRequest,
+) -> AppResult<()> {
+    let stored_contract = connection.query_row(
+        queries::backup::SELECT_CREATE_CONTRACT,
+        rusqlite::params![upload_id, user_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<u32>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        },
+    )?;
+    let request_metadata = serde_json::to_string(&request.metadata)?;
+    let base_contract_matches = stored_contract.1 == request.device_id
+        && stored_contract.2 == request.client_asset_id
+        && stored_contract.3 == request.operation_id
+        && stored_contract.4 == request.original_filename
+        && stored_contract.5 == request.mime_type
+        && stored_contract.6 == request.byte_size as i64
+        && stored_contract.7.as_deref() == Some(request.source_modified_at.as_str());
+    let manifest_is_missing =
+        stored_contract.8.is_none() && stored_contract.9.is_none() && stored_contract.10.is_none();
+    if base_contract_matches && manifest_is_missing {
+        connection.execute(
+            queries::backup::INSERT_MANIFEST,
+            rusqlite::params![
+                stored_contract.0,
+                request.protocol_version,
+                request.content_hash,
+                request_metadata,
+            ],
+        )?;
+        return Ok(());
+    }
+    let matches = base_contract_matches
+        && stored_contract.8 == Some(request.protocol_version)
+        && stored_contract.9.as_deref() == Some(request.content_hash.as_str())
+        && stored_contract.10.as_deref() == Some(request_metadata.as_str());
+    if !matches {
+        return Err(AppError::Conflict(
+            "idempotency key already belongs to a different backup manifest".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn select_upload_by_operation(

@@ -35,6 +35,7 @@ struct FeatureFlags {
 #[serde(rename_all = "camelCase")]
 struct BackupCapabilities {
     enabled: bool,
+    protocol_version: u8,
     max_upload_bytes: u64,
     max_chunk_bytes: u64,
     max_active_uploads_per_user: usize,
@@ -66,6 +67,7 @@ async fn get_capabilities(
         },
         backup: BackupCapabilities {
             enabled: true,
+            protocol_version: 2,
             max_upload_bytes: config.backup.max_upload_bytes,
             max_chunk_bytes: config.backup.max_chunk_bytes,
             max_active_uploads_per_user: config.backup.max_active_uploads_per_user,

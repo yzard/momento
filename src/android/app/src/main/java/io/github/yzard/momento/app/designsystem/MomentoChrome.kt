@@ -7,15 +7,22 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -31,6 +38,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+
+val momentoDetailMediaContentPadding = PaddingValues(bottom = 104.dp)
 
 @Composable
 fun MomentoPageTitle(text: String, modifier: Modifier) {
@@ -79,6 +88,28 @@ fun MomentoPageHeader(
             trailingContent()
         }
     }
+}
+
+@Composable
+fun MomentoDetailPageHeader(
+    title: String,
+    subtitle: String?,
+    backContentDescription: String,
+    enabled: Boolean,
+    onBack: () -> Unit,
+    modifier: Modifier,
+) {
+    MomentoPageHeader(
+        title = title,
+        subtitle = subtitle,
+        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars),
+        leadingContent = {
+            IconButton(onClick = onBack, enabled = enabled) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, backContentDescription)
+            }
+        },
+        trailingContent = null,
+    )
 }
 
 @Composable

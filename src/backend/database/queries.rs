@@ -100,8 +100,10 @@ pub mod backup {
          , backup_upload_sessions.expected_size
          , backup_assets.media_id
          , backup_assets.error
+         , backup_asset_manifests.content_hash
       FROM backup_assets
       JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+      LEFT JOIN backup_asset_manifests ON backup_asset_manifests.asset_id = backup_assets.id
      WHERE backup_assets.user_id = ?
        AND backup_assets.operation_id = ?
     "#;
@@ -112,8 +114,10 @@ pub mod backup {
          , backup_upload_sessions.expected_size
          , backup_assets.media_id
          , backup_assets.error
+         , backup_asset_manifests.content_hash
       FROM backup_assets
       JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+      LEFT JOIN backup_asset_manifests ON backup_asset_manifests.asset_id = backup_assets.id
      WHERE backup_assets.user_id = ?
        AND backup_assets.device_id = ?
        AND backup_assets.client_asset_id = ?
@@ -143,6 +147,32 @@ pub mod backup {
       , expires_at
     ) VALUES (?, ?, ?, ?, 'uploading', datetime('now', ?))
     "#;
+    pub const INSERT_MANIFEST: &str = r#"
+    INSERT INTO backup_asset_manifests (
+        asset_id
+      , protocol_version
+      , content_hash
+      , metadata_json
+    ) VALUES (?, ?, ?, ?)
+    "#;
+    pub const SELECT_CREATE_CONTRACT: &str = r#"
+    SELECT backup_assets.id
+         , backup_assets.device_id
+         , backup_assets.client_asset_id
+         , backup_assets.operation_id
+         , backup_assets.original_filename
+         , backup_assets.mime_type
+         , backup_assets.byte_size
+         , backup_assets.source_modified_at
+         , backup_asset_manifests.protocol_version
+         , backup_asset_manifests.content_hash
+         , backup_asset_manifests.metadata_json
+      FROM backup_assets
+      JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+      LEFT JOIN backup_asset_manifests ON backup_asset_manifests.asset_id = backup_assets.id
+     WHERE backup_upload_sessions.upload_id = ?
+       AND backup_upload_sessions.user_id = ?
+    "#;
     pub const SELECT_UPLOAD: &str = r#"
     SELECT backup_assets.id
          , backup_upload_sessions.upload_id
@@ -153,8 +183,10 @@ pub mod backup {
          , backup_assets.staged_path
          , backup_assets.media_id
          , backup_assets.error
+         , backup_asset_manifests.content_hash
       FROM backup_assets
       JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
+      LEFT JOIN backup_asset_manifests ON backup_asset_manifests.asset_id = backup_assets.id
      WHERE backup_upload_sessions.upload_id = ?
        AND backup_upload_sessions.user_id = ?
     "#;
@@ -241,6 +273,8 @@ pub mod backup {
        AND status = 'processing'
     "#;
     pub const MARK_SESSION_PROCESSING: &str = "UPDATE backup_upload_sessions SET status = 'processing', updated_at = datetime('now') WHERE asset_id = ? AND status = 'queued'";
+    pub const SELECT_MANIFEST_FOR_ASSET: &str =
+        "SELECT content_hash, metadata_json FROM backup_asset_manifests WHERE asset_id = ?";
     pub const COMPLETE_ASSET: &str = "UPDATE backup_assets SET status = 'completed', media_id = ?, error = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
     pub const COMPLETE_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'completed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
     pub const FAIL_ASSET: &str = "UPDATE backup_assets SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status = 'processing'";

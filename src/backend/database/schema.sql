@@ -153,6 +153,15 @@ CREATE TABLE IF NOT EXISTS backup_upload_sessions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS backup_asset_manifests (
+    asset_id INTEGER PRIMARY KEY,
+    protocol_version INTEGER NOT NULL CHECK(protocol_version = 2),
+    content_hash TEXT NOT NULL CHECK(length(content_hash) = 64),
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (asset_id) REFERENCES backup_assets(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_backup_upload_sessions_user_active
     ON backup_upload_sessions (user_id, status, expires_at);
 

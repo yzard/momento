@@ -5,6 +5,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
 import java.io.IOException
+import io.github.yzard.momento.core.model.AlbumDetail
+import io.github.yzard.momento.core.model.Media
 
 class AlbumsScreenTest {
     @Test fun choosesTheExpectedCollageForUpToFourThumbnails() {
@@ -26,6 +28,19 @@ class AlbumsScreenTest {
         assertEquals("Remove from album (2)", removeFromAlbumSelectionLabel(2))
     }
 
+    @Test fun combinesTheAlbumCountAndDescriptionInTheFloatingTitle() {
+        val album = AlbumDetail(
+            id = 1,
+            name = "Summer",
+            description = "At the lake",
+            coverMediaId = null,
+            media = listOf(media(1), media(2)),
+            createdAt = "2026-01-01T00:00:00Z",
+        )
+
+        assertEquals("2 memories · At the lake", albumDetailSubtitle(album))
+    }
+
     @Test fun movesSelectedAlbumMediaEarlier() {
         assertEquals(listOf(2L, 1L, 3L), reorderAlbumIds(listOf(1, 2, 3), 2, -1))
     }
@@ -40,4 +55,12 @@ class AlbumsScreenTest {
         assertTrue(executeAlbumOperation {})
         assertFalse(executeAlbumOperation { throw IOException("offline") })
     }
+
+    private fun media(id: Long) = Media(
+        id = id,
+        filename = "$id.jpg",
+        originalFilename = "$id.jpg",
+        mediaType = "photo",
+        createdAt = "2026-01-01T00:00:00Z",
+    )
 }

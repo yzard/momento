@@ -1,6 +1,8 @@
 package io.github.yzard.momento.app.designsystem
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -32,5 +34,13 @@ class MomentoChromeTest {
         val disabled = momentoActionChipContainerColor(colors, pressed = false, enabled = false)
 
         assertEquals(colors.container.alpha * 0.55f, disabled.alpha, 0.01f)
+    }
+
+    @Test
+    fun detailMediaRunsToTheTopAndReservesOnlyBottomChromeSpace() {
+        assertEquals(0.dp, momentoDetailMediaContentPadding.calculateTopPadding())
+        assertEquals(104.dp, momentoDetailMediaContentPadding.calculateBottomPadding())
+        assertEquals(0.dp, momentoDetailMediaContentPadding.calculateLeftPadding(LayoutDirection.Ltr))
+        assertEquals(0.dp, momentoDetailMediaContentPadding.calculateRightPadding(LayoutDirection.Ltr))
     }
 }

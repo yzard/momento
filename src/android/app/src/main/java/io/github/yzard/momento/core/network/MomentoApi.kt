@@ -63,7 +63,7 @@ interface MomentoApi {
     @POST("api/v1/backup/device/register") suspend fun registerDevice(@Body request: BackupDeviceRegisterRequest): BackupDeviceRegisterResponse
     @POST("api/v1/backup/upload/create") suspend fun createUpload(@Body request: BackupUploadCreateRequest): BackupUploadResponse
     @POST("api/v1/backup/upload/status") suspend fun uploadStatus(@Body request: BackupUploadIdRequest): BackupUploadResponse
-    @PUT("api/v1/backup/upload/chunk/{uploadId}") suspend fun uploadChunk(@Path("uploadId") uploadId: String, @Header("Content-Range") range: String, @Body bytes: RequestBody): BackupUploadResponse
+    @PUT("api/v1/backup/upload/chunk/{uploadId}") suspend fun uploadChunk(@Path("uploadId") uploadId: String, @Header("Content-Range") range: String, @Header("X-Content-SHA256") contentHash: String, @Body bytes: RequestBody): BackupUploadResponse
     @POST("api/v1/backup/upload/complete") suspend fun completeUpload(@Body request: BackupUploadIdRequest): BackupUploadResponse
     @POST("api/v1/backup/upload/cancel") suspend fun cancelUpload(@Body request: BackupUploadIdRequest): BackupUploadResponse
 }

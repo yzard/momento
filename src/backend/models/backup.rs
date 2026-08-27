@@ -10,13 +10,16 @@ pub struct BackupDeviceRegisterRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupUploadCreateRequest {
+    pub protocol_version: u32,
     pub device_id: String,
     pub client_asset_id: String,
     pub operation_id: String,
     pub original_filename: String,
     pub mime_type: String,
     pub byte_size: u64,
+    pub content_hash: String,
     pub source_modified_at: String,
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +41,7 @@ pub struct BackupUploadResponse {
     pub status: String,
     pub uploaded_size: i64,
     pub expected_size: i64,
+    pub content_hash: Option<String>,
     pub media_id: Option<i64>,
     pub error: Option<String>,
 }

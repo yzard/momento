@@ -44,7 +44,10 @@ android {
     kotlinOptions { jvmTarget = "17" }
     sourceSets {
         getByName("test").java.srcDir("../../../tests/android/io")
-        getByName("androidTest").java.srcDir("../../../tests/android/instrumented")
+        getByName("androidTest").apply {
+            java.srcDir("../../../tests/android/instrumented")
+            assets.srcDir("schemas")
+        }
     }
 
     signingConfigs {
@@ -123,6 +126,7 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test)
     androidTestImplementation(libs.androidx.test.ext)
     androidTestImplementation(libs.espresso)
+    androidTestImplementation(libs.room.testing)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
 }

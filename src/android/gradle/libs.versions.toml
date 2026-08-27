@@ -47,6 +47,7 @@ serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-jso
 room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
 room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
+room-testing = { module = "androidx.room:room-testing", version.ref = "room" }
 work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 datastore = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 coil = { module = "io.coil-kt:coil-compose", version.ref = "coil" }

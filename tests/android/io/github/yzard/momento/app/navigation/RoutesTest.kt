@@ -58,7 +58,7 @@ class RoutesTest {
                 screenshotDetection = false,
                 documentDetection = true,
             ),
-            backup = BackupCapabilities(true, 1, 1, 1, 1),
+            backup = BackupCapabilities(true, 2, 1, 1, 1, 1),
         )
 
         assertTrue(Destination.DOCUMENTS.isAvailable(capabilities))
@@ -68,10 +68,11 @@ class RoutesTest {
         assertTrue(Destination.ALBUMS.isAvailable(capabilities))
     }
 
-    @Test fun settingsAlbumsAndAdminOwnTheirPageTitles() {
+    @Test fun settingsAlbumsPlacesAndAdminOwnTheirPageTitles() {
         assertTrue(Destination.SETTINGS.hasShellPageTitle().not())
         assertTrue(Destination.ALBUMS.hasShellPageTitle().not())
+        assertTrue(Destination.PLACES.hasShellPageTitle().not())
         assertTrue(Destination.ADMIN.hasShellPageTitle().not())
-        assertTrue(Destination.PLACES.hasShellPageTitle())
+        assertTrue(Destination.MAP.hasShellPageTitle())
     }
 }

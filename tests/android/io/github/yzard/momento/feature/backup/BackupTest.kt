@@ -12,20 +12,23 @@ import org.junit.Test
 
 class BackupTest {
     @Test fun serverCapabilityPreventsAnExistingWorkerFromUploading() {
-        val enabled = BackupCapabilities(true, 100, 100, 1, 24)
+        val enabled = BackupCapabilities(true, 2, 100, 100, 1, 24)
         val disabled = enabled.copy(enabled = false)
         assertTrue(backupCanRun(enabled))
         assertFalse(backupCanRun(disabled))
+        assertFalse(backupCanRun(enabled.copy(protocolVersion = 1)))
     }
     @Test fun discoveredAssetsStartQueuedWithStableClientId() {
         val asset = discoveredAsset(
             "content://media/42",
             42,
+            "external",
             null,
             "IMG_0042.jpg",
             "image/jpeg",
             12,
             100,
+            0,
             "Camera",
         )
         assertEquals("media_42", asset.clientAssetId)
@@ -34,9 +37,13 @@ class BackupTest {
     }
 
     @Test fun backupResetGenerationProducesANewServerClientAssetId() {
-        assertEquals("media_42", backupClientAssetId(42, null))
-        assertEquals("media_reset123_42", backupClientAssetId(42, "reset123"))
-        assertFalse(backupClientAssetId(42, null) == backupClientAssetId(42, "reset123"))
+        assertEquals("media_42", backupClientAssetId(42, "external", null))
+        assertEquals("media_reset123_42", backupClientAssetId(42, "external", "reset123"))
+        assertEquals("media_external_primary_42", backupClientAssetId(42, "external_primary", null))
+        assertFalse(
+            backupClientAssetId(42, "external", null) ==
+                backupClientAssetId(42, "external", "reset123"),
+        )
     }
 
     @Test fun retriesOnlyTransientHttpResponses() {
@@ -48,12 +55,20 @@ class BackupTest {
     }
 
     @Test fun serverProcessingIsRetriedWithoutBlockingTheWorker() {
-        assertEquals(BackupProgress.WAITING_FOR_SERVER, serverProgress(BackupUploadResponse("upload", "processing", 10, 10, null, null)))
+        assertEquals(BackupProgress.WAITING_FOR_SERVER, serverProgress(BackupUploadResponse("upload", "processing", 10, 10, "hash", null, null)))
     }
 
     @Test fun completedAndFailedServerResponsesAreTerminal() {
-        assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "completed", 10, 10, 4, null)))
-        assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "failed", 10, 10, null, "bad file")))
+        assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "completed", 10, 10, "hash", 4, null)))
+        assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "failed", 10, 10, "hash", null, "bad file")))
+    }
+
+    @Test fun calculatesSha256ForOnlyTheUploadedChunkBytes() {
+        val buffer = "hello-extra".toByteArray()
+        assertEquals(
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            sha256Hex(buffer, 5),
+        )
     }
 
     @Test fun cancellationKeepsWritableAndTransientSessionsRetryable() {
