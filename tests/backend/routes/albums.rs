@@ -10,6 +10,20 @@ fn access_token(user_id: i64) -> String {
         .expect("Failed to create access token")
 }
 
+fn insert_aesthetic_score(
+    pool: &momento_api::database::DbPool,
+    media_id: i64,
+    aesthetic_score: f64,
+) {
+    pool.get()
+        .expect("database")
+        .execute(
+            "INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', 'test', ?, 0.0, 0.0, 0.0, 0.0)",
+            rusqlite::params![media_id, aesthetic_score],
+        )
+        .expect("aesthetic score");
+}
+
 #[tokio::test]
 async fn album_create_and_add_media_use_the_shared_album_contract() {
     let (app, pool) = create_test_app();
@@ -168,4 +182,73 @@ async fn album_reorder_requires_and_atomically_applies_a_complete_permutation() 
         .collect::<Result<Vec<_>, _>>()
         .expect("position rows");
     assert_eq!(positions, vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn album_list_selects_four_highest_aesthetic_thumbnails_and_treats_missing_as_zero() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "album-thumbnails", "album-thumbnails@example.com");
+    let missing_first = create_test_media(&pool, "missing-first.jpg");
+    let highest = create_test_media(&pool, "highest.jpg");
+    let middle = create_test_media(&pool, "middle.jpg");
+    let lowest_positive = create_test_media(&pool, "lowest-positive.jpg");
+    let scored_zero = create_test_media(&pool, "scored-zero.jpg");
+    let missing_last = create_test_media(&pool, "missing-last.jpg");
+    let media_ids = [
+        missing_first,
+        highest,
+        middle,
+        lowest_positive,
+        scored_zero,
+        missing_last,
+    ];
+    for media_id in media_ids {
+        grant_media_access(&pool, media_id, user_id);
+    }
+    insert_aesthetic_score(&pool, highest, 0.9);
+    insert_aesthetic_score(&pool, middle, 0.6);
+    insert_aesthetic_score(&pool, lowest_positive, 0.2);
+    insert_aesthetic_score(&pool, scored_zero, 0.0);
+
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+    let created = server
+        .post("/api/v1/album/create")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({ "name": "Best four" }))
+        .await;
+    let album_id = created.json::<Value>()["id"].as_i64().expect("album ID");
+    server
+        .post("/api/v1/album/add-media")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({ "albumId": album_id, "mediaIds": media_ids }))
+        .await
+        .assert_status_ok();
+
+    let response = server
+        .post("/api/v1/album/list")
+        .add_header(AUTHORIZATION, authorization)
+        .await;
+    response.assert_status_ok();
+    let album = response.json::<Value>()["albums"][0].clone();
+
+    assert_eq!(album["mediaCount"], json!(6));
+    assert_eq!(
+        album["thumbnailMediaIds"],
+        json!([highest, middle, lowest_positive, missing_first]),
+    );
+
+    let updated = server
+        .post("/api/v1/album/update")
+        .add_header(
+            AUTHORIZATION,
+            format!("Bearer {}", access_token(user_id)),
+        )
+        .json(&json!({ "albumId": album_id, "name": "Still the best four" }))
+        .await;
+    updated.assert_status_ok();
+    assert_eq!(
+        updated.json::<Value>()["thumbnailMediaIds"],
+        json!([highest, middle, lowest_positive, missing_first]),
+    );
 }

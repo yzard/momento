@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { placesApi, type PlaceSummary } from '../api/places'
 import type { Media } from '../api/types'
+import MemoryCardOverlay from '../components/common/MemoryCardOverlay'
 import PhotoGrid from '../components/timeline/PhotoGrid'
 import Lightbox from '../components/viewer/Lightbox'
 
@@ -136,15 +137,12 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
       className="group relative aspect-[3/2] overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
     >
       {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" /> : <div className="flex h-full w-full items-center justify-center bg-muted"><MapPinned className="h-9 w-9 text-muted-foreground/40" aria-hidden="true" /></div>}
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-4 pb-4 pt-14 text-white">
-        <div className="flex items-end justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="truncate font-display text-xl font-semibold leading-tight">{place.city}</h2>
-            <p className="mt-0.5 truncate text-sm text-white/80">{region}</p>
-          </div>
-          <span className="shrink-0 rounded-full bg-black/45 px-2.5 py-1 text-xs font-bold text-white backdrop-blur-sm">{place.mediaCount} media</span>
-        </div>
-      </div>
+      <MemoryCardOverlay
+        title={place.city}
+        subtitle={region}
+        badge={`${place.mediaCount} media`}
+        headingLevel="h2"
+      />
     </Link>
   )
 }

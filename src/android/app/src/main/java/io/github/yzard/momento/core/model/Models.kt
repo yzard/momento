@@ -29,7 +29,7 @@ import kotlinx.serialization.Serializable
 )
 @Serializable data class TimelineResponse(val groups: List<TimelineGroup>, val nextCursor: String?, val previousCursor: String?, val hasOlder: Boolean, val hasNewer: Boolean)
 
-@Serializable data class Album(val id: Long, val name: String, val description: String?, val coverMediaId: Long?, val mediaCount: Long, val createdAt: String)
+@Serializable data class Album(val id: Long, val name: String, val description: String?, val coverMediaId: Long?, val thumbnailMediaIds: List<Long>, val mediaCount: Long, val createdAt: String)
 @Serializable data class AlbumDetail(val id: Long, val name: String, val description: String?, val coverMediaId: Long?, val media: List<Media>, val createdAt: String)
 @Serializable data class AlbumsResponse(val albums: List<Album>)
 @Serializable data class AlbumIdRequest(val albumId: Long)

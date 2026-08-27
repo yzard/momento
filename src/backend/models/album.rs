@@ -8,6 +8,7 @@ pub struct AlbumResponse {
     pub name: String,
     pub description: Option<String>,
     pub cover_media_id: Option<i64>,
+    pub thumbnail_media_ids: Vec<i64>,
     pub media_count: i64,
     pub created_at: String,
 }

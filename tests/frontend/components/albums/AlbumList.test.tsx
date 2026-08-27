@@ -13,9 +13,9 @@ vi.mock('../../../../src/frontend/api/media', () => ({
 vi.mock('../../../../src/frontend/hooks/useAlbums', () => ({
   useAlbums: () => ({
     data: [
-      { id: 1, name: 'First', description: null, coverMediaId: 10, mediaCount: 1, createdAt: '2026-01-01' },
-      { id: 2, name: 'Second', description: null, coverMediaId: 20, mediaCount: 1, createdAt: '2026-01-02' },
-      { id: 3, name: 'Empty', description: null, coverMediaId: null, mediaCount: 0, createdAt: '2026-01-03' },
+      { id: 1, name: 'First', description: null, coverMediaId: 10, thumbnailMediaIds: [10, 11, 12, 13], mediaCount: 4, createdAt: '2026-01-01' },
+      { id: 2, name: 'Second', description: null, coverMediaId: 20, thumbnailMediaIds: [20, 11], mediaCount: 2, createdAt: '2026-01-02' },
+      { id: 3, name: 'Empty', description: null, coverMediaId: null, thumbnailMediaIds: [], mediaCount: 0, createdAt: '2026-01-03' },
     ],
     isLoading: false,
     error: null,
@@ -39,6 +39,9 @@ describe('AlbumList', () => {
     mocks.albumCard.mockReset()
     mocks.getThumbnailBatch.mockResolvedValue(new Map([
       [10, 'first-cover'],
+      [11, 'shared-cover'],
+      [12, 'third-cover'],
+      [13, 'fourth-cover'],
       [20, 'second-cover'],
     ]))
   })
@@ -49,15 +52,15 @@ describe('AlbumList', () => {
     render(<AlbumList onAlbumClick={vi.fn()} />)
 
     await waitFor(() => expect(mocks.getThumbnailBatch).toHaveBeenCalledOnce())
-    expect(mocks.getThumbnailBatch).toHaveBeenCalledWith([10, 20])
+    expect(mocks.getThumbnailBatch).toHaveBeenCalledWith([10, 11, 12, 13, 20])
     await waitFor(() => {
       expect(mocks.albumCard).toHaveBeenCalledWith(expect.objectContaining({
         album: expect.objectContaining({ id: 1 }),
-        coverUrl: 'first-cover',
+        thumbnailUrls: ['first-cover', 'shared-cover', 'third-cover', 'fourth-cover'],
       }))
       expect(mocks.albumCard).toHaveBeenCalledWith(expect.objectContaining({
         album: expect.objectContaining({ id: 2 }),
-        coverUrl: 'second-cover',
+        thumbnailUrls: ['second-cover', 'shared-cover'],
       }))
     })
   })

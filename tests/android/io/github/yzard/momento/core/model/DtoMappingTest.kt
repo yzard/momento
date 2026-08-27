@@ -21,6 +21,12 @@ class DtoMappingTest {
         assertEquals(listOf(7L), response.groups.single().media.map { it.id })
     }
 
+    @Test fun decodesAlbumThumbnailMediaIds() {
+        val response = Json.decodeFromString<AlbumsResponse>("{\"albums\":[{\"id\":3,\"name\":\"Summer\",\"description\":null,\"coverMediaId\":9,\"thumbnailMediaIds\":[11,12,13,14],\"mediaCount\":8,\"createdAt\":\"2026-01-01T00:00:00Z\"}]}")
+
+        assertEquals(listOf(11L, 12L, 13L, 14L), response.albums.single().thumbnailMediaIds)
+    }
+
     @Test fun decodesBackupUploadContract() {
         val response = Json.decodeFromString<BackupUploadResponse>("{\"uploadId\":\"abc\",\"status\":\"uploading\",\"uploadedSize\":12,\"expectedSize\":42,\"mediaId\":null,\"error\":null}")
         assertEquals(12, response.uploadedSize)

@@ -18,9 +18,7 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
   const [coverUrls, setCoverUrls] = useState<Map<number, string>>(new Map())
 
   useEffect(() => {
-    const coverIds = albums
-      ?.map((album) => album.coverMediaId)
-      .filter((mediaId): mediaId is number => mediaId !== null) ?? []
+    const coverIds = [...new Set(albums?.flatMap((album) => album.thumbnailMediaIds) ?? [])]
     if (coverIds.length === 0) {
       setCoverUrls(new Map())
       return
@@ -106,7 +104,7 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
             <AlbumCard
               key={album.id}
               album={album}
-              coverUrl={album.coverMediaId === null ? null : coverUrls.get(album.coverMediaId) ?? null}
+              thumbnailUrls={album.thumbnailMediaIds.map((mediaId) => coverUrls.get(mediaId) ?? null)}
               onClick={() => onAlbumClick(album)}
               onDelete={() => handleDelete(album.id)}
             />

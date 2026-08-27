@@ -2,24 +2,37 @@ package io.github.yzard.momento.feature.albums
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -33,10 +46,14 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -44,12 +61,26 @@ import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Album
 import io.github.yzard.momento.core.model.AlbumDetail
 import io.github.yzard.momento.core.model.Media
+import io.github.yzard.momento.core.ui.MemoryCardOverlay
 import io.github.yzard.momento.feature.media.MediaGrid
 import io.github.yzard.momento.feature.media.toggleMediaSelection
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 import java.io.IOException
+
+enum class AlbumCollageLayout { EMPTY, SINGLE, TWO_COLUMNS, LARGE_LEFT, GRID }
+
+fun albumCollageLayout(thumbnailCount: Int): AlbumCollageLayout = when (thumbnailCount) {
+    0 -> AlbumCollageLayout.EMPTY
+    1 -> AlbumCollageLayout.SINGLE
+    2 -> AlbumCollageLayout.TWO_COLUMNS
+    3 -> AlbumCollageLayout.LARGE_LEFT
+    else -> AlbumCollageLayout.GRID
+}
+
+fun albumMemoryCountLabel(mediaCount: Long): String =
+    "$mediaCount ${if (mediaCount == 1L) "memory" else "memories"}"
 
 @Composable
 fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
@@ -88,34 +119,33 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
             Text(error!!, color = MaterialTheme.colorScheme.error)
             TextButton({ scope.launch { loadAlbums() } }) { Text("Retry") }
         }
-        else -> LazyColumn(
+        else -> LazyVerticalGrid(
+            columns = GridCells.Adaptive(156.dp),
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
+            contentPadding = PaddingValues(start = 10.dp, top = 64.dp, end = 10.dp, bottom = 88.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            item {
+            item(span = { GridItemSpan(maxLineSpan) }) {
                 Button(
                     onClick = { creating = true },
                     enabled = !working,
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(6.dp),
                 ) { Text("Create album") }
             }
             if (albums.orEmpty().isEmpty()) {
-                item { Text("No albums yet", Modifier.padding(16.dp)) }
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Text("No albums yet", Modifier.padding(16.dp))
+                }
             }
-            items(albums.orEmpty(), key = { it.id }) { album ->
-                ListItem(
-                    headlineContent = { Text(album.name) },
-                    supportingContent = { Text("${album.mediaCount} items") },
-                    leadingContent = { AlbumCoverThumbnail(album, repository) },
-                    trailingContent = {
-                        TextButton(
-                            enabled = !working,
-                            onClick = { albumPendingDeletion = album },
-                        ) { Text("Delete") }
-                    },
-                    modifier = Modifier.clickable(enabled = !working) { selectedAlbumId = album.id },
+            gridItems(albums.orEmpty(), key = { it.id }) { album ->
+                AlbumTile(
+                    album = album,
+                    repository = repository,
+                    enabled = !working,
+                    select = { selectedAlbumId = album.id },
+                    delete = { albumPendingDeletion = album },
                 )
-                HorizontalDivider()
             }
         }
     }
@@ -260,16 +290,6 @@ private fun AlbumDetailScreen(
                             enabled = !working,
                         ) { Text("Remove ${selectedIds.size}") }
                         selectedIds.singleOrNull()?.let { selectedId ->
-                            TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        runMutation("Could not update album cover") {
-                                            repository.updateAlbum(albumId, null, null, selectedId)
-                                        }
-                                    }
-                                },
-                                enabled = !working,
-                            ) { Text("Use as cover") }
                             TextButton(
                                 onClick = {
                                     scope.launch {
@@ -481,26 +501,116 @@ fun AlbumAddMediaSheet(
 }
 
 @Composable
-private fun AlbumCoverThumbnail(album: Album, repository: MomentoRepository) {
-    val context = LocalContext.current
-    val url by produceState<String?>(null, album.coverMediaId) {
-        value = album.coverMediaId?.let { mediaId -> repository.thumbnailUrl(mediaId, true) }
-    }
-    val shape = RoundedCornerShape(10.dp)
+private fun AlbumTile(
+    album: Album,
+    repository: MomentoRepository,
+    enabled: Boolean,
+    select: () -> Unit,
+    delete: () -> Unit,
+) {
+    val shape = RoundedCornerShape(16.dp)
     Box(
         modifier = Modifier
-            .size(64.dp)
+            .fillMaxWidth()
+            .aspectRatio(1f)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .semantics {
+                contentDescription = "${album.name}, ${albumMemoryCountLabel(album.mediaCount)}"
+            }
+            .clickable(enabled = enabled, onClick = select),
     ) {
-        url?.let { thumbnailUrl ->
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(thumbnailUrl).build(),
-                imageLoader = repository.authenticatedImageLoader(context),
-                contentDescription = "${album.name} cover",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+        AlbumThumbnailCollage(album, repository)
+        MemoryCardOverlay(
+            title = album.name,
+            subtitle = null,
+            badge = albumMemoryCountLabel(album.mediaCount),
+        )
+        IconButton(
+            onClick = delete,
+            enabled = enabled,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.55f)),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Delete ${album.name}",
+                tint = Color.White,
             )
+        }
+    }
+}
+
+@Composable
+private fun AlbumThumbnailCollage(album: Album, repository: MomentoRepository) {
+    val context = LocalContext.current
+    val thumbnailMediaIds = album.thumbnailMediaIds.take(4)
+    val urls by produceState<List<String>>(emptyList(), thumbnailMediaIds) {
+        value = thumbnailMediaIds.map { mediaId -> repository.thumbnailUrl(mediaId, true) }
+    }
+
+    @Composable
+    fun Thumbnail(index: Int, modifier: Modifier) {
+        Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
+            urls.getOrNull(index)?.let { thumbnailUrl ->
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(thumbnailUrl).build(),
+                    imageLoader = repository.authenticatedImageLoader(context),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+
+    when (albumCollageLayout(thumbnailMediaIds.size)) {
+        AlbumCollageLayout.EMPTY -> Box(Modifier.fillMaxSize()) {
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        AlbumCollageLayout.SINGLE -> Thumbnail(0, Modifier.fillMaxSize())
+        AlbumCollageLayout.TWO_COLUMNS -> Row(
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant),
+            horizontalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Thumbnail(0, Modifier.weight(1f).fillMaxHeight())
+            Thumbnail(1, Modifier.weight(1f).fillMaxHeight())
+        }
+        AlbumCollageLayout.LARGE_LEFT -> Row(
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant),
+            horizontalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Thumbnail(0, Modifier.weight(1f).fillMaxHeight())
+            Column(
+                Modifier.weight(1f).fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                Thumbnail(1, Modifier.weight(1f).fillMaxWidth())
+                Thumbnail(2, Modifier.weight(1f).fillMaxWidth())
+            }
+        }
+        AlbumCollageLayout.GRID -> Column(
+            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+                Thumbnail(0, Modifier.weight(1f).fillMaxHeight())
+                Thumbnail(1, Modifier.weight(1f).fillMaxHeight())
+            }
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+                Thumbnail(2, Modifier.weight(1f).fillMaxHeight())
+                Thumbnail(3, Modifier.weight(1f).fillMaxHeight())
+            }
         }
     }
 }

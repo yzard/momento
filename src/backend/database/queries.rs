@@ -1540,20 +1540,53 @@ pub mod albums {
      WHERE a.id = ?
     "#;
 
-    pub const SELECT_ALL_FOR_USER: &str = r#"
+    const SELECT_WITH_THUMBNAILS: &str = r#"
+    WITH ranked_thumbnails AS (
+        SELECT am.album_id
+             , am.media_id
+             , ROW_NUMBER() OVER (
+                   PARTITION BY am.album_id
+                   ORDER BY COALESCE(aesthetics.aesthetic_score, 0.0) DESC
+                          , am.position
+                          , am.media_id
+               ) AS thumbnail_rank
+          FROM album_media AS am
+          LEFT JOIN media_aesthetics AS aesthetics ON aesthetics.media_id = am.media_id
+    )
     SELECT a.id
          , a.name
          , a.description
          , a.cover_media_id
-         , COUNT(am.media_id) as media_count
+         , (SELECT COUNT(*) FROM album_media WHERE album_id = a.id) AS media_count
          , a.created_at
+         , MAX(CASE WHEN ranked.thumbnail_rank = 1 THEN ranked.media_id END) AS thumbnail_media_id_1
+         , MAX(CASE WHEN ranked.thumbnail_rank = 2 THEN ranked.media_id END) AS thumbnail_media_id_2
+         , MAX(CASE WHEN ranked.thumbnail_rank = 3 THEN ranked.media_id END) AS thumbnail_media_id_3
+         , MAX(CASE WHEN ranked.thumbnail_rank = 4 THEN ranked.media_id END) AS thumbnail_media_id_4
       FROM albums AS a
-      JOIN album_access AS aa ON a.id = aa.album_id
-      LEFT JOIN album_media AS am ON a.id = am.album_id
-     WHERE aa.user_id = ?
+      %access_join%
+      LEFT JOIN ranked_thumbnails AS ranked
+        ON ranked.album_id = a.id
+       AND ranked.thumbnail_rank <= 4
+     WHERE %filter%
      GROUP BY a.id
-     ORDER BY a.created_at DESC
+     %order_by%
     "#;
+
+    fn select_with_thumbnails_query(access_join: &str, filter: &str, order_by: &str) -> String {
+        SELECT_WITH_THUMBNAILS
+            .replace("%access_join%", access_join)
+            .replace("%filter%", filter)
+            .replace("%order_by%", order_by)
+    }
+
+    pub fn select_all_for_user_query() -> String {
+        select_with_thumbnails_query(
+            "JOIN album_access AS aa ON a.id = aa.album_id",
+            "aa.user_id = ?",
+            "ORDER BY a.created_at DESC",
+        )
+    }
 
     pub const CHECK_OWNERSHIP: &str = r#"
     SELECT a.id
@@ -1670,18 +1703,9 @@ pub mod albums {
     SELECT COUNT(*) FROM album_access WHERE album_id = ?
     "#;
 
-    pub const SELECT_WITH_COUNT: &str = r#"
-    SELECT a.id
-         , a.name
-         , a.description
-         , a.cover_media_id
-         , COUNT(am.media_id) as media_count
-         , a.created_at
-      FROM albums AS a
-      LEFT JOIN album_media AS am ON a.id = am.album_id
-     WHERE a.id = ?
-     GROUP BY a.id
-    "#;
+    pub fn select_with_count_query() -> String {
+        select_with_thumbnails_query("", "a.id = ?", "")
+    }
 }
 
 pub mod map {

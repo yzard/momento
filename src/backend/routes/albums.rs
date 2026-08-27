@@ -25,11 +25,16 @@ pub fn router() -> Router<AppState> {
 }
 
 fn map_album_row(row: &rusqlite::Row) -> rusqlite::Result<AlbumResponse> {
+    let thumbnail_media_ids = (6..10)
+        .filter_map(|column| row.get::<_, Option<i64>>(column).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(AlbumResponse {
         id: row.get(0)?,
         name: row.get(1)?,
         description: row.get(2)?,
         cover_media_id: row.get(3)?,
+        thumbnail_media_ids,
         media_count: row.get(4)?,
         created_at: row.get(5)?,
     })
@@ -197,7 +202,7 @@ async fn update_album(
 
     let album = fetch_one(
         &conn,
-        queries::albums::SELECT_WITH_COUNT,
+        &queries::albums::select_with_count_query(),
         &[&request.album_id],
         map_album_row,
     )?
@@ -317,7 +322,7 @@ async fn list_albums(
 
     let albums = fetch_all(
         &conn,
-        queries::albums::SELECT_ALL_FOR_USER,
+        &queries::albums::select_all_for_user_query(),
         &[&current_user.id],
         map_album_row,
     )?;

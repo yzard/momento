@@ -35,6 +35,7 @@ export interface Album {
   name: string
   description: string | null
   coverMediaId: number | null
+  thumbnailMediaIds: number[]
   mediaCount: number
   createdAt: string
 }
