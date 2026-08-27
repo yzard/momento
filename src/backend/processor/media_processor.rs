@@ -9,7 +9,7 @@ use crate::database::{queries, DbConn};
 use crate::processor::metadata::{
     apply_supplemental_metadata, extract_image_metadata, extract_video_metadata,
     load_supplemental_metadata, normalize_gps_coordinates, reverse_geocoding::reverse_geocode,
-    supplemental_metadata_path, MediaMetadata,
+    supplemental_metadata_path, MediaMetadata, MetadataSource, MetadataSourceType,
 };
 use crate::utils::path::resolve_storage_path;
 
@@ -48,17 +48,31 @@ pub fn build_original_filename(media_id: i64, source_path: &Path) -> String {
     }
 }
 
-pub async fn generate_complete_metadata(source_path: &Path, media_type: &str) -> MediaMetadata {
-    let mut metadata = if media_type == "image" {
+#[derive(Debug, Clone)]
+pub struct CompleteMediaMetadata {
+    pub metadata: MediaMetadata,
+    pub sources: Vec<MetadataSource>,
+}
+
+pub async fn generate_complete_metadata(
+    source_path: &Path,
+    media_type: &str,
+) -> CompleteMediaMetadata {
+    let mut extracted = if media_type == "image" {
         extract_image_metadata(source_path).await
     } else {
         extract_video_metadata(source_path).await
     };
 
     if let Some(supplemental_metadata) = load_supplemental_metadata(source_path) {
-        apply_supplemental_metadata(&mut metadata, &supplemental_metadata);
+        apply_supplemental_metadata(&mut extracted.metadata, &supplemental_metadata);
+        extracted.sources.push(MetadataSource {
+            source_type: MetadataSourceType::SupplementalSidecar,
+            payload: supplemental_metadata,
+        });
     }
-    normalize_gps_coordinates(&mut metadata);
+    let metadata = &mut extracted.metadata;
+    normalize_gps_coordinates(metadata);
 
     if metadata.date_taken.is_none() {
         metadata.date_taken = source_path
@@ -75,11 +89,17 @@ pub async fn generate_complete_metadata(source_path: &Path, media_type: &str) ->
         && metadata.location_state.is_some()
         && metadata.location_country.is_some()
     {
-        return metadata;
+        return CompleteMediaMetadata {
+            metadata: extracted.metadata,
+            sources: extracted.sources,
+        };
     }
 
     let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude) else {
-        return metadata;
+        return CompleteMediaMetadata {
+            metadata: extracted.metadata,
+            sources: extracted.sources,
+        };
     };
     if let Ok(Some(location)) = reverse_geocode(latitude, longitude) {
         if metadata.location_city.is_none() {
@@ -93,7 +113,10 @@ pub async fn generate_complete_metadata(source_path: &Path, media_type: &str) ->
         }
     }
 
-    metadata
+    CompleteMediaMetadata {
+        metadata: extracted.metadata,
+        sources: extracted.sources,
+    }
 }
 
 pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option<&str>) {

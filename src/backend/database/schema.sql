@@ -54,6 +54,16 @@ CREATE TABLE IF NOT EXISTS media_metadata (
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS media_metadata_sources (
+    media_id INTEGER NOT NULL,
+    source_type TEXT NOT NULL CHECK(source_type IN ('exiftool', 'ffprobe', 'supplemental_sidecar')),
+    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (media_id, source_type),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS albums (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,

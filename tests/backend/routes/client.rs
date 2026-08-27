@@ -18,6 +18,13 @@ async fn capabilities_exposes_version_extensions_features_and_backup_limits() {
         .expect("extensions")
         .iter()
         .any(|extension| extension == ".jpg"));
+    for lossless_camera_extension in [".avif", ".dng", ".arw", ".srw"] {
+        assert!(body["supportedMediaExtensions"]
+            .as_array()
+            .expect("extensions")
+            .iter()
+            .any(|extension| extension == lossless_camera_extension));
+    }
     for feature in [
         "llm",
         "imageTagging",

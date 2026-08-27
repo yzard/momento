@@ -22,6 +22,11 @@ fn clearing_metadata_also_clears_llm_text_models() {
     conn.execute("INSERT INTO media_screenshot_classification_inputs (media_id, sequence, model_type, model_version, is_screenshot, confidence) VALUES (?, 0, 'screenshot_detection', 'test', 1, 0.9)", [media_id]).expect("screenshot input result");
     conn.execute("INSERT INTO media_document_classifications (media_id, model_type, model_version, is_document, confidence) VALUES (?, 'document_detection', 'test', 1, 0.8)", [media_id]).expect("document result");
     conn.execute("INSERT INTO media_document_classification_inputs (media_id, sequence, model_type, model_version, is_document, confidence) VALUES (?, 0, 'document_detection', 'test', 1, 0.8)", [media_id]).expect("document input result");
+    conn.execute(
+        "INSERT INTO media_metadata_sources (media_id, source_type, schema_version, payload_json) VALUES (?, 'exiftool', 1, '{}')",
+        [media_id],
+    )
+    .expect("raw metadata source");
     drop(conn);
 
     let cleared = momento_api::processor::metadata_worker::reset_all(&pool)
@@ -37,6 +42,14 @@ fn clearing_metadata_also_clears_llm_text_models() {
         )
         .expect("Failed to query cleared LLM text");
     assert_eq!(count, 0);
+    let source_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM media_metadata_sources WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("raw metadata source count");
+    assert_eq!(source_count, 0);
     for (table, task) in [
         (
             "media_screenshot_classifications",

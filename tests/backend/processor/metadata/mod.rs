@@ -42,6 +42,19 @@ async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
         .expect("metadata generation");
 
     let connection = pool.get().expect("database connection");
+    let metadata_sources = connection
+        .prepare("SELECT source_type, payload_json FROM media_metadata_sources WHERE media_id = ? ORDER BY source_type")
+        .expect("metadata source query")
+        .query_map([photo_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("metadata source rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("metadata sources");
+    assert_eq!(metadata_sources.len(), 2);
+    assert_eq!(metadata_sources[0].0, "exiftool");
+    assert_eq!(metadata_sources[1].0, "supplemental_sidecar");
+    assert!(metadata_sources[1].1.contains("retained"));
     let regenerated_content_hash: String = connection
         .query_row(
             "SELECT content_hash FROM media WHERE id = ?",
@@ -139,6 +152,14 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
         .expect("repeated video metadata generation");
 
     let connection = pool.get().expect("database connection");
+    let ffprobe_source_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_metadata_sources WHERE media_id = ? AND source_type = 'ffprobe' AND json_valid(payload_json)",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("ffprobe source count");
+    assert_eq!(ffprobe_source_count, 1);
     let inputs = connection
         .prepare("SELECT storage_root, file_path, mime_type, input_kind, frame_timestamp_ms FROM media_ai_inputs WHERE media_id = ? ORDER BY task")
         .expect("video AI input query")

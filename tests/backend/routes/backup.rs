@@ -168,6 +168,22 @@ async fn backup_create_validates_registered_device_and_metadata() {
     response.assert_status_bad_request();
 
     register_device(&server, &access_token, "registered_device").await;
+    let mut raw_request = upload_create_request(
+        "registered_device",
+        "raw_asset",
+        "raw_operation",
+        "camera.dng",
+        1,
+        EMPTY_SHA256,
+        "2024-01-02T03:04:05Z",
+    );
+    raw_request["mimeType"] = json!("image/x-adobe-dng");
+    server
+        .post("/api/v1/backup/upload/create")
+        .add_header(AUTHORIZATION, format!("Bearer {access_token}"))
+        .json(&raw_request)
+        .await
+        .assert_status_ok();
     let response = server
         .post("/api/v1/backup/upload/create")
         .add_header(AUTHORIZATION, format!("Bearer {access_token}"))

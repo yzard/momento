@@ -49,6 +49,21 @@ fn creates_lossless_backup_manifest_table() {
 }
 
 #[test]
+fn creates_raw_metadata_source_table() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("database connection");
+    let table_name: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ["media_metadata_sources"],
+            |row| row.get(0),
+        )
+        .expect("raw metadata source table");
+
+    assert_eq!(table_name, "media_metadata_sources");
+}
+
+#[test]
 fn creates_durable_metadata_and_ai_job_tables() {
     let pool = create_test_db();
     let connection = pool.get().expect("Failed to get database connection");

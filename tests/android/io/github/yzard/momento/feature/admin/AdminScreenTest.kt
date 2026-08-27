@@ -103,6 +103,13 @@ class AdminScreenTest {
         assertEquals(5, cronFieldsPerRow(720))
     }
 
+    @Test fun adminNavigationAdaptsToAvailableWidth() {
+        assertFalse(adminUsesNavigationRail(360))
+        assertFalse(adminUsesNavigationRail(719))
+        assertTrue(adminUsesNavigationRail(720))
+        assertTrue(adminUsesNavigationRail(840))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsJoiningTheWrongCronFieldCount() {
         joinCronFields(listOf("15", "1", "*", "*"))

@@ -73,10 +73,12 @@ import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.data.SettingsStore
 import io.github.yzard.momento.core.data.ThemePreference
 import io.github.yzard.momento.core.database.BackupDatabase
+import io.github.yzard.momento.core.database.BackupIntegritySummary
 import io.github.yzard.momento.core.database.BackupQueueCount
 import io.github.yzard.momento.core.model.BackupState
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.backup.BackupHistoryClearResult
+import io.github.yzard.momento.feature.backup.BackupHistoryRepairResult
 import io.github.yzard.momento.feature.backup.PERIODIC_BACKUP_WORK_NAME
 import io.github.yzard.momento.feature.backup.backupCanReadOriginalMedia
 import io.github.yzard.momento.feature.backup.backupLocationMetadataAccessLabel
@@ -88,6 +90,7 @@ import io.github.yzard.momento.feature.backup.currentBackupMediaAccess
 import io.github.yzard.momento.feature.backup.isBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.observeBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.requestBackupCancellation
+import io.github.yzard.momento.feature.backup.repairUnverifiedBackupHistory
 import io.github.yzard.momento.feature.backup.scheduleImmediateBackup
 import io.github.yzard.momento.feature.backup.schedulePeriodicBackup
 import io.github.yzard.momento.feature.auth.PasswordChangeFields
@@ -147,6 +150,14 @@ fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): Stri
     return "$uploaded/$total media uploaded, uploading..."
 }
 
+fun backupIntegritySummary(summary: BackupIntegritySummary): String = when {
+    summary.completedRecords == 0L -> "No completed backups to verify"
+    summary.unverifiedCompletedRecords == 0L ->
+        "${summary.verifiedRecords}/${summary.completedRecords} completed backups fully verified against the server"
+    else ->
+        "${summary.verifiedRecords}/${summary.completedRecords} completed backups fully verified; ${summary.unverifiedCompletedRecords} older backups need re-verification"
+}
+
 enum class BackupScheduleStatus { NOT_SCHEDULED, WAITING, RUNNING }
 
 private val ACTIVE_BACKUP_STATES = setOf(
@@ -202,6 +213,9 @@ fun SettingsScreen(
     val latestBackupError by remember(database) {
         database.backupAssetDao().observeLatestError()
     }.collectAsState(initial = null)
+    val backupIntegrity by remember(database) {
+        database.backupAssetDao().observeIntegritySummary()
+    }.collectAsState(initial = BackupIntegritySummary(0, 0, 0, 0))
     val workManager = remember(context) { WorkManager.getInstance(context.applicationContext) }
     val periodicWorkInfos by remember(workManager) {
         workManager.getWorkInfosForUniqueWorkFlow(PERIODIC_BACKUP_WORK_NAME)
@@ -215,7 +229,9 @@ fun SettingsScreen(
     var themeDialog by remember { mutableStateOf(false) }
     var logoutDialog by remember { mutableStateOf(false) }
     var clearBackupHistoryDialog by remember { mutableStateOf(false) }
+    var repairBackupHistoryDialog by remember { mutableStateOf(false) }
     var clearBackupHistoryBusy by remember { mutableStateOf(false) }
+    var repairBackupHistoryBusy by remember { mutableStateOf(false) }
     var backupHistoryStatus by remember { mutableStateOf<String?>(null) }
     var updateBusy by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf("Check the signed-in host for a newer Android release") }
@@ -240,6 +256,9 @@ fun SettingsScreen(
     val canCancelBackup = backupHasActiveRecords(allQueueCounts)
     val backupHistoryRecordCount = allQueueCounts.sumOf { it.count }
     val canClearBackupHistory = backupHistoryCanBeCleared(allQueueCounts, backupScheduleStatus)
+    val canRepairBackupHistory = backupIntegrity.unverifiedCompletedRecords > 0 &&
+        !backupHasActiveRecords(allQueueCounts) &&
+        backupScheduleStatus != BackupScheduleStatus.RUNNING
     val backupHistoryDescription = backupHistoryStatus ?: when {
         backupHistoryRecordCount == 0L -> "No local backup history"
         canClearBackupHistory -> "$backupHistoryRecordCount local records. Clear them to back up the selected range again."
@@ -501,6 +520,11 @@ fun SettingsScreen(
                 supportingContent = {
                     Column {
                         Text(backupHistoryDescription)
+                        Text(backupIntegritySummary(backupIntegrity))
+                        TextButton(
+                            onClick = { repairBackupHistoryDialog = true },
+                            enabled = canRepairBackupHistory && !repairBackupHistoryBusy && !clearBackupHistoryBusy,
+                        ) { Text(if (repairBackupHistoryBusy) "Re-verifying" else "Re-verify older backups") }
                         TextButton(
                             onClick = { clearBackupHistoryDialog = true },
                             enabled = canClearBackupHistory && !clearBackupHistoryBusy,
@@ -616,6 +640,62 @@ fun SettingsScreen(
                 TextButton(
                     enabled = !clearBackupHistoryBusy,
                     onClick = { clearBackupHistoryDialog = false },
+                ) { Text("Cancel") }
+            },
+        )
+    }
+    if (repairBackupHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!repairBackupHistoryBusy) repairBackupHistoryDialog = false
+            },
+            title = { Text("Re-verify older backups?") },
+            text = {
+                Text(
+                    "Momento will read the original files again, capture the metadata currently available on Android, and upload only older completed records that lack full verification. Matching originals are deduplicated on the server. If an older Android upload contained a reduced copy, the corrected original may appear as a new media item so an existing shared file is never overwritten unsafely.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !repairBackupHistoryBusy,
+                    onClick = {
+                        scope.launch {
+                            if (repairBackupHistoryBusy) return@launch
+                            repairBackupHistoryBusy = true
+                            try {
+                                when (
+                                    val result = repairUnverifiedBackupHistory(
+                                        context.applicationContext,
+                                        database.backupAssetDao(),
+                                        settingsStore,
+                                        settings.mobileDataEnabled,
+                                    )
+                                ) {
+                                    is BackupHistoryRepairResult.Requeued -> {
+                                        backupHistoryStatus =
+                                            "Queued ${result.recordCount} older backups for lossless re-verification."
+                                    }
+                                    BackupHistoryRepairResult.ActiveBackup -> {
+                                        backupHistoryStatus =
+                                            "Older backups were not requeued because a backup is still active."
+                                    }
+                                }
+                            } catch (_: IOException) {
+                                backupHistoryStatus = "Could not re-verify backup history. Try again."
+                            } catch (_: SQLiteException) {
+                                backupHistoryStatus = "Could not re-verify backup history. Try again."
+                            } finally {
+                                repairBackupHistoryBusy = false
+                                repairBackupHistoryDialog = false
+                            }
+                        }
+                    },
+                ) { Text(if (repairBackupHistoryBusy) "Re-verifying" else "Re-verify") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !repairBackupHistoryBusy,
+                    onClick = { repairBackupHistoryDialog = false },
                 ) { Text("Cancel") }
             },
         )

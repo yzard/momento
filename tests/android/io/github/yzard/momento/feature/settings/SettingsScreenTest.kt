@@ -1,6 +1,7 @@
 package io.github.yzard.momento.feature.settings
 
 import io.github.yzard.momento.core.database.BackupQueueCount
+import io.github.yzard.momento.core.database.BackupIntegritySummary
 import io.github.yzard.momento.core.data.ThemePreference
 import io.github.yzard.momento.core.model.BackupState
 import org.junit.Assert.assertEquals
@@ -8,6 +9,22 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SettingsScreenTest {
+    @Test
+    fun summarizesLosslessBackupVerification() {
+        assertEquals(
+            "No completed backups to verify",
+            backupIntegritySummary(BackupIntegritySummary(0, 0, 0, 0)),
+        )
+        assertEquals(
+            "8/10 completed backups fully verified; 2 older backups need re-verification",
+            backupIntegritySummary(BackupIntegritySummary(12, 10, 8, 2)),
+        )
+        assertEquals(
+            "10/10 completed backups fully verified against the server",
+            backupIntegritySummary(BackupIntegritySummary(10, 10, 10, 0)),
+        )
+    }
+
     @Test
     fun summarizesEmptyBackupQueueAsComplete() {
         assertEquals("0/0 media uploaded, all set.", backupSummary(emptyList(), networkAllowed = false))

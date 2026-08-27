@@ -26,13 +26,22 @@ async fn complete_metadata_uses_local_reverse_geocoding() {
         r#"{"geoData":{"latitude":40.759,"longitude":-73.9859}}"#,
     )
     .expect("Failed to save supplemental metadata fixture");
-    let metadata = generate_complete_metadata(&media_path, "image").await;
+    let complete_metadata = generate_complete_metadata(&media_path, "image").await;
+    let metadata = complete_metadata.metadata;
 
     assert_eq!(metadata.gps_latitude, Some(40.759));
     assert_eq!(metadata.gps_longitude, Some(-73.9859));
     assert_eq!(metadata.location_city.as_deref(), Some("Times Square"));
     assert_eq!(metadata.location_state.as_deref(), Some("New York"));
     assert_eq!(metadata.location_country.as_deref(), Some("United States"));
+    assert!(complete_metadata
+        .sources
+        .iter()
+        .any(|source| source.source_type.as_str() == "exiftool"));
+    assert!(complete_metadata
+        .sources
+        .iter()
+        .any(|source| source.source_type.as_str() == "supplemental_sidecar"));
 }
 
 #[test]

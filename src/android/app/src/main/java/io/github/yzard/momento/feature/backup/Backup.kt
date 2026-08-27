@@ -208,6 +208,8 @@ internal fun discoveredAsset(
     0,
     null,
     null,
+    0,
+    null,
 )
 
 internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER }
@@ -221,6 +223,14 @@ internal fun serverProgress(response: BackupUploadResponse): BackupProgress = wh
     "completed", "failed", "cancelled" -> BackupProgress.COMPLETED
     else -> BackupProgress.WAITING_FOR_SERVER
 }
+
+internal fun completedBackupHashMatches(
+    protocolVersion: Int,
+    expectedContentHash: String?,
+    serverContentHash: String?,
+): Boolean = protocolVersion == LOSSLESS_BACKUP_PROTOCOL_VERSION &&
+    expectedContentHash != null &&
+    expectedContentHash == serverContentHash
 
 class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
@@ -284,11 +294,15 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
     ): BackupProgress {
         var activeUploadId = asset.uploadId
         var durableUploadedBytes = asset.uploadedBytes
+        var activeProtocolVersion = asset.protocolVersion
+        var activeContentHash = asset.contentHash
         try {
             if (asset.state == BackupState.CANCELLING) {
                 return cancelBackupAsset(asset, assets, repository)
             }
             val snapshot = prepareBackupSnapshot(applicationContext, asset, locationMetadataAccess)
+            activeProtocolVersion = LOSSLESS_BACKUP_PROTOCOL_VERSION
+            activeContentHash = snapshot.contentHash
             val createRequest = BackupUploadCreateRequest(
                 protocolVersion = LOSSLESS_BACKUP_PROTOCOL_VERSION,
                 deviceId = deviceId,
@@ -311,17 +325,31 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 else -> existing
             }
             if (existing != null) {
-                val progress = recordServerStatus(asset, upload, assets)
+                val progress = recordServerStatus(
+                    asset,
+                    upload,
+                    assets,
+                    activeProtocolVersion,
+                    activeContentHash,
+                )
                 if (asset.state == BackupState.SERVER_PROCESSING || progress == BackupProgress.COMPLETED) return progress
                 if (asset.state == BackupState.COMPLETING && upload.status != "uploading") return progress
             }
 
             activeUploadId = upload.uploadId
             durableUploadedBytes = upload.uploadedSize
-            if (upload.status != "uploading") return recordServerStatus(asset, upload, assets)
+            if (upload.status != "uploading") {
+                return recordServerStatus(
+                    asset,
+                    upload,
+                    assets,
+                    activeProtocolVersion,
+                    activeContentHash,
+                )
+            }
 
             var offset = upload.uploadedSize
-            assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, upload.uploadId, null, null)
+            assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, upload.uploadId, null, null, activeProtocolVersion, activeContentHash)
             val mediaStream = try {
                 snapshot.file.inputStream()
             } catch (error: FileNotFoundException) {
@@ -343,52 +371,64 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                     )
                     offset = response.uploadedSize
                     durableUploadedBytes = offset
-                    assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, response.uploadId, response.mediaId, response.error)
+                    assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, response.uploadId, response.mediaId, response.error, activeProtocolVersion, activeContentHash)
                     setForeground(progress("Uploading ${asset.displayName}"))
                 }
             }
             if (offset != snapshot.byteSize) throw TerminalBackupException("Upload ended before source file")
-            assets.updateTransfer(asset.uri, BackupState.COMPLETING, offset, upload.uploadId, null, null)
-            return recordServerStatus(asset, repository.completeBackupUpload(upload.uploadId), assets)
+            assets.updateTransfer(asset.uri, BackupState.COMPLETING, offset, upload.uploadId, null, null, activeProtocolVersion, activeContentHash)
+            return recordServerStatus(
+                asset,
+                repository.completeBackupUpload(upload.uploadId),
+                assets,
+                activeProtocolVersion,
+                activeContentHash,
+            )
         } catch (error: HttpException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, "HTTP ${error.code()}")
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, "HTTP ${error.code()}", activeProtocolVersion, activeContentHash)
             if (isRetryable(error.code())) throw error
             return BackupProgress.COMPLETED
         } catch (error: IOException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
             throw error
         } catch (error: TerminalBackupException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
                     uploadId = activeUploadId,
                     uploadedBytes = durableUploadedBytes,
                     errorMessage = error.message,
+                    protocolVersion = activeProtocolVersion,
+                    contentHash = activeContentHash,
                 ),
                 assets,
                 repository,
             )
         } catch (error: SecurityException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
                     uploadId = activeUploadId,
                     uploadedBytes = durableUploadedBytes,
                     errorMessage = error.message,
+                    protocolVersion = activeProtocolVersion,
+                    contentHash = activeContentHash,
                 ),
                 assets,
                 repository,
             )
         } catch (error: IllegalArgumentException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
                     uploadId = activeUploadId,
                     uploadedBytes = durableUploadedBytes,
                     errorMessage = error.message,
+                    protocolVersion = activeProtocolVersion,
+                    contentHash = activeContentHash,
                 ),
                 assets,
                 repository,
@@ -396,21 +436,30 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
         }
     }
 
-    private suspend fun recordServerStatus(asset: BackupAssetEntity, response: BackupUploadResponse, assets: BackupAssetDao): BackupProgress = when (response.status) {
+    private suspend fun recordServerStatus(
+        asset: BackupAssetEntity,
+        response: BackupUploadResponse,
+        assets: BackupAssetDao,
+        protocolVersion: Int,
+        contentHash: String?,
+    ): BackupProgress = when (response.status) {
         "completed" -> {
-            assets.updateTransfer(asset.uri, BackupState.COMPLETED, response.uploadedSize, response.uploadId, response.mediaId, response.error)
+            if (!completedBackupHashMatches(protocolVersion, contentHash, response.contentHash)) {
+                throw TerminalBackupException("Server completion hash does not match the original snapshot")
+            }
+            assets.updateTransfer(asset.uri, BackupState.COMPLETED, response.uploadedSize, response.uploadId, response.mediaId, response.error, protocolVersion, response.contentHash)
             BackupProgress.COMPLETED
         }
         "failed" -> {
-            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, response.uploadedSize, response.uploadId, response.mediaId, response.error ?: "Server upload ${response.status}")
+            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, response.uploadedSize, response.uploadId, response.mediaId, response.error ?: "Server upload ${response.status}", protocolVersion, contentHash)
             BackupProgress.COMPLETED
         }
         "cancelled" -> {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLED, response.uploadedSize, response.uploadId, response.mediaId, response.error)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLED, response.uploadedSize, response.uploadId, response.mediaId, response.error, protocolVersion, contentHash)
             BackupProgress.COMPLETED
         }
         else -> {
-            assets.updateTransfer(asset.uri, BackupState.SERVER_PROCESSING, response.uploadedSize, response.uploadId, response.mediaId, response.error)
+            assets.updateTransfer(asset.uri, BackupState.SERVER_PROCESSING, response.uploadedSize, response.uploadId, response.mediaId, response.error, protocolVersion, contentHash)
             BackupProgress.WAITING_FOR_SERVER
         }
     }
@@ -442,26 +491,26 @@ internal suspend fun cancelBackupAsset(
 ): BackupProgress {
     val uploadId = asset.uploadId
     if (uploadId == null) {
-        assets.updateTransfer(asset.uri, BackupState.CANCELLED, 0, null, null, null)
+        assets.updateTransfer(asset.uri, BackupState.CANCELLED, 0, null, null, null, asset.protocolVersion, asset.contentHash)
         return BackupProgress.COMPLETED
     }
     return try {
         recordCancellationStatus(asset, repository.cancelBackupUpload(uploadId), assets)
     } catch (error: IOException) {
-        assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message)
+        assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message, asset.protocolVersion, asset.contentHash)
         BackupProgress.WAITING_FOR_SERVER
     } catch (error: HttpException) {
         if (!isCancellationRetryable(error.code())) {
-            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${error.code()} while cancelling")
+            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${error.code()} while cancelling", asset.protocolVersion, asset.contentHash)
             return BackupProgress.COMPLETED
         }
         val current = try {
             repository.backupUploadStatus(uploadId)
         } catch (_: IOException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message, asset.protocolVersion, asset.contentHash)
             return BackupProgress.WAITING_FOR_SERVER
         } catch (statusError: HttpException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${statusError.code()} while checking cancellation")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${statusError.code()} while checking cancellation", asset.protocolVersion, asset.contentHash)
             return BackupProgress.WAITING_FOR_SERVER
         }
         recordCancellationStatus(asset, current, assets)
@@ -473,9 +522,20 @@ private suspend fun recordCancellationStatus(
     response: BackupUploadResponse,
     assets: BackupAssetDao,
 ): BackupProgress {
-    val state = cancellationState(response.status)
-    val error = response.error ?: if (state == BackupState.TERMINAL_FAILED) "Server upload failed" else null
-    assets.updateTransfer(asset.uri, state, response.uploadedSize, response.uploadId, response.mediaId, error)
+    val reportedState = cancellationState(response.status)
+    val completedHashMatches = reportedState != BackupState.COMPLETED || completedBackupHashMatches(
+        asset.protocolVersion,
+        asset.contentHash,
+        response.contentHash,
+    )
+    val state = if (completedHashMatches) reportedState else BackupState.TERMINAL_FAILED
+    val error = when {
+        !completedHashMatches -> "Server completion hash does not match the original snapshot"
+        response.error != null -> response.error
+        state == BackupState.TERMINAL_FAILED -> "Server upload failed"
+        else -> null
+    }
+    assets.updateTransfer(asset.uri, state, response.uploadedSize, response.uploadId, response.mediaId, error, asset.protocolVersion, asset.contentHash)
     if (state == BackupState.CANCELLING || state == BackupState.SERVER_PROCESSING) {
         return BackupProgress.WAITING_FOR_SERVER
     }
@@ -1003,6 +1063,11 @@ sealed interface BackupHistoryClearResult {
     data object ActiveBackup : BackupHistoryClearResult
 }
 
+sealed interface BackupHistoryRepairResult {
+    data class Requeued(val recordCount: Int) : BackupHistoryRepairResult
+    data object ActiveBackup : BackupHistoryRepairResult
+}
+
 private suspend fun stopScheduledBackupWork(workManager: WorkManager) {
     workManager.cancelUniqueWork(IMMEDIATE_BACKUP_WORK_NAME).await()
     workManager.cancelUniqueWork(PERIODIC_BACKUP_WORK_NAME).await()
@@ -1027,6 +1092,28 @@ suspend fun clearBackupHistory(
     deleteAllBackupSnapshots(context)
     schedulePeriodicBackup(context, allowMobileData)
     return BackupHistoryClearResult.Cleared(deletedRecords)
+}
+
+suspend fun repairUnverifiedBackupHistory(
+    context: Context,
+    assets: BackupAssetDao,
+    settingsStore: SettingsStore,
+    allowMobileData: Boolean,
+): BackupHistoryRepairResult {
+    val workManager = WorkManager.getInstance(context)
+    stopScheduledBackupWork(workManager)
+    if (assets.activeRecordCount() > 0) {
+        schedulePeriodicBackup(context, allowMobileData)
+        return BackupHistoryRepairResult.ActiveBackup
+    }
+
+    val generation = settingsStore.rotateBackupGeneration()
+    val requeuedRecords = assets.requeueUnverifiedCompleted(generation)
+    schedulePeriodicBackup(context, allowMobileData)
+    if (requeuedRecords > 0) {
+        scheduleImmediateBackup(context, allowMobileData)
+    }
+    return BackupHistoryRepairResult.Requeued(requeuedRecords)
 }
 
 suspend fun requestBackupCancellation(

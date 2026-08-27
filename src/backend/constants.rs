@@ -70,7 +70,9 @@ pub const FACE_DETECTION_MODEL_TYPE: &str = "face_detection";
 
 pub static IMAGE_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".heic", ".heif",
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif",
+        ".avif", ".dng", ".cr2", ".cr3", ".nef", ".nrw", ".arw", ".rw2", ".orf", ".raf", ".pef",
+        ".srw", ".raw",
     ]
     .into_iter()
     .collect()

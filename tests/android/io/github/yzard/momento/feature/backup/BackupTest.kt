@@ -63,6 +63,14 @@ class BackupTest {
         assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "failed", 10, 10, "hash", null, "bad file")))
     }
 
+    @Test fun completedBackupRequiresTheV2ServerHashToMatch() {
+        val hash = "a".repeat(64)
+        assertTrue(completedBackupHashMatches(2, hash, hash))
+        assertFalse(completedBackupHashMatches(1, hash, hash))
+        assertFalse(completedBackupHashMatches(2, hash, "b".repeat(64)))
+        assertFalse(completedBackupHashMatches(2, hash, null))
+    }
+
     @Test fun calculatesSha256ForOnlyTheUploadedChunkBytes() {
         val buffer = "hello-extra".toByteArray()
         assertEquals(

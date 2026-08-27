@@ -39,9 +39,18 @@ data class BackupAssetEntity(
     val uploadedBytes: Long,
     val mediaId: Long?,
     val errorMessage: String?,
+    @ColumnInfo(defaultValue = "0") val protocolVersion: Int,
+    val contentHash: String?,
 )
 
 data class BackupQueueCount(val state: BackupState, val count: Long)
+
+data class BackupIntegritySummary(
+    val totalRecords: Long,
+    val completedRecords: Long,
+    val verifiedRecords: Long,
+    val unverifiedCompletedRecords: Long,
+)
 
 @Dao
 interface BackupAssetDao {
@@ -65,6 +74,14 @@ interface BackupAssetDao {
     fun observeLatestError(): Flow<String?>
     @Query("SELECT state, COUNT(*) AS count FROM backup_assets WHERE :cameraOnly = 0 OR folder = 'Camera' GROUP BY state")
     fun observeCounts(cameraOnly: Boolean): Flow<List<BackupQueueCount>>
+    @Query("""
+        SELECT COUNT(*) AS totalRecords,
+               COALESCE(SUM(CASE WHEN state = 'COMPLETED' THEN 1 ELSE 0 END), 0) AS completedRecords,
+               COALESCE(SUM(CASE WHEN state = 'COMPLETED' AND protocolVersion = 2 AND length(contentHash) = 64 THEN 1 ELSE 0 END), 0) AS verifiedRecords,
+               COALESCE(SUM(CASE WHEN state = 'COMPLETED' AND (protocolVersion != 2 OR contentHash IS NULL OR length(contentHash) != 64) THEN 1 ELSE 0 END), 0) AS unverifiedCompletedRecords
+          FROM backup_assets
+    """)
+    fun observeIntegritySummary(): Flow<BackupIntegritySummary>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertDiscovered(asset: BackupAssetEntity): Long
 
     @Query("""
@@ -82,16 +99,34 @@ interface BackupAssetDao {
             uploadId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE uploadId END,
             uploadedBytes = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN 0 ELSE uploadedBytes END,
             mediaId = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE mediaId END,
-            errorMessage = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE errorMessage END
+            errorMessage = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE errorMessage END,
+            protocolVersion = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN 0 ELSE protocolVersion END,
+            contentHash = CASE WHEN byteSize != :byteSize OR modifiedAt != :modifiedAt OR generationModified != :generationModified OR state = 'CANCELLED' THEN NULL ELSE contentHash END
         WHERE uri = :uri
     """)
     suspend fun reconcileDiscovered(uri: String, volumeName: String, clientAssetId: String, operationId: String, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, generationModified: Long, folder: String)
 
-    @Query("UPDATE backup_assets SET state = :state, uploadedBytes = :uploadedBytes, uploadId = :uploadId, mediaId = :mediaId, errorMessage = :errorMessage WHERE uri = :uri")
-    suspend fun updateTransfer(uri: String, state: BackupState, uploadedBytes: Long, uploadId: String?, mediaId: Long?, errorMessage: String?)
+    @Query("UPDATE backup_assets SET state = :state, uploadedBytes = :uploadedBytes, uploadId = :uploadId, mediaId = :mediaId, errorMessage = :errorMessage, protocolVersion = :protocolVersion, contentHash = :contentHash WHERE uri = :uri")
+    suspend fun updateTransfer(uri: String, state: BackupState, uploadedBytes: Long, uploadId: String?, mediaId: Long?, errorMessage: String?, protocolVersion: Int, contentHash: String?)
+
+    @Query("""
+        UPDATE backup_assets SET
+            clientAssetId = clientAssetId || '_verify_' || :generation,
+            operationId = lower(hex(randomblob(16))),
+            state = 'QUEUED',
+            uploadId = NULL,
+            uploadedBytes = 0,
+            mediaId = NULL,
+            errorMessage = NULL,
+            protocolVersion = 0,
+            contentHash = NULL
+        WHERE state = 'COMPLETED'
+          AND (protocolVersion != 2 OR contentHash IS NULL OR length(contentHash) != 64)
+    """)
+    suspend fun requeueUnverifiedCompleted(generation: String): Int
 }
 
-@Database(entities = [BackupAssetEntity::class], version = 4, exportSchema = true)
+@Database(entities = [BackupAssetEntity::class], version = 5, exportSchema = true)
 @TypeConverters(BackupConverters::class)
 abstract class BackupDatabase : RoomDatabase() {
     abstract fun backupAssetDao(): BackupAssetDao
@@ -104,8 +139,15 @@ abstract class BackupDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE backup_assets ADD COLUMN protocolVersion INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE backup_assets ADD COLUMN contentHash TEXT")
+            }
+        }
+
         fun create(context: Context): BackupDatabase = Room.databaseBuilder(context, BackupDatabase::class.java, "momento-backup.db")
-            .addMigrations(MIGRATION_3_4)
+            .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
             .build()
     }
 }

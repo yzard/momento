@@ -45,6 +45,8 @@ class BackupDatabaseInstrumentedTest {
                     uploadedBytes = 50,
                     mediaId = null,
                     errorMessage = "Cancelled by user",
+                    protocolVersion = 1,
+                    contentHash = null,
                 ),
             )
 
@@ -139,6 +141,74 @@ class BackupDatabaseInstrumentedTest {
     }
 
     @Test
+    fun migratesVersionFourAssetsAsUnverifiedHistory() {
+        val databaseName = "backup-migration-${System.nanoTime()}"
+        migrationHelper.createDatabase(databaseName, 4).apply {
+            execSQL(
+                """
+                INSERT INTO backup_assets (
+                    uri, volumeName, clientAssetId, operationId, displayName, mimeType,
+                    byteSize, modifiedAt, generationModified, folder, state, uploadId,
+                    uploadedBytes, mediaId, errorMessage
+                ) VALUES (
+                    'content://media/9', 'external', 'media_9', 'operation-9', 'IMG_9.jpg',
+                    'image/jpeg', 100, 1700000000, 4, 'Camera', 'COMPLETED',
+                    'upload-9', 100, 9, NULL
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        migrationHelper.runMigrationsAndValidate(
+            databaseName,
+            5,
+            true,
+            BackupDatabase.MIGRATION_4_5,
+        ).use { database ->
+            database.query(
+                "SELECT protocolVersion, contentHash FROM backup_assets WHERE uri = 'content://media/9'",
+            ).use { cursor ->
+                cursor.moveToFirst()
+                assertEquals(0, cursor.getInt(0))
+                assertNull(cursor.getString(1))
+            }
+        }
+    }
+
+    @Test
+    fun reportsAndRequeuesOnlyUnverifiedCompletedBackups() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
+        try {
+            val assets = database.backupAssetDao()
+            assets.insertDiscovered(backupAsset(1, BackupState.COMPLETED))
+            assets.insertDiscovered(
+                backupAsset(2, BackupState.COMPLETED).copy(
+                    protocolVersion = 2,
+                    contentHash = "a".repeat(64),
+                ),
+            )
+            assets.insertDiscovered(backupAsset(3, BackupState.TERMINAL_FAILED))
+
+            val summary = assets.observeIntegritySummary().first()
+            assertEquals(3, summary.totalRecords)
+            assertEquals(2, summary.completedRecords)
+            assertEquals(1, summary.verifiedRecords)
+            assertEquals(1, summary.unverifiedCompletedRecords)
+            assertEquals(1, assets.requeueUnverifiedCompleted("repair1"))
+
+            val pending = assets.pending(cameraOnly = false).single()
+            assertEquals("media_1_verify_repair1", pending.clientAssetId)
+            assertEquals(BackupState.QUEUED, pending.state)
+            assertEquals(0, pending.protocolVersion)
+            assertNull(pending.contentHash)
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
     fun deletesEveryTerminalBackupRecordWhenIdle() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
@@ -191,5 +261,7 @@ class BackupDatabaseInstrumentedTest {
         uploadedBytes = if (state == BackupState.COMPLETED) 100 else 0,
         mediaId = if (state == BackupState.COMPLETED) index.toLong() else null,
         errorMessage = null,
+        protocolVersion = 0,
+        contentHash = null,
     )
 }

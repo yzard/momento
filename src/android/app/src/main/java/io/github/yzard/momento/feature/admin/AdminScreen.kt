@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.padding
@@ -47,14 +48,12 @@ import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -134,6 +133,8 @@ fun cronFieldsPerRow(widthDp: Int): Int = when {
     widthDp < 720 -> 3
     else -> 5
 }
+
+fun adminUsesNavigationRail(widthDp: Int): Boolean = widthDp >= 720
 
 fun toggledRole(role: String): String = if (role == "admin") "user" else "admin"
 
@@ -254,85 +255,106 @@ fun AdminScreen(repository: MomentoRepository, settingsStore: SettingsStore) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            MomentoPageHeader(
-                title = "Admin",
-                subtitle = "System access and processing",
-                modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars),
-                leadingContent = null,
-                trailingContent = {
-                    IconButton(
-                        onClick = ::refreshFromUser,
-                        enabled = !refreshing,
-                    ) {
-                        if (refreshing) {
-                            CircularProgressIndicator(Modifier.padding(12.dp))
-                        } else {
-                            Icon(Icons.Default.Refresh, "Refresh all admin status")
-                        }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.statusBars),
+    ) {
+        MomentoPageHeader(
+            title = "Admin",
+            subtitle = "System access and processing",
+            modifier = Modifier,
+            leadingContent = null,
+            trailingContent = {
+                IconButton(
+                    onClick = ::refreshFromUser,
+                    enabled = !refreshing,
+                ) {
+                    if (refreshing) {
+                        CircularProgressIndicator(Modifier.padding(12.dp))
+                    } else {
+                        Icon(Icons.Default.Refresh, "Refresh all admin status")
                     }
-                },
+                }
+            },
+        )
+        AdminResponsiveLayout(
+            selectedSection = selectedSection,
+            selectSection = { selectedSection = it },
+            modifier = Modifier.weight(1f),
+        ) {
+            AdminSectionContent(
+                selectedSection = selectedSection,
+                repository = repository,
+                webDavUrl = webDavUrl(settings.origin),
+                importStatus = importStatus,
+                metadataStatus = metadataStatus,
+                aiStatus = aiStatus,
+                importError = importError,
+                metadataError = metadataError,
+                aiError = aiError,
+                userRefreshVersion = userRefreshVersion,
+                refreshImport = { scope.launch { refreshImport() } },
+                refreshMetadata = { scope.launch { refreshMetadata() } },
+                refreshAi = { scope.launch { refreshAi() } },
+                modifier = Modifier.fillMaxSize(),
             )
-        },
-    ) { scaffoldPadding ->
-        BoxWithConstraints(Modifier.fillMaxSize().padding(scaffoldPadding)) {
-            val tabletLayout = maxWidth >= 720.dp
-            if (tabletLayout) {
-                Row(Modifier.fillMaxSize()) {
-                    NavigationRail(Modifier.width(104.dp)) {
-                        AdminSection.entries.forEach { section ->
-                            NavigationRailItem(
-                                selected = selectedSection == section,
-                                onClick = { selectedSection = section },
-                                icon = { Icon(section.icon, null) },
-                                label = { Text(section.label) },
-                            )
-                        }
-                    }
-                    VerticalDivider(Modifier.fillMaxSize().width(1.dp))
-                    AdminSectionContent(
-                        selectedSection = selectedSection,
-                        repository = repository,
-                        webDavUrl = webDavUrl(settings.origin),
-                        importStatus = importStatus,
-                        metadataStatus = metadataStatus,
-                        aiStatus = aiStatus,
-                        importError = importError,
-                        metadataError = metadataError,
-                        aiError = aiError,
-                        refreshing = refreshing,
-                        userRefreshVersion = userRefreshVersion,
-                        refresh = ::refreshFromUser,
-                        refreshImport = { scope.launch { refreshImport() } },
-                        refreshMetadata = { scope.launch { refreshMetadata() } },
-                        refreshAi = { scope.launch { refreshAi() } },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            } else {
-                Column(Modifier.fillMaxSize()) {
-                    AdminSectionTabs(selectedSection) { selectedSection = it }
-                    AdminSectionContent(
-                        selectedSection = selectedSection,
-                        repository = repository,
-                        webDavUrl = webDavUrl(settings.origin),
-                        importStatus = importStatus,
-                        metadataStatus = metadataStatus,
-                        aiStatus = aiStatus,
-                        importError = importError,
-                        metadataError = metadataError,
-                        aiError = aiError,
-                        refreshing = refreshing,
-                        userRefreshVersion = userRefreshVersion,
-                        refresh = ::refreshFromUser,
-                        refreshImport = { scope.launch { refreshImport() } },
-                        refreshMetadata = { scope.launch { refreshMetadata() } },
-                        refreshAi = { scope.launch { refreshAi() } },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
+        }
+    }
+}
+
+@Composable
+internal fun AdminResponsiveLayout(
+    selectedSection: AdminSection,
+    selectSection: (AdminSection) -> Unit,
+    modifier: Modifier,
+    content: @Composable () -> Unit,
+) {
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        AdminSectionLayout(
+            selectedSection = selectedSection,
+            selectSection = selectSection,
+            useNavigationRail = adminUsesNavigationRail(maxWidth.value.toInt()),
+            content = content,
+        )
+    }
+}
+
+@Composable
+internal fun AdminSectionLayout(
+    selectedSection: AdminSection,
+    selectSection: (AdminSection) -> Unit,
+    useNavigationRail: Boolean,
+    content: @Composable () -> Unit,
+) {
+    if (useNavigationRail) {
+        Row(Modifier.fillMaxSize()) {
+            AdminSectionRail(selectedSection, selectSection)
+            VerticalDivider(Modifier.fillMaxHeight().width(1.dp))
+            Box(Modifier.weight(1f).fillMaxHeight()) { content() }
+        }
+        return
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        AdminSectionTabs(selectedSection, selectSection)
+        Box(Modifier.weight(1f).fillMaxWidth()) { content() }
+    }
+}
+
+@Composable
+private fun AdminSectionRail(
+    selectedSection: AdminSection,
+    selectSection: (AdminSection) -> Unit,
+) {
+    NavigationRail(Modifier.fillMaxHeight().width(104.dp)) {
+        AdminSection.entries.forEach { section ->
+            NavigationRailItem(
+                selected = selectedSection == section,
+                onClick = { selectSection(section) },
+                icon = { Icon(section.icon, null) },
+                label = { Text(section.label) },
+            )
         }
     }
 }
@@ -354,7 +376,6 @@ internal fun AdminSectionTabs(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AdminSectionContent(
     selectedSection: AdminSection,
@@ -366,19 +387,13 @@ private fun AdminSectionContent(
     importError: String?,
     metadataError: String?,
     aiError: String?,
-    refreshing: Boolean,
     userRefreshVersion: Int,
-    refresh: () -> Unit,
     refreshImport: () -> Unit,
     refreshMetadata: () -> Unit,
     refreshAi: () -> Unit,
     modifier: Modifier,
 ) {
-    PullToRefreshBox(
-        isRefreshing = refreshing,
-        onRefresh = refresh,
-        modifier = modifier.fillMaxSize(),
-    ) {
+    Box(modifier.fillMaxSize()) {
         when (selectedSection) {
             AdminSection.USERS -> UserAdministration(repository, userRefreshVersion)
             AdminSection.IMPORT -> ImportAdministration(repository, webDavUrl, importStatus, importError, refreshImport)

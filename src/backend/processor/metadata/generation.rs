@@ -53,7 +53,8 @@ pub async fn generate_media_metadata(
             .await
             .map_err(|error| error.to_string())?,
     };
-    let metadata = generate_complete_metadata(&original_path, &media_type).await;
+    let complete_metadata = generate_complete_metadata(&original_path, &media_type).await;
+    let metadata = &complete_metadata.metadata;
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
     let tiny_thumbnail_path = paths().thumbnails_tiny.join(&thumbnail_relative);
@@ -122,6 +123,19 @@ pub async fn generate_media_metadata(
         let transaction = connection
             .unchecked_transaction()
             .map_err(|error| error.to_string())?;
+        transaction
+            .execute(queries::metadata::DELETE_SOURCES_FOR_MEDIA, [media_id])
+            .map_err(|error| error.to_string())?;
+        for source in &complete_metadata.sources {
+            let payload_json =
+                serde_json::to_string(&source.payload).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    queries::metadata::INSERT_SOURCE,
+                    rusqlite::params![media_id, source.source_type.as_str(), 1, payload_json],
+                )
+                .map_err(|error| error.to_string())?;
+        }
         transaction
             .execute(
                 queries::metadata::UPDATE_METADATA,

@@ -423,6 +423,7 @@ pub mod metadata_jobs {
     pub const DELETE_DOCUMENT_CLASSIFICATION_INPUTS: &str =
         "DELETE FROM media_document_classification_inputs";
     pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
+    pub const DELETE_METADATA_SOURCES: &str = "DELETE FROM media_metadata_sources";
     pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
     pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
     pub const MARK_IMPORTED_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) SELECT id, datetime('now') FROM media WHERE import_state = 'imported'";
@@ -1437,6 +1438,16 @@ pub mod metadata {
     pub const DELETE_AI_INPUTS_FOR_TASK: &str =
         "DELETE FROM media_ai_inputs WHERE media_id = ? AND task = ?";
     pub const INSERT_AI_INPUT: &str = "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    pub const DELETE_SOURCES_FOR_MEDIA: &str =
+        "DELETE FROM media_metadata_sources WHERE media_id = ?";
+    pub const INSERT_SOURCE: &str = r#"
+    INSERT INTO media_metadata_sources (
+        media_id
+      , source_type
+      , schema_version
+      , payload_json
+    ) VALUES (?, ?, ?, ?)
+    "#;
     pub const SELECT_THUMBNAILS: &str = r#"
     SELECT m.id
          , mm.thumbnail_path

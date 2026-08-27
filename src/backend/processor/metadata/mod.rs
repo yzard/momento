@@ -34,6 +34,35 @@ pub struct MediaMetadata {
     pub focal_length_35mm: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataSourceType {
+    ExifTool,
+    Ffprobe,
+    SupplementalSidecar,
+}
+
+impl MetadataSourceType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExifTool => "exiftool",
+            Self::Ffprobe => "ffprobe",
+            Self::SupplementalSidecar => "supplemental_sidecar",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataSource {
+    pub source_type: MetadataSourceType,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtractedMediaMetadata {
+    pub metadata: MediaMetadata,
+    pub sources: Vec<MetadataSource>,
+}
+
 pub async fn generate_media_metadata(
     pool: &DbPool,
     media_id: i64,
@@ -194,16 +223,16 @@ pub fn normalize_gps_coordinates(metadata: &mut MediaMetadata) {
     metadata.gps_longitude = None;
 }
 
-pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
-    let mut metadata = extract_exif_metadata(file_path).await;
+pub async fn extract_image_metadata(file_path: &Path) -> ExtractedMediaMetadata {
+    let mut extracted = extract_exif_metadata(file_path).await;
 
-    if metadata.mime_type.is_none() {
+    if extracted.metadata.mime_type.is_none() {
         let ext = file_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        metadata.mime_type = Some(
+        extracted.metadata.mime_type = Some(
             match ext.as_str() {
                 "jpg" | "jpeg" => "image/jpeg",
                 "png" => "image/png",
@@ -213,6 +242,17 @@ pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
                 "tiff" | "tif" => "image/tiff",
                 "bmp" => "image/bmp",
                 "avif" => "image/avif",
+                "dng" => "image/x-adobe-dng",
+                "cr2" => "image/x-canon-cr2",
+                "cr3" => "image/x-canon-cr3",
+                "nef" | "nrw" => "image/x-nikon-nef",
+                "arw" => "image/x-sony-arw",
+                "rw2" => "image/x-panasonic-rw2",
+                "orf" => "image/x-olympus-orf",
+                "raf" => "image/x-fuji-raf",
+                "pef" => "image/x-pentax-pef",
+                "srw" => "image/x-samsung-srw",
+                "raw" => "image/x-raw",
                 "svg" => "image/svg+xml",
                 _ => "application/octet-stream",
             }
@@ -220,12 +260,13 @@ pub async fn extract_image_metadata(file_path: &Path) -> MediaMetadata {
         );
     }
 
-    log_extracted_metadata(file_path, &metadata);
-    metadata
+    log_extracted_metadata(file_path, &extracted.metadata);
+    extracted
 }
 
-async fn extract_exif_metadata(file_path: &Path) -> MediaMetadata {
+async fn extract_exif_metadata(file_path: &Path) -> ExtractedMediaMetadata {
     let mut metadata = MediaMetadata::default();
+    let mut sources = Vec::new();
 
     let output = Command::new("exiftool")
         .args(["-json", "-n", file_path.to_str().unwrap_or("")])
@@ -239,6 +280,10 @@ async fn extract_exif_metadata(file_path: &Path) -> MediaMetadata {
                     if let Some(data) = exif_data.first() {
                         apply_exif_data(&mut metadata, data);
                         normalize_gps_coordinates(&mut metadata);
+                        sources.push(MetadataSource {
+                            source_type: MetadataSourceType::ExifTool,
+                            payload: data.clone(),
+                        });
                     }
                 }
                 Err(e) => {
@@ -273,7 +318,7 @@ async fn extract_exif_metadata(file_path: &Path) -> MediaMetadata {
             );
         }
     }
-    metadata
+    ExtractedMediaMetadata { metadata, sources }
 }
 
 fn apply_exif_data(metadata: &mut MediaMetadata, data: &serde_json::Value) {
@@ -390,8 +435,8 @@ fn parse_exif_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
-    let mut metadata = extract_exif_metadata(file_path).await;
+pub async fn extract_video_metadata(file_path: &Path) -> ExtractedMediaMetadata {
+    let mut extracted = extract_exif_metadata(file_path).await;
 
     // Run ffprobe
     let output = Command::new("ffprobe")
@@ -410,24 +455,33 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
     let output = match output {
         Ok(o) if o.status.success() => o,
         _ => {
-            metadata.duration_seconds = Some(0.0);
-            return metadata;
+            extracted.metadata.duration_seconds = Some(0.0);
+            return extracted;
         }
     };
 
     let json_str = match String::from_utf8(output.stdout) {
         Ok(s) => s,
         Err(_) => {
-            return metadata;
+            return extracted;
         }
     };
 
-    let ffprobe_data: FfprobeOutput = match serde_json::from_str(&json_str) {
-        Ok(d) => d,
+    let ffprobe_payload: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(payload) => payload,
         Err(_) => {
-            return metadata;
+            return extracted;
         }
     };
+    extracted.sources.push(MetadataSource {
+        source_type: MetadataSourceType::Ffprobe,
+        payload: ffprobe_payload.clone(),
+    });
+    let ffprobe_data: FfprobeOutput = match serde_json::from_value(ffprobe_payload) {
+        Ok(parsed_output) => parsed_output,
+        Err(_) => return extracted,
+    };
+    let metadata = &mut extracted.metadata;
 
     // Extract video stream info
     if let Some(streams) = ffprobe_data.streams {
@@ -498,7 +552,7 @@ pub async fn extract_video_metadata(file_path: &Path) -> MediaMetadata {
     );
 
     log_extracted_metadata(file_path, &metadata);
-    metadata
+    extracted
 }
 
 #[derive(Debug, Deserialize)]

@@ -73,6 +73,7 @@ pub fn reset_all(pool: &DbPool) -> Result<i64, rusqlite::Error> {
         [],
     )?;
     transaction.execute(queries::metadata_jobs::DELETE_RTREE, [])?;
+    transaction.execute(queries::metadata_jobs::DELETE_METADATA_SOURCES, [])?;
     transaction.execute(queries::metadata_jobs::DELETE_METADATA, [])?;
     transaction.execute(queries::metadata_jobs::RESET_IMPORTED, [])?;
     transaction.commit()?;
