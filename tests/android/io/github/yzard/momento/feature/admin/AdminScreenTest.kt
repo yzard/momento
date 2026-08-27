@@ -97,6 +97,12 @@ class AdminScreenTest {
         assertEquals(List(5) { "" }, splitCronExpression("15 1 * *"))
     }
 
+    @Test fun cronFieldsWrapWithoutHorizontalScrolling() {
+        assertEquals(2, cronFieldsPerRow(360))
+        assertEquals(3, cronFieldsPerRow(600))
+        assertEquals(5, cronFieldsPerRow(720))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsJoiningTheWrongCronFieldCount() {
         joinCronFields(listOf("15", "1", "*", "*"))

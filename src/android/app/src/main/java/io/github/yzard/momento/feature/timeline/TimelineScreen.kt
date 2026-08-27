@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
@@ -114,6 +115,8 @@ fun shouldAppendTimeline(
 fun addToAlbumSelectionLabel(selectedCount: Int): String = "Add to album ($selectedCount)"
 
 fun trashSelectionLabel(selectedCount: Int): String = "Trash ($selectedCount)"
+
+fun compactTimelineSelection(widthDp: Int): Boolean = widthDp < 480
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -466,6 +469,7 @@ private fun ContinuousTimelineGrid(
         TimelineSelectionControl(
             selecting = selecting,
             selectedCount = selectedIds.size,
+            compact = compactTimelineSelection(maxWidth.value.toInt()),
             startSelecting = startSelecting,
             cancelSelecting = cancelSelecting,
             requestTrash = requestTrash,
@@ -503,6 +507,7 @@ private fun FloatingTimelineHeader(
 private fun TimelineSelectionControl(
     selecting: Boolean,
     selectedCount: Int,
+    compact: Boolean,
     startSelecting: () -> Unit,
     cancelSelecting: () -> Unit,
     requestTrash: () -> Unit,
@@ -519,16 +524,30 @@ private fun TimelineSelectionControl(
     ) {
         Row {
             if (selecting && selectedCount > 0) {
-                TextButton(
-                    onClick = requestAddToAlbum,
-                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                ) { Text(addToAlbumSelectionLabel(selectedCount)) }
-                TextButton(
-                    onClick = requestTrash,
-                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                ) {
-                    Icon(Icons.Default.Delete, "Move selected media to Trash")
-                    Text(trashSelectionLabel(selectedCount))
+                if (compact) {
+                    Text(
+                        selectedCount.toString(),
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(start = 12.dp),
+                    )
+                    IconButton(onClick = requestAddToAlbum) {
+                        Icon(Icons.Default.AddPhotoAlternate, "Add $selectedCount selected media to an album")
+                    }
+                    IconButton(onClick = requestTrash) {
+                        Icon(Icons.Default.Delete, "Move $selectedCount selected media to Trash")
+                    }
+                } else {
+                    TextButton(
+                        onClick = requestAddToAlbum,
+                        colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+                    ) { Text(addToAlbumSelectionLabel(selectedCount)) }
+                    TextButton(
+                        onClick = requestTrash,
+                        colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+                    ) {
+                        Icon(Icons.Default.Delete, "Move selected media to Trash")
+                        Text(trashSelectionLabel(selectedCount))
+                    }
                 }
             }
             if (selecting) {

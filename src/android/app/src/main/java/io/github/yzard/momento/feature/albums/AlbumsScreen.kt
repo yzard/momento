@@ -1,5 +1,6 @@
 package io.github.yzard.momento.feature.albums
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -45,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -88,7 +90,7 @@ fun removeFromAlbumSelectionLabel(selectedCount: Int): String =
 @Composable
 fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
     var albums by remember { mutableStateOf<List<Album>?>(null) }
-    var selectedAlbumId by remember { mutableStateOf<Long?>(null) }
+    var selectedAlbumId by rememberSaveable { mutableStateOf<Long?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
     var albumPendingDeletion by remember { mutableStateOf<Album?>(null) }
@@ -101,6 +103,7 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
     }
 
     LaunchedEffect(Unit) { loadAlbums() }
+    BackHandler(enabled = selectedAlbumId != null) { selectedAlbumId = null }
 
     val albumId = selectedAlbumId
     if (albumId != null) {

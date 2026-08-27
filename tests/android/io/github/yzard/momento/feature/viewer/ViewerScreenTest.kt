@@ -99,6 +99,12 @@ class ViewerScreenTest {
         assertEquals(0L, boundedPlaybackPosition(500f, 0))
     }
 
+    @Test fun formatsPlaybackTimeForShortAndLongVideos() {
+        assertEquals("0:00", formatPlaybackTime(-1))
+        assertEquals("1:05", formatPlaybackTime(65_000))
+        assertEquals("1:01:01", formatPlaybackTime(3_661_000))
+    }
+
     @Test
     fun filmstripChoosesTheThumbnailNearestTheViewportCenter() {
         val centered = centeredFilmstripIndex(

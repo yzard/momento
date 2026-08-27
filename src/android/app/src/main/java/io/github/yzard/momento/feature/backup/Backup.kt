@@ -32,6 +32,7 @@ import io.github.yzard.momento.core.database.BackupAssetDao
 import io.github.yzard.momento.core.database.BackupAssetEntity
 import io.github.yzard.momento.core.database.BackupDatabase
 import io.github.yzard.momento.core.model.BackupState
+import io.github.yzard.momento.core.model.BackupCapabilities
 import io.github.yzard.momento.core.model.BackupUploadCreateRequest
 import io.github.yzard.momento.core.model.BackupUploadResponse
 import io.github.yzard.momento.core.network.NetworkClient
@@ -155,6 +156,8 @@ internal fun discoveredAsset(
 
 internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER }
 
+internal fun backupCanRun(capabilities: BackupCapabilities): Boolean = capabilities.enabled
+
 private class TerminalBackupException(message: String) : Exception(message)
 
 internal fun serverProgress(response: BackupUploadResponse): BackupProgress = when (response.status) {
@@ -172,7 +175,9 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
             val settings = settingsStore.settings.first()
             if (!tokenStore.isAuthenticated.value || settings.origin == null) return Result.failure()
-            if (currentBackupMediaAccess(applicationContext) == BackupMediaAccess.DENIED) return Result.success()
+            val mediaAccess = currentBackupMediaAccess(applicationContext)
+            val locationMetadataAccess = currentBackupLocationMetadataAccess(applicationContext)
+            if (!backupCanReadOriginalMedia(mediaAccess, locationMetadataAccess)) return Result.success()
             if (!isBackupNetworkAllowed(applicationContext, settings.mobileDataEnabled)) return Result.retry()
 
             setForeground(progress("Preparing backup"))
@@ -183,10 +188,17 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 assets,
                 settingsStore.backupGeneration(),
             ).scan(settings.cameraOnly)
-            val chunkSize = repository.capabilities(settings.origin).backup.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
+            val backupCapabilities = repository.capabilities(settings.origin).backup
+            if (!backupCanRun(backupCapabilities)) return Result.success()
+            val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
             var waitingForServer = false
             for (asset in assets.pending(settings.cameraOnly)) {
-                if (transfer(asset, assets, repository, deviceId, chunkSize) == BackupProgress.WAITING_FOR_SERVER) waitingForServer = true
+                if (
+                    transfer(asset, assets, repository, deviceId, chunkSize, locationMetadataAccess) ==
+                    BackupProgress.WAITING_FOR_SERVER
+                ) {
+                    waitingForServer = true
+                }
             }
             if (waitingForServer) Result.retry() else Result.success()
         } catch (error: IOException) {
@@ -198,7 +210,14 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
         }
     }
 
-    private suspend fun transfer(asset: BackupAssetEntity, assets: BackupAssetDao, repository: MomentoRepository, deviceId: String, chunkSize: Int): BackupProgress {
+    private suspend fun transfer(
+        asset: BackupAssetEntity,
+        assets: BackupAssetDao,
+        repository: MomentoRepository,
+        deviceId: String,
+        chunkSize: Int,
+        locationMetadataAccess: BackupLocationMetadataAccess,
+    ): BackupProgress {
         var activeUploadId = asset.uploadId
         var durableUploadedBytes = asset.uploadedBytes
         try {
@@ -220,7 +239,12 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             var offset = upload.uploadedSize
             assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, upload.uploadId, null, null)
             val mediaStream = try {
-                applicationContext.contentResolver.openInputStream(Uri.parse(asset.uri))
+                val mediaUri = backupMediaUri(
+                    Uri.parse(asset.uri),
+                    Build.VERSION.SDK_INT,
+                    locationMetadataAccess,
+                )
+                applicationContext.contentResolver.openInputStream(mediaUri)
             } catch (error: FileNotFoundException) {
                 throw TerminalBackupException(error.message ?: "Media asset is no longer available")
             }
@@ -453,6 +477,11 @@ enum class BackupMediaAccess {
     DENIED,
 }
 
+enum class BackupLocationMetadataAccess {
+    PRESERVED,
+    DENIED,
+}
+
 internal const val IMMEDIATE_BACKUP_WORK_NAME = "momento_backup_now"
 internal const val PERIODIC_BACKUP_WORK_NAME = "momento_backup_periodic"
 internal const val LEGACY_BACKUP_WORK_NAME = "momento_backup"
@@ -481,6 +510,13 @@ fun backupReadPermissions(sdkVersion: Int): Array<String> = when {
     )
     else -> arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
 }
+
+fun backupPermissions(sdkVersion: Int): Array<String> = buildList {
+    addAll(backupReadPermissions(sdkVersion))
+    if (sdkVersion >= Build.VERSION_CODES.Q) {
+        add(android.Manifest.permission.ACCESS_MEDIA_LOCATION)
+    }
+}.toTypedArray()
 
 fun backupMediaAccess(sdkVersion: Int, grantedPermissions: Set<String>): BackupMediaAccess {
     if (sdkVersion < Build.VERSION_CODES.TIRAMISU) {
@@ -512,10 +548,63 @@ fun currentBackupMediaAccess(context: Context): BackupMediaAccess {
     return backupMediaAccess(Build.VERSION.SDK_INT, grantedPermissions)
 }
 
+fun backupLocationMetadataAccess(
+    sdkVersion: Int,
+    grantedPermissions: Set<String>,
+): BackupLocationMetadataAccess {
+    if (sdkVersion < Build.VERSION_CODES.Q) return BackupLocationMetadataAccess.PRESERVED
+    return if (android.Manifest.permission.ACCESS_MEDIA_LOCATION in grantedPermissions) {
+        BackupLocationMetadataAccess.PRESERVED
+    } else {
+        BackupLocationMetadataAccess.DENIED
+    }
+}
+
+fun currentBackupLocationMetadataAccess(context: Context): BackupLocationMetadataAccess {
+    val grantedPermissions = setOfNotNull(
+        android.Manifest.permission.ACCESS_MEDIA_LOCATION.takeIf { permission ->
+            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        },
+    )
+    return backupLocationMetadataAccess(Build.VERSION.SDK_INT, grantedPermissions)
+}
+
+fun backupCanReadOriginalMedia(
+    mediaAccess: BackupMediaAccess,
+    locationMetadataAccess: BackupLocationMetadataAccess,
+): Boolean = mediaAccess != BackupMediaAccess.DENIED &&
+    locationMetadataAccess == BackupLocationMetadataAccess.PRESERVED
+
+fun currentBackupCanReadOriginalMedia(context: Context): Boolean = backupCanReadOriginalMedia(
+    currentBackupMediaAccess(context),
+    currentBackupLocationMetadataAccess(context),
+)
+
+internal fun backupUsesOriginalMediaUri(
+    sdkVersion: Int,
+    locationMetadataAccess: BackupLocationMetadataAccess,
+): Boolean = sdkVersion >= Build.VERSION_CODES.Q &&
+    locationMetadataAccess == BackupLocationMetadataAccess.PRESERVED
+
+private fun backupMediaUri(
+    uri: Uri,
+    sdkVersion: Int,
+    locationMetadataAccess: BackupLocationMetadataAccess,
+): Uri {
+    if (!backupUsesOriginalMediaUri(sdkVersion, locationMetadataAccess)) return uri
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return uri
+    return MediaStore.setRequireOriginal(uri)
+}
+
 fun backupMediaAccessLabel(access: BackupMediaAccess): String = when (access) {
     BackupMediaAccess.FULL -> "All photos and videos are available for backup"
     BackupMediaAccess.PARTIAL -> "Only selected photos or media types are available for backup"
     BackupMediaAccess.DENIED -> "Photo and video access is required before backup can run"
+}
+
+fun backupLocationMetadataAccessLabel(access: BackupLocationMetadataAccess): String = when (access) {
+    BackupLocationMetadataAccess.PRESERVED -> "Photo location metadata will be preserved"
+    BackupLocationMetadataAccess.DENIED -> "Photo location access is required for lossless backup"
 }
 
 private fun backupConstraints(allowMobileData: Boolean): Constraints = Constraints.Builder()

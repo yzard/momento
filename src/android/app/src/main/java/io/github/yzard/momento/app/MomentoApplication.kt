@@ -4,6 +4,8 @@ import android.view.autofill.AutofillManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.text.BasicTextField
@@ -13,16 +15,19 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -76,6 +81,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -109,7 +115,9 @@ import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.navigation.Destination
+import io.github.yzard.momento.app.navigation.MainShellState
 import io.github.yzard.momento.app.navigation.isTimelinePage
+import io.github.yzard.momento.app.navigation.isAvailable
 import io.github.yzard.momento.app.navigation.hasFloatingTitle
 import io.github.yzard.momento.app.navigation.timelineSubpageDestinations
 import io.github.yzard.momento.app.navigation.utilityDrawerDestinations
@@ -121,6 +129,7 @@ import io.github.yzard.momento.core.data.SettingsStore
 import io.github.yzard.momento.core.data.ThemePreference
 import io.github.yzard.momento.core.data.normalizeServerOrigin
 import io.github.yzard.momento.core.model.Media
+import io.github.yzard.momento.core.model.Capabilities
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.admin.AdminScreen
 import io.github.yzard.momento.feature.albums.AlbumsScreen
@@ -128,8 +137,7 @@ import io.github.yzard.momento.feature.auth.LoginRequirement
 import io.github.yzard.momento.feature.auth.PasswordChangeFields
 import io.github.yzard.momento.feature.auth.loginRequirement
 import io.github.yzard.momento.feature.auth.validateNewPassword
-import io.github.yzard.momento.feature.backup.BackupMediaAccess
-import io.github.yzard.momento.feature.backup.currentBackupMediaAccess
+import io.github.yzard.momento.feature.backup.currentBackupCanReadOriginalMedia
 import io.github.yzard.momento.feature.backup.schedulePeriodicBackup
 import io.github.yzard.momento.feature.deduplicate.DeduplicateScreen
 import io.github.yzard.momento.feature.faces.FacesScreen
@@ -172,7 +180,7 @@ fun MomentoApplication(
         if (
             authenticated &&
             loadedSettings.origin != null &&
-            currentBackupMediaAccess(context) != BackupMediaAccess.DENIED
+            currentBackupCanReadOriginalMedia(context)
         ) {
             schedulePeriodicBackup(context.applicationContext, loadedSettings.mobileDataEnabled)
         }
@@ -209,9 +217,9 @@ fun MomentoApplication(
 
 @Composable
 private fun ServerScreen(settingsStore: SettingsStore, repository: MomentoRepository) {
-    var origin by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    var insecureWarning by remember { mutableStateOf(false) }
+    var origin by rememberSaveable { mutableStateOf("") }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    var insecureWarning by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     Surface(
@@ -219,10 +227,7 @@ private fun ServerScreen(settingsStore: SettingsStore, repository: MomentoReposi
         color = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(28.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
+        AuthFormLayout {
             Text("Your Momento", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
             Text("Connect to the server that keeps your library private.", Modifier.padding(vertical = 12.dp))
             OutlinedTextField(
@@ -311,7 +316,7 @@ private fun LoginScreen(
     signedIn: (User) -> Unit,
     passwordChangeRequired: (User) -> Unit,
 ) {
-    var username by remember { mutableStateOf("") }
+    var username by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var signingIn by remember { mutableStateOf(false) }
@@ -376,10 +381,7 @@ private fun LoginScreen(
         color = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize().imePadding().padding(28.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
+        AuthFormLayout {
             Text("Sign in", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
             OutlinedTextField(
                 value = username,
@@ -459,10 +461,7 @@ private fun ForcedPasswordChangeScreen(
         color = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize().imePadding().padding(28.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
+        AuthFormLayout {
             Text(
                 "Change your password",
                 style = MaterialTheme.typography.displaySmall,
@@ -494,6 +493,28 @@ private fun ForcedPasswordChangeScreen(
     }
 }
 
+@Composable
+private fun AuthFormLayout(content: @Composable ColumnScope.() -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .imePadding(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth()
+                .widthIn(max = 480.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 28.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.Center,
+            content = content,
+        )
+    }
+}
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Suppress("DEPRECATION")
 private fun Modifier.autofill(
@@ -518,20 +539,18 @@ private fun MainShell(
     initialUser: User?,
     userLoaded: (User) -> Unit,
 ) {
-    var destination by remember { mutableStateOf(Destination.TIMELINE) }
-    var viewerMedia by remember { mutableStateOf<List<Media>?>(null) }
-    var viewerIndex by remember { mutableIntStateOf(0) }
-    var contentRevision by remember { mutableIntStateOf(0) }
-    var viewerChanged by remember { mutableStateOf(false) }
+    val shellState: MainShellState = viewModel()
     var user by remember { mutableStateOf(initialUser) }
-    var timelinePeriod by remember { mutableStateOf(TimelinePeriod.DAY) }
-    var timelineSearchQuery by rememberSaveable { mutableStateOf("") }
+    val settings by settingsStore.settings.collectAsState(
+        initial = Settings(null, false, true, ThemePreference.SYSTEM),
+    )
+    var capabilities by remember { mutableStateOf<Capabilities?>(null) }
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
     BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
-    BackHandler(enabled = !drawerState.isOpen && destination != Destination.TIMELINE) {
-        destination = Destination.TIMELINE
+    BackHandler(enabled = !drawerState.isOpen && shellState.destination != Destination.TIMELINE) {
+        shellState.navigate(Destination.TIMELINE)
     }
     LaunchedEffect(Unit) {
         if (user == null) {
@@ -545,17 +564,37 @@ private fun MainShell(
             }
         }
     }
+    LaunchedEffect(settings.origin) {
+        val origin = settings.origin
+        if (origin == null) {
+            capabilities = null
+            return@LaunchedEffect
+        }
+        capabilities = try {
+            repository.capabilities(origin)
+        } catch (_: IOException) {
+            null
+        } catch (_: HttpException) {
+            null
+        } catch (_: kotlinx.serialization.SerializationException) {
+            null
+        }
+    }
+    LaunchedEffect(capabilities, shellState.destination) {
+        if (!shellState.destination.isAvailable(capabilities)) shellState.navigate(Destination.TIMELINE)
+    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ModalNavigationDrawer(
             drawerState = drawerState,
-            gesturesEnabled = destination != Destination.MAP,
+            gesturesEnabled = shellState.destination != Destination.MAP,
             drawerContent = {
                 MainNavigationDrawer(
-                    destination = destination,
+                    destination = shellState.destination,
+                    capabilities = capabilities,
                     select = { selectedDestination ->
                         scope.launch {
                             drawerState.close()
-                            destination = selectedDestination
+                            shellState.navigate(selectedDestination)
                         }
                     },
                     logout = {
@@ -568,44 +607,41 @@ private fun MainShell(
             },
         ) {
             Box(Modifier.fillMaxSize()) {
-                key(contentRevision) {
+                key(shellState.contentRevision) {
                     ShellDestination(
-                        destination = destination,
-                        timelinePeriod = timelinePeriod,
-                        timelineSearchQuery = timelineSearchQuery,
+                        destination = shellState.destination,
+                        timelinePeriod = shellState.timelinePeriod,
+                        timelineSearchQuery = shellState.timelineSearchQuery,
                         repository = repository,
                         settingsStore = settingsStore,
                         user = user,
-                        openDestination = { destination = it },
+                        capabilities = capabilities,
+                        openDestination = shellState::navigate,
                         openMedia = { media, index ->
-                            viewerMedia = media
-                            viewerIndex = index
-                            viewerChanged = false
+                            shellState.openViewer(media, index)
                         },
                         logout = { scope.launch { repository.logout() } },
                     )
                 }
                 ShellOverlay(
-                    destination = destination,
-                    timelinePeriod = timelinePeriod,
-                    selectTimelinePeriod = { timelinePeriod = it },
+                    destination = shellState.destination,
+                    timelinePeriod = shellState.timelinePeriod,
+                    selectTimelinePeriod = shellState::selectTimelinePeriod,
                     openMenu = { scope.launch { drawerState.open() } },
                     search = { query ->
-                        timelineSearchQuery = query
+                        shellState.updateTimelineSearchQuery(query)
                     },
                 )
             }
         }
-        viewerMedia?.let { media ->
+        shellState.viewerMedia?.let { media ->
             ViewerScreen(
                 media = media,
-                initialIndex = viewerIndex,
+                initialIndex = shellState.viewerIndex,
                 repository = repository,
-                mediaChanged = { viewerChanged = true },
-                close = {
-                    viewerMedia = null
-                    if (viewerChanged) contentRevision += 1
-                },
+                viewedIndexChanged = shellState::updateViewerIndex,
+                mediaChanged = shellState::markViewerChanged,
+                close = shellState::closeViewer,
             )
         }
     }
@@ -614,13 +650,21 @@ private fun MainShell(
 @Composable
 private fun MainNavigationDrawer(
     destination: Destination,
+    capabilities: Capabilities?,
     select: (Destination) -> Unit,
     logout: () -> Unit,
 ) {
     var timelineExpanded by rememberSaveable { mutableStateOf(true) }
     var utilityExpanded by rememberSaveable { mutableStateOf(false) }
-    val drawerDestinations = webDrawerDestinations.drop(1 + timelineSubpageDestinations.size)
-    val utilityStart = drawerDestinations.indexOf(utilityDrawerDestinations.first())
+    val visibleTimelineDestinations = timelineSubpageDestinations.filter { it.isAvailable(capabilities) }
+    val visibleUtilityDestinations = utilityDrawerDestinations.filter { it.isAvailable(capabilities) }
+    val collectionDestinations = webDrawerDestinations.filter { drawerDestination ->
+        drawerDestination != Destination.TIMELINE &&
+            drawerDestination !in timelineSubpageDestinations &&
+            drawerDestination !in utilityDrawerDestinations &&
+            drawerDestination != Destination.TRASH &&
+            drawerDestination.isAvailable(capabilities)
+    }
     ModalDrawerSheet(
         modifier = Modifier.width(280.dp),
         drawerContainerColor = MaterialTheme.colorScheme.background,
@@ -659,7 +703,7 @@ private fun MainNavigationDrawer(
                     )
                     AnimatedVisibility(visible = timelineExpanded) {
                         Column {
-                            timelineSubpageDestinations.forEach { timelineDestination ->
+                            visibleTimelineDestinations.forEach { timelineDestination ->
                                 DrawerDestinationItem(
                                     destination = timelineDestination,
                                     selectedDestination = destination,
@@ -671,7 +715,7 @@ private fun MainNavigationDrawer(
                         }
                     }
                 }
-                items(drawerDestinations.take(utilityStart)) { drawerDestination ->
+                items(collectionDestinations) { drawerDestination ->
                     DrawerDestinationItem(
                         destination = drawerDestination,
                         selectedDestination = destination,
@@ -680,10 +724,10 @@ private fun MainNavigationDrawer(
                         select = select,
                     )
                 }
-                item {
+                if (visibleUtilityDestinations.isNotEmpty()) item {
                     NavigationDrawerItem(
                         label = { Text("Utility") },
-                        selected = !utilityExpanded && destination in utilityDrawerDestinations,
+                        selected = !utilityExpanded && destination in visibleUtilityDestinations,
                         onClick = { utilityExpanded = !utilityExpanded },
                         icon = { Icon(Icons.Default.Build, null) },
                         badge = {
@@ -698,7 +742,7 @@ private fun MainNavigationDrawer(
                     )
                     AnimatedVisibility(visible = utilityExpanded) {
                         Column {
-                            utilityDrawerDestinations.forEach { utilityDestination ->
+                            visibleUtilityDestinations.forEach { utilityDestination ->
                                 DrawerDestinationItem(
                                     destination = utilityDestination,
                                     selectedDestination = destination,
@@ -710,15 +754,7 @@ private fun MainNavigationDrawer(
                         }
                     }
                 }
-                items(drawerDestinations.drop(utilityStart + utilityDrawerDestinations.size)) { drawerDestination ->
-                    DrawerDestinationItem(
-                        destination = drawerDestination,
-                        selectedDestination = destination,
-                        icon = drawerIcon(drawerDestination),
-                        indentation = 0.dp,
-                        select = select,
-                    )
-                }
+                item { DrawerDestinationItem(Destination.TRASH, destination, Icons.Default.Delete, 0.dp, select) }
             }
             HorizontalDivider()
             DrawerDestinationItem(Destination.SETTINGS, destination, Icons.Default.Settings, 0.dp, select)
@@ -1004,6 +1040,7 @@ private fun ShellDestination(
     repository: MomentoRepository,
     settingsStore: SettingsStore,
     user: User?,
+    capabilities: Capabilities?,
     openDestination: (Destination) -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
     logout: () -> Unit,
@@ -1020,16 +1057,21 @@ private fun ShellDestination(
             search = timelineSearchQuery,
             openMedia = openMedia,
         )
-        Destination.COLLECTIONS -> CollectionsScreen(openDestination)
-        Destination.SETTINGS -> SettingsScreen(repository, settingsStore, user, { openDestination(Destination.ADMIN) }, logout)
+        Destination.SETTINGS -> SettingsScreen(
+            repository = repository,
+            settingsStore = settingsStore,
+            user = user,
+            backupAvailable = capabilities?.backup?.enabled != false,
+            openAdmin = { openDestination(Destination.ADMIN) },
+            logout = logout,
+        )
         Destination.ALBUMS -> AlbumsScreen(repository, openMedia)
-        Destination.MAP -> NativeMapScreen(repository) { media -> openMedia(media, 0) }
+        Destination.MAP -> NativeMapScreen(repository, openMedia)
         Destination.PLACES -> PlacesScreen(repository, openMedia)
         Destination.FACES -> FacesScreen(repository, user?.role == "admin", openMedia)
         Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin", openMedia)
         Destination.TRASH -> TrashScreen(repository)
         Destination.ADMIN -> AdminScreen(repository, settingsStore)
-        Destination.VIEWER -> Unit
     }
 }
 
@@ -1040,27 +1082,4 @@ private fun timelinePage(destination: Destination): TimelinePage = when (destina
     Destination.SCREENSHOTS -> TimelinePage.SCREENSHOTS
     Destination.DOCUMENTS -> TimelinePage.DOCUMENTS
     else -> error("Destination ${destination.name} is not a timeline page")
-}
-
-@Composable
-private fun CollectionsScreen(open: (Destination) -> Unit) {
-    val collections = listOf(
-        Destination.ALBUMS,
-        Destination.MAP,
-        Destination.PLACES,
-        Destination.FACES,
-        Destination.DEDUPLICATE,
-        Destination.TRASH,
-    )
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp), contentPadding = PaddingValues(bottom = 100.dp)) {
-        items(collections) { collection ->
-            ListItem(
-                headlineContent = { Text(collection.label) },
-                supportingContent = { Text(if (collection == Destination.DEDUPLICATE) "Find similar photos" else "Browse your library") },
-                leadingContent = { Icon(Icons.Default.Folder, null) },
-                modifier = Modifier.clickable { open(collection) },
-            )
-            HorizontalDivider()
-        }
-    }
 }

@@ -8,6 +8,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TimelineScreenTest {
+    @Test fun compactSelectionActionsUseIconsBeforeTheyWouldOverflow() {
+        assertTrue(compactTimelineSelection(360))
+        assertTrue(!compactTimelineSelection(480))
+    }
     @Test
     fun timelinePagesMapToIndependentBackendFilters() {
         assertEquals(null, TimelinePage.TIMELINE.mediaType)

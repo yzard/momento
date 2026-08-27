@@ -1,6 +1,5 @@
 package io.github.yzard.momento.feature.places
 
-import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,14 +13,18 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,12 +35,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.contentDescription
@@ -52,16 +56,20 @@ import io.github.yzard.momento.feature.media.EmptyState
 import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.media.MediaGrid
+import io.github.yzard.momento.feature.media.shouldLoadMoreMedia
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.filter
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 import java.io.IOException
 import java.util.Base64
 
-fun placeGridColumns(isPortrait: Boolean, widthDp: Int): Int = when {
-    isPortrait -> 2
-    widthDp >= 900 -> 4
-    else -> 3
+fun placeGridColumns(widthDp: Int): Int = when {
+    widthDp < 360 -> 1
+    widthDp < 600 -> 2
+    widthDp < 840 -> 3
+    widthDp < 1200 -> 4
+    else -> 5
 }
 
 fun decodePlaceThumbnail(dataUrl: String?): ByteArray? {
@@ -83,7 +91,7 @@ fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
     var nextCursor by remember(repository) { mutableStateOf<String?>(null) }
     var hasMore by remember(repository) { mutableStateOf(false) }
     var loading by remember(repository) { mutableStateOf(false) }
-    var selected by remember(repository) { mutableStateOf<Place?>(null) }
+    var selectedPlaceId by rememberSaveable { mutableStateOf<String?>(null) }
     var error by remember(repository) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -113,11 +121,11 @@ fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
     }
 
     LaunchedEffect(repository) { loadPlaces(true) }
-    BackHandler(enabled = selected != null) { selected = null }
+    BackHandler(enabled = selectedPlaceId != null) { selectedPlaceId = null }
 
-    val selectedPlace = selected
+    val selectedPlace = places?.firstOrNull { place -> place.placeId == selectedPlaceId }
     if (selectedPlace != null) {
-        PlaceDetailScreen(repository, selectedPlace.placeId, openMedia)
+        PlaceDetailScreen(repository, selectedPlace, { selectedPlaceId = null }, openMedia)
         return
     }
 
@@ -131,7 +139,7 @@ fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
             hasMore = hasMore,
             loading = loading,
             loadMore = { scope.launch { loadPlaces(false) } },
-            select = { selected = it },
+            select = { selectedPlaceId = it.placeId },
         )
     }
 }
@@ -145,14 +153,23 @@ private fun PlaceTiles(
     loadMore: () -> Unit,
     select: (Place) -> Unit,
 ) {
-    val configuration = LocalConfiguration.current
+    val gridState = rememberLazyGridState()
+    LaunchedEffect(gridState, hasMore, loading) {
+        snapshotFlow {
+            val layout = gridState.layoutInfo
+            shouldLoadMoreMedia(
+                lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
+                totalItemsCount = layout.totalItemsCount,
+                hasMore = hasMore,
+                loading = loading,
+            )
+        }.filter { it }.collect { loadMore() }
+    }
     BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        val columns = placeGridColumns(
-            isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT,
-            widthDp = maxWidth.value.toInt(),
-        )
+        val columns = placeGridColumns(maxWidth.value.toInt())
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
+            state = gridState,
             contentPadding = PaddingValues(start = 10.dp, top = 72.dp, end = 10.dp, bottom = 92.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -230,9 +247,11 @@ private fun PlaceTile(place: Place, repository: MomentoRepository, select: () ->
 @Composable
 private fun PlaceDetailScreen(
     repository: MomentoRepository,
-    placeId: String,
+    place: Place,
+    close: () -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
+    val placeId = place.placeId
     var media by remember(placeId) { mutableStateOf<List<Media>?>(null) }
     var nextCursor by remember(placeId) { mutableStateOf<String?>(null) }
     var more by remember(placeId) { mutableStateOf(true) }
@@ -268,7 +287,24 @@ private fun PlaceDetailScreen(
             repository = repository,
             selectedMediaIds = emptySet(),
             contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
-            headerContent = null,
+            headerContent = {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = close) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to places")
+                    }
+                    Column(Modifier.padding(start = 4.dp)) {
+                        Text(place.city, style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "${placeRegion(place)} · ${place.mediaCount} media",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
             footerContent = if (more && nextCursor != null) {
                 {
                     Text(

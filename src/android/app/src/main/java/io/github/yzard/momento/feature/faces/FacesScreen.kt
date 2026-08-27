@@ -16,11 +16,13 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -37,7 +39,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -53,7 +57,9 @@ import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.media.MediaGrid
 import io.github.yzard.momento.feature.media.adaptiveGridColumns
+import io.github.yzard.momento.feature.media.shouldLoadMoreMedia
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.filter
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 import java.io.IOException
@@ -70,7 +76,7 @@ fun FacesScreen(
     var nextCursor by remember(repository) { mutableStateOf<String?>(null) }
     var hasMore by remember(repository) { mutableStateOf(false) }
     var selectedIds by remember(repository) { mutableStateOf<Set<Long>>(emptySet()) }
-    var detail by remember(repository) { mutableStateOf<FaceGroup?>(null) }
+    var detailGroupId by rememberSaveable { mutableStateOf<Long?>(null) }
     var loading by remember(repository) { mutableStateOf(false) }
     var working by remember(repository) { mutableStateOf(false) }
     var confirmMerge by remember(repository) { mutableStateOf(false) }
@@ -121,11 +127,11 @@ fun FacesScreen(
     }
 
     LaunchedEffect(repository) { loadGroups(true) }
-    BackHandler(enabled = detail != null) { detail = null }
+    BackHandler(enabled = detailGroupId != null) { detailGroupId = null }
 
-    val selectedGroup = detail
+    val selectedGroup = groups?.firstOrNull { group -> group.faceGroupId == detailGroupId }
     if (selectedGroup != null) {
-        FaceGroupDetailScreen(repository, selectedGroup, openMedia)
+        FaceGroupDetailScreen(repository, selectedGroup, { detailGroupId = null }, openMedia)
         return
     }
 
@@ -135,8 +141,21 @@ fun FacesScreen(
         groups!!.isEmpty() -> EmptyState("No faces yet")
         else -> BoxWithConstraints(Modifier.fillMaxSize()) {
             val columns = adaptiveGridColumns(maxWidth.value.toInt())
+            val gridState = rememberLazyGridState()
+            LaunchedEffect(gridState, hasMore, loading) {
+                snapshotFlow {
+                    val layout = gridState.layoutInfo
+                    shouldLoadMoreMedia(
+                        lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
+                        totalItemsCount = layout.totalItemsCount,
+                        hasMore = hasMore,
+                        loading = loading,
+                    )
+                }.filter { it }.collect { loadGroups(false) }
+            }
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
+                state = gridState,
                 contentPadding = PaddingValues(top = 64.dp, start = 10.dp, end = 10.dp, bottom = 160.dp),
             ) {
                 if (error != null) {
@@ -150,7 +169,7 @@ fun FacesScreen(
                         repository = repository,
                         selected = group.faceGroupId in selectedIds,
                         selectable = isAdmin,
-                        open = { detail = group },
+                        open = { detailGroupId = group.faceGroupId },
                         toggleSelection = {
                             selectedIds = if (group.faceGroupId in selectedIds) {
                                 selectedIds - group.faceGroupId
@@ -213,6 +232,7 @@ fun FacesScreen(
 private fun FaceGroupDetailScreen(
     repository: MomentoRepository,
     group: FaceGroup,
+    close: () -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     var media by remember(repository, group.faceGroupId) { mutableStateOf<List<Media>?>(null) }
@@ -241,10 +261,22 @@ private fun FaceGroupDetailScreen(
             selectedMediaIds = emptySet(),
             contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
             headerContent = {
-                Text(
-                    "Person ${group.faceGroupId}",
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = close) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to people")
+                    }
+                    Column(Modifier.padding(start = 4.dp)) {
+                        Text("Person ${group.faceGroupId}", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "${group.mediaCount} media · ${group.faceCount} faces",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             },
             footerContent = null,
             modifier = Modifier.fillMaxSize(),
@@ -284,7 +316,11 @@ private fun FaceCard(
         Box {
             if (image == null) {
                 Box(
-                    Modifier.fillMaxWidth().aspectRatio(1f).background(MaterialTheme.colorScheme.surfaceVariant),
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable(onClick = open),
                     contentAlignment = Alignment.Center,
                 ) { Icon(Icons.Default.Face, "No face thumbnail") }
             } else {

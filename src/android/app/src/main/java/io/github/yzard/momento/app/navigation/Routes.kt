@@ -1,7 +1,9 @@
 package io.github.yzard.momento.app.navigation
 
+import io.github.yzard.momento.core.model.Capabilities
+
 enum class Destination(val label: String) {
-    TIMELINE("Timeline"), PHOTOS("Photos"), VIDEOS("Videos"), SCREENSHOTS("Screenshots"), DOCUMENTS("Documents"), COLLECTIONS("Collections"), SETTINGS("Settings"), ALBUMS("Albums"), MAP("Map"), PLACES("Places"), FACES("Faces"), DEDUPLICATE("Deduplicate"), TRASH("Trash"), ADMIN("Admin"), VIEWER("Viewer")
+    TIMELINE("Timeline"), PHOTOS("Photos"), VIDEOS("Videos"), SCREENSHOTS("Screenshots"), DOCUMENTS("Documents"), SETTINGS("Settings"), ALBUMS("Albums"), MAP("Map"), PLACES("Places"), FACES("Faces"), DEDUPLICATE("Deduplicate"), TRASH("Trash"), ADMIN("Admin")
 }
 
 val timelineSubpageDestinations = listOf(
@@ -31,3 +33,14 @@ fun Destination.isTimelinePage(): Boolean = when (this) {
 }
 
 fun Destination.hasFloatingTitle(): Boolean = this != Destination.SETTINGS && this != Destination.ADMIN
+
+fun Destination.isAvailable(capabilities: Capabilities?): Boolean {
+    if (capabilities == null) return true
+    return when (this) {
+        Destination.SCREENSHOTS -> capabilities.features.screenshotDetection
+        Destination.DOCUMENTS -> capabilities.features.documentDetection
+        Destination.FACES -> capabilities.features.faceDetection
+        Destination.DEDUPLICATE -> capabilities.features.deduplicate
+        else -> true
+    }
+}

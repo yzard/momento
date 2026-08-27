@@ -77,6 +77,14 @@ fun deduplicateFileSize(fileSize: Long?): String {
 fun deduplicateDimensions(media: Media): String =
     if (media.width == null || media.height == null) "Unknown dimensions" else "${media.width} × ${media.height}"
 
+fun deduplicateColumns(widthDp: Int): Int = when {
+    widthDp < 560 -> 2
+    widthDp < 840 -> 3
+    else -> 4
+}
+
+fun compactDeduplicateActions(widthDp: Int): Boolean = widthDp < 460
+
 @Composable
 fun DeduplicateScreen(
     repository: MomentoRepository,
@@ -269,17 +277,34 @@ fun DeduplicateScreen(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     shadowElevation = 8.dp,
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("${selectedMediaIds.size} selected", fontWeight = FontWeight.Bold)
-                            Text("Unselected items are kept", style = MaterialTheme.typography.bodySmall)
+                    BoxWithConstraints(Modifier.fillMaxWidth().padding(12.dp)) {
+                        if (compactDeduplicateActions(maxWidth.value.toInt())) {
+                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("${selectedMediaIds.size} selected", fontWeight = FontWeight.Bold)
+                                Text("Unselected items are kept", style = MaterialTheme.typography.bodySmall)
+                                Row(Modifier.align(Alignment.End)) {
+                                    TextButton(onClick = { selectedMediaIds = emptySet() }, enabled = !working) {
+                                        Text("Clear")
+                                    }
+                                    Button(onClick = { confirmTrash = true }, enabled = !working) {
+                                        Text("Move to Trash")
+                                    }
+                                }
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("${selectedMediaIds.size} selected", fontWeight = FontWeight.Bold)
+                                    Text("Unselected items are kept", style = MaterialTheme.typography.bodySmall)
+                                }
+                                TextButton(onClick = { selectedMediaIds = emptySet() }, enabled = !working) { Text("Clear") }
+                                Button(onClick = { confirmTrash = true }, enabled = !working) { Text("Move to Trash") }
+                            }
                         }
-                        TextButton(onClick = { selectedMediaIds = emptySet() }, enabled = !working) { Text("Clear") }
-                        Button(onClick = { confirmTrash = true }, enabled = !working) { Text("Move to Trash") }
                     }
                 }
             }
@@ -331,7 +356,7 @@ private fun DuplicateGroupCard(
             Text("Similar group ${group.clusterId}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text("${group.items.size} items to compare", color = MaterialTheme.colorScheme.onSurfaceVariant)
             BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 10.dp)) {
-                val columns = if (maxWidth >= 720.dp) 4 else 2
+                val columns = deduplicateColumns(maxWidth.value.toInt())
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     group.items.chunked(columns).forEach { mediaRow ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

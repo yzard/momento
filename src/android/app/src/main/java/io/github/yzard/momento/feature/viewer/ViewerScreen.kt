@@ -1,12 +1,12 @@
 package io.github.yzard.momento.feature.viewer
 
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -64,7 +64,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -83,23 +82,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem as PlayerMediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -225,6 +229,7 @@ fun ViewerScreen(
     media: List<Media>,
     initialIndex: Int,
     repository: MomentoRepository,
+    viewedIndexChanged: (Int) -> Unit,
     mediaChanged: () -> Unit,
     close: () -> Unit,
 ) {
@@ -243,7 +248,7 @@ fun ViewerScreen(
     var zoomedMediaId by remember { mutableStateOf<Long?>(null) }
     var pendingShareFile by remember { mutableStateOf<File?>(null) }
     val context = LocalContext.current
-    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val view = LocalView.current
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     val shareLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -251,14 +256,6 @@ fun ViewerScreen(
         pendingShareFile = null
         sharing = false
     }
-    val mediaLift by animateDpAsState(
-        targetValue = when {
-            activeSheet == null -> 0.dp
-            sheetState.targetValue == SheetValue.Expanded -> screenHeight * 0.55f
-            else -> screenHeight * 0.35f
-        },
-        label = "viewer media lift",
-    )
 
     if (items.isEmpty()) {
         LaunchedEffect(Unit) { close() }
@@ -270,6 +267,20 @@ fun ViewerScreen(
     val timestamp = remember(item.id, item.dateTaken, item.createdAt) { viewerTimestamp(item) }
 
     LaunchedEffect(item.id) { zoomedMediaId = null }
+    LaunchedEffect(index) { viewedIndexChanged(index) }
+    LaunchedEffect(chromeVisible, item.id, activeSheet) {
+        if (!chromeVisible || activeSheet != null) return@LaunchedEffect
+        delay(3_500)
+        chromeVisible = false
+    }
+    DisposableEffect(view) {
+        val window = (view.context as Activity).window
+        val insetsController = WindowCompat.getInsetsController(window, view)
+        insetsController.systemBarsBehavior =
+            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose { insetsController.show(WindowInsetsCompat.Type.systemBars()) }
+    }
     LaunchedEffect(context.cacheDir) {
         val shareDirectory = File(context.cacheDir, SHARE_CACHE_DIRECTORY)
         val nowMillis = System.currentTimeMillis()
@@ -342,12 +353,13 @@ fun ViewerScreen(
 
     BackHandler(onBack = close)
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+        val compactLandscape = maxWidth > maxHeight
         HorizontalPager(
             state = pagerState,
             key = { page -> items[page].id },
             userScrollEnabled = activeSheet == null && zoomedMediaId == null,
-            modifier = Modifier.fillMaxSize().padding(bottom = mediaLift),
+            modifier = Modifier.fillMaxSize(),
         ) { page ->
             ViewerMedia(
                 media = items[page],
@@ -398,6 +410,8 @@ fun ViewerScreen(
                 albums = { activeSheet = ViewerSheet.ALBUMS },
                 information = { activeSheet = ViewerSheet.INFORMATION },
                 trash = { confirmTrash = true },
+                compactLandscape = compactLandscape,
+                userInteracted = { chromeVisible = true },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -532,6 +546,15 @@ private fun VideoViewer(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    if (!active) {
+        MediaThumbnail(
+            media = media,
+            repository = repository,
+            trashed = false,
+            modifier = modifier,
+        )
+        return
+    }
     val url by produceState<String?>(null, media.id) { value = repository.originalUrl(media.id) }
     val currentUrl = url
     if (currentUrl == null) {
@@ -549,6 +572,16 @@ private fun VideoViewer(
                 setMediaItem(PlayerMediaItem.fromUri(currentUrl))
                 prepare()
             }
+    }
+    var playbackError by remember(player) { mutableStateOf<String?>(null) }
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                playbackError = "This video could not be played."
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
     }
     DisposableEffect(player, lifecycleOwner) {
         var resumeOnStart = false
@@ -597,12 +630,32 @@ private fun VideoViewer(
             modifier = Modifier.fillMaxSize(),
         )
         Box(Modifier.fillMaxSize().viewerChromeToggle(toggleChrome))
+        playbackError?.let { message ->
+            Surface(
+                modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                color = Color(0xE6242824),
+                contentColor = Color.White,
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(message, style = MaterialTheme.typography.titleMedium)
+                    TextButton(onClick = {
+                        playbackError = null
+                        player.prepare()
+                        player.play()
+                    }) { Text("Try again", color = Color.White) }
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun ViewerTopControls(timestamp: ViewerTimestamp, close: () -> Unit, modifier: Modifier) {
-    val floatingColors = momentoFloatingControlColors()
+    val floatingColors = momentoFloatingControlColors(darkTheme = true)
     Box(modifier.windowInsetsPadding(WindowInsets.safeDrawing).padding(12.dp)) {
         Surface(
             modifier = Modifier.align(Alignment.TopCenter),
@@ -639,28 +692,32 @@ private fun ViewerBottomControls(
     albums: () -> Unit,
     information: () -> Unit,
     trash: () -> Unit,
+    compactLandscape: Boolean,
+    userInteracted: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors()
+    val floatingColors = momentoFloatingControlColors(darkTheme = true)
     Column(
         modifier = modifier.windowInsetsPadding(WindowInsets.safeDrawing).padding(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (player != null) {
-            VideoPlaybackControls(player, Modifier.widthIn(max = 560.dp).fillMaxWidth())
+            VideoPlaybackControls(player, userInteracted, Modifier.widthIn(max = 640.dp).fillMaxWidth())
         }
-        ViewerFilmstrip(
-            media = media,
-            currentIndex = currentIndex,
-            repository = repository,
-            navigate = navigate,
-            modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth(),
-        )
+        if (!compactLandscape) {
+            ViewerFilmstrip(
+                media = media,
+                currentIndex = currentIndex,
+                repository = repository,
+                navigate = navigate,
+                modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth(),
+            )
+        }
         Box(Modifier.fillMaxWidth().height(56.dp)) {
             MomentoFloatingButton(
                 modifier = Modifier.align(Alignment.CenterStart),
-                onClick = share,
+                onClick = { userInteracted(); share() },
             ) {
                 if (sharing) {
                     CircularProgressIndicator(
@@ -679,7 +736,7 @@ private fun ViewerBottomControls(
             ) {
                 Row {
                     TextButton(
-                        onClick = albums,
+                        onClick = { userInteracted(); albums() },
                         colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
                     ) {
                         Icon(Icons.Default.AddPhotoAlternate, null)
@@ -687,7 +744,7 @@ private fun ViewerBottomControls(
                         Text("Albums")
                     }
                     TextButton(
-                        onClick = information,
+                        onClick = { userInteracted(); information() },
                         colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
                     ) {
                         Icon(Icons.Default.Info, null)
@@ -698,7 +755,7 @@ private fun ViewerBottomControls(
             }
             MomentoFloatingButton(
                 modifier = Modifier.align(Alignment.CenterEnd),
-                onClick = trash,
+                onClick = { userInteracted(); trash() },
             ) { Icon(Icons.Default.Delete, "Move media to Trash") }
         }
     }
@@ -712,7 +769,7 @@ private fun ViewerFilmstrip(
     navigate: (Int) -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors()
+    val floatingColors = momentoFloatingControlColors(darkTheme = true)
     val listState = rememberLazyListState()
     val latestCurrentIndex by rememberUpdatedState(currentIndex)
     val latestNavigate by rememberUpdatedState(navigate)
@@ -772,8 +829,8 @@ private fun ViewerFilmstrip(
 }
 
 @Composable
-private fun VideoPlaybackControls(player: ExoPlayer, modifier: Modifier) {
-    val floatingColors = momentoFloatingControlColors()
+private fun VideoPlaybackControls(player: ExoPlayer, userInteracted: () -> Unit, modifier: Modifier) {
+    val floatingColors = momentoFloatingControlColors(darkTheme = true)
     var positionMs by remember(player) { mutableLongStateOf(0L) }
     var durationMs by remember(player) { mutableLongStateOf(0L) }
     var previewPositionMs by remember(player) { mutableFloatStateOf(0f) }
@@ -806,6 +863,7 @@ private fun VideoPlaybackControls(player: ExoPlayer, modifier: Modifier) {
         ) {
             IconButton(
                 onClick = {
+                    userInteracted()
                     if (player.playWhenReady) player.pause() else player.play()
                     playing = player.playWhenReady
                 },
@@ -818,6 +876,7 @@ private fun VideoPlaybackControls(player: ExoPlayer, modifier: Modifier) {
             Slider(
                 value = displayedPosition,
                 onValueChange = { value ->
+                    userInteracted()
                     dragging = true
                     previewPositionMs = value
                 },
@@ -831,8 +890,14 @@ private fun VideoPlaybackControls(player: ExoPlayer, modifier: Modifier) {
                 enabled = durationMs > 0,
                 modifier = Modifier.weight(1f),
             )
+            Text(
+                "${formatPlaybackTime(displayedPosition.toLong())} / ${formatPlaybackTime(durationMs)}",
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
             IconButton(
                 onClick = {
+                    userInteracted()
                     player.volume = if (player.volume == 0f) 1f else 0f
                     muted = player.volume == 0f
                 },
@@ -911,6 +976,15 @@ private fun formatFileSize(bytes: Long): String {
 private fun formatDuration(seconds: Double): String {
     val totalSeconds = seconds.toLong().coerceAtLeast(0)
     return "%d:%02d".format(Locale.ENGLISH, totalSeconds / 60, totalSeconds % 60)
+}
+
+fun formatPlaybackTime(milliseconds: Long): String {
+    val totalSeconds = milliseconds.coerceAtLeast(0L) / 1_000L
+    val hours = totalSeconds / 3_600L
+    val minutes = totalSeconds % 3_600L / 60L
+    val seconds = totalSeconds % 60L
+    if (hours > 0L) return "%d:%02d:%02d".format(Locale.ENGLISH, hours, minutes, seconds)
+    return "%d:%02d".format(Locale.ENGLISH, minutes, seconds)
 }
 
 private const val SHARE_CACHE_DIRECTORY = "shared_media"

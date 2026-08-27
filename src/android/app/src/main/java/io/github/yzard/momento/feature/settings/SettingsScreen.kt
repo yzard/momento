@@ -11,14 +11,21 @@ import android.provider.Settings as AndroidSettings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
@@ -49,9 +56,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.MaterialTheme
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
@@ -66,12 +75,14 @@ import io.github.yzard.momento.core.database.BackupDatabase
 import io.github.yzard.momento.core.database.BackupQueueCount
 import io.github.yzard.momento.core.model.BackupState
 import io.github.yzard.momento.core.model.User
-import io.github.yzard.momento.feature.backup.BackupMediaAccess
 import io.github.yzard.momento.feature.backup.BackupHistoryClearResult
 import io.github.yzard.momento.feature.backup.PERIODIC_BACKUP_WORK_NAME
+import io.github.yzard.momento.feature.backup.backupCanReadOriginalMedia
+import io.github.yzard.momento.feature.backup.backupLocationMetadataAccessLabel
 import io.github.yzard.momento.feature.backup.backupMediaAccessLabel
-import io.github.yzard.momento.feature.backup.backupReadPermissions
+import io.github.yzard.momento.feature.backup.backupPermissions
 import io.github.yzard.momento.feature.backup.clearBackupHistory
+import io.github.yzard.momento.feature.backup.currentBackupLocationMetadataAccess
 import io.github.yzard.momento.feature.backup.currentBackupMediaAccess
 import io.github.yzard.momento.feature.backup.isBackupNetworkAllowed
 import io.github.yzard.momento.feature.backup.observeBackupNetworkAllowed
@@ -168,11 +179,13 @@ fun themePreferenceLabel(themePreference: ThemePreference): String = when (theme
     ThemePreference.DARK -> "Dark"
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     repository: MomentoRepository,
     settingsStore: SettingsStore,
     user: User?,
+    backupAvailable: Boolean,
     openAdmin: () -> Unit,
     logout: () -> Unit,
 ) {
@@ -207,6 +220,10 @@ fun SettingsScreen(
     var updateStatus by remember { mutableStateOf("Check the signed-in host for a newer Android release") }
     var pendingUpdatePath by rememberSaveable { mutableStateOf<String?>(null) }
     var mediaAccess by remember { mutableStateOf(currentBackupMediaAccess(context)) }
+    var locationMetadataAccess by remember {
+        mutableStateOf(currentBackupLocationMetadataAccess(context))
+    }
+    val backupHasRequiredAccess = backupCanReadOriginalMedia(mediaAccess, locationMetadataAccess)
     val scope = rememberCoroutineScope()
     val activePeriodicWork = periodicWorkInfos.firstOrNull { !it.state.isFinished }
     val backupScheduleStatus = when (activePeriodicWork?.state) {
@@ -228,8 +245,11 @@ fun SettingsScreen(
         else -> "$backupHistoryRecordCount local records. Finish or cancel the current backup before clearing."
     }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        mediaAccess = currentBackupMediaAccess(context)
-        if (mediaAccess != BackupMediaAccess.DENIED) {
+        val refreshedMediaAccess = currentBackupMediaAccess(context)
+        val refreshedLocationMetadataAccess = currentBackupLocationMetadataAccess(context)
+        mediaAccess = refreshedMediaAccess
+        locationMetadataAccess = refreshedLocationMetadataAccess
+        if (backupCanReadOriginalMedia(refreshedMediaAccess, refreshedLocationMetadataAccess)) {
             schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
             scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
         }
@@ -357,10 +377,11 @@ fun SettingsScreen(
             if (decision != AndroidUpdateDecision.UPDATE_AVAILABLE) file.delete()
         }
     }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars),
-        contentPadding = PaddingValues(bottom = 88.dp),
-    ) {
+    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
+        LazyColumn(
+            modifier = Modifier.align(Alignment.TopCenter).widthIn(max = 840.dp).fillMaxHeight().fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 88.dp),
+        ) {
         item {
             Text(
                 "Settings",
@@ -370,29 +391,32 @@ fun SettingsScreen(
             )
             ListItem(
                 headlineContent = { Text(user?.username ?: "Account") },
-                supportingContent = { Text(settings.origin ?: "No server selected") },
-                leadingContent = { Icon(Icons.Default.AccountCircle, null) },
-                trailingContent = {
-                    Row {
-                        TextButton(onClick = { passwordDialog = true }) {
-                            Text("Change Password")
-                        }
-                        IconButton(onClick = { logoutDialog = true }) {
-                            Icon(Icons.AutoMirrored.Filled.Logout, "Log out")
+                supportingContent = {
+                    Column {
+                        Text(settings.origin ?: "No server selected")
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { passwordDialog = true }) { Text("Change password") }
+                            TextButton(onClick = { logoutDialog = true }) {
+                                Icon(Icons.AutoMirrored.Filled.Logout, null)
+                                Text("Log out")
+                            }
                         }
                     }
                 },
+                leadingContent = { Icon(Icons.Default.AccountCircle, null) },
             )
             ListItem(
                 headlineContent = { Text("Momento ${BuildConfig.VERSION_NAME}") },
-                supportingContent = { Text(updateStatus) },
-                leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
-                trailingContent = {
-                    TextButton(
-                        onClick = { scope.launch { checkForUpdate() } },
-                        enabled = !updateBusy,
-                    ) { Text(if (updateBusy) "Checking" else "Update") }
+                supportingContent = {
+                    Column {
+                        Text(updateStatus)
+                        TextButton(
+                            onClick = { scope.launch { checkForUpdate() } },
+                            enabled = !updateBusy,
+                        ) { Text(if (updateBusy) "Checking" else "Check for update") }
+                    }
                 },
+                leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
             )
             HorizontalDivider()
             Text(
@@ -402,10 +426,11 @@ fun SettingsScreen(
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
+            if (backupAvailable) {
             SettingsSwitch("Camera folder only", settings.cameraOnly) { enabled ->
                 scope.launch {
                     settingsStore.setCameraOnly(enabled)
-                    if (mediaAccess != BackupMediaAccess.DENIED) {
+                    if (backupHasRequiredAccess) {
                         schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
                     }
                 }
@@ -413,7 +438,7 @@ fun SettingsScreen(
             SettingsSwitch("Use mobile data", settings.mobileDataEnabled) { enabled ->
                 scope.launch {
                     settingsStore.setMobileDataEnabled(enabled)
-                    if (mediaAccess != BackupMediaAccess.DENIED) {
+                    if (backupHasRequiredAccess) {
                         schedulePeriodicBackup(context.applicationContext, enabled)
                     }
                 }
@@ -423,64 +448,73 @@ fun SettingsScreen(
                 supportingContent = {
                     Column {
                         Text(backupMediaAccessLabel(mediaAccess))
+                        Text(backupLocationMetadataAccessLabel(locationMetadataAccess))
                         Text(backupSummary(queueCounts, networkAllowed))
                         Text(backupScheduleSummary(backupScheduleStatus, nextScheduledAt))
                         latestBackupError?.let { Text("Recent issue: $it") }
                         Text("Metadata and AI processing run separately on the server schedule.")
-                    }
-                },
-                leadingContent = { Icon(Icons.Default.Backup, null) },
-                trailingContent = {
-                    Row {
-                        if (canCancelBackup) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (canCancelBackup) {
+                                TextButton(
+                                    enabled = !clearBackupHistoryBusy,
+                                    onClick = {
+                                        scope.launch {
+                                            requestBackupCancellation(
+                                                context.applicationContext,
+                                                database.backupAssetDao(),
+                                                settings.mobileDataEnabled,
+                                            )
+                                        }
+                                    },
+                                ) { Text("Cancel") }
+                            }
                             TextButton(
                                 enabled = !clearBackupHistoryBusy,
                                 onClick = {
-                                    scope.launch {
-                                        requestBackupCancellation(
-                                            context.applicationContext,
-                                            database.backupAssetDao(),
-                                            settings.mobileDataEnabled,
+                                    val refreshedMediaAccess = currentBackupMediaAccess(context)
+                                    val refreshedLocationMetadataAccess =
+                                        currentBackupLocationMetadataAccess(context)
+                                    mediaAccess = refreshedMediaAccess
+                                    locationMetadataAccess = refreshedLocationMetadataAccess
+                                    if (
+                                        !backupCanReadOriginalMedia(
+                                            refreshedMediaAccess,
+                                            refreshedLocationMetadataAccess,
                                         )
+                                    ) {
+                                        permissionRequest.launch(backupPermissions(Build.VERSION.SDK_INT))
+                                    } else {
+                                        schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
+                                        scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
                                     }
                                 },
-                            ) {
-                                Text("Cancel")
-                            }
-                        }
-                        TextButton(
-                            enabled = !clearBackupHistoryBusy,
-                            onClick = {
-                                mediaAccess = currentBackupMediaAccess(context)
-                                if (mediaAccess == BackupMediaAccess.DENIED) {
-                                    permissionRequest.launch(backupReadPermissions(Build.VERSION.SDK_INT))
-                                } else {
-                                    schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
-                                    scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
-                                }
-                            },
-                        ) {
-                            Text("Backup Now")
+                            ) { Text("Back up now") }
                         }
                     }
                 },
+                leadingContent = { Icon(Icons.Default.Backup, null) },
             )
             ListItem(
                 headlineContent = { Text("Backup history") },
-                supportingContent = { Text(backupHistoryDescription) },
-                leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
-                trailingContent = {
-                    TextButton(
-                        onClick = { clearBackupHistoryDialog = true },
-                        enabled = canClearBackupHistory && !clearBackupHistoryBusy,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error,
-                        ),
-                    ) {
-                        Text(if (clearBackupHistoryBusy) "Clearing" else "Clear")
+                supportingContent = {
+                    Column {
+                        Text(backupHistoryDescription)
+                        TextButton(
+                            onClick = { clearBackupHistoryDialog = true },
+                            enabled = canClearBackupHistory && !clearBackupHistoryBusy,
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        ) { Text(if (clearBackupHistoryBusy) "Clearing" else "Clear backup history") }
                     }
                 },
+                leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
             )
+            } else {
+                ListItem(
+                    headlineContent = { Text("Device backup unavailable") },
+                    supportingContent = { Text("This server has disabled Android device backup.") },
+                    leadingContent = { Icon(Icons.Default.Backup, null) },
+                )
+            }
             HorizontalDivider()
             ListItem(
                 headlineContent = { Text("Appearance") },
@@ -496,6 +530,7 @@ fun SettingsScreen(
                 )
             }
         }
+    }
     }
     if (passwordDialog) PasswordDialog(repository) { passwordDialog = false }
     if (themeDialog) {
@@ -605,7 +640,11 @@ private fun PackageInfo.compatibleLongVersionCode(): Long =
 
 @Composable
 private fun SettingsSwitch(label: String, checked: Boolean, set: (Boolean) -> Unit) {
-    ListItem(headlineContent = { Text(label) }, trailingContent = { Switch(checked, set) })
+    ListItem(
+        headlineContent = { Text(label) },
+        trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+        modifier = Modifier.clickable(role = Role.Switch) { set(!checked) },
+    )
 }
 
 @Composable

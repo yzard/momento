@@ -8,6 +8,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeduplicateScreenTest {
+    @Test fun comparisonCardsAndActionsAdaptAcrossPhoneAndTabletWidths() {
+        assertEquals(2, deduplicateColumns(360))
+        assertEquals(3, deduplicateColumns(600))
+        assertEquals(4, deduplicateColumns(840))
+        assertTrue(compactDeduplicateActions(360))
+        assertFalse(compactDeduplicateActions(460))
+    }
     @Test
     fun activeStatesContinuePolling() {
         assertTrue(activeDeduplicationState("queued"))

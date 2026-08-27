@@ -2,6 +2,7 @@ package io.github.yzard.momento.feature.backup
 
 import android.Manifest
 import io.github.yzard.momento.core.model.BackupState
+import io.github.yzard.momento.core.model.BackupCapabilities
 import io.github.yzard.momento.core.model.BackupUploadResponse
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -10,6 +11,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BackupTest {
+    @Test fun serverCapabilityPreventsAnExistingWorkerFromUploading() {
+        val enabled = BackupCapabilities(true, 100, 100, 1, 24)
+        val disabled = enabled.copy(enabled = false)
+        assertTrue(backupCanRun(enabled))
+        assertFalse(backupCanRun(disabled))
+    }
     @Test fun discoveredAssetsStartQueuedWithStableClientId() {
         val asset = discoveredAsset(
             "content://media/42",
@@ -97,6 +104,37 @@ class BackupTest {
         assertArrayEquals(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), backupReadPermissions(32))
     }
 
+    @Test fun requestsPhotoLocationPermissionOnAndroid10AndNewer() {
+        assertArrayEquals(
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+                Manifest.permission.ACCESS_MEDIA_LOCATION,
+            ),
+            backupPermissions(34),
+        )
+        assertArrayEquals(
+            arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.ACCESS_MEDIA_LOCATION,
+            ),
+            backupPermissions(33),
+        )
+        assertArrayEquals(
+            arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.ACCESS_MEDIA_LOCATION,
+            ),
+            backupPermissions(32),
+        )
+        assertArrayEquals(
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE),
+            backupPermissions(28),
+        )
+    }
+
     @Test fun distinguishesFullPartialAndDeniedMediaAccess() {
         assertEquals(
             BackupMediaAccess.FULL,
@@ -119,6 +157,60 @@ class BackupTest {
             backupMediaAccess(32, setOf(Manifest.permission.READ_EXTERNAL_STORAGE)),
         )
         assertEquals(BackupMediaAccess.DENIED, backupMediaAccess(32, emptySet()))
+    }
+
+    @Test fun requiresPhotoLocationAccessOnlyOnAndroid10AndNewer() {
+        assertEquals(
+            BackupLocationMetadataAccess.PRESERVED,
+            backupLocationMetadataAccess(28, emptySet()),
+        )
+        assertEquals(
+            BackupLocationMetadataAccess.DENIED,
+            backupLocationMetadataAccess(29, emptySet()),
+        )
+        assertEquals(
+            BackupLocationMetadataAccess.PRESERVED,
+            backupLocationMetadataAccess(29, setOf(Manifest.permission.ACCESS_MEDIA_LOCATION)),
+        )
+    }
+
+    @Test fun backupRunsOnlyWhenOriginalMediaCanBeRead() {
+        assertTrue(
+            backupCanReadOriginalMedia(
+                BackupMediaAccess.FULL,
+                BackupLocationMetadataAccess.PRESERVED,
+            ),
+        )
+        assertTrue(
+            backupCanReadOriginalMedia(
+                BackupMediaAccess.PARTIAL,
+                BackupLocationMetadataAccess.PRESERVED,
+            ),
+        )
+        assertFalse(
+            backupCanReadOriginalMedia(
+                BackupMediaAccess.DENIED,
+                BackupLocationMetadataAccess.PRESERVED,
+            ),
+        )
+        assertFalse(
+            backupCanReadOriginalMedia(
+                BackupMediaAccess.FULL,
+                BackupLocationMetadataAccess.DENIED,
+            ),
+        )
+    }
+
+    @Test fun usesOriginalMediaUriWhenAndroidCanRedactLocationMetadata() {
+        assertFalse(
+            backupUsesOriginalMediaUri(28, BackupLocationMetadataAccess.PRESERVED),
+        )
+        assertTrue(
+            backupUsesOriginalMediaUri(29, BackupLocationMetadataAccess.PRESERVED),
+        )
+        assertFalse(
+            backupUsesOriginalMediaUri(29, BackupLocationMetadataAccess.DENIED),
+        )
     }
 
     @Test fun recognizesCommonCameraDirectories() {
@@ -145,6 +237,14 @@ class BackupTest {
         assertEquals(
             "Photo and video access is required before backup can run",
             backupMediaAccessLabel(BackupMediaAccess.DENIED),
+        )
+        assertEquals(
+            "Photo location metadata will be preserved",
+            backupLocationMetadataAccessLabel(BackupLocationMetadataAccess.PRESERVED),
+        )
+        assertEquals(
+            "Photo location access is required for lossless backup",
+            backupLocationMetadataAccessLabel(BackupLocationMetadataAccess.DENIED),
         )
     }
 }

@@ -20,11 +20,12 @@ class PlacesScreenTest {
     }
 
     @Test
-    fun portraitAlwaysUsesTwoLargeTiles() {
-        assertEquals(2, placeGridColumns(isPortrait = true, widthDp = 320))
-        assertEquals(2, placeGridColumns(isPortrait = true, widthDp = 900))
-        assertEquals(3, placeGridColumns(isPortrait = false, widthDp = 700))
-        assertEquals(4, placeGridColumns(isPortrait = false, widthDp = 900))
+    fun placeGridUsesAvailableWidthInEveryOrientation() {
+        assertEquals(1, placeGridColumns(320))
+        assertEquals(2, placeGridColumns(360))
+        assertEquals(3, placeGridColumns(600))
+        assertEquals(4, placeGridColumns(840))
+        assertEquals(5, placeGridColumns(1200))
     }
 
     @Test

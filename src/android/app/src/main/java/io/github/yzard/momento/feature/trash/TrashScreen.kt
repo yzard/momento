@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -51,8 +53,27 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
 import java.io.IOException
+import java.time.DateTimeException
+import java.time.Duration
+import java.time.Instant
 
 private enum class TrashAction { DELETE_SELECTED, EMPTY }
+
+fun trashDaysRemaining(deletedAt: String, now: Instant): Int? {
+    val deleted = try {
+        Instant.parse(deletedAt)
+    } catch (_: DateTimeException) {
+        return null
+    }
+    val secondsRemaining = Duration.between(now, deleted.plus(Duration.ofDays(30))).seconds
+    if (secondsRemaining <= 0) return 0
+    return ((secondsRemaining + 86_399L) / 86_400L).toInt()
+}
+
+fun trashRetentionLabel(deletedAt: String, now: Instant): String =
+    trashDaysRemaining(deletedAt, now)?.let { days ->
+        if (days == 0) "Deleting soon" else "$days d left"
+    } ?: "30-day retention"
 
 @Composable
 fun TrashScreen(repository: MomentoRepository) {
@@ -126,7 +147,7 @@ fun TrashScreen(repository: MomentoRepository) {
         current == null -> LoadingState()
         current.isEmpty() -> EmptyState("Trash is empty")
         else -> {
-            val media = remember(current) { current.map(TrashMedia::asMedia) }
+            val now = remember(current) { Instant.now() }
             BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                 val columns = adaptiveGridColumns(maxWidth.value.toInt())
                 LazyVerticalGrid(
@@ -134,32 +155,62 @@ fun TrashScreen(repository: MomentoRepository) {
                     state = gridState,
                     contentPadding = PaddingValues(bottom = 104.dp),
                 ) {
-                    items(media, key = { it.id }) { item ->
-                        SelectableMediaThumbnail(
-                            media = item,
-                            repository = repository,
-                            trashed = true,
-                            selected = item.id in selectedIds,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(1f)
-                                .padding(0.5.dp)
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
-                                .clickable {
-                                    selecting = true
-                                    selectedIds = toggleMediaSelection(selectedIds, item.id)
-                                },
-                        )
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Column(Modifier.fillMaxWidth().padding(start = 16.dp, top = 68.dp, end = 120.dp, bottom = 12.dp)) {
+                            Text("Recently deleted", style = MaterialTheme.typography.titleLarge)
+                            Text(
+                                "Items are permanently deleted 30 days after they enter Trash.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    items(current, key = { it.id }) { trashItem ->
+                        Box {
+                            val media = remember(trashItem) { trashItem.asMedia() }
+                            SelectableMediaThumbnail(
+                                media = media,
+                                repository = repository,
+                                trashed = true,
+                                selected = media.id in selectedIds,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(1f)
+                                    .padding(0.5.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable {
+                                        selecting = true
+                                        selectedIds = toggleMediaSelection(selectedIds, media.id)
+                                    },
+                            )
+                            Surface(
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                                color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.72f),
+                                contentColor = androidx.compose.ui.graphics.Color.White,
+                                shape = MaterialTheme.shapes.small,
+                            ) {
+                                Text(
+                                    trashRetentionLabel(trashItem.deletedAt, now),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
                     }
                 }
                 TrashSelectionControl(
                     selecting = selecting,
                     selectedCount = selectedIds.size,
+                    allSelected = selectedIds.size == current.size,
                     cancel = {
                         selecting = false
                         selectedIds = emptySet()
                     },
                     start = { selecting = true },
+                    selectAll = {
+                        selecting = true
+                        selectedIds = if (selectedIds.size == current.size) emptySet() else current.map { it.id }.toSet()
+                    },
                     modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
                 )
                 if (selecting && selectedIds.isNotEmpty()) {
@@ -212,8 +263,10 @@ fun TrashScreen(repository: MomentoRepository) {
 private fun TrashSelectionControl(
     selecting: Boolean,
     selectedCount: Int,
+    allSelected: Boolean,
     cancel: () -> Unit,
     start: () -> Unit,
+    selectAll: () -> Unit,
     modifier: Modifier,
 ) {
     val floatingColors = momentoFloatingControlColors()
@@ -224,10 +277,18 @@ private fun TrashSelectionControl(
         shape = MaterialTheme.shapes.extraLarge,
         shadowElevation = 3.dp,
     ) {
-        TextButton(
-            onClick = if (selecting) cancel else start,
-            colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-        ) { Text(if (selecting) "Cancel ($selectedCount)" else "Select") }
+        Row {
+            if (selecting) {
+                TextButton(
+                    onClick = selectAll,
+                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+                ) { Text(if (allSelected) "Clear all" else "Select all") }
+            }
+            TextButton(
+                onClick = if (selecting) cancel else start,
+                colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
+            ) { Text(if (selecting) "Done ($selectedCount)" else "Select") }
+        }
     }
 }
 

@@ -1,5 +1,8 @@
 package io.github.yzard.momento.app.navigation
 
+import io.github.yzard.momento.core.model.BackupCapabilities
+import io.github.yzard.momento.core.model.Capabilities
+import io.github.yzard.momento.core.model.FeatureFlags
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,6 +42,30 @@ class RoutesTest {
 
     @Test fun utilitySectionContainsDeduplication() {
         assertEquals(listOf(Destination.DEDUPLICATE), utilityDrawerDestinations)
+    }
+
+    @Test fun serverCapabilitiesHideUnavailableGeneratedCollections() {
+        val capabilities = Capabilities(
+            appVersion = "1.0.0",
+            apiVersion = 1,
+            supportedMediaExtensions = emptyList(),
+            features = FeatureFlags(
+                llm = true,
+                imageTagging = true,
+                deduplicate = false,
+                faceDetection = false,
+                imageAesthetics = true,
+                screenshotDetection = false,
+                documentDetection = true,
+            ),
+            backup = BackupCapabilities(true, 1, 1, 1, 1),
+        )
+
+        assertTrue(Destination.DOCUMENTS.isAvailable(capabilities))
+        assertTrue(!Destination.SCREENSHOTS.isAvailable(capabilities))
+        assertTrue(!Destination.FACES.isAvailable(capabilities))
+        assertTrue(!Destination.DEDUPLICATE.isAvailable(capabilities))
+        assertTrue(Destination.ALBUMS.isAvailable(capabilities))
     }
 
     @Test fun settingsAndAdminOwnTheirPageTitles() {

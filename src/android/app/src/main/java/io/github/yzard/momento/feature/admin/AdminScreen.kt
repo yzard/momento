@@ -1,5 +1,6 @@
 package io.github.yzard.momento.feature.admin
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -59,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -124,6 +126,12 @@ fun validCronFields(cronFields: List<String>): Boolean {
     return cronFields.all { field -> field.trim().isNotEmpty() && !field.trim().contains(Regex("\\s")) }
 }
 
+fun cronFieldsPerRow(widthDp: Int): Int = when {
+    widthDp < 420 -> 2
+    widthDp < 720 -> 3
+    else -> 5
+}
+
 fun toggledRole(role: String): String = if (role == "admin") "user" else "admin"
 
 fun statusSummary(status: JobStatus?): String {
@@ -170,7 +178,7 @@ fun AdminScreen(repository: MomentoRepository, settingsStore: SettingsStore) {
     val settings by settingsStore.settings.collectAsState(
         initial = Settings(null, false, true, ThemePreference.SYSTEM),
     )
-    var selectedSection by remember { mutableStateOf(AdminSection.USERS) }
+    var selectedSection by rememberSaveable { mutableStateOf(AdminSection.USERS) }
     var importStatus by remember { mutableStateOf<ImportStatus?>(null) }
     var metadataStatus by remember { mutableStateOf<JobStatus?>(null) }
     var aiStatus by remember { mutableStateOf<AiStatusResponse?>(null) }
@@ -927,27 +935,51 @@ private fun AiAdministration(
 
 @Composable
 private fun AiStatusTable(status: AiStatusResponse?) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .width(720.dp),
-    ) {
-        AiStatusRow("Feature", listOf("Queued", "Submitting", "Submitted", "Failed", "Completed"), true)
-        HorizontalDivider(Modifier.padding(vertical = 6.dp))
-        AdminAiFeature.entries.forEach { feature ->
-            val jobs = aiJobCounts(status, feature)
-            AiStatusRow(
-                feature.label,
-                listOf(
-                    jobs?.queued?.toString() ?: "0",
-                    jobs?.submitting?.toString() ?: "0",
-                    jobs?.submitted?.toString() ?: "0",
-                    jobs?.failed?.toString() ?: "0",
-                    jobs?.completed?.toString() ?: "0",
-                ),
-                false,
-            )
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth < 720.dp) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                AdminAiFeature.entries.forEach { feature ->
+                    val jobs = aiJobCounts(status, feature)
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))
+                            .padding(12.dp),
+                    ) {
+                        Text(feature.label, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${jobs?.queued ?: 0} queued · ${jobs?.submitting ?: 0} submitting · ${jobs?.submitted ?: 0} submitted",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            "${jobs?.failed ?: 0} failed · ${jobs?.completed ?: 0} completed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        } else {
+            Column(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).width(720.dp),
+            ) {
+                AiStatusRow("Feature", listOf("Queued", "Submitting", "Submitted", "Failed", "Completed"), true)
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                AdminAiFeature.entries.forEach { feature ->
+                    val jobs = aiJobCounts(status, feature)
+                    AiStatusRow(
+                        feature.label,
+                        listOf(
+                            jobs?.queued?.toString() ?: "0",
+                            jobs?.submitting?.toString() ?: "0",
+                            jobs?.submitted?.toString() ?: "0",
+                            jobs?.failed?.toString() ?: "0",
+                            jobs?.completed?.toString() ?: "0",
+                        ),
+                        false,
+                    )
+                }
+            }
         }
     }
 }
@@ -988,41 +1020,49 @@ private fun AiScheduleEditor(
     val storedExpression = joinCronFields(splitCronExpression(schedule.cronExpression))
     Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
         Text("Schedule · five-field cron · system timezone", style = MaterialTheme.typography.labelSmall)
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            cronFieldLabels.forEachIndexed { index, fieldLabel ->
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        fieldLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                    OutlinedTextField(
-                        value = cronFields[index],
-                        onValueChange = { fieldValue ->
-                            cronFields = cronFields.toMutableList().also { fields ->
-                                fields[index] = fieldValue
-                            }
-                        },
-                        singleLine = true,
-                        isError = cronFields[index].trim().isEmpty() || cronFields[index].trim().contains(Regex("\\s")),
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            val fieldsPerRow = cronFieldsPerRow(maxWidth.value.toInt())
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                cronFieldLabels.indices.chunked(fieldsPerRow).forEach { rowIndices ->
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                    )
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        rowIndices.forEach { index ->
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    cronFieldLabels[index],
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                                OutlinedTextField(
+                                    value = cronFields[index],
+                                    onValueChange = { fieldValue ->
+                                        cronFields = cronFields.toMutableList().also { fields ->
+                                            fields[index] = fieldValue
+                                        }
+                                    },
+                                    singleLine = true,
+                                    isError = cronFields[index].trim().isEmpty() ||
+                                        cronFields[index].trim().contains(Regex("\\s")),
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                        repeat(fieldsPerRow - rowIndices.size) { Box(Modifier.weight(1f)) }
+                    }
                 }
-            }
-            OutlinedButton(
-                onClick = { save(cronExpression) },
-                enabled = !busy && fieldsValid && cronExpression != storedExpression,
-                modifier = Modifier
-                    .size(48.dp)
-                    .semantics { contentDescription = "Save $label cron schedule" },
-                contentPadding = PaddingValues(0.dp),
-            ) {
-                Icon(Icons.Default.Save, contentDescription = null)
+                OutlinedButton(
+                    onClick = { save(cronExpression) },
+                    enabled = !busy && fieldsValid && cronExpression != storedExpression,
+                    modifier = Modifier.align(Alignment.End).semantics {
+                        contentDescription = "Save $label cron schedule"
+                    },
+                ) {
+                    Icon(Icons.Default.Save, contentDescription = null)
+                    Text("Save schedule", Modifier.padding(start = 8.dp))
+                }
             }
         }
         if (!fieldsValid) {

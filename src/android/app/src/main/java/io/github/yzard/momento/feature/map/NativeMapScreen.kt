@@ -144,6 +144,11 @@ fun mapClusterChanges(currentIds: Set<String>, incomingIds: Set<String>): MapClu
         retainedIds = currentIds intersect incomingIds,
     )
 
+fun mapClusterThumbnailChanged(existing: MapCluster?, incoming: MapCluster): Boolean =
+    existing == null ||
+        existing.representativeId != incoming.representativeId ||
+        existing.count != incoming.count
+
 data class MapPosition(
     val latitude: Double,
     val longitude: Double,
@@ -170,6 +175,11 @@ fun normalizedMapZoom(zoom: Double): Int? {
     return zoom.roundToInt().coerceIn(MINIMUM_MAP_ZOOM, MAXIMUM_MAP_ZOOM)
 }
 
+fun representativeMediaIndex(media: List<Media>, representativeId: Long): Int {
+    val index = media.indexOfFirst { candidate -> candidate.id == representativeId }
+    return index.coerceAtLeast(0)
+}
+
 private data class RenderedMapCluster(
     val cluster: MapCluster,
     val marker: Marker,
@@ -182,8 +192,9 @@ private data class OwnedMapView(
 
 @OptIn(FlowPreview::class)
 @Composable
-fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> Unit) {
+fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int) -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
+    var updating by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val viewportRequests = remember { Channel<MapViewportRequest>(Channel.CONFLATED) }
     val viewportRequestTracker = remember { MapViewportRequestTracker() }
@@ -251,11 +262,31 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
         viewportRequests.receiveAsFlow().debounce(VIEWPORT_DEBOUNCE_MS).collectLatest { request ->
             val viewport = request.viewport
             mapView.position()?.let { position -> saveMapPosition(context, position) }
+            updating = true
             try {
                 val clusters = repository.mapClusters(viewport.bounds, viewport.zoom).clusters
                 if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
 
                 val incomingClusters = clusters.associateBy { cluster -> cluster.id }
+                val clustersNeedingThumbnails = clusters.filter { cluster ->
+                    mapClusterThumbnailChanged(renderedClusters[cluster.id]?.cluster, cluster)
+                }
+                val loadedThumbnails = mutableMapOf<String, Bitmap?>()
+                clustersNeedingThumbnails.chunked(THUMBNAIL_LOAD_BATCH_SIZE).forEach { clusterBatch ->
+                    val loadedBatch = coroutineScope {
+                        clusterBatch.map { cluster ->
+                            async {
+                                cluster.id to loadClusterThumbnail(context, repository, cluster.representativeId)
+                            }
+                        }.awaitAll()
+                    }
+                    if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
+                    loadedThumbnails.putAll(loadedBatch)
+                }
+
+                // Commit the new viewport only after its marker visuals are ready. A cancelled
+                // zoom request therefore leaves the previous complete marker set on screen.
+                if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
                 val changes = mapClusterChanges(renderedClusters.keys, incomingClusters.keys)
                 changes.removedIds.forEach { clusterId ->
                     renderedClusters.remove(clusterId)?.let { renderedCluster ->
@@ -263,20 +294,17 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
                     }
                 }
 
-                val markersNeedingThumbnails = mutableListOf<RenderedMapCluster>()
                 incomingClusters.forEach { (clusterId, cluster) ->
                     val existing = renderedClusters[clusterId]
                     val marker = existing?.marker ?: Marker(mapView).also { newMarker ->
                         newMarker.setAnchor(CLUSTER_MARKER_ANCHOR_X, CLUSTER_MARKER_ANCHOR_Y)
                         mapView.overlays.add(newMarker)
                     }
-                    val thumbnailChanged = existing == null ||
-                        existing.cluster.representativeId != cluster.representativeId ||
-                        existing.cluster.count != cluster.count
+                    val thumbnailChanged = mapClusterThumbnailChanged(existing?.cluster, cluster)
                     marker.position = GeoPoint(cluster.lat, cluster.lng)
                     marker.title = "${cluster.count} photos"
                     if (thumbnailChanged) {
-                        marker.icon = clusterMarkerDrawable(context, null, cluster.count)
+                        marker.icon = clusterMarkerDrawable(context, loadedThumbnails[clusterId], cluster.count)
                     }
                     marker.setOnMarkerClickListener { _, _ ->
                         if (!viewportRequestTracker.isCurrent(request)) return@setOnMarkerClickListener true
@@ -291,42 +319,17 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
                     }
                     val renderedCluster = RenderedMapCluster(cluster, marker)
                     renderedClusters[clusterId] = renderedCluster
-                    if (thumbnailChanged) markersNeedingThumbnails += renderedCluster
                 }
                 mapView.invalidate()
                 error = null
-
-                markersNeedingThumbnails.chunked(THUMBNAIL_LOAD_BATCH_SIZE).forEach { markerBatch ->
-                    val loadedThumbnails = coroutineScope {
-                        markerBatch.map { renderedCluster ->
-                            async {
-                                val thumbnail = loadClusterThumbnail(
-                                    context,
-                                    repository,
-                                    renderedCluster.cluster.representativeId,
-                                )
-                                renderedCluster to thumbnail
-                            }
-                        }.awaitAll()
-                    }
-                    if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
-                    loadedThumbnails.forEach thumbnailLoop@{ (renderedCluster, thumbnail) ->
-                        val currentCluster = renderedClusters[renderedCluster.cluster.id]
-                        if (currentCluster?.marker !== renderedCluster.marker) return@thumbnailLoop
-                        renderedCluster.marker.icon = clusterMarkerDrawable(
-                            context,
-                            thumbnail,
-                            renderedCluster.cluster.count,
-                        )
-                    }
-                    mapView.invalidate()
-                }
             } catch (_: IOException) {
                 error = "Could not load map photos"
             } catch (_: HttpException) {
                 error = "Could not load map photos"
             } catch (_: SerializationException) {
                 error = "The server returned invalid map data"
+            } finally {
+                if (viewportRequestTracker.isCurrent(request)) updating = false
             }
         }
     }
@@ -336,7 +339,9 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
             try {
                 val media = repository.mapMedia(selection.bounds, clusterPrefixes(selection.cluster.id))
                 if (!viewportRequestTracker.isCurrent(selection.viewportRequest)) return@collectLatest
-                if (media.isNotEmpty()) currentShowMedia(media)
+                if (media.isNotEmpty()) {
+                    currentShowMedia(media, representativeMediaIndex(media, selection.cluster.representativeId))
+                }
                 error = null
             } catch (_: IOException) {
                 error = "Could not load photos from this area"
@@ -369,6 +374,15 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>) -> U
                 TextButton(onClick = { error = null; mapView.viewport()?.let(::requestViewport) }) {
                     Text("$message. Retry")
                 }
+            }
+        }
+        if (updating && error == null) {
+            Surface(
+                modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Text("Updating map…", modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp))
             }
         }
     }

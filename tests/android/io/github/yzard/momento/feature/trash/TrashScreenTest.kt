@@ -4,8 +4,17 @@ import io.github.yzard.momento.core.model.TrashMedia
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.time.Instant
 
 class TrashScreenTest {
+    @Test fun showsTheThirtyDayRetentionCountdown() {
+        val now = Instant.parse("2026-08-27T12:00:00Z")
+        assertEquals(30, trashDaysRemaining("2026-08-27T11:59:00Z", now))
+        assertEquals(1, trashDaysRemaining("2026-07-29T12:00:00Z", now))
+        assertEquals(0, trashDaysRemaining("2026-07-01T12:00:00Z", now))
+        assertEquals("30-day retention", trashRetentionLabel("invalid", now))
+    }
+
     @Test
     fun mapsTrashMediaIntoTheSharedGridModel() {
         val media = TrashMedia(
