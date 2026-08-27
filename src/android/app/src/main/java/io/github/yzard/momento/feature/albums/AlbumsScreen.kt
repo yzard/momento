@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -27,10 +30,11 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,6 +63,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import io.github.yzard.momento.app.designsystem.MomentoActionChip
+import io.github.yzard.momento.app.designsystem.MomentoPageHeader
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Album
 import io.github.yzard.momento.core.model.AlbumDetail
@@ -119,41 +125,51 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
         return
     }
 
-    when {
-        albums == null && error == null -> CircularProgressIndicator(Modifier.padding(24.dp))
-        error != null -> Column(Modifier.padding(24.dp)) {
-            Text(error!!, color = MaterialTheme.colorScheme.error)
-            TextButton({ scope.launch { loadAlbums() } }) { Text("Retry") }
-        }
-        else -> LazyVerticalGrid(
-            columns = GridCells.Adaptive(156.dp),
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 10.dp, top = 64.dp, end = 10.dp, bottom = 88.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Button(
-                    onClick = { creating = true },
-                    enabled = !working,
-                    modifier = Modifier.padding(6.dp),
-                ) { Text("Create album") }
+    Box(Modifier.fillMaxSize()) {
+        when {
+            albums == null && error == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+            error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
+                Text(error!!, color = MaterialTheme.colorScheme.error)
+                TextButton({ scope.launch { loadAlbums() } }) { Text("Retry") }
             }
-            if (albums.orEmpty().isEmpty()) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Text("No albums yet", Modifier.padding(16.dp))
+            else -> LazyVerticalGrid(
+                columns = GridCells.Adaptive(156.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 10.dp, top = 88.dp, end = 10.dp, bottom = 88.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (albums.orEmpty().isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Text("No albums yet", Modifier.padding(16.dp))
+                    }
+                }
+                gridItems(albums.orEmpty(), key = { it.id }) { album ->
+                    AlbumTile(
+                        album = album,
+                        repository = repository,
+                        enabled = !working,
+                        select = { selectedAlbumId = album.id },
+                        delete = { albumPendingDeletion = album },
+                    )
                 }
             }
-            gridItems(albums.orEmpty(), key = { it.id }) { album ->
-                AlbumTile(
-                    album = album,
-                    repository = repository,
-                    enabled = !working,
-                    select = { selectedAlbumId = album.id },
-                    delete = { albumPendingDeletion = album },
-                )
-            }
         }
+        MomentoPageHeader(
+            title = "Albums",
+            subtitle = null,
+            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.statusBars),
+            leadingContent = null,
+            trailingContent = {
+                MomentoActionChip(
+                    label = "Create album",
+                    icon = Icons.Default.Add,
+                    enabled = !working,
+                    onClick = { creating = true },
+                    modifier = Modifier,
+                )
+            },
+        )
     }
 
     if (creating) {
@@ -244,11 +260,14 @@ private fun AlbumDetailScreen(
     LaunchedEffect(albumId) { loadAlbum() }
     val album = detail
     if (album == null) {
-        Column(Modifier.padding(24.dp)) {
-            if (error == null) CircularProgressIndicator() else {
-                Text(error!!, color = MaterialTheme.colorScheme.error)
-                TextButton({ scope.launch { loadAlbum() } }) { Text("Retry") }
+        Box(Modifier.fillMaxSize()) {
+            Column(Modifier.align(Alignment.Center).padding(24.dp)) {
+                if (error == null) CircularProgressIndicator() else {
+                    Text(error!!, color = MaterialTheme.colorScheme.error)
+                    TextButton({ scope.launch { loadAlbum() } }) { Text("Retry") }
+                }
             }
+            AlbumDetailPageHeader("Album", null, working, close)
         }
         return
     }
@@ -262,88 +281,96 @@ private fun AlbumDetailScreen(
         return succeeded
     }
 
-    MediaGrid(
-        media = album.media,
-        repository = repository,
-        selectedMediaIds = selectedIds,
-        contentPadding = PaddingValues(top = 64.dp, bottom = 88.dp),
-        headerContent = {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                TextButton(close, enabled = !working) { Text("Back") }
-                Text(album.name, style = MaterialTheme.typography.headlineSmall)
-                album.description?.let { description -> Text(description) }
-                error?.let { message ->
-                    Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
-                }
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                    modifier = Modifier.padding(top = 8.dp),
-                ) {
-                    TextButton({ editing = true }, enabled = !working) { Text("Edit") }
-                    TextButton(
-                        onClick = {
-                            selecting = !selecting
-                            if (!selecting) selectedIds = emptySet()
-                        },
-                        enabled = !working,
+    Box(Modifier.fillMaxSize()) {
+        MediaGrid(
+            media = album.media,
+            repository = repository,
+            selectedMediaIds = selectedIds,
+            contentPadding = PaddingValues(top = 88.dp, bottom = 88.dp),
+            headerContent = {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    album.description?.let { description ->
+                        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    error?.let { message ->
+                        Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        modifier = Modifier.padding(top = 8.dp),
                     ) {
-                        Text(if (selecting) "Cancel selection" else "Select media")
-                    }
-                    if (selectedIds.isNotEmpty()) {
+                        TextButton({ editing = true }, enabled = !working) { Text("Edit") }
                         TextButton(
-                            onClick = { removingSelected = true },
+                            onClick = {
+                                selecting = !selecting
+                                if (!selecting) selectedIds = emptySet()
+                            },
                             enabled = !working,
-                        ) { Text(removeFromAlbumSelectionLabel(selectedIds.size)) }
-                        selectedIds.singleOrNull()?.let { selectedId ->
-                            TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        runMutation("Could not reorder media") {
-                                            repository.reorderAlbumMedia(
-                                                albumId,
-                                                reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
-                                            )
-                                        }
-                                    }
-                                },
-                                enabled = !working,
-                            ) { Text("Move earlier") }
-                            TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        runMutation("Could not reorder media") {
-                                            repository.reorderAlbumMedia(
-                                                albumId,
-                                                reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
-                                            )
-                                        }
-                                    }
-                                },
-                                enabled = !working,
-                            ) { Text("Move later") }
+                        ) {
+                            Text(if (selecting) "Cancel selection" else "Select media")
                         }
+                        if (selectedIds.isNotEmpty()) {
+                            TextButton(
+                                onClick = { removingSelected = true },
+                                enabled = !working,
+                            ) { Text(removeFromAlbumSelectionLabel(selectedIds.size)) }
+                            selectedIds.singleOrNull()?.let { selectedId ->
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            runMutation("Could not reorder media") {
+                                                repository.reorderAlbumMedia(
+                                                    albumId,
+                                                    reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
+                                                )
+                                            }
+                                        }
+                                    },
+                                    enabled = !working,
+                                ) { Text("Move earlier") }
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            runMutation("Could not reorder media") {
+                                                repository.reorderAlbumMedia(
+                                                    albumId,
+                                                    reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
+                                                )
+                                            }
+                                        }
+                                    },
+                                    enabled = !working,
+                                ) { Text("Move later") }
+                            }
+                        }
+                        TextButton({ deleting = true }, enabled = !working) { Text("Delete album") }
                     }
-                    TextButton({ deleting = true }, enabled = !working) { Text("Delete album") }
+                    if (selecting) {
+                        Text(
+                            "${selectedIds.size} selected",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                    }
                 }
-                if (selecting) {
-                    Text(
-                        "${selectedIds.size} selected",
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                }
-            }
-        },
-        footerContent = null,
-        modifier = Modifier.fillMaxSize(),
-    ) { media ->
+            },
+            footerContent = null,
+            modifier = Modifier.fillMaxSize(),
+        ) { media ->
             if (selecting) {
                 selectedIds = toggleMediaSelection(selectedIds, media.id)
             } else {
                 openMedia(album.media, album.media.indexOf(media))
             }
         }
+        AlbumDetailPageHeader(
+            title = album.name,
+            subtitle = albumMemoryCountLabel(album.media.size.toLong()),
+            working = working,
+            close = close,
+        )
+    }
 
     if (editing) {
         AlbumEditorDialog(
@@ -474,7 +501,13 @@ fun AlbumAddMediaSheet(
                     }
                 }
                 if (!creating) {
-                    TextButton(onClick = { creating = true }, modifier = Modifier.padding(horizontal = 12.dp)) { Text("Create new album") }
+                    MomentoActionChip(
+                        label = "Create new album",
+                        icon = Icons.Default.Add,
+                        enabled = !working,
+                        onClick = { creating = true },
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    )
                 }
             }
         }
@@ -504,6 +537,26 @@ fun AlbumAddMediaSheet(
             dismiss = { creating = false },
         )
     }
+}
+
+@Composable
+private fun AlbumDetailPageHeader(
+    title: String,
+    subtitle: String?,
+    working: Boolean,
+    close: () -> Unit,
+) {
+    MomentoPageHeader(
+        title = title,
+        subtitle = subtitle,
+        modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars),
+        leadingContent = {
+            IconButton(onClick = close, enabled = !working) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back to albums")
+            }
+        },
+        trailingContent = null,
+    )
 }
 
 @Composable

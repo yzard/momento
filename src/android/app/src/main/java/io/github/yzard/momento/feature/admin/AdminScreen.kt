@@ -8,12 +8,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,7 +53,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -72,6 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.github.yzard.momento.app.designsystem.MomentoPageHeader
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.data.SettingsStore
@@ -253,18 +256,12 @@ fun AdminScreen(repository: MomentoRepository, settingsStore: SettingsStore) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Admin")
-                        Text(
-                            "System access and processing",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                actions = {
+            MomentoPageHeader(
+                title = "Admin",
+                subtitle = "System access and processing",
+                modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars),
+                leadingContent = null,
+                trailingContent = {
                     IconButton(
                         onClick = ::refreshFromUser,
                         enabled = !refreshing,

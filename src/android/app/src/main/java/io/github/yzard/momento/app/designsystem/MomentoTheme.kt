@@ -1,6 +1,7 @@
 package io.github.yzard.momento.app.designsystem
 
 import android.app.Activity
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -8,9 +9,12 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Typography
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -30,38 +34,84 @@ import androidx.core.graphics.drawable.toDrawable
 import io.github.yzard.momento.core.data.ThemePreference
 
 private val lightColors = lightColorScheme(
-    primary = Color(0xFF315D3D),
+    primary = Color(0xFF000000),
     onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFD3E8D6),
-    onPrimaryContainer = Color(0xFF15361F),
-    secondary = Color(0xFF5A6658),
-    tertiary = Color(0xFF735A20),
-    background = Color(0xFFF8F9F6),
-    onBackground = Color(0xFF191C19),
-    surface = Color(0xFFF8F9F6),
-    onSurface = Color(0xFF191C19),
-    surfaceVariant = Color(0xFFE2E5DF),
-    onSurfaceVariant = Color(0xFF444843),
-    outline = Color(0xFF747873),
-    outlineVariant = Color(0xFFC4C8C2),
+    primaryContainer = Color(0xFFE5E5EA),
+    onPrimaryContainer = Color(0xFF000000),
+    secondary = Color(0xFF3A3A3C),
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFE5E5EA),
+    onSecondaryContainer = Color(0xFF000000),
+    tertiary = Color(0xFF000000),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFF2F2F7),
+    onTertiaryContainer = Color(0xFF000000),
+    error = Color(0xFFFF3B30),
+    onError = Color(0xFF000000),
+    errorContainer = Color(0xFFFFE5E5),
+    onErrorContainer = Color(0xFF7A0000),
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF000000),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF000000),
+    surfaceVariant = Color(0xFFF2F2F7),
+    onSurfaceVariant = Color(0xFF6E6E73),
+    outline = Color(0xFF8E8E93),
+    outlineVariant = Color(0xFFD1D1D6),
+    scrim = Color(0xFF000000),
+    inverseSurface = Color(0xFF1C1C1E),
+    inverseOnSurface = Color(0xFFF2F2F7),
+    inversePrimary = Color(0xFFFFFFFF),
+    surfaceDim = Color(0xFFE5E5EA),
+    surfaceBright = Color(0xFFFFFFFF),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF7F7F8),
+    surfaceContainer = Color(0xFFF2F2F7),
+    surfaceContainerHigh = Color(0xFFEAEAEE),
+    surfaceContainerHighest = Color(0xFFE5E5EA),
+    surfaceTint = Color.Transparent,
 )
 
 private val darkColors = darkColorScheme(
-    primary = Color(0xFF9ECFA8),
-    onPrimary = Color(0xFF07391A),
-    primaryContainer = Color(0xFF1D4F2B),
-    onPrimaryContainer = Color(0xFFD3E8D6),
-    secondary = Color(0xFFBECBB9),
-    tertiary = Color(0xFFE2C46F),
-    background = Color(0xFF101410),
-    onBackground = Color(0xFFE1E4DE),
-    surface = Color(0xFF101410),
-    onSurface = Color(0xFFE1E4DE),
-    surfaceVariant = Color(0xFF292E29),
-    onSurfaceVariant = Color(0xFFC3C8C1),
-    outline = Color(0xFF8E938D),
-    outlineVariant = Color(0xFF444943),
+    primary = Color(0xFFFFFFFF),
+    onPrimary = Color(0xFF000000),
+    primaryContainer = Color(0xFF2C2C2E),
+    onPrimaryContainer = Color(0xFFFFFFFF),
+    secondary = Color(0xFFD1D1D6),
+    onSecondary = Color(0xFF1C1C1E),
+    secondaryContainer = Color(0xFF2C2C2E),
+    onSecondaryContainer = Color(0xFFF2F2F7),
+    tertiary = Color(0xFFF2F2F7),
+    onTertiary = Color(0xFF000000),
+    tertiaryContainer = Color(0xFF2C2C2E),
+    onTertiaryContainer = Color(0xFFFFFFFF),
+    error = Color(0xFFFF453A),
+    onError = Color(0xFF000000),
+    errorContainer = Color(0xFF5C1815),
+    onErrorContainer = Color(0xFFFFDAD6),
+    background = Color(0xFF000000),
+    onBackground = Color(0xFFFFFFFF),
+    surface = Color(0xFF000000),
+    onSurface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFF1C1C1E),
+    onSurfaceVariant = Color(0xFFA1A1A6),
+    outline = Color(0xFF636366),
+    outlineVariant = Color(0xFF38383A),
+    scrim = Color(0xFF000000),
+    inverseSurface = Color(0xFFF2F2F7),
+    inverseOnSurface = Color(0xFF1C1C1E),
+    inversePrimary = Color(0xFF000000),
+    surfaceDim = Color(0xFF000000),
+    surfaceBright = Color(0xFF2C2C2E),
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF0A0A0A),
+    surfaceContainer = Color(0xFF111111),
+    surfaceContainerHigh = Color(0xFF1C1C1E),
+    surfaceContainerHighest = Color(0xFF2C2C2E),
+    surfaceTint = Color.Transparent,
 )
+
+internal fun momentoColorScheme(darkTheme: Boolean): ColorScheme = if (darkTheme) darkColors else lightColors
 
 private val defaultTypography = Typography()
 private val momentoTypography = Typography(
@@ -83,14 +133,27 @@ private val momentoTypography = Typography(
     labelLarge = defaultTypography.labelLarge.copy(fontWeight = FontWeight.Medium),
 )
 
-data class FloatingControlColors(val container: Color, val content: Color, val selected: Color)
+private val momentoShapes = Shapes(
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
+
+data class FloatingControlColors(
+    val container: Color,
+    val content: Color,
+    val selected: Color,
+    val outline: Color,
+)
 
 val LocalMomentoDarkTheme = staticCompositionLocalOf { false }
 
 fun momentoFloatingControlColors(darkTheme: Boolean): FloatingControlColors = FloatingControlColors(
-    container = if (darkTheme) Color(0xFF202420).copy(alpha = 0.94f) else Color(0xFFF3F5F0).copy(alpha = 0.94f),
-    content = if (darkTheme) Color(0xFFF4F6F1) else Color(0xFF202420),
-    selected = if (darkTheme) Color(0xFF9ECFA8).copy(alpha = 0.24f) else Color(0xFF315D3D).copy(alpha = 0.14f),
+    container = if (darkTheme) Color(0xFF1C1C1E).copy(alpha = 0.94f) else Color(0xFFF5F5F7).copy(alpha = 0.96f),
+    content = if (darkTheme) Color.White else Color.Black,
+    selected = if (darkTheme) Color.White.copy(alpha = 0.16f) else Color.Black.copy(alpha = 0.10f),
+    outline = if (darkTheme) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f),
 )
 
 @Composable
@@ -109,6 +172,7 @@ fun MomentoFloatingButton(
         shape = CircleShape,
         color = colors.container,
         contentColor = colors.content,
+        border = BorderStroke(1.dp, colors.outline),
         shadowElevation = 0.dp,
         tonalElevation = 0.dp,
     ) {
@@ -132,7 +196,7 @@ fun MomentoTheme(themePreference: ThemePreference, content: @Composable () -> Un
         SideEffect {
             val window = (view.context as Activity).window
             window.setBackgroundDrawable(
-                (if (darkTheme) 0xFF101410.toInt() else 0xFFF8F9F6.toInt()).toDrawable(),
+                (if (darkTheme) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()).toDrawable(),
             )
             WindowCompat.getInsetsController(window, view).apply {
                 isAppearanceLightStatusBars = !darkTheme
@@ -142,8 +206,9 @@ fun MomentoTheme(themePreference: ThemePreference, content: @Composable () -> Un
     }
     CompositionLocalProvider(LocalMomentoDarkTheme provides darkTheme) {
         MaterialTheme(
-            colorScheme = if (darkTheme) darkColors else lightColors,
+            colorScheme = momentoColorScheme(darkTheme),
             typography = momentoTypography,
+            shapes = momentoShapes,
             content = content,
         )
     }

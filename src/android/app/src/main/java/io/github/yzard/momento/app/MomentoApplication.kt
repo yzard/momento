@@ -113,12 +113,14 @@ import androidx.compose.ui.semantics.Role
 import io.github.yzard.momento.BuildConfig
 import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
+import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
+import io.github.yzard.momento.app.designsystem.MomentoPageHeader
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.navigation.Destination
 import io.github.yzard.momento.app.navigation.MainShellState
 import io.github.yzard.momento.app.navigation.isTimelinePage
 import io.github.yzard.momento.app.navigation.isAvailable
-import io.github.yzard.momento.app.navigation.hasFloatingTitle
+import io.github.yzard.momento.app.navigation.hasShellPageTitle
 import io.github.yzard.momento.app.navigation.timelineSubpageDestinations
 import io.github.yzard.momento.app.navigation.utilityDrawerDestinations
 import io.github.yzard.momento.app.navigation.webDrawerDestinations
@@ -825,23 +827,14 @@ private fun ShellOverlay(
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .imePadding(),
         ) {
-            if (destination.hasFloatingTitle()) {
-                val floatingColors = momentoFloatingControlColors()
-                Surface(
-                    modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
-                    shape = MaterialTheme.shapes.extraLarge,
-                    color = floatingColors.container,
-                    contentColor = floatingColors.content,
-                    shadowElevation = 0.dp,
-                    tonalElevation = 0.dp,
-                ) {
-                    Text(
-                        destination.label,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    )
-                }
+            if (destination.hasShellPageTitle()) {
+                MomentoPageHeader(
+                    title = destination.label,
+                    subtitle = null,
+                    modifier = Modifier.align(Alignment.TopStart),
+                    leadingContent = null,
+                    trailingContent = null,
+                )
             }
 
             MomentoFloatingButton(
@@ -885,39 +878,27 @@ private fun TimelinePeriodDock(
     modifier: Modifier,
 ) {
     val floatingColors = momentoFloatingControlColors()
-    Surface(
-        modifier = modifier,
-        shape = MaterialTheme.shapes.extraLarge,
-        color = floatingColors.container,
-        contentColor = floatingColors.content,
-        shadowElevation = 0.dp,
-        tonalElevation = 0.dp,
-    ) {
-        Row(
-            Modifier.padding(4.dp).selectableGroup(),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            TimelinePeriod.entries.forEach { period ->
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .background(
-                            color = if (selected == period) floatingColors.selected else Color.Transparent,
-                            shape = CircleShape,
-                        )
-                        .selectable(
-                            selected = selected == period,
-                            onClick = { select(period) },
-                            role = Role.RadioButton,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        period.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = floatingColors.content,
+    MomentoFloatingDock(modifier = modifier.selectableGroup()) {
+        TimelinePeriod.entries.forEach { period ->
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(
+                        color = if (selected == period) floatingColors.selected else Color.Transparent,
+                        shape = CircleShape,
                     )
-                }
+                    .selectable(
+                        selected = selected == period,
+                        onClick = { select(period) },
+                        role = Role.RadioButton,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    period.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = floatingColors.content,
+                )
             }
         }
     }

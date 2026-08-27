@@ -67,6 +67,7 @@ import androidx.core.net.toUri
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import io.github.yzard.momento.BuildConfig
+import io.github.yzard.momento.app.designsystem.MomentoPageHeader
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.data.SettingsStore
@@ -383,11 +384,12 @@ fun SettingsScreen(
             contentPadding = PaddingValues(bottom = 88.dp),
         ) {
         item {
-            Text(
-                "Settings",
-                style = MaterialTheme.typography.headlineLarge,
-                color = MaterialTheme.colorScheme.onBackground,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp),
+            MomentoPageHeader(
+                title = "Settings",
+                subtitle = null,
+                modifier = Modifier,
+                leadingContent = null,
+                trailingContent = null,
             )
             ListItem(
                 headlineContent = { Text(user?.username ?: "Account") },
