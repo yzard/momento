@@ -30,8 +30,6 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DatePicker
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,7 +39,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -79,7 +76,8 @@ import io.github.yzard.momento.feature.media.toggleMediaSelection
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import java.time.Instant
-import java.time.temporal.ChronoUnit
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 enum class TimelinePage(
     val label: String,
@@ -109,9 +107,6 @@ fun normalizedTimelineSearchQuery(value: String): String = value.trim()
 
 fun timelineScrollKey(page: TimelinePage, period: TimelinePeriod, search: String): String =
     "${page.name}:${period.name}:$search"
-
-fun datePickerAnchorDate(selectedDateMillis: Long): String =
-    Instant.ofEpochMilli(selectedDateMillis).plus(1, ChronoUnit.DAYS).minusMillis(1).toString()
 
 fun shouldAppendTimeline(
     lastVisibleItemIndex: Int,
@@ -159,7 +154,8 @@ private fun TimelinePageContent(
     var confirmTrash by remember { mutableStateOf(false) }
     var addingToAlbum by remember { mutableStateOf(false) }
     var selectionError by remember { mutableStateOf<String?>(null) }
-    var showDatePicker by remember { mutableStateOf(false) }
+    var showPeriodPicker by remember { mutableStateOf(false) }
+    var pickerInitialDate by remember { mutableStateOf(LocalDate.now(ZoneOffset.UTC)) }
     var anchorDate by remember { mutableStateOf(Instant.now().toString()) }
     var refreshVersion by remember { mutableStateOf(0) }
     val scrollKey = remember(page, period, search) { timelineScrollKey(page, period, search) }
@@ -311,7 +307,14 @@ private fun TimelinePageContent(
                 requestAddToAlbum = { addingToAlbum = true },
                 retryOlder = { scope.launch { load(reset = false, direction = TimelineDirection.OLDER) } },
                 retryNewer = { scope.launch { loadNewer() } },
-                chooseDate = { showDatePicker = true },
+                choosePeriod = { visiblePeriod ->
+                    pickerInitialDate = timelinePeriodInitialDate(
+                        period = period,
+                        label = visiblePeriod,
+                        fallback = LocalDate.now(ZoneOffset.UTC),
+                    )
+                    showPeriodPicker = true
+                },
                 openMedia = openMedia,
             )
         }
@@ -348,23 +351,19 @@ private fun TimelinePageContent(
             confirmButton = { TextButton(onClick = { selectionError = null }) { Text("OK") } },
         )
     }
-    if (showDatePicker) {
-        val datePickerState = rememberDatePickerState()
-        DatePickerDialog(
-            onDismissRequest = { showDatePicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    datePickerState.selectedDateMillis?.let { selectedDateMillis ->
-                        pagingState = TimelinePagingState.initial()
-                        anchorDate = datePickerAnchorDate(selectedDateMillis)
-                        refreshVersion += 1
-                        scope.launch { gridState.scrollToItem(0) }
-                    }
-                    showDatePicker = false
-                }) { Text("Jump") }
+    if (showPeriodPicker) {
+        TimelinePeriodPicker(
+            period = period,
+            initialDate = pickerInitialDate,
+            dismiss = { showPeriodPicker = false },
+            select = { selectedDate ->
+                pagingState = TimelinePagingState.initial()
+                anchorDate = timelinePeriodAnchorDate(period, selectedDate)
+                refreshVersion += 1
+                showPeriodPicker = false
+                scope.launch { gridState.scrollToItem(0) }
             },
-            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Cancel") } },
-        ) { DatePicker(state = datePickerState) }
+        )
     }
 }
 
@@ -387,7 +386,7 @@ private fun ContinuousTimelineGrid(
     requestAddToAlbum: () -> Unit,
     retryOlder: () -> Unit,
     retryNewer: () -> Unit,
-    chooseDate: () -> Unit,
+    choosePeriod: (String) -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     val timelineMedia = remember(groups) { flattenTimelineGroups(groups) }
@@ -459,7 +458,7 @@ private fun ContinuousTimelineGrid(
         }
         FloatingTimelineHeader(
             label = visiblePeriod,
-            chooseDate = chooseDate,
+            choosePeriod = { choosePeriod(visiblePeriod) },
             modifier = Modifier.align(Alignment.TopCenter),
         )
         TimelineSelectionControl(
@@ -497,7 +496,7 @@ private fun ContinuousTimelineGrid(
 @Composable
 private fun FloatingTimelineHeader(
     label: String,
-    chooseDate: () -> Unit,
+    choosePeriod: () -> Unit,
     modifier: Modifier,
 ) {
     val floatingColors = momentoFloatingControlColors()
@@ -511,9 +510,9 @@ private fun FloatingTimelineHeader(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable(onClick = chooseDate).padding(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.clickable(onClick = choosePeriod).padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            Icon(Icons.Default.CalendarMonth, "Jump to date", Modifier.size(18.dp))
+            Icon(Icons.Default.CalendarMonth, "Choose period", Modifier.size(18.dp))
             Spacer(Modifier.size(8.dp))
             Text(text = label, style = MaterialTheme.typography.labelLarge)
         }
