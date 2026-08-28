@@ -24,6 +24,12 @@ data class ViewerChromeState(
 
     fun openSheet(sheet: ViewerSheet): ViewerChromeState = recordInteraction().copy(sheet = sheet)
 
+    fun toggleSheet(sheet: ViewerSheet): ViewerChromeState = if (this.sheet == sheet) {
+        closeSheet()
+    } else {
+        openSheet(sheet)
+    }
+
     fun closeSheet(): ViewerChromeState = recordInteraction().copy(sheet = null)
 
     fun hideAfterInactivity(): ViewerChromeState {

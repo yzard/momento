@@ -140,13 +140,19 @@ class EncryptedTokenStore(context: Context) {
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
         return cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString()
     }
-    fun saveTokens(tokens: TokenPair) {
+    fun saveLoginTokens(tokens: TokenPair) {
         storage.edit()
             .putString("access", encrypt(tokens.accessToken))
             .putString("refresh", encrypt(tokens.refreshToken))
             .putBoolean(authenticationCompleteKey, false)
             .apply()
         authenticationState.signedOut()
+    }
+    fun replaceSessionTokens(tokens: TokenPair) {
+        storage.edit()
+            .putString("access", encrypt(tokens.accessToken))
+            .putString("refresh", encrypt(tokens.refreshToken))
+            .apply()
     }
     fun markAuthenticated() {
         storage.edit().putBoolean(authenticationCompleteKey, true).apply()

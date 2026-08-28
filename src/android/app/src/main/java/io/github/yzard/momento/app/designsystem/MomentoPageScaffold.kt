@@ -34,15 +34,20 @@ fun momentoPageLayout(
     statusBarInsetDp: Int,
     navigationBarInsetDp: Int,
     hasBottomControls: Boolean,
+    edgeToEdgeContent: Boolean,
 ): MomentoPageLayout {
     require(widthDp >= 0) { "Page width must not be negative" }
     require(statusBarInsetDp >= 0) { "Status bar inset must not be negative" }
     require(navigationBarInsetDp >= 0) { "Navigation bar inset must not be negative" }
 
-    val horizontalPadding = when {
-        widthDp < 600 -> 12
-        widthDp < 840 -> 20
-        else -> 28
+    val horizontalPadding = if (edgeToEdgeContent) {
+        0
+    } else {
+        when {
+            widthDp < 600 -> 12
+            widthDp < 840 -> 20
+            else -> 28
+        }
     }
     val bottomControlClearance = if (hasBottomControls) 92 else 20
     return MomentoPageLayout(
@@ -60,6 +65,7 @@ fun MomentoPageScaffold(
     onBack: (() -> Unit)?,
     trailingContent: (@Composable RowScope.() -> Unit)?,
     reserveBottomControls: Boolean,
+    edgeToEdgeContent: Boolean,
     bottomContent: (@Composable BoxScope.() -> Unit)?,
     modifier: Modifier,
     content: @Composable BoxScope.(PaddingValues) -> Unit,
@@ -77,9 +83,9 @@ fun MomentoPageScaffold(
     ) {
         content(
             PaddingValues(
-                start = adaptivePageHorizontalPadding(),
+                start = adaptivePageHorizontalPadding(edgeToEdgeContent),
                 top = statusBarPadding + 80.dp,
-                end = adaptivePageHorizontalPadding(),
+                end = adaptivePageHorizontalPadding(edgeToEdgeContent),
                 bottom = navigationBarPadding + if (reserveBottomControls || bottomContent != null) 92.dp else 20.dp,
             ),
         )
@@ -114,12 +120,13 @@ fun MomentoPageScaffold(
 }
 
 @Composable
-private fun adaptivePageHorizontalPadding(): Dp {
+private fun adaptivePageHorizontalPadding(edgeToEdgeContent: Boolean): Dp {
     val screenWidthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
     return momentoPageLayout(
         widthDp = screenWidthDp,
         statusBarInsetDp = 0,
         navigationBarInsetDp = 0,
         hasBottomControls = false,
+        edgeToEdgeContent = edgeToEdgeContent,
     ).horizontalPadding.dp
 }

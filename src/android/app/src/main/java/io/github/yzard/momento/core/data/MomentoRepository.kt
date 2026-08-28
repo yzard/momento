@@ -32,7 +32,7 @@ class MomentoRepository(
     override suspend fun capabilities(origin: String): Capabilities = networkClient.api(origin).capabilities()
     suspend fun login(username: String, password: String): User {
         val service = api()
-        tokenStore.saveTokens(service.login(basicAuthorization(username, password)))
+        tokenStore.saveLoginTokens(service.login(basicAuthorization(username, password)))
         return try {
             service.currentUser()
         } catch (error: IOException) {

@@ -112,6 +112,15 @@ enum class AdminAiFeature(val identifier: String, val label: String) {
     FACE_DETECTION("face_detection", "Face detection"),
 }
 
+enum class AdminLayoutMode(
+    val usesNavigationRail: Boolean,
+    val usesAiControlTable: Boolean,
+) {
+    COMPACT(usesNavigationRail = false, usesAiControlTable = false),
+    EXPANDED(usesNavigationRail = true, usesAiControlTable = false),
+    EXPANDED_LANDSCAPE(usesNavigationRail = true, usesAiControlTable = true),
+}
+
 internal val cronFieldLabels = listOf("Minute", "Hour", "Day", "Month", "Weekday")
 
 fun splitCronExpression(cronExpression: String): List<String> {
@@ -136,7 +145,11 @@ fun cronFieldsPerRow(widthDp: Int): Int = when {
     else -> 5
 }
 
-fun adminUsesNavigationRail(widthDp: Int): Boolean = widthDp >= 720
+fun adminLayoutMode(widthDp: Int, heightDp: Int): AdminLayoutMode = when {
+    widthDp < 720 -> AdminLayoutMode.COMPACT
+    widthDp >= 840 && heightDp >= 600 && widthDp > heightDp -> AdminLayoutMode.EXPANDED_LANDSCAPE
+    else -> AdminLayoutMode.EXPANDED
+}
 
 fun toggledRole(role: String): String = if (role == "admin") "user" else "admin"
 
@@ -272,6 +285,7 @@ fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsSto
             }
         },
         reserveBottomControls = true,
+        edgeToEdgeContent = false,
         bottomContent = null,
         modifier = Modifier,
     ) { contentPadding ->
@@ -279,9 +293,10 @@ fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsSto
             selectedSection = selectedSection,
             selectSection = { selectedSection = it },
             modifier = Modifier.fillMaxSize().padding(contentPadding),
-        ) {
+        ) { layoutMode ->
             AdminSectionContent(
                 selectedSection = selectedSection,
+                layoutMode = layoutMode,
                 repository = repository,
                 webDavUrl = webDavUrl(settings.origin),
                 importStatus = importStatus,
@@ -305,15 +320,18 @@ internal fun AdminResponsiveLayout(
     selectedSection: AdminSection,
     selectSection: (AdminSection) -> Unit,
     modifier: Modifier,
-    content: @Composable () -> Unit,
+    content: @Composable (AdminLayoutMode) -> Unit,
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
+        val layoutMode = adminLayoutMode(
+            widthDp = maxWidth.value.toInt(),
+            heightDp = maxHeight.value.toInt(),
+        )
         AdminSectionLayout(
             selectedSection = selectedSection,
             selectSection = selectSection,
-            useNavigationRail = adminUsesNavigationRail(maxWidth.value.toInt()),
-            content = content,
-        )
+            useNavigationRail = layoutMode.usesNavigationRail,
+        ) { content(layoutMode) }
     }
 }
 
@@ -376,6 +394,7 @@ internal fun AdminSectionTabs(
 @Composable
 private fun AdminSectionContent(
     selectedSection: AdminSection,
+    layoutMode: AdminLayoutMode,
     repository: AdministrationRepository,
     webDavUrl: String,
     importStatus: ImportStatus?,
@@ -395,7 +414,13 @@ private fun AdminSectionContent(
             AdminSection.USERS -> UserAdministration(repository, userRefreshVersion)
             AdminSection.IMPORT -> ImportAdministration(repository, webDavUrl, importStatus, importError, refreshImport)
             AdminSection.METADATA -> MetadataAdministration(repository, metadataStatus, metadataError, refreshMetadata)
-            AdminSection.AI -> AiAdministration(repository, aiStatus, aiError, refreshAi)
+            AdminSection.AI -> AiAdministration(
+                repository = repository,
+                status = aiStatus,
+                error = aiError,
+                refresh = refreshAi,
+                useControlTable = layoutMode.usesAiControlTable,
+            )
         }
     }
 }

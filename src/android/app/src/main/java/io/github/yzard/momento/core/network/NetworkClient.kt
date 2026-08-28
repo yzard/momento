@@ -21,7 +21,6 @@ import java.util.Base64
 @OptIn(ExperimentalSerializationApi::class)
 class NetworkClient(private val tokenStore: EncryptedTokenStore) {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
-    private val refreshMutex = Mutex()
     private val client = OkHttpClient.Builder().addInterceptor(BearerInterceptor(tokenStore, this)).build()
     private var currentOrigin: String? = null
     private var currentApi: MomentoApi? = null
@@ -60,12 +59,18 @@ class NetworkClient(private val tokenStore: EncryptedTokenStore) {
             return@withLock false
         }
         try {
-            tokenStore.saveTokens(createApi(origin, OkHttpClient()).refresh(RefreshTokenRequest(refreshToken)))
+            tokenStore.replaceSessionTokens(
+                createApi(origin, OkHttpClient()).refresh(RefreshTokenRequest(refreshToken)),
+            )
             true
         } catch (error: HttpException) {
             if (error.code() == 401 || error.code() == 403) tokenStore.clear()
             false
         }
+    }
+
+    private companion object {
+        val refreshMutex = Mutex()
     }
 }
 

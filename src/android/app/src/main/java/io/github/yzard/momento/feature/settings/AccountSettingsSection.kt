@@ -1,5 +1,6 @@
 package io.github.yzard.momento.feature.settings
 
+import android.view.autofill.AutofillManager
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.AccountRepository
 import io.github.yzard.momento.core.model.User
@@ -95,6 +97,7 @@ private fun PasswordDialog(repository: AccountRepository, dismiss: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = dismiss,
@@ -125,6 +128,7 @@ private fun PasswordDialog(repository: AccountRepository, dismiss: () -> Unit) {
                         submitting = true
                         try {
                             repository.changePassword(currentPassword, newPassword)
+                            context.getSystemService(AutofillManager::class.java)?.commit()
                             dismiss()
                         } catch (_: HttpException) {
                             error = "Could not change password"

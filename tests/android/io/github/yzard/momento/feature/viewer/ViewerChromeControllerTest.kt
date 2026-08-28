@@ -23,6 +23,13 @@ class ViewerChromeControllerTest {
         assertEquals(false, ViewerChromeState.initial().hideAfterInactivity().visible)
     }
 
+    @Test fun tappingTheInformationActionAgainClosesItsPanel() {
+        val open = ViewerChromeState.initial().toggleSheet(ViewerSheet.INFORMATION)
+
+        assertEquals(ViewerSheet.INFORMATION, open.sheet)
+        assertEquals(null, open.toggleSheet(ViewerSheet.INFORMATION).sheet)
+    }
+
     @Test fun navigationKeepsFilmstripAndPagerIndexBounded() {
         val navigation = ViewerNavigationState(currentIndex = 2, itemCount = 3)
 

@@ -208,6 +208,7 @@ fun DeduplicateScreen(
         onBack = null,
         trailingContent = null,
         reserveBottomControls = true,
+        edgeToEdgeContent = false,
         bottomContent = null,
         modifier = Modifier,
     ) { contentPadding ->

@@ -85,20 +85,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.autofill.AutofillNode
 import androidx.compose.ui.autofill.AutofillType
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalAutofill
-import androidx.compose.ui.platform.LocalAutofillTree
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -141,6 +136,8 @@ import io.github.yzard.momento.feature.albums.AlbumsScreen
 import io.github.yzard.momento.feature.albums.AlbumDetailScreen
 import io.github.yzard.momento.feature.auth.LoginRequirement
 import io.github.yzard.momento.feature.auth.PasswordChangeFields
+import io.github.yzard.momento.feature.auth.momentoAutofill
+import io.github.yzard.momento.feature.auth.rememberMomentoAutofillNode
 import io.github.yzard.momento.feature.auth.loginRequirement
 import io.github.yzard.momento.feature.auth.validateNewPassword
 import io.github.yzard.momento.feature.backup.currentBackupCanReadOriginalMedia
@@ -334,27 +331,8 @@ private fun LoginScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     val context = LocalContext.current
     val autofill = LocalAutofill.current
-    val autofillTree = LocalAutofillTree.current
-    val usernameAutofillNode = remember {
-        AutofillNode(
-            autofillTypes = listOf(AutofillType.Username),
-            onFill = { username = it },
-        )
-    }
-    val passwordAutofillNode = remember {
-        AutofillNode(
-            autofillTypes = listOf(AutofillType.Password),
-            onFill = { password = it },
-        )
-    }
-    DisposableEffect(autofillTree, usernameAutofillNode, passwordAutofillNode) {
-        autofillTree += usernameAutofillNode
-        autofillTree += passwordAutofillNode
-        onDispose {
-            autofillTree.children.remove(usernameAutofillNode.id)
-            autofillTree.children.remove(passwordAutofillNode.id)
-        }
-    }
+    val usernameAutofillNode = rememberMomentoAutofillNode(listOf(AutofillType.Username)) { username = it }
+    val passwordAutofillNode = rememberMomentoAutofillNode(listOf(AutofillType.Password)) { password = it }
 
     fun submit() {
         if (signingIn) return
@@ -401,7 +379,7 @@ private fun LoginScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 20.dp)
-                    .autofill(usernameAutofillNode, autofill),
+                    .momentoAutofill(usernameAutofillNode, autofill),
             )
             OutlinedTextField(
                 value = password,
@@ -414,7 +392,7 @@ private fun LoginScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .focusRequester(passwordFocusRequester)
-                    .autofill(passwordAutofillNode, autofill),
+                    .momentoAutofill(passwordAutofillNode, autofill),
             )
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button(
@@ -438,6 +416,7 @@ private fun ForcedPasswordChangeScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     fun submit() {
         if (submitting) return
@@ -451,6 +430,7 @@ private fun ForcedPasswordChangeScreen(
             submitting = true
             try {
                 repository.changePassword(currentPassword, newPassword)
+                context.getSystemService(AutofillManager::class.java)?.commit()
                 passwordChanged()
             } catch (_: HttpException) {
                 error = "Could not change password. Check your current password."
@@ -522,23 +502,6 @@ private fun AuthFormLayout(content: @Composable ColumnScope.() -> Unit) {
         )
     }
 }
-
-@OptIn(ExperimentalComposeUiApi::class)
-@Suppress("DEPRECATION")
-private fun Modifier.autofill(
-    autofillNode: AutofillNode,
-    autofill: androidx.compose.ui.autofill.Autofill?,
-): Modifier = this
-    .onGloballyPositioned { coordinates ->
-        autofillNode.boundingBox = coordinates.boundsInWindow().takeUnless { it == Rect.Zero }
-    }
-    .onFocusChanged { focusState ->
-        if (focusState.isFocused) {
-            autofill?.requestAutofillForNode(autofillNode)
-        } else {
-            autofill?.cancelAutofillForNode(autofillNode)
-        }
-    }
 
 @Composable
 private fun MainShell(

@@ -135,6 +135,7 @@ fun AlbumsScreen(
             )
         },
         reserveBottomControls = true,
+        edgeToEdgeContent = false,
         bottomContent = null,
         modifier = Modifier,
     ) { contentPadding ->

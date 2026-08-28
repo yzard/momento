@@ -7,11 +7,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -25,7 +27,6 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AddPhotoAlternate
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -118,6 +119,13 @@ fun shouldAppendTimeline(
     hasOlder: Boolean,
     appending: Boolean,
 ): Boolean = hasOlder && !appending && totalItemsCount > 0 && lastVisibleItemIndex >= totalItemsCount - 3
+
+fun shouldPrependTimeline(
+    firstVisibleItemIndex: Int,
+    hasNewer: Boolean,
+    prepending: Boolean,
+    scrollingTowardStart: Boolean,
+): Boolean = hasNewer && !prepending && scrollingTowardStart && firstVisibleItemIndex <= 2
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -239,6 +247,17 @@ private fun TimelinePageContent(
         }.filter { it }.collect { load(reset = false, direction = TimelineDirection.OLDER) }
     }
 
+    LaunchedEffect(gridState, pagingState.newerCursor, pagingState.hasNewer) {
+        snapshotFlow {
+            shouldPrependTimeline(
+                firstVisibleItemIndex = gridState.firstVisibleItemIndex,
+                hasNewer = pagingState.hasNewer && pagingState.message == null,
+                prepending = pagingState.loadingDirection != null,
+                scrollingTowardStart = gridState.isScrollInProgress && gridState.lastScrolledBackward,
+            )
+        }.filter { it }.collect { loadNewer() }
+    }
+
     DisposableEffect(scrollKey, gridState) {
         onDispose {
             timelineScrollPositions[scrollKey] = TimelineScrollPosition(
@@ -255,6 +274,7 @@ private fun TimelinePageContent(
         onBack = null,
         trailingContent = null,
         reserveBottomControls = true,
+        edgeToEdgeContent = true,
         bottomContent = null,
         modifier = Modifier,
     ) { contentPadding ->
@@ -276,7 +296,6 @@ private fun TimelinePageContent(
                 gridState = gridState,
                 loadingOlder = pagingState.loadingDirection == TimelineDirection.OLDER,
                 loadingNewer = pagingState.loadingDirection == TimelineDirection.NEWER,
-                hasNewer = pagingState.hasNewer,
                 error = pagingState.message,
                 failedDirection = pagingState.failedDirection?.wireValue,
                 selecting = selecting,
@@ -290,10 +309,8 @@ private fun TimelinePageContent(
                 toggleSelection = { mediaId -> selectedIds = toggleMediaSelection(selectedIds, mediaId) },
                 requestTrash = { confirmTrash = true },
                 requestAddToAlbum = { addingToAlbum = true },
-                loadNewer = { scope.launch { loadNewer() } },
                 retryOlder = { scope.launch { load(reset = false, direction = TimelineDirection.OLDER) } },
                 retryNewer = { scope.launch { loadNewer() } },
-                refresh = ::refreshTimeline,
                 chooseDate = { showDatePicker = true },
                 openMedia = openMedia,
             )
@@ -338,8 +355,10 @@ private fun TimelinePageContent(
             confirmButton = {
                 TextButton(onClick = {
                     datePickerState.selectedDateMillis?.let { selectedDateMillis ->
+                        pagingState = TimelinePagingState.initial()
                         anchorDate = datePickerAnchorDate(selectedDateMillis)
                         refreshVersion += 1
+                        scope.launch { gridState.scrollToItem(0) }
                     }
                     showDatePicker = false
                 }) { Text("Jump") }
@@ -356,7 +375,6 @@ private fun ContinuousTimelineGrid(
     gridState: LazyGridState,
     loadingOlder: Boolean,
     loadingNewer: Boolean,
-    hasNewer: Boolean,
     error: String?,
     failedDirection: String?,
     selecting: Boolean,
@@ -367,10 +385,8 @@ private fun ContinuousTimelineGrid(
     toggleSelection: (Long) -> Unit,
     requestTrash: () -> Unit,
     requestAddToAlbum: () -> Unit,
-    loadNewer: () -> Unit,
     retryOlder: () -> Unit,
     retryNewer: () -> Unit,
-    refresh: () -> Unit,
     chooseDate: () -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
@@ -380,7 +396,7 @@ private fun ContinuousTimelineGrid(
         return
     }
     val allMedia = remember(timelineMedia) { timelineMedia.map { it.media } }
-    val leadingItemCount = if (hasNewer || loadingNewer || failedDirection == "newer") 1 else 0
+    val leadingItemCount = if (failedDirection == "newer") 1 else 0
     val visiblePeriod by remember(timelineMedia, gridState, leadingItemCount) {
         derivedStateOf {
             timelinePeriodAtIndex(timelineMedia, (gridState.firstVisibleItemIndex - leadingItemCount).coerceAtLeast(0))
@@ -395,20 +411,14 @@ private fun ContinuousTimelineGrid(
             state = gridState,
             contentPadding = contentPadding,
         ) {
-            if (leadingItemCount > 0) {
+            if (failedDirection == "newer") {
                 item(key = "newer", span = { GridItemSpan(maxLineSpan) }) {
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         TextButton(
-                            onClick = if (failedDirection == "newer") retryNewer else loadNewer,
+                            onClick = retryNewer,
                             enabled = !loadingNewer,
                         ) {
-                            Text(
-                                when {
-                                    loadingNewer -> "Loading newer media"
-                                    failedDirection == "newer" -> "Could not load newer media. Retry"
-                                    else -> "Load newer media"
-                                },
-                            )
+                            Text("Could not load newer media. Retry")
                         }
                     }
                 }
@@ -449,7 +459,6 @@ private fun ContinuousTimelineGrid(
         }
         FloatingTimelineHeader(
             label = visiblePeriod,
-            refresh = refresh,
             chooseDate = chooseDate,
             modifier = Modifier.align(Alignment.TopCenter),
         )
@@ -488,7 +497,6 @@ private fun ContinuousTimelineGrid(
 @Composable
 private fun FloatingTimelineHeader(
     label: String,
-    refresh: () -> Unit,
     chooseDate: () -> Unit,
     modifier: Modifier,
 ) {
@@ -501,10 +509,13 @@ private fun FloatingTimelineHeader(
         shadowElevation = 3.dp,
         tonalElevation = 1.dp,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = chooseDate) { Icon(Icons.Default.CalendarMonth, "Jump to date") }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.clickable(onClick = chooseDate).padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            Icon(Icons.Default.CalendarMonth, "Jump to date", Modifier.size(18.dp))
+            Spacer(Modifier.size(8.dp))
             Text(text = label, style = MaterialTheme.typography.labelLarge)
-            IconButton(onClick = refresh) { Icon(Icons.Default.Refresh, "Refresh timeline") }
         }
     }
 }

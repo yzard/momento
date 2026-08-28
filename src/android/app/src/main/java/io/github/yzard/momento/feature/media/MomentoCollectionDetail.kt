@@ -40,6 +40,7 @@ fun MomentoCollectionDetail(
         onBack = close,
         trailingContent = null,
         reserveBottomControls = reserveBottomControls,
+        edgeToEdgeContent = true,
         bottomContent = bottomContent,
         modifier = Modifier,
     ) { contentPadding ->

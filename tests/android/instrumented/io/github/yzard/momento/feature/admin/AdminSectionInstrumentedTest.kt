@@ -7,7 +7,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.material3.Text
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import io.github.yzard.momento.app.designsystem.MomentoTheme
@@ -77,5 +79,25 @@ class AdminSectionInstrumentedTest {
             composeRule.onNodeWithText(section.label).performClick().assertIsSelected()
             composeRule.onNodeWithText("${section.label} content").assertIsDisplayed()
         }
+    }
+
+    @Test
+    fun expandedLandscapeAiControlsExposeTheWebTableColumns() {
+        composeRule.setContent {
+            MomentoTheme(ThemePreference.DARK) {
+                AiControlTable(
+                    status = null,
+                    busyControls = emptySet(),
+                    primary = { _, _, _ -> },
+                    clean = { _, _ -> },
+                    save = { _, _, _ -> },
+                )
+            }
+        }
+
+        listOf("Feature", "Minute", "Hour", "Day", "Month", "Weekday", "Save", "Start / Cancel", "Clean")
+            .forEach { label -> composeRule.onAllNodesWithText(label).assertCountEquals(1) }
+        composeRule.onAllNodesWithText("OCR").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Face detection").assertCountEquals(1)
     }
 }

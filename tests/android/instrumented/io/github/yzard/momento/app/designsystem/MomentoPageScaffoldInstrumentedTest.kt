@@ -33,6 +33,7 @@ class MomentoPageScaffoldInstrumentedTest {
                     onBack = { backClicks += 1 },
                     trailingContent = null,
                     reserveBottomControls = true,
+                    edgeToEdgeContent = true,
                     bottomContent = { Text("Selection actions") },
                     modifier = Modifier,
                 ) {
@@ -61,6 +62,7 @@ class MomentoPageScaffoldInstrumentedTest {
                         onBack = null,
                         trailingContent = null,
                         reserveBottomControls = false,
+                        edgeToEdgeContent = false,
                         bottomContent = null,
                         modifier = Modifier,
                     ) {
@@ -85,6 +87,7 @@ class MomentoPageScaffoldInstrumentedTest {
                     onBack = null,
                     trailingContent = null,
                     reserveBottomControls = false,
+                    edgeToEdgeContent = true,
                     bottomContent = null,
                     modifier = Modifier,
                 ) {

@@ -64,6 +64,7 @@ class AndroidVisualQaMatrixTest {
                 statusBarInsetDp = 24,
                 navigationBarInsetDp = 24,
                 hasBottomControls = true,
+                edgeToEdgeContent = false,
             )
             assertTrue(layout.topPadding >= 104)
             assertTrue(layout.bottomPadding >= 116)

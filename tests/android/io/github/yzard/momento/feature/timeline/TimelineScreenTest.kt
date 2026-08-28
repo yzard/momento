@@ -53,6 +53,22 @@ class TimelineScreenTest {
     }
 
     @Test
+    fun prependsOnlyWhenUserScrollsTowardTheStart() {
+        assertTrue(
+            shouldPrependTimeline(
+                firstVisibleItemIndex = 2,
+                hasNewer = true,
+                prepending = false,
+                scrollingTowardStart = true,
+            ),
+        )
+        assertFalse(shouldPrependTimeline(2, hasNewer = true, prepending = true, scrollingTowardStart = true))
+        assertFalse(shouldPrependTimeline(2, hasNewer = false, prepending = false, scrollingTowardStart = true))
+        assertFalse(shouldPrependTimeline(2, hasNewer = true, prepending = false, scrollingTowardStart = false))
+        assertFalse(shouldPrependTimeline(3, hasNewer = true, prepending = false, scrollingTowardStart = true))
+    }
+
+    @Test
     fun mergesCursorPagesWithoutRepeatingMedia() {
         val existing = listOf(TimelineGroup("Today", listOf(media(1))))
         val next = listOf(

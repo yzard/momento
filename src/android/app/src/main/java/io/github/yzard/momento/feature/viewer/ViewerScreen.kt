@@ -8,10 +8,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
@@ -21,6 +21,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -46,7 +47,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -100,9 +101,11 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
@@ -149,6 +152,16 @@ import androidx.compose.runtime.CompositionLocalProvider
 data class ViewerTimestamp(val date: String, val time: String)
 data class FilmstripItemBounds(val index: Int, val offset: Int, val size: Int)
 data class FilmstripEdgeVisibility(val left: Boolean, val right: Boolean)
+data class ViewerInformationPaneSizing(
+    val minimumWidthDp: Float,
+    val initialWidthDp: Float,
+    val maximumWidthDp: Float,
+)
+data class PlaybackSliderGeometry(
+    val thumbDiameterDp: Int,
+    val trackSlotHeightDp: Int,
+    val trackStrokeDp: Int,
+)
 enum class ViewerInformationPresentation { BOTTOM, RIGHT }
 
 fun viewerIndex(index: Int, change: Int, size: Int): Int {
@@ -240,6 +253,35 @@ fun playbackProgressFraction(positionMs: Float, durationMs: Long): Float {
 fun viewerInformationPresentation(landscape: Boolean): ViewerInformationPresentation =
     if (landscape) ViewerInformationPresentation.RIGHT else ViewerInformationPresentation.BOTTOM
 
+fun viewerInformationPaneSizing(viewportWidthDp: Float): ViewerInformationPaneSizing {
+    require(viewportWidthDp > 0f) { "Viewer width must be positive" }
+    val minimumWidthDp = (viewportWidthDp * 0.34f).coerceIn(280f, 360f).coerceAtMost(viewportWidthDp)
+    val initialWidthDp = (viewportWidthDp * 0.46f).coerceIn(minimumWidthDp, 420f).coerceAtMost(viewportWidthDp)
+    return ViewerInformationPaneSizing(
+        minimumWidthDp = minimumWidthDp,
+        initialWidthDp = initialWidthDp,
+        maximumWidthDp = viewportWidthDp,
+    )
+}
+
+fun resizedViewerInformationPaneWidth(
+    currentWidthDp: Float,
+    horizontalDragDp: Float,
+    sizing: ViewerInformationPaneSizing,
+): Float = (currentWidthDp - horizontalDragDp).coerceIn(sizing.minimumWidthDp, sizing.maximumWidthDp)
+
+fun shouldDismissViewerInformationPane(
+    currentWidthDp: Float,
+    minimumWidthDp: Float,
+    rightwardDragDp: Float,
+): Boolean = currentWidthDp <= minimumWidthDp + 0.5f && rightwardDragDp >= 56f
+
+fun playbackSliderGeometry(dragging: Boolean): PlaybackSliderGeometry = PlaybackSliderGeometry(
+    thumbDiameterDp = if (dragging) 14 else 10,
+    trackSlotHeightDp = 14,
+    trackStrokeDp = 2,
+)
+
 fun centeredFilmstripIndex(
     viewportStartOffset: Int,
     viewportEndOffset: Int,
@@ -284,6 +326,7 @@ fun ViewerScreen(
     val view = LocalView.current
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    var informationPaneWidthDp by rememberSaveable { mutableFloatStateOf(Float.NaN) }
     val shareLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         pendingShareFile?.delete()
         pendingShareFile = null
@@ -401,68 +444,107 @@ fun ViewerScreen(
     }
 
     CompositionLocalProvider(LocalMomentoDarkTheme provides true) {
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        HorizontalPager(
-            state = pagerState,
-            key = { page -> items[page].id },
-            userScrollEnabled = chromeState.sheet == null && zoomedMediaId == null,
-            modifier = Modifier.fillMaxSize(),
-        ) { page ->
-            ViewerMedia(
-                media = items[page],
-                repository = repository,
-                active = page == index,
-                toggleChrome = { chromeState = chromeState.toggle() },
-                zoomChanged = { zoomed ->
-                    val pageMediaId = items[page].id
-                    if (zoomed && page == index) {
-                        zoomedMediaId = pageMediaId
-                    } else if (zoomedMediaId == pageMediaId) {
-                        zoomedMediaId = null
+        BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+            val paneSizing = viewerInformationPaneSizing(maxWidth.value)
+            val currentPaneWidthDp = if (informationPaneWidthDp.isFinite()) {
+                informationPaneWidthDp.coerceIn(paneSizing.minimumWidthDp, paneSizing.maximumWidthDp)
+            } else {
+                paneSizing.initialWidthDp
+            }
+            Row(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    HorizontalPager(
+                        state = pagerState,
+                        key = { page -> items[page].id },
+                        userScrollEnabled = chromeState.sheet == null && zoomedMediaId == null,
+                        modifier = Modifier.fillMaxSize(),
+                    ) { page ->
+                        ViewerMedia(
+                            media = items[page],
+                            repository = repository,
+                            active = page == index,
+                            toggleChrome = { chromeState = chromeState.toggle() },
+                            zoomChanged = { zoomed ->
+                                val pageMediaId = items[page].id
+                                if (zoomed && page == index) {
+                                    zoomedMediaId = pageMediaId
+                                } else if (zoomedMediaId == pageMediaId) {
+                                    zoomedMediaId = null
+                                }
+                            },
+                            playerChanged = { mediaId, player ->
+                                if (player == null) {
+                                    if (activeVideoPlayer?.first == mediaId) activeVideoPlayer = null
+                                } else {
+                                    activeVideoPlayer = mediaId to player
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     }
-                },
-                playerChanged = { mediaId, player ->
-                    if (player == null) {
-                        if (activeVideoPlayer?.first == mediaId) activeVideoPlayer = null
-                    } else {
-                        activeVideoPlayer = mediaId to player
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
 
-        AnimatedVisibility(
-            visible = chromeState.visible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
-        ) {
-            ViewerTopControls(timestamp = timestamp, close = close, modifier = Modifier.fillMaxWidth())
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = chromeState.visible,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                    ) {
+                        ViewerTopControls(timestamp = timestamp, close = close, modifier = Modifier.fillMaxWidth())
+                    }
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = chromeState.visible,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
+                    ) {
+                        ViewerBottomControls(
+                            media = items,
+                            currentIndex = index,
+                            repository = repository,
+                            player = activeVideoPlayer?.takeIf { it.first == item.id }?.second,
+                            navigate = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
+                            sharing = sharing,
+                            share = { scope.launch { shareCurrent() } },
+                            albums = { chromeState = chromeState.openSheet(ViewerSheet.ALBUMS) },
+                            information = { chromeState = chromeState.toggleSheet(ViewerSheet.INFORMATION) },
+                            trash = { confirmTrash = true },
+                            userInteracted = ::recordChromeInteraction,
+                            interactionChanged = ::changeChromeInteraction,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+                AnimatedVisibility(
+                    visible = chromeState.sheet == ViewerSheet.INFORMATION &&
+                        informationPresentation == ViewerInformationPresentation.RIGHT,
+                    enter = expandHorizontally(expandFrom = Alignment.End) + fadeIn(),
+                    exit = shrinkHorizontally(shrinkTowards = Alignment.End) + fadeOut(),
+                ) {
+                    ResizableMediaInformationPane(
+                        media = item,
+                        width = currentPaneWidthDp.dp,
+                        minimumWidth = paneSizing.minimumWidthDp.dp,
+                        resize = { horizontalDragDp ->
+                            val paneWidthDp = if (informationPaneWidthDp.isFinite()) {
+                                informationPaneWidthDp.coerceIn(
+                                    paneSizing.minimumWidthDp,
+                                    paneSizing.maximumWidthDp,
+                                )
+                            } else {
+                                currentPaneWidthDp
+                            }
+                            informationPaneWidthDp = resizedViewerInformationPaneWidth(
+                                currentWidthDp = paneWidthDp,
+                                horizontalDragDp = horizontalDragDp,
+                                sizing = paneSizing,
+                            )
+                        },
+                        interactionChanged = ::changeChromeInteraction,
+                        dismiss = { chromeState = chromeState.closeSheet() },
+                    )
+                }
+            }
         }
-        AnimatedVisibility(
-            visible = chromeState.visible,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
-        ) {
-            ViewerBottomControls(
-                media = items,
-                currentIndex = index,
-                repository = repository,
-                player = activeVideoPlayer?.takeIf { it.first == item.id }?.second,
-                navigate = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
-                sharing = sharing,
-                share = { scope.launch { shareCurrent() } },
-                albums = { chromeState = chromeState.openSheet(ViewerSheet.ALBUMS) },
-                information = { chromeState = chromeState.openSheet(ViewerSheet.INFORMATION) },
-                trash = { confirmTrash = true },
-                userInteracted = ::recordChromeInteraction,
-                interactionChanged = ::changeChromeInteraction,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    }
     }
 
     if (
@@ -472,6 +554,12 @@ fun ViewerScreen(
         ModalBottomSheet(
             onDismissRequest = { chromeState = chromeState.closeSheet() },
             sheetState = sheetState,
+            modifier = Modifier.fillMaxWidth(),
+            sheetMaxWidth = if (chromeState.sheet == ViewerSheet.INFORMATION) {
+                Dp.Unspecified
+            } else {
+                BottomSheetDefaults.SheetMaxWidth
+            },
             containerColor = MaterialTheme.colorScheme.background,
             contentColor = MaterialTheme.colorScheme.onBackground,
         ) {
@@ -481,39 +569,11 @@ fun ViewerScreen(
                     mediaIds = listOf(item.id),
                     close = { chromeState = chromeState.closeSheet() },
                 )
-                ViewerSheet.INFORMATION -> MediaInformationContent(item, Modifier.fillMaxWidth().fillMaxHeight(0.72f))
-                null -> Unit
-            }
-        }
-    }
-
-    AnimatedVisibility(
-        visible = chromeState.sheet == ViewerSheet.INFORMATION &&
-            informationPresentation == ViewerInformationPresentation.RIGHT,
-        enter = fadeIn() + slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth }),
-        exit = fadeOut() + slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth }),
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.42f))
-                .clickable { chromeState = chromeState.closeSheet() },
-        ) {
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxHeight()
-                    .widthIn(max = 420.dp)
-                    .fillMaxWidth(0.46f)
-                    .clickable(onClick = {}),
-                color = MaterialTheme.colorScheme.background,
-                contentColor = MaterialTheme.colorScheme.onBackground,
-            ) {
-                MediaInformationContent(
+                ViewerSheet.INFORMATION -> MediaInformationContent(
                     media = item,
                     modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
                 )
+                null -> Unit
             }
         }
     }
@@ -947,6 +1007,7 @@ private fun VideoPlaybackControls(
     var muted by remember(player) { mutableStateOf(player.volume == 0f) }
     val seekRangeEnd = seekState.durationMs.coerceAtLeast(1L).toFloat()
     val displayedPosition = seekState.displayedPositionMs
+    val sliderGeometry = playbackSliderGeometry(seekState.dragging)
 
     LaunchedEffect(player) {
         while (isActive) {
@@ -1001,28 +1062,31 @@ private fun VideoPlaybackControls(
                 enabled = seekState.durationMs > 0,
                 modifier = Modifier.weight(1f).height(48.dp),
                 thumb = {
-                    Box(
-                        Modifier
-                            .size(if (seekState.dragging) 12.dp else 9.dp)
-                            .background(floatingColors.content, CircleShape),
-                    )
+                    Canvas(Modifier.size(sliderGeometry.trackSlotHeightDp.dp)) {
+                        drawCircle(
+                            color = floatingColors.content,
+                            radius = sliderGeometry.thumbDiameterDp.dp.toPx() / 2f,
+                            center = center,
+                        )
+                    }
                 },
                 track = { sliderState ->
                     val progress = playbackProgressFraction(sliderState.value, seekState.durationMs)
-                    Canvas(Modifier.fillMaxWidth().height(3.dp)) {
+                    Canvas(Modifier.fillMaxWidth().height(sliderGeometry.trackSlotHeightDp.dp)) {
                         val centerY = size.height / 2f
+                        val strokeWidth = sliderGeometry.trackStrokeDp.dp.toPx()
                         drawLine(
                             color = floatingColors.content.copy(alpha = 0.32f),
                             start = Offset(0f, centerY),
                             end = Offset(size.width, centerY),
-                            strokeWidth = size.height,
+                            strokeWidth = strokeWidth,
                             cap = StrokeCap.Round,
                         )
                         drawLine(
                             color = floatingColors.content,
                             start = Offset(0f, centerY),
                             end = Offset(size.width * progress, centerY),
-                            strokeWidth = size.height,
+                            strokeWidth = strokeWidth,
                             cap = StrokeCap.Round,
                         )
                     }
@@ -1067,15 +1131,126 @@ private fun Modifier.viewerChromeToggle(toggle: () -> Unit): Modifier = pointerI
 }
 
 @Composable
-private fun MediaInformationContent(media: Media, modifier: Modifier) {
+private fun ResizableMediaInformationPane(
+    media: Media,
+    width: Dp,
+    minimumWidth: Dp,
+    resize: (Float) -> Unit,
+    interactionChanged: (Boolean) -> Unit,
+    dismiss: () -> Unit,
+) {
+    val density = LocalDensity.current
+    val latestResize by rememberUpdatedState(resize)
+    val latestInteractionChanged by rememberUpdatedState(interactionChanged)
+    val latestWidth by rememberUpdatedState(width)
+    val latestDismiss by rememberUpdatedState(dismiss)
+    val swipeToDismissModifier = Modifier.pointerInput(density) {
+        var rightwardDragDp = 0f
+        detectHorizontalDragGestures(
+            onDragStart = {
+                rightwardDragDp = 0f
+                latestInteractionChanged(true)
+            },
+            onDragEnd = {
+                latestInteractionChanged(false)
+                if (rightwardDragDp >= 56f) latestDismiss()
+                rightwardDragDp = 0f
+            },
+            onDragCancel = {
+                rightwardDragDp = 0f
+                latestInteractionChanged(false)
+            },
+            onHorizontalDrag = { change, dragAmountPx ->
+                change.consume()
+                val dragAmountDp = dragAmountPx / density.density
+                rightwardDragDp = if (dragAmountDp > 0f) rightwardDragDp + dragAmountDp else 0f
+            },
+        )
+    }
+    Surface(
+        modifier = Modifier.width(width).fillMaxHeight(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+    ) {
+        Row(Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .width(24.dp)
+                    .fillMaxHeight()
+                    .pointerInput(density, minimumWidth) {
+                        var rightwardDragDp = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = {
+                                rightwardDragDp = 0f
+                                latestInteractionChanged(true)
+                            },
+                            onDragEnd = {
+                                latestInteractionChanged(false)
+                                if (
+                                    shouldDismissViewerInformationPane(
+                                        currentWidthDp = latestWidth.value,
+                                        minimumWidthDp = minimumWidth.value,
+                                        rightwardDragDp = rightwardDragDp,
+                                    )
+                                ) {
+                                    latestDismiss()
+                                }
+                                rightwardDragDp = 0f
+                            },
+                            onDragCancel = {
+                                rightwardDragDp = 0f
+                                latestInteractionChanged(false)
+                            },
+                            onHorizontalDrag = { change, dragAmountPx ->
+                                change.consume()
+                                val dragAmountDp = dragAmountPx / density.density
+                                if (dragAmountDp < 0f) {
+                                    rightwardDragDp = 0f
+                                } else if (latestWidth <= minimumWidth + 0.5.dp) {
+                                    rightwardDragDp += dragAmountDp
+                                }
+                                latestResize(dragAmountDp)
+                            },
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier
+                        .width(3.dp)
+                        .height(52.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(2.dp)),
+                )
+            }
+            MediaInformationContent(
+                media = media,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .then(swipeToDismissModifier)
+                    .windowInsetsPadding(WindowInsets.safeDrawing),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaInformationContent(
+    media: Media,
+    modifier: Modifier,
+) {
     val rows = remember(media) { mediaMetadataRows(media) }
     LazyColumn(modifier) {
         item {
-            Text(
-                "Information",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Information",
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
         }
         items(rows) { (label, value) ->
             ListItem(

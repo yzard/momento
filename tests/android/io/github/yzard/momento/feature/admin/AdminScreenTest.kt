@@ -103,11 +103,16 @@ class AdminScreenTest {
         assertEquals(5, cronFieldsPerRow(720))
     }
 
-    @Test fun adminNavigationAdaptsToAvailableWidth() {
-        assertFalse(adminUsesNavigationRail(360))
-        assertFalse(adminUsesNavigationRail(719))
-        assertTrue(adminUsesNavigationRail(720))
-        assertTrue(adminUsesNavigationRail(840))
+    @Test fun adminLayoutUsesTheAiTableOnlyForExpandedLandscapeWindows() {
+        assertEquals(AdminLayoutMode.COMPACT, adminLayoutMode(widthDp = 360, heightDp = 800))
+        assertEquals(AdminLayoutMode.COMPACT, adminLayoutMode(widthDp = 719, heightDp = 360))
+        assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 720, heightDp = 360))
+        assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 900, heightDp = 412))
+        assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 840, heightDp = 1_000))
+        assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 840, heightDp = 700))
+        assertTrue(AdminLayoutMode.EXPANDED_LANDSCAPE.usesNavigationRail)
+        assertTrue(AdminLayoutMode.EXPANDED_LANDSCAPE.usesAiControlTable)
+        assertFalse(AdminLayoutMode.EXPANDED.usesAiControlTable)
     }
 
     @Test(expected = IllegalArgumentException::class)

@@ -14,6 +14,7 @@ class MomentoPageScaffoldTest {
                 statusBarInsetDp = 24,
                 navigationBarInsetDp = 24,
                 hasBottomControls = true,
+                edgeToEdgeContent = false,
             ),
         )
     }
@@ -27,6 +28,21 @@ class MomentoPageScaffoldTest {
                 statusBarInsetDp = 0,
                 navigationBarInsetDp = 0,
                 hasBottomControls = false,
+                edgeToEdgeContent = false,
+            ),
+        )
+    }
+
+    @Test
+    fun edgeToEdgePageRemovesHorizontalPaddingAtEveryWidth() {
+        assertEquals(
+            MomentoPageLayout(horizontalPadding = 0, topPadding = 104, bottomPadding = 116),
+            momentoPageLayout(
+                widthDp = 1_024,
+                statusBarInsetDp = 24,
+                navigationBarInsetDp = 24,
+                hasBottomControls = true,
+                edgeToEdgeContent = true,
             ),
         )
     }
@@ -39,6 +55,7 @@ class MomentoPageScaffoldTest {
                 statusBarInsetDp = -1,
                 navigationBarInsetDp = 0,
                 hasBottomControls = false,
+                edgeToEdgeContent = false,
             )
         }
     }

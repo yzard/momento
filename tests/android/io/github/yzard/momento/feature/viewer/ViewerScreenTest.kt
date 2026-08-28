@@ -142,6 +142,42 @@ class ViewerScreenTest {
         assertEquals(ViewerInformationPresentation.RIGHT, viewerInformationPresentation(landscape = true))
     }
 
+    @Test
+    fun landscapeInformationPaneStartsCompactAndCanReplaceTheMediaArea() {
+        val sizing = viewerInformationPaneSizing(viewportWidthDp = 1_000f)
+
+        assertEquals(340f, sizing.minimumWidthDp)
+        assertEquals(420f, sizing.initialWidthDp)
+        assertEquals(1_000f, sizing.maximumWidthDp)
+        assertEquals(620f, resizedViewerInformationPaneWidth(420f, -200f, sizing))
+        assertEquals(340f, resizedViewerInformationPaneWidth(420f, 500f, sizing))
+        assertEquals(1_000f, resizedViewerInformationPaneWidth(420f, -2_000f, sizing))
+    }
+
+    @Test
+    fun landscapeInformationPaneDismissesAfterACommittedRightSwipeAtItsMinimumWidth() {
+        assertTrue(shouldDismissViewerInformationPane(340f, 340f, 56f))
+        assertFalse(shouldDismissViewerInformationPane(360f, 340f, 80f))
+        assertFalse(shouldDismissViewerInformationPane(340f, 340f, 40f))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsInformationPaneSizingWithoutAViewport() {
+        viewerInformationPaneSizing(viewportWidthDp = 0f)
+    }
+
+    @Test
+    fun playbackCursorAndTrackShareAnExactVerticalCenter() {
+        val resting = playbackSliderGeometry(dragging = false)
+        val dragging = playbackSliderGeometry(dragging = true)
+
+        assertEquals(PlaybackSliderGeometry(10, 14, 2), resting)
+        assertEquals(PlaybackSliderGeometry(14, 14, 2), dragging)
+        assertEquals(resting.trackSlotHeightDp, dragging.trackSlotHeightDp)
+        assertTrue(resting.thumbDiameterDp <= resting.trackSlotHeightDp)
+        assertEquals(dragging.thumbDiameterDp, dragging.trackSlotHeightDp)
+    }
+
     private fun media(id: Long) = Media(
         id = id,
         filename = "$id.jpg",
