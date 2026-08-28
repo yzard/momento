@@ -145,10 +145,14 @@ fun cronFieldsPerRow(widthDp: Int): Int = when {
     else -> 5
 }
 
-fun adminLayoutMode(widthDp: Int, heightDp: Int): AdminLayoutMode = when {
-    widthDp < 720 -> AdminLayoutMode.COMPACT
-    widthDp >= 840 && heightDp >= 600 && widthDp > heightDp -> AdminLayoutMode.EXPANDED_LANDSCAPE
-    else -> AdminLayoutMode.EXPANDED
+fun adminLayoutMode(widthDp: Int, heightDp: Int): AdminLayoutMode {
+    require(widthDp >= 0) { "Admin window width must not be negative" }
+    require(heightDp >= 0) { "Admin window height must not be negative" }
+    return when {
+        widthDp >= 600 && heightDp >= 600 && widthDp > heightDp -> AdminLayoutMode.EXPANDED_LANDSCAPE
+        widthDp < 720 -> AdminLayoutMode.COMPACT
+        else -> AdminLayoutMode.EXPANDED
+    }
 }
 
 fun toggledRole(role: String): String = if (role == "admin") "user" else "admin"
@@ -292,7 +296,8 @@ fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsSto
         AdminResponsiveLayout(
             selectedSection = selectedSection,
             selectSection = { selectedSection = it },
-            modifier = Modifier.fillMaxSize().padding(contentPadding),
+            contentPadding = contentPadding,
+            modifier = Modifier.fillMaxSize(),
         ) { layoutMode ->
             AdminSectionContent(
                 selectedSection = selectedSection,
@@ -319,6 +324,7 @@ fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsSto
 internal fun AdminResponsiveLayout(
     selectedSection: AdminSection,
     selectSection: (AdminSection) -> Unit,
+    contentPadding: PaddingValues,
     modifier: Modifier,
     content: @Composable (AdminLayoutMode) -> Unit,
 ) {
@@ -327,11 +333,13 @@ internal fun AdminResponsiveLayout(
             widthDp = maxWidth.value.toInt(),
             heightDp = maxHeight.value.toInt(),
         )
-        AdminSectionLayout(
-            selectedSection = selectedSection,
-            selectSection = selectSection,
-            useNavigationRail = layoutMode.usesNavigationRail,
-        ) { content(layoutMode) }
+        Box(Modifier.fillMaxSize().padding(contentPadding)) {
+            AdminSectionLayout(
+                selectedSection = selectedSection,
+                selectSection = selectSection,
+                useNavigationRail = layoutMode.usesNavigationRail,
+            ) { content(layoutMode) }
+        }
     }
 }
 

@@ -109,10 +109,17 @@ class AdminScreenTest {
         assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 720, heightDp = 360))
         assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 900, heightDp = 412))
         assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 840, heightDp = 1_000))
+        assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 690, heightDp = 650))
+        assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 720, heightDp = 600))
         assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 840, heightDp = 700))
         assertTrue(AdminLayoutMode.EXPANDED_LANDSCAPE.usesNavigationRail)
         assertTrue(AdminLayoutMode.EXPANDED_LANDSCAPE.usesAiControlTable)
         assertFalse(AdminLayoutMode.EXPANDED.usesAiControlTable)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsInvalidAdminWindowDimensions() {
+        adminLayoutMode(widthDp = -1, heightDp = 600)
     }
 
     @Test(expected = IllegalArgumentException::class)

@@ -1,5 +1,10 @@
 package io.github.yzard.momento.feature.admin
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -12,9 +17,12 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.core.data.ThemePreference
 import org.junit.Rule
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class AdminSectionInstrumentedTest {
@@ -78,6 +86,30 @@ class AdminSectionInstrumentedTest {
         AdminSection.entries.forEach { section ->
             composeRule.onNodeWithText(section.label).performClick().assertIsSelected()
             composeRule.onNodeWithText("${section.label} content").assertIsDisplayed()
+        }
+    }
+
+    @Test
+    fun foldWindowIsClassifiedBeforePagePaddingIsApplied() {
+        var observedMode: AdminLayoutMode? = null
+        composeRule.setContent {
+            MomentoTheme(ThemePreference.DARK) {
+                Box(Modifier.requiredSize(width = 720.dp, height = 600.dp)) {
+                    AdminResponsiveLayout(
+                        selectedSection = AdminSection.AI,
+                        selectSection = {},
+                        contentPadding = PaddingValues(horizontal = 60.dp, vertical = 80.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) { layoutMode ->
+                        SideEffect { observedMode = layoutMode }
+                        Text("${layoutMode.name} content")
+                    }
+                }
+            }
+        }
+
+        composeRule.runOnIdle {
+            assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, observedMode)
         }
     }
 
