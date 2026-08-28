@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -22,19 +21,18 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.core.data.AuthenticatedMediaRepository
 import io.github.yzard.momento.core.model.Media
+import io.github.yzard.momento.core.ui.MomentoAsyncImage
+import io.github.yzard.momento.app.designsystem.MomentoSelectionMark
 
 @Composable
 fun MediaGrid(
     media: List<Media>,
-    repository: MomentoRepository,
+    repository: AuthenticatedMediaRepository,
     selectedMediaIds: Set<Long>,
     contentPadding: PaddingValues,
     headerContent: (@Composable () -> Unit)?,
@@ -105,14 +103,13 @@ internal fun <GridEntry> LazyMediaGrid(
 }
 
 @Composable
-fun MediaThumbnail(media: Media, repository: MomentoRepository, trashed: Boolean, modifier: Modifier) {
-    val context = LocalContext.current
+fun MediaThumbnail(media: Media, repository: AuthenticatedMediaRepository, trashed: Boolean, modifier: Modifier) {
     val url by produceState<String?>(null, media.id, trashed) {
         value = if (trashed) repository.trashThumbnailUrl(media.id) else repository.thumbnailUrl(media.id, true)
     }
-    AsyncImage(
-        model = url?.let { ImageRequest.Builder(context).data(it).build() },
-        imageLoader = repository.authenticatedImageLoader(context),
+    MomentoAsyncImage(
+        model = url,
+        repository = repository,
         contentDescription = media.originalFilename,
         contentScale = ContentScale.Crop,
         modifier = modifier,
@@ -122,7 +119,7 @@ fun MediaThumbnail(media: Media, repository: MomentoRepository, trashed: Boolean
 @Composable
 fun SelectableMediaThumbnail(
     media: Media,
-    repository: MomentoRepository,
+    repository: AuthenticatedMediaRepository,
     trashed: Boolean,
     selected: Boolean,
     modifier: Modifier,
@@ -135,10 +132,9 @@ fun SelectableMediaThumbnail(
         MediaThumbnail(media, repository, trashed, Modifier.fillMaxSize())
         if (selected) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.38f)))
-            Icon(
-                imageVector = Icons.Default.CheckCircle,
+            MomentoSelectionMark(
+                selected = true,
                 contentDescription = "Selected",
-                tint = Color.White,
                 modifier = Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(8.dp),
             )
         }

@@ -61,18 +61,19 @@ class RoutesTest {
             backup = BackupCapabilities(true, 2, 1, 1, 1, 1),
         )
 
-        assertTrue(Destination.DOCUMENTS.isAvailable(capabilities))
-        assertTrue(!Destination.SCREENSHOTS.isAvailable(capabilities))
-        assertTrue(!Destination.FACES.isAvailable(capabilities))
-        assertTrue(!Destination.DEDUPLICATE.isAvailable(capabilities))
-        assertTrue(Destination.ALBUMS.isAvailable(capabilities))
+        val available = CapabilityState.Available(capabilities)
+        assertTrue(Destination.DOCUMENTS.isAvailable(available))
+        assertTrue(!Destination.SCREENSHOTS.isAvailable(available))
+        assertTrue(!Destination.FACES.isAvailable(available))
+        assertTrue(!Destination.DEDUPLICATE.isAvailable(available))
+        assertTrue(Destination.ALBUMS.isAvailable(available))
     }
 
-    @Test fun settingsAlbumsPlacesAndAdminOwnTheirPageTitles() {
-        assertTrue(Destination.SETTINGS.hasShellPageTitle().not())
-        assertTrue(Destination.ALBUMS.hasShellPageTitle().not())
-        assertTrue(Destination.PLACES.hasShellPageTitle().not())
-        assertTrue(Destination.ADMIN.hasShellPageTitle().not())
-        assertTrue(Destination.MAP.hasShellPageTitle())
+    @Test fun unknownCapabilitiesDoNotExposeServerGeneratedCollectionsOrBackup() {
+        assertTrue(!Destination.SCREENSHOTS.isAvailable(CapabilityState.Loading))
+        assertTrue(!Destination.FACES.isAvailable(CapabilityState.Failed("Offline")))
+        assertTrue(Destination.ALBUMS.isAvailable(CapabilityState.Loading))
+        assertTrue(!CapabilityState.Loading.backupAvailable())
     }
+
 }

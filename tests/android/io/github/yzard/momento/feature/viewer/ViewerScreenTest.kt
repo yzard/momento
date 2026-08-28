@@ -121,6 +121,27 @@ class ViewerScreenTest {
         assertEquals(null, centeredFilmstripIndex(0, 300, emptyList()))
     }
 
+    @Test
+    fun filmstripFadesOnlyTowardAvailableMedia() {
+        assertEquals(FilmstripEdgeVisibility(left = false, right = true), filmstripEdgeVisibility(false, true))
+        assertEquals(FilmstripEdgeVisibility(left = true, right = false), filmstripEdgeVisibility(true, false))
+        assertEquals(FilmstripEdgeVisibility(left = false, right = false), filmstripEdgeVisibility(false, false))
+    }
+
+    @Test
+    fun playbackProgressFractionIsBounded() {
+        assertEquals(0f, playbackProgressFraction(-50f, 1_000))
+        assertEquals(0.5f, playbackProgressFraction(500f, 1_000))
+        assertEquals(1f, playbackProgressFraction(1_500f, 1_000))
+        assertEquals(0f, playbackProgressFraction(500f, 0))
+    }
+
+    @Test
+    fun mediaInformationUsesTheAvailableOrientation() {
+        assertEquals(ViewerInformationPresentation.BOTTOM, viewerInformationPresentation(landscape = false))
+        assertEquals(ViewerInformationPresentation.RIGHT, viewerInformationPresentation(landscape = true))
+    }
+
     private fun media(id: Long) = Media(
         id = id,
         filename = "$id.jpg",

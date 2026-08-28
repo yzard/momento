@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -21,17 +20,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun LoadingState() = StateLayout {
+fun LoadingState(label: String, modifier: Modifier) = StateLayout(modifier) {
     CircularProgressIndicator()
-    Text("Loading", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-fun EmptyState(message: String) = StateLayout {
+fun EmptyState(title: String, explanation: String, modifier: Modifier) = StateLayout(modifier) {
     Icon(Icons.Outlined.Collections, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(message, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+    Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
     Text(
-        "New memories will appear here when they are available.",
+        explanation,
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,
@@ -39,21 +38,19 @@ fun EmptyState(message: String) = StateLayout {
 }
 
 @Composable
-fun ErrorState(message: String, retry: () -> Unit) = StateLayout {
+fun ErrorState(message: String, retry: () -> Unit, modifier: Modifier) = StateLayout(modifier) {
     Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error)
     Text(message, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
     TextButton(onClick = retry) { Text("Try again") }
 }
 
 @Composable
-private fun StateLayout(content: @Composable () -> Unit) {
+private fun StateLayout(modifier: Modifier, content: @Composable () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp).widthIn(max = 440.dp),
+        modifier = modifier.fillMaxSize().padding(32.dp).widthIn(max = 440.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
     ) {
         content()
     }
 }
-
-@Composable fun ConfirmDialog(title: String, message: String, accept: () -> Unit, dismiss: () -> Unit) = AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = { Text(message) }, confirmButton = { TextButton(accept) { Text("Confirm") } }, dismissButton = { TextButton(dismiss) { Text("Cancel") } })

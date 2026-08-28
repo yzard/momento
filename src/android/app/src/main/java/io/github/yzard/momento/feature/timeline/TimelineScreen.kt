@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
@@ -55,34 +56,40 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
-import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
+import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
+import io.github.yzard.momento.app.designsystem.MomentoSelectionAction
+import io.github.yzard.momento.app.designsystem.MomentoSelectionDock
+import io.github.yzard.momento.app.navigation.LibraryChange
 import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.core.data.RequestResult
+import io.github.yzard.momento.core.data.runRequest
+import io.github.yzard.momento.core.data.userMessage
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.TimelineGroup
 import io.github.yzard.momento.feature.albums.AlbumAddMediaSheet
 import io.github.yzard.momento.feature.media.EmptyState
 import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
+import io.github.yzard.momento.feature.media.PageState
 import io.github.yzard.momento.feature.media.SelectableMediaThumbnail
 import io.github.yzard.momento.feature.media.adaptiveGridColumns
 import io.github.yzard.momento.feature.media.toggleMediaSelection
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
-import kotlinx.serialization.SerializationException
-import retrofit2.HttpException
-import java.io.IOException
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 enum class TimelinePage(
+    val label: String,
     val mediaType: String?,
     val classification: String?,
 ) {
-    TIMELINE(null, null),
-    PHOTOS("image", null),
-    VIDEOS("video", null),
-    SCREENSHOTS("image", "screenshot"),
-    DOCUMENTS("image", "document"),
+    TIMELINE("Timeline", null, null),
+    PHOTOS("Photos", "image", null),
+    VIDEOS("Videos", "video", null),
+    SCREENSHOTS("Screenshots", "image", "screenshot"),
+    DOCUMENTS("Documents", "image", "document"),
 }
 
 enum class TimelinePeriod(val label: String, val groupBy: String) {
@@ -112,12 +119,6 @@ fun shouldAppendTimeline(
     appending: Boolean,
 ): Boolean = hasOlder && !appending && totalItemsCount > 0 && lastVisibleItemIndex >= totalItemsCount - 3
 
-fun addToAlbumSelectionLabel(selectedCount: Int): String = "Add to album ($selectedCount)"
-
-fun trashSelectionLabel(selectedCount: Int): String = "Trash ($selectedCount)"
-
-fun compactTimelineSelection(widthDp: Int): Boolean = widthDp < 480
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TimelineScreen(
@@ -125,11 +126,12 @@ fun TimelineScreen(
     page: TimelinePage,
     period: TimelinePeriod,
     search: String,
+    libraryChange: LibraryChange?,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     val normalizedSearch = normalizedTimelineSearchQuery(search)
     key(page, period, normalizedSearch) {
-        TimelinePageContent(repository, page, period, normalizedSearch, openMedia)
+        TimelinePageContent(repository, page, period, normalizedSearch, libraryChange, openMedia)
     }
 }
 
@@ -140,17 +142,10 @@ private fun TimelinePageContent(
     page: TimelinePage,
     period: TimelinePeriod,
     search: String,
+    libraryChange: LibraryChange?,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
-    var groups by remember { mutableStateOf<List<TimelineGroup>?>(null) }
-    var olderCursor by remember { mutableStateOf<String?>(null) }
-    var newerCursor by remember { mutableStateOf<String?>(null) }
-    var hasOlder by remember { mutableStateOf(false) }
-    var hasNewer by remember { mutableStateOf(false) }
-    var loadingDirection by remember { mutableStateOf<String?>(null) }
-    var failedDirection by remember { mutableStateOf<String?>(null) }
-    var refreshing by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var pagingState by remember { mutableStateOf(TimelinePagingState.initial()) }
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var confirmTrash by remember { mutableStateOf(false) }
@@ -164,84 +159,62 @@ private fun TimelinePageContent(
     val gridState = rememberLazyGridState(restoredPosition.index, restoredPosition.offset)
     val scope = rememberCoroutineScope()
 
-    suspend fun load(reset: Boolean, direction: String) {
-        val requestCursor = if (direction == "older") olderCursor else newerCursor
-        if (!reset && (loadingDirection != null || requestCursor == null)) return
-        if (reset) {
-            groups = null
-            olderCursor = null
-            newerCursor = null
-            hasOlder = false
-            hasNewer = false
-            error = null
-            failedDirection = null
-            refreshing = true
-        } else {
-            loadingDirection = direction
-        }
-        try {
-            val timelineResponse = repository.timelinePage(
+    suspend fun load(reset: Boolean, direction: TimelineDirection) {
+        val requestCursor = pagingState.cursor(direction)
+        val loadingState = pagingState.begin(reset, direction) ?: return
+        pagingState = loadingState
+        when (val requestResult = runRequest {
+            repository.timelinePage(
                 cursor = if (reset) null else requestCursor,
                 groupBy = period.groupBy,
                 search = search,
                 mediaType = page.mediaType,
                 classification = page.classification,
-                direction = direction,
+                direction = direction.wireValue,
                 anchorDate = anchorDate,
             )
-            groups = when {
-                reset -> timelineResponse.groups
-                direction == "older" -> mergeTimelineGroups(groups.orEmpty(), timelineResponse.groups)
-                else -> mergeTimelineGroups(timelineResponse.groups, groups.orEmpty())
+        }) {
+            is RequestResult.Success -> {
+                pagingState = loadingState.complete(requestResult.response, reset, direction)
             }
-            if (reset || direction == "older") {
-                olderCursor = timelineResponse.nextCursor
-                hasOlder = timelineResponse.hasOlder
+            is RequestResult.Failure -> {
+                pagingState = loadingState.fail(
+                    direction,
+                    requestResult.error.userMessage("Could not load timeline"),
+                )
             }
-            if (reset || direction == "newer") {
-                newerCursor = timelineResponse.previousCursor
-                hasNewer = timelineResponse.hasNewer
-            }
-            error = null
-            failedDirection = null
-        } catch (_: IOException) {
-            error = "Could not load timeline"
-            failedDirection = direction
-        } catch (_: HttpException) {
-            error = "Could not load timeline"
-            failedDirection = direction
-        } catch (_: SerializationException) {
-            error = "Could not load timeline"
-            failedDirection = direction
-        } finally {
-            loadingDirection = null
-            refreshing = false
         }
     }
 
     suspend fun loadNewer() {
         val firstIndex = gridState.firstVisibleItemIndex
         val firstOffset = gridState.firstVisibleItemScrollOffset
-        val existingIds = flattenTimelineGroups(groups.orEmpty()).mapTo(mutableSetOf()) { it.media.id }
-        load(reset = false, direction = "newer")
-        val addedCount = flattenTimelineGroups(groups.orEmpty()).count { it.media.id !in existingIds }
+        val existingGroups = (pagingState.page as? PageState.Ready)?.content.orEmpty()
+        val existingIds = flattenTimelineGroups(existingGroups).mapTo(mutableSetOf()) { it.media.id }
+        load(reset = false, direction = TimelineDirection.NEWER)
+        val updatedGroups = (pagingState.page as? PageState.Ready)?.content.orEmpty()
+        val addedCount = flattenTimelineGroups(updatedGroups).count { it.media.id !in existingIds }
         if (addedCount > 0) gridState.scrollToItem(firstIndex + addedCount, firstOffset)
     }
 
     suspend fun moveSelectedToTrash() {
         if (selectedIds.isEmpty()) return
         confirmTrash = false
-        try {
-            repository.moveToTrash(selectedIds.toList())
-            groups = removeTimelineMedia(groups.orEmpty(), selectedIds)
-            selectedIds = emptySet()
-            selecting = false
-        } catch (_: IOException) {
-            selectionError = "Could not move the selected media to Trash"
-        } catch (_: HttpException) {
-            selectionError = "Could not move the selected media to Trash"
-        } catch (_: SerializationException) {
-            selectionError = "Could not move the selected media to Trash"
+        when (val requestResult = runRequest { repository.moveToTrash(selectedIds.toList()) }) {
+            is RequestResult.Success -> {
+                val groups = (pagingState.page as? PageState.Ready)?.content.orEmpty()
+                pagingState = pagingState.copy(
+                    page = PageState.Ready(
+                        removeTimelineMedia(groups, selectedIds),
+                        refreshing = false,
+                    ),
+                )
+                selectedIds = emptySet()
+                selecting = false
+            }
+            is RequestResult.Failure -> {
+                selectionError = requestResult.error.userMessage("Could not move the selected media to Trash")
+            }
         }
     }
 
@@ -250,20 +223,20 @@ private fun TimelinePageContent(
         refreshVersion += 1
     }
 
-    LaunchedEffect(repository, page, period, search, anchorDate, refreshVersion) {
-        load(reset = true, direction = "older")
+    LaunchedEffect(repository, page, period, search, anchorDate, refreshVersion, libraryChange?.sequence) {
+        load(reset = true, direction = TimelineDirection.OLDER)
     }
 
-    LaunchedEffect(gridState, olderCursor, hasOlder) {
+    LaunchedEffect(gridState, pagingState.olderCursor, pagingState.hasOlder) {
         snapshotFlow {
             val layout = gridState.layoutInfo
             shouldAppendTimeline(
                 lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
                 totalItemsCount = layout.totalItemsCount,
-                hasOlder = hasOlder && error == null,
-                appending = loadingDirection != null,
+                hasOlder = pagingState.hasOlder && pagingState.message == null,
+                appending = pagingState.loadingDirection != null,
             )
-        }.filter { it }.collect { load(reset = false, direction = "older") }
+        }.filter { it }.collect { load(reset = false, direction = TimelineDirection.OLDER) }
     }
 
     DisposableEffect(scrollKey, gridState) {
@@ -275,28 +248,40 @@ private fun TimelinePageContent(
         }
     }
 
-    val currentGroups = groups
-    when {
-        currentGroups == null && error != null -> ErrorState(requireNotNull(error)) {
-            scope.launch { load(reset = true, direction = "older") }
-        }
-        currentGroups == null -> LoadingState()
-        else -> PullToRefreshBox(
-            isRefreshing = refreshing,
+    MomentoPageScaffold(
+        title = page.label,
+        subtitle = null,
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = null,
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
+    when (val pageState = pagingState.page) {
+        is PageState.Failed -> ErrorState(
+            pageState.message,
+            { scope.launch { load(reset = true, direction = TimelineDirection.OLDER) } },
+            Modifier,
+        )
+        PageState.Loading -> LoadingState("Loading timeline", Modifier)
+        is PageState.Ready -> PullToRefreshBox(
+            isRefreshing = pageState.refreshing,
             onRefresh = ::refreshTimeline,
             modifier = Modifier.fillMaxSize(),
         ) {
             ContinuousTimelineGrid(
-                groups = currentGroups,
+                groups = pageState.content,
                 repository = repository,
                 gridState = gridState,
-                loadingOlder = loadingDirection == "older",
-                loadingNewer = loadingDirection == "newer",
-                hasNewer = hasNewer,
-                error = error,
-                failedDirection = failedDirection,
+                loadingOlder = pagingState.loadingDirection == TimelineDirection.OLDER,
+                loadingNewer = pagingState.loadingDirection == TimelineDirection.NEWER,
+                hasNewer = pagingState.hasNewer,
+                error = pagingState.message,
+                failedDirection = pagingState.failedDirection?.wireValue,
                 selecting = selecting,
                 selectedIds = selectedIds,
+                contentPadding = contentPadding,
                 startSelecting = { selecting = true },
                 cancelSelecting = {
                     selecting = false
@@ -306,13 +291,14 @@ private fun TimelinePageContent(
                 requestTrash = { confirmTrash = true },
                 requestAddToAlbum = { addingToAlbum = true },
                 loadNewer = { scope.launch { loadNewer() } },
-                retryOlder = { scope.launch { load(reset = false, direction = "older") } },
+                retryOlder = { scope.launch { load(reset = false, direction = TimelineDirection.OLDER) } },
                 retryNewer = { scope.launch { loadNewer() } },
                 refresh = ::refreshTimeline,
                 chooseDate = { showDatePicker = true },
                 openMedia = openMedia,
             )
         }
+    }
     }
 
     if (confirmTrash) {
@@ -375,6 +361,7 @@ private fun ContinuousTimelineGrid(
     failedDirection: String?,
     selecting: Boolean,
     selectedIds: Set<Long>,
+    contentPadding: PaddingValues,
     startSelecting: () -> Unit,
     cancelSelecting: () -> Unit,
     toggleSelection: (Long) -> Unit,
@@ -389,7 +376,7 @@ private fun ContinuousTimelineGrid(
 ) {
     val timelineMedia = remember(groups) { flattenTimelineGroups(groups) }
     if (timelineMedia.isEmpty()) {
-        EmptyState("No media yet")
+        EmptyState("No media yet", "Imported memories will appear here when they are ready.", Modifier)
         return
     }
     val allMedia = remember(timelineMedia) { timelineMedia.map { it.media } }
@@ -406,7 +393,7 @@ private fun ContinuousTimelineGrid(
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
             state = gridState,
-            contentPadding = momentoMediaViewerContentPadding,
+            contentPadding = contentPadding,
         ) {
             if (leadingItemCount > 0) {
                 item(key = "newer", span = { GridItemSpan(maxLineSpan) }) {
@@ -468,14 +455,33 @@ private fun ContinuousTimelineGrid(
         )
         TimelineSelectionControl(
             selecting = selecting,
-            selectedCount = selectedIds.size,
-            compact = compactTimelineSelection(maxWidth.value.toInt()),
             startSelecting = startSelecting,
             cancelSelecting = cancelSelecting,
-            requestTrash = requestTrash,
-            requestAddToAlbum = requestAddToAlbum,
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
         )
+        if (selectedIds.isNotEmpty()) {
+            MomentoSelectionDock(
+                selectedCount = selectedIds.size,
+                actions = listOf(
+                    MomentoSelectionAction(
+                        label = "Add to album",
+                        icon = Icons.Default.AddPhotoAlternate,
+                        enabled = true,
+                        destructive = false,
+                        perform = requestAddToAlbum,
+                    ),
+                    MomentoSelectionAction(
+                        label = "Move to Trash",
+                        icon = Icons.Default.Delete,
+                        enabled = true,
+                        destructive = true,
+                        perform = requestTrash,
+                    ),
+                ),
+                clearSelection = cancelSelecting,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+            )
+        }
     }
 }
 
@@ -506,58 +512,13 @@ private fun FloatingTimelineHeader(
 @Composable
 private fun TimelineSelectionControl(
     selecting: Boolean,
-    selectedCount: Int,
-    compact: Boolean,
     startSelecting: () -> Unit,
     cancelSelecting: () -> Unit,
-    requestTrash: () -> Unit,
-    requestAddToAlbum: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors()
-    Surface(
-        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
-        color = floatingColors.container,
-        contentColor = floatingColors.content,
-        shape = MaterialTheme.shapes.extraLarge,
-        shadowElevation = 3.dp,
-    ) {
-        Row {
-            if (selecting && selectedCount > 0) {
-                if (compact) {
-                    Text(
-                        selectedCount.toString(),
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.padding(start = 12.dp),
-                    )
-                    IconButton(onClick = requestAddToAlbum) {
-                        Icon(Icons.Default.AddPhotoAlternate, "Add $selectedCount selected media to an album")
-                    }
-                    IconButton(onClick = requestTrash) {
-                        Icon(Icons.Default.Delete, "Move $selectedCount selected media to Trash")
-                    }
-                } else {
-                    TextButton(
-                        onClick = requestAddToAlbum,
-                        colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                    ) { Text(addToAlbumSelectionLabel(selectedCount)) }
-                    TextButton(
-                        onClick = requestTrash,
-                        colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                    ) {
-                        Icon(Icons.Default.Delete, "Move selected media to Trash")
-                        Text(trashSelectionLabel(selectedCount))
-                    }
-                }
-            }
-            if (selecting) {
-                IconButton(onClick = cancelSelecting) { Icon(Icons.Default.Close, "Cancel selection") }
-            } else {
-                TextButton(
-                    onClick = startSelecting,
-                    colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                ) { Text("Select") }
-            }
+    MomentoFloatingDock(modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp)) {
+        TextButton(onClick = if (selecting) cancelSelecting else startSelecting) {
+            Text(if (selecting) "Done" else "Select")
         }
     }
 }

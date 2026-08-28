@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -41,17 +42,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.core.data.RequestResult
+import io.github.yzard.momento.core.data.runRequest
+import io.github.yzard.momento.core.data.userMessage
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
+import io.github.yzard.momento.app.designsystem.MomentoSelectionAction
+import io.github.yzard.momento.app.designsystem.MomentoSelectionDock
+import io.github.yzard.momento.app.designsystem.MomentoSelectionMark
+import io.github.yzard.momento.app.navigation.LibraryChange
 import io.github.yzard.momento.core.model.DeduplicateGroup
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.feature.media.EmptyState
 import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
+import io.github.yzard.momento.feature.media.beginCursorPage
+import io.github.yzard.momento.feature.media.completeCursorPage
+import io.github.yzard.momento.feature.media.emptyCursorPagingState
+import io.github.yzard.momento.feature.media.failCursorPage
 import io.github.yzard.momento.feature.media.MediaThumbnail
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.serialization.SerializationException
-import retrofit2.HttpException
-import java.io.IOException
 import java.util.Locale
 
 fun canManageDeduplication(isAdmin: Boolean): Boolean = isAdmin
@@ -89,117 +99,100 @@ fun compactDeduplicateActions(widthDp: Int): Boolean = widthDp < 460
 fun DeduplicateScreen(
     repository: MomentoRepository,
     isAdmin: Boolean,
+    libraryChange: LibraryChange?,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     var status by remember(repository) { mutableStateOf("idle") }
-    var groups by remember(repository) { mutableStateOf<List<DeduplicateGroup>?>(null) }
-    var nextCursor by remember(repository) { mutableStateOf<String?>(null) }
-    var hasMore by remember(repository) { mutableStateOf(false) }
+    var pagingState by remember(repository) { mutableStateOf(emptyCursorPagingState<DeduplicateGroup>()) }
     var totalGroups by remember(repository) { mutableStateOf(0L) }
     var totalMedia by remember(repository) { mutableStateOf(0L) }
     var selectedMediaIds by remember(repository) { mutableStateOf<Set<Long>>(emptySet()) }
-    var loadingMore by remember(repository) { mutableStateOf(false) }
     var working by remember(repository) { mutableStateOf(false) }
     var confirmTrash by remember { mutableStateOf(false) }
     var confirmAdminAction by remember { mutableStateOf<String?>(null) }
-    var error by remember(repository) { mutableStateOf<String?>(null) }
+    var actionError by remember(repository) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     suspend fun loadGroups(reset: Boolean) {
-        if (loadingMore || (!reset && (!hasMore || nextCursor == null))) return
-        if (reset) {
-            groups = null
-            nextCursor = null
-            hasMore = false
-        } else {
-            loadingMore = true
-        }
-        try {
-            val response = repository.duplicateGroups(if (reset) null else nextCursor)
-            groups = if (reset) {
-                response.groups
-            } else {
-                appendDeduplicateGroups(groups.orEmpty(), response.groups)
+        val loadingState = beginCursorPage(pagingState, reset) ?: return
+        pagingState = loadingState
+        when (val requestResult = runRequest { repository.duplicateGroups(if (reset) null else loadingState.nextCursor) }) {
+            is RequestResult.Success -> {
+                val response = requestResult.response
+                pagingState = completeCursorPage(
+                    state = loadingState,
+                    page = response.groups,
+                    nextCursor = response.nextCursor,
+                    hasMore = response.hasMore,
+                    key = DeduplicateGroup::clusterId,
+                )
+                totalGroups = response.totalGroups
+                totalMedia = response.totalMedia
             }
-            nextCursor = response.nextCursor
-            hasMore = response.hasMore
-            totalGroups = response.totalGroups
-            totalMedia = response.totalMedia
-            error = null
-        } catch (_: IOException) {
-            error = "Could not load duplicate groups"
-        } catch (_: HttpException) {
-            error = "Could not load duplicate groups"
-        } catch (_: SerializationException) {
-            error = "Could not load duplicate groups"
-        } finally {
-            loadingMore = false
+            is RequestResult.Failure -> pagingState = failCursorPage(
+                loadingState,
+                requestResult.error.userMessage("Could not load duplicate groups"),
+            )
         }
     }
 
     suspend fun loadStatus() {
         if (!isAdmin) return
-        try {
-            status = repository.aiStatus().deduplicate.status
-        } catch (_: IOException) {
-            error = "Could not load deduplication status"
-        } catch (_: HttpException) {
-            error = "Could not load deduplication status"
-        } catch (_: SerializationException) {
-            error = "Could not load deduplication status"
+        when (val requestResult = runRequest { repository.aiStatus() }) {
+            is RequestResult.Success -> status = requestResult.response.deduplicate.status
+            is RequestResult.Failure -> {
+                actionError = requestResult.error.userMessage("Could not load deduplication status")
+            }
         }
     }
 
     suspend fun runAdminAction(action: String) {
         if (working) return
         working = true
-        try {
+        val requestResult = runRequest {
             when (action) {
                 "start" -> repository.startAiFeature("deduplicate")
                 "cancel" -> repository.cancelAiFeature("deduplicate")
                 "clean" -> repository.cleanAiFeature("deduplicate")
                 else -> kotlin.error("Unknown deduplication action $action")
             }
-            error = null
-            loadStatus()
-            loadGroups(true)
-        } catch (_: IOException) {
-            error = "Could not $action deduplication"
-        } catch (_: HttpException) {
-            error = "Could not $action deduplication"
-        } catch (_: SerializationException) {
-            error = "Could not $action deduplication"
-        } finally {
-            working = false
         }
+        when (requestResult) {
+            is RequestResult.Success -> {
+                actionError = null
+                loadStatus()
+                loadGroups(true)
+            }
+            is RequestResult.Failure -> {
+                actionError = requestResult.error.userMessage("Could not $action deduplication")
+            }
+        }
+        working = false
     }
 
     suspend fun moveSelectedToTrash() {
         if (working || selectedMediaIds.isEmpty()) return
-        val unsafeGroups = groupsWithoutKeptMedia(groups.orEmpty(), selectedMediaIds)
+        val unsafeGroups = groupsWithoutKeptMedia(pagingState.entries, selectedMediaIds)
         if (unsafeGroups.isNotEmpty()) {
-            error = "Keep at least one item in every similar group before moving media to Trash"
+            actionError = "Keep at least one item in every similar group before moving media to Trash"
             confirmTrash = false
             return
         }
         working = true
-        try {
-            repository.moveToTrash(selectedMediaIds.toList())
-            selectedMediaIds = emptySet()
-            confirmTrash = false
-            loadGroups(true)
-        } catch (_: IOException) {
-            error = "Could not move selected media to Trash"
-        } catch (_: HttpException) {
-            error = "Could not move selected media to Trash"
-        } catch (_: SerializationException) {
-            error = "Could not move selected media to Trash"
-        } finally {
-            working = false
+        when (val requestResult = runRequest { repository.moveToTrash(selectedMediaIds.toList()) }) {
+            is RequestResult.Success -> {
+                selectedMediaIds = emptySet()
+                confirmTrash = false
+                loadGroups(true)
+            }
+            is RequestResult.Failure -> {
+                actionError = requestResult.error.userMessage("Could not move selected media to Trash")
+            }
         }
+        working = false
     }
 
-    LaunchedEffect(repository) { loadGroups(true) }
+    LaunchedEffect(repository, libraryChange?.sequence) { loadGroups(true) }
     LaunchedEffect(repository, isAdmin) {
         while (isAdmin) {
             loadStatus()
@@ -207,14 +200,28 @@ fun DeduplicateScreen(
         }
     }
 
-    val currentGroups = groups
+    val currentGroups = pagingState.entries.takeIf { pagingState.initialized }
+    MomentoPageScaffold(
+        title = "Deduplicate",
+        subtitle = null,
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = null,
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
     when {
-        currentGroups == null && error != null -> ErrorState(requireNotNull(error)) { scope.launch { loadGroups(true) } }
-        currentGroups == null -> LoadingState()
+        currentGroups == null && pagingState.error != null -> ErrorState(
+            requireNotNull(pagingState.error),
+            { scope.launch { loadGroups(true) } },
+            Modifier,
+        )
+        currentGroups == null -> LoadingState("Loading similar media", Modifier)
         else -> Box(Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(top = 64.dp, bottom = if (selectedMediaIds.isEmpty()) 96.dp else 180.dp),
+                contentPadding = contentPadding,
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 item {
@@ -236,11 +243,19 @@ fun DeduplicateScreen(
                                 ) { Text("Clean") }
                             }
                         }
-                        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        (actionError ?: pagingState.error)?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
                 if (currentGroups.isEmpty()) {
-                    item { EmptyState("No similar media groups") }
+                    item {
+                        EmptyState(
+                            "No similar media groups",
+                            "Run deduplication to find visually similar memories.",
+                            Modifier,
+                        )
+                    }
                 }
                 items(currentGroups, key = { it.clusterId }) { group ->
                     DuplicateGroupCard(
@@ -259,56 +274,35 @@ fun DeduplicateScreen(
                         },
                     )
                 }
-                if (hasMore) {
+                if (pagingState.hasMore) {
                     item {
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                             TextButton(
                                 onClick = { scope.launch { loadGroups(false) } },
-                                enabled = !loadingMore,
-                            ) { Text(if (loadingMore) "Loading more" else "Load more groups") }
+                                enabled = !pagingState.loading,
+                            ) { Text(if (pagingState.loading) "Loading more" else "Load more groups") }
                         }
                     }
                 }
             }
             if (selectedMediaIds.isNotEmpty()) {
-                Surface(
-                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(12.dp),
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shadowElevation = 8.dp,
-                ) {
-                    BoxWithConstraints(Modifier.fillMaxWidth().padding(12.dp)) {
-                        if (compactDeduplicateActions(maxWidth.value.toInt())) {
-                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("${selectedMediaIds.size} selected", fontWeight = FontWeight.Bold)
-                                Text("Unselected items are kept", style = MaterialTheme.typography.bodySmall)
-                                Row(Modifier.align(Alignment.End)) {
-                                    TextButton(onClick = { selectedMediaIds = emptySet() }, enabled = !working) {
-                                        Text("Clear")
-                                    }
-                                    Button(onClick = { confirmTrash = true }, enabled = !working) {
-                                        Text("Move to Trash")
-                                    }
-                                }
-                            }
-                        } else {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("${selectedMediaIds.size} selected", fontWeight = FontWeight.Bold)
-                                    Text("Unselected items are kept", style = MaterialTheme.typography.bodySmall)
-                                }
-                                TextButton(onClick = { selectedMediaIds = emptySet() }, enabled = !working) { Text("Clear") }
-                                Button(onClick = { confirmTrash = true }, enabled = !working) { Text("Move to Trash") }
-                            }
-                        }
-                    }
-                }
+                MomentoSelectionDock(
+                    selectedCount = selectedMediaIds.size,
+                    actions = listOf(
+                        MomentoSelectionAction(
+                            label = "Move to Trash",
+                            icon = Icons.Default.Delete,
+                            enabled = !working,
+                            destructive = true,
+                            perform = { confirmTrash = true },
+                        ),
+                    ),
+                    clearSelection = { selectedMediaIds = emptySet() },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                )
             }
         }
+    }
     }
 
     if (confirmTrash) {
@@ -405,10 +399,14 @@ private fun DuplicateMediaCard(
                 onClick = toggleSelection,
                 modifier = Modifier.align(Alignment.TopEnd),
             ) {
-                Icon(
-                    imageVector = if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                    contentDescription = if (selected) "Deselect ${media.originalFilename}" else "Select ${media.originalFilename}",
-                    tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                MomentoSelectionMark(
+                    selected = selected,
+                    contentDescription = if (selected) {
+                        "Deselect ${media.originalFilename}"
+                    } else {
+                        "Select ${media.originalFilename}"
+                    },
+                    modifier = Modifier,
                 )
             }
         }
@@ -419,11 +417,4 @@ private fun DuplicateMediaCard(
             Text(media.dateTaken ?: media.createdAt, maxLines = 1, style = MaterialTheme.typography.bodySmall)
         }
     }
-}
-
-fun appendDeduplicateGroups(
-    existing: List<DeduplicateGroup>,
-    page: List<DeduplicateGroup>,
-): List<DeduplicateGroup> = existing + page.filter { candidate ->
-    existing.none { it.clusterId == candidate.clusterId }
 }

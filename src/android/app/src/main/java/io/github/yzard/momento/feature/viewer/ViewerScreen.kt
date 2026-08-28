@@ -3,14 +3,18 @@ package io.github.yzard.momento.feature.viewer
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -42,6 +46,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -79,16 +84,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
@@ -116,11 +126,11 @@ import io.github.yzard.momento.feature.albums.AlbumAddMediaSheet
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
+import io.github.yzard.momento.app.designsystem.LocalMomentoDarkTheme
 import io.github.yzard.momento.feature.media.MediaThumbnail
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import retrofit2.HttpException
@@ -134,11 +144,12 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
+import androidx.compose.runtime.CompositionLocalProvider
 
 data class ViewerTimestamp(val date: String, val time: String)
 data class FilmstripItemBounds(val index: Int, val offset: Int, val size: Int)
-
-private enum class ViewerSheet { ALBUMS, INFORMATION }
+data class FilmstripEdgeVisibility(val left: Boolean, val right: Boolean)
+enum class ViewerInformationPresentation { BOTTOM, RIGHT }
 
 fun viewerIndex(index: Int, change: Int, size: Int): Int {
     if (size <= 0) return 0
@@ -213,6 +224,22 @@ fun boundedPlaybackPosition(positionMs: Float, durationMs: Long): Long {
     return positionMs.toLong().coerceIn(0, durationMs)
 }
 
+fun filmstripEdgeVisibility(
+    canScrollBackward: Boolean,
+    canScrollForward: Boolean,
+): FilmstripEdgeVisibility = FilmstripEdgeVisibility(
+    left = canScrollBackward,
+    right = canScrollForward,
+)
+
+fun playbackProgressFraction(positionMs: Float, durationMs: Long): Float {
+    if (durationMs <= 0) return 0f
+    return (positionMs / durationMs.toFloat()).coerceIn(0f, 1f)
+}
+
+fun viewerInformationPresentation(landscape: Boolean): ViewerInformationPresentation =
+    if (landscape) ViewerInformationPresentation.RIGHT else ViewerInformationPresentation.BOTTOM
+
 fun centeredFilmstripIndex(
     viewportStartOffset: Int,
     viewportEndOffset: Int,
@@ -230,7 +257,7 @@ fun ViewerScreen(
     initialIndex: Int,
     repository: MomentoRepository,
     viewedIndexChanged: (Int) -> Unit,
-    mediaChanged: () -> Unit,
+    mediaChanged: (Long) -> Unit,
     close: () -> Unit,
 ) {
     var items by remember(media) { mutableStateOf(media) }
@@ -238,16 +265,22 @@ fun ViewerScreen(
         initialPage = viewerIndex(initialIndex, 0, media.size),
         pageCount = { items.size },
     )
-    var activeSheet by remember { mutableStateOf<ViewerSheet?>(null) }
     var confirmTrash by remember { mutableStateOf(false) }
     var trashing by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var chromeVisible by remember { mutableStateOf(true) }
+    var chromeState by rememberSaveable(
+        stateSaver = Saver(
+            save = { state -> state.restorationValues() },
+            restore = ::restoreViewerChromeState,
+        ),
+    ) { mutableStateOf(ViewerChromeState.initial()) }
     var activeVideoPlayer by remember { mutableStateOf<Pair<Long, ExoPlayer>?>(null) }
     var zoomedMediaId by remember { mutableStateOf<Long?>(null) }
     var pendingShareFile by remember { mutableStateOf<File?>(null) }
     val context = LocalContext.current
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val informationPresentation = viewerInformationPresentation(landscape)
     val view = LocalView.current
     val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
@@ -266,12 +299,20 @@ fun ViewerScreen(
     val item = items[index]
     val timestamp = remember(item.id, item.dateTaken, item.createdAt) { viewerTimestamp(item) }
 
+    fun recordChromeInteraction() {
+        chromeState = chromeState.recordInteraction()
+    }
+
+    fun changeChromeInteraction(active: Boolean) {
+        chromeState = chromeState.changeInteraction(active)
+    }
+
     LaunchedEffect(item.id) { zoomedMediaId = null }
     LaunchedEffect(index) { viewedIndexChanged(index) }
-    LaunchedEffect(chromeVisible, item.id, activeSheet) {
-        if (!chromeVisible || activeSheet != null) return@LaunchedEffect
+    LaunchedEffect(chromeState, item.id) {
+        if (!chromeState.visible || chromeState.sheet != null || chromeState.interactionActive) return@LaunchedEffect
         delay(3_500)
-        chromeVisible = false
+        chromeState = chromeState.hideAfterInactivity()
     }
     DisposableEffect(view) {
         val window = (view.context as Activity).window
@@ -334,7 +375,7 @@ fun ViewerScreen(
             repository.moveToTrash(listOf(item.id))
             val result = removeViewedMedia(items, index)
             items = result.first
-            mediaChanged()
+            mediaChanged(item.id)
             if (result.first.isEmpty()) {
                 close()
             } else {
@@ -351,21 +392,27 @@ fun ViewerScreen(
         }
     }
 
-    BackHandler(onBack = close)
+    BackHandler {
+        if (chromeState.sheet != null) {
+            chromeState = chromeState.closeSheet()
+        } else {
+            close()
+        }
+    }
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
-        val compactLandscape = maxWidth > maxHeight
+    CompositionLocalProvider(LocalMomentoDarkTheme provides true) {
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(
             state = pagerState,
             key = { page -> items[page].id },
-            userScrollEnabled = activeSheet == null && zoomedMediaId == null,
+            userScrollEnabled = chromeState.sheet == null && zoomedMediaId == null,
             modifier = Modifier.fillMaxSize(),
         ) { page ->
             ViewerMedia(
                 media = items[page],
                 repository = repository,
                 active = page == index,
-                toggleChrome = { chromeVisible = !chromeVisible },
+                toggleChrome = { chromeState = chromeState.toggle() },
                 zoomChanged = { zoomed ->
                     val pageMediaId = items[page].id
                     if (zoomed && page == index) {
@@ -386,7 +433,7 @@ fun ViewerScreen(
         }
 
         AnimatedVisibility(
-            visible = chromeVisible,
+            visible = chromeState.visible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
@@ -394,7 +441,7 @@ fun ViewerScreen(
             ViewerTopControls(timestamp = timestamp, close = close, modifier = Modifier.fillMaxWidth())
         }
         AnimatedVisibility(
-            visible = chromeVisible,
+            visible = chromeState.visible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter),
@@ -407,31 +454,66 @@ fun ViewerScreen(
                 navigate = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
                 sharing = sharing,
                 share = { scope.launch { shareCurrent() } },
-                albums = { activeSheet = ViewerSheet.ALBUMS },
-                information = { activeSheet = ViewerSheet.INFORMATION },
+                albums = { chromeState = chromeState.openSheet(ViewerSheet.ALBUMS) },
+                information = { chromeState = chromeState.openSheet(ViewerSheet.INFORMATION) },
                 trash = { confirmTrash = true },
-                compactLandscape = compactLandscape,
-                userInteracted = { chromeVisible = true },
+                userInteracted = ::recordChromeInteraction,
+                interactionChanged = ::changeChromeInteraction,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
     }
+    }
 
-    if (activeSheet != null) {
+    if (
+        chromeState.sheet == ViewerSheet.ALBUMS ||
+        (chromeState.sheet == ViewerSheet.INFORMATION && informationPresentation == ViewerInformationPresentation.BOTTOM)
+    ) {
         ModalBottomSheet(
-            onDismissRequest = { activeSheet = null },
+            onDismissRequest = { chromeState = chromeState.closeSheet() },
             sheetState = sheetState,
             containerColor = MaterialTheme.colorScheme.background,
             contentColor = MaterialTheme.colorScheme.onBackground,
         ) {
-            when (activeSheet) {
+            when (chromeState.sheet) {
                 ViewerSheet.ALBUMS -> AlbumAddMediaSheet(
                     repository = repository,
                     mediaIds = listOf(item.id),
-                    close = { activeSheet = null },
+                    close = { chromeState = chromeState.closeSheet() },
                 )
-                ViewerSheet.INFORMATION -> MediaInformationSheet(item)
+                ViewerSheet.INFORMATION -> MediaInformationContent(item, Modifier.fillMaxWidth().fillMaxHeight(0.72f))
                 null -> Unit
+            }
+        }
+    }
+
+    AnimatedVisibility(
+        visible = chromeState.sheet == ViewerSheet.INFORMATION &&
+            informationPresentation == ViewerInformationPresentation.RIGHT,
+        enter = fadeIn() + slideInHorizontally(initialOffsetX = { fullWidth -> fullWidth }),
+        exit = fadeOut() + slideOutHorizontally(targetOffsetX = { fullWidth -> fullWidth }),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.42f))
+                .clickable { chromeState = chromeState.closeSheet() },
+        ) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .widthIn(max = 420.dp)
+                    .fillMaxWidth(0.46f)
+                    .clickable(onClick = {}),
+                color = MaterialTheme.colorScheme.background,
+                contentColor = MaterialTheme.colorScheme.onBackground,
+            ) {
+                MediaInformationContent(
+                    media = item,
+                    modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+                )
             }
         }
     }
@@ -692,8 +774,8 @@ private fun ViewerBottomControls(
     albums: () -> Unit,
     information: () -> Unit,
     trash: () -> Unit,
-    compactLandscape: Boolean,
     userInteracted: () -> Unit,
+    interactionChanged: (Boolean) -> Unit,
     modifier: Modifier,
 ) {
     val floatingColors = momentoFloatingControlColors(darkTheme = true)
@@ -703,17 +785,21 @@ private fun ViewerBottomControls(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (player != null) {
-            VideoPlaybackControls(player, userInteracted, Modifier.widthIn(max = 640.dp).fillMaxWidth())
-        }
-        if (!compactLandscape) {
-            ViewerFilmstrip(
-                media = media,
-                currentIndex = currentIndex,
-                repository = repository,
-                navigate = navigate,
-                modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth(),
+            VideoPlaybackControls(
+                player = player,
+                userInteracted = userInteracted,
+                interactionChanged = interactionChanged,
+                modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
             )
         }
+        ViewerFilmstrip(
+            media = media,
+            currentIndex = currentIndex,
+            repository = repository,
+            navigate = navigate,
+            interactionChanged = interactionChanged,
+            modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
+        )
         Box(Modifier.fillMaxWidth().height(56.dp)) {
             MomentoFloatingButton(
                 modifier = Modifier.align(Alignment.CenterStart),
@@ -767,18 +853,22 @@ private fun ViewerFilmstrip(
     currentIndex: Int,
     repository: MomentoRepository,
     navigate: (Int) -> Unit,
+    interactionChanged: (Boolean) -> Unit,
     modifier: Modifier,
 ) {
     val floatingColors = momentoFloatingControlColors(darkTheme = true)
     val listState = rememberLazyListState()
     val latestCurrentIndex by rememberUpdatedState(currentIndex)
     val latestNavigate by rememberUpdatedState(navigate)
-    LaunchedEffect(currentIndex) { listState.animateScrollToItem(currentIndex) }
+    LaunchedEffect(currentIndex) {
+        if (!listState.isScrollInProgress) listState.animateScrollToItem(currentIndex)
+    }
     LaunchedEffect(listState) {
         androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }
             .distinctUntilChanged()
-            .filter { scrolling -> !scrolling }
-            .collect {
+            .collect { scrolling ->
+                interactionChanged(scrolling)
+                if (scrolling) return@collect
                 val layout = listState.layoutInfo
                 val centeredIndex = centeredFilmstripIndex(
                     viewportStartOffset = layout.viewportStartOffset,
@@ -791,60 +881,79 @@ private fun ViewerFilmstrip(
             }
     }
 
-    Surface(
-        modifier = modifier.padding(horizontal = 68.dp),
-        color = floatingColors.container,
-        contentColor = floatingColors.content,
-        shape = MaterialTheme.shapes.extraLarge,
-    ) {
-        BoxWithConstraints(Modifier.fillMaxWidth().height(58.dp)) {
-            val thumbnailSize = 46.dp
-            val centeredPadding = ((maxWidth - thumbnailSize) / 2).coerceAtLeast(0.dp)
-            LazyRow(
-                state = listState,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = centeredPadding),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                itemsIndexed(media, key = { _, item -> item.id }) { index, item ->
-                    MediaThumbnail(
-                        media = item,
-                        repository = repository,
-                        trashed = false,
-                        modifier = Modifier
-                            .size(thumbnailSize)
-                            .clip(RoundedCornerShape(10.dp))
-                            .border(
-                                width = if (index == currentIndex) 2.dp else 0.dp,
-                                color = floatingColors.content,
-                                shape = RoundedCornerShape(10.dp),
-                            )
-                            .clickable { navigate(index) },
-                    )
-                }
+    BoxWithConstraints(modifier.height(58.dp)) {
+        val thumbnailSize = 46.dp
+        val centeredPadding = ((maxWidth - thumbnailSize) / 2).coerceAtLeast(0.dp)
+        val edgeVisibility = filmstripEdgeVisibility(
+            canScrollBackward = listState.canScrollBackward,
+            canScrollForward = listState.canScrollForward,
+        )
+        LazyRow(
+            state = listState,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = centeredPadding),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            itemsIndexed(media, key = { _, item -> item.id }) { index, item ->
+                MediaThumbnail(
+                    media = item,
+                    repository = repository,
+                    trashed = false,
+                    modifier = Modifier
+                        .size(thumbnailSize)
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(
+                            width = if (index == currentIndex) 2.dp else 0.dp,
+                            color = floatingColors.content,
+                            shape = RoundedCornerShape(10.dp),
+                        )
+                        .clickable { navigate(index) },
+                )
             }
+        }
+        if (edgeVisibility.left) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .width(36.dp)
+                    .background(Brush.horizontalGradient(listOf(Color.Black, Color.Transparent))),
+            )
+        }
+        if (edgeVisibility.right) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(36.dp)
+                    .background(Brush.horizontalGradient(listOf(Color.Transparent, Color.Black))),
+            )
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun VideoPlaybackControls(player: ExoPlayer, userInteracted: () -> Unit, modifier: Modifier) {
+private fun VideoPlaybackControls(
+    player: ExoPlayer,
+    userInteracted: () -> Unit,
+    interactionChanged: (Boolean) -> Unit,
+    modifier: Modifier,
+) {
     val floatingColors = momentoFloatingControlColors(darkTheme = true)
-    var positionMs by remember(player) { mutableLongStateOf(0L) }
-    var durationMs by remember(player) { mutableLongStateOf(0L) }
-    var previewPositionMs by remember(player) { mutableFloatStateOf(0f) }
-    var dragging by remember(player) { mutableStateOf(false) }
+    var seekState by remember(player) { mutableStateOf(ViewerSeekState.initial()) }
     var playing by remember(player) { mutableStateOf(player.playWhenReady) }
     var muted by remember(player) { mutableStateOf(player.volume == 0f) }
-    val seekRangeEnd = durationMs.coerceAtLeast(1L).toFloat()
-    val displayedPosition = (if (dragging) previewPositionMs else positionMs.toFloat())
-        .coerceIn(0f, seekRangeEnd)
+    val seekRangeEnd = seekState.durationMs.coerceAtLeast(1L).toFloat()
+    val displayedPosition = seekState.displayedPositionMs
 
     LaunchedEffect(player) {
         while (isActive) {
-            if (!dragging) positionMs = player.currentPosition.coerceAtLeast(0L)
-            durationMs = player.duration.coerceAtLeast(0L)
+            seekState = seekState.synchronize(
+                positionMs = player.currentPosition,
+                durationMs = player.duration,
+            )
             playing = player.playWhenReady
             muted = player.volume == 0f
             delay(200)
@@ -852,14 +961,14 @@ private fun VideoPlaybackControls(player: ExoPlayer, userInteracted: () -> Unit,
     }
 
     Surface(
-        modifier = modifier.padding(horizontal = 36.dp),
-        color = floatingColors.container,
+        modifier = modifier.padding(horizontal = 12.dp),
+        color = Color.Transparent,
         contentColor = floatingColors.content,
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = MaterialTheme.shapes.small,
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 6.dp),
+            modifier = Modifier.padding(horizontal = 2.dp),
         ) {
             IconButton(
                 onClick = {
@@ -877,21 +986,50 @@ private fun VideoPlaybackControls(player: ExoPlayer, userInteracted: () -> Unit,
                 value = displayedPosition,
                 onValueChange = { value ->
                     userInteracted()
-                    dragging = true
-                    previewPositionMs = value
+                    if (!seekState.dragging) interactionChanged(true)
+                    seekState = seekState.dragTo(value)
                 },
                 onValueChangeFinished = {
-                    val target = boundedPlaybackPosition(previewPositionMs, durationMs)
-                    player.seekTo(target)
-                    positionMs = target
-                    dragging = false
+                    val commit = seekState.commitDrag()
+                    if (commit != null) {
+                        seekState = commit.first
+                        player.seekTo(commit.second)
+                    }
+                    interactionChanged(false)
                 },
                 valueRange = 0f..seekRangeEnd,
-                enabled = durationMs > 0,
-                modifier = Modifier.weight(1f),
+                enabled = seekState.durationMs > 0,
+                modifier = Modifier.weight(1f).height(48.dp),
+                thumb = {
+                    Box(
+                        Modifier
+                            .size(if (seekState.dragging) 12.dp else 9.dp)
+                            .background(floatingColors.content, CircleShape),
+                    )
+                },
+                track = { sliderState ->
+                    val progress = playbackProgressFraction(sliderState.value, seekState.durationMs)
+                    Canvas(Modifier.fillMaxWidth().height(3.dp)) {
+                        val centerY = size.height / 2f
+                        drawLine(
+                            color = floatingColors.content.copy(alpha = 0.32f),
+                            start = Offset(0f, centerY),
+                            end = Offset(size.width, centerY),
+                            strokeWidth = size.height,
+                            cap = StrokeCap.Round,
+                        )
+                        drawLine(
+                            color = floatingColors.content,
+                            start = Offset(0f, centerY),
+                            end = Offset(size.width * progress, centerY),
+                            strokeWidth = size.height,
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                },
             )
             Text(
-                "${formatPlaybackTime(displayedPosition.toLong())} / ${formatPlaybackTime(durationMs)}",
+                "${formatPlaybackTime(displayedPosition.toLong())} / ${formatPlaybackTime(seekState.durationMs)}",
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
             )
@@ -929,9 +1067,9 @@ private fun Modifier.viewerChromeToggle(toggle: () -> Unit): Modifier = pointerI
 }
 
 @Composable
-private fun MediaInformationSheet(media: Media) {
+private fun MediaInformationContent(media: Media, modifier: Modifier) {
     val rows = remember(media) { mediaMetadataRows(media) }
-    LazyColumn(Modifier.fillMaxWidth().fillMaxHeight(0.72f)) {
+    LazyColumn(modifier) {
         item {
             Text(
                 "Information",

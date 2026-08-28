@@ -1,6 +1,5 @@
 package io.github.yzard.momento.feature.places
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -30,7 +29,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,29 +39,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import io.github.yzard.momento.app.designsystem.MomentoDetailPageHeader
-import io.github.yzard.momento.app.designsystem.MomentoPageHeader
-import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
+import io.github.yzard.momento.app.navigation.LibraryChange
 import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.core.data.RequestResult
+import io.github.yzard.momento.core.data.runRequest
+import io.github.yzard.momento.core.data.userMessage
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.Place
 import io.github.yzard.momento.core.ui.MemoryCardOverlay
+import io.github.yzard.momento.core.ui.MomentoAsyncImage
 import io.github.yzard.momento.feature.media.EmptyState
 import io.github.yzard.momento.feature.media.ErrorState
 import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.media.MediaGrid
+import io.github.yzard.momento.feature.media.MomentoCollectionDetail
+import io.github.yzard.momento.feature.media.PageState
+import io.github.yzard.momento.feature.media.beginCursorPage
+import io.github.yzard.momento.feature.media.completeCursorPage
+import io.github.yzard.momento.feature.media.emptyCursorPagingState
+import io.github.yzard.momento.feature.media.failCursorPage
 import io.github.yzard.momento.feature.media.shouldLoadMoreMedia
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.filter
-import kotlinx.serialization.SerializationException
-import retrofit2.HttpException
-import java.io.IOException
 import java.util.Base64
 
 fun placeGridColumns(widthDp: Int): Int = when {
@@ -91,70 +92,65 @@ fun placeDetailSubtitle(place: Place): String =
     listOf(placeRegion(place), "${place.mediaCount} media").filter { it.isNotEmpty() }.joinToString(" · ")
 
 @Composable
-fun PlacesScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
-    var places by remember(repository) { mutableStateOf<List<Place>?>(null) }
-    var nextCursor by remember(repository) { mutableStateOf<String?>(null) }
-    var hasMore by remember(repository) { mutableStateOf(false) }
-    var loading by remember(repository) { mutableStateOf(false) }
-    var selectedPlaceId by rememberSaveable { mutableStateOf<String?>(null) }
-    var error by remember(repository) { mutableStateOf<String?>(null) }
+fun PlacesScreen(
+    repository: MomentoRepository,
+    libraryChange: LibraryChange?,
+    openPlace: (Place) -> Unit,
+) {
+    var pagingState by remember(repository) { mutableStateOf(emptyCursorPagingState<Place>()) }
     val scope = rememberCoroutineScope()
 
     suspend fun loadPlaces(reset: Boolean) {
-        if (loading || (!reset && (!hasMore || nextCursor == null))) return
-        loading = true
-        if (reset) {
-            places = null
-            nextCursor = null
-            hasMore = false
-        }
-        try {
-            val response = repository.places(if (reset) null else nextCursor)
-            places = if (reset) response.places else appendPlaces(places.orEmpty(), response.places)
-            nextCursor = response.nextCursor
-            hasMore = response.hasMore
-            error = null
-        } catch (_: IOException) {
-            error = "Could not load places"
-        } catch (_: HttpException) {
-            error = "Could not load places"
-        } catch (_: SerializationException) {
-            error = "Could not load places"
-        } finally {
-            loading = false
-        }
-    }
-
-    LaunchedEffect(repository) { loadPlaces(true) }
-    BackHandler(enabled = selectedPlaceId != null) { selectedPlaceId = null }
-
-    val selectedPlace = places?.firstOrNull { place -> place.placeId == selectedPlaceId }
-    if (selectedPlace != null) {
-        PlaceDetailScreen(repository, selectedPlace, { selectedPlaceId = null }, openMedia)
-        return
-    }
-
-    Box(Modifier.fillMaxSize()) {
-        when {
-            places == null && error != null -> ErrorState(error!!) { scope.launch { loadPlaces(true) } }
-            places == null -> LoadingState()
-            places!!.isEmpty() -> EmptyState("No places yet")
-            else -> PlaceTiles(
-                places = places!!,
-                repository = repository,
-                hasMore = hasMore,
-                loading = loading,
-                loadMore = { scope.launch { loadPlaces(false) } },
-                select = { selectedPlaceId = it.placeId },
+        val loadingState = beginCursorPage(pagingState, reset) ?: return
+        pagingState = loadingState
+        when (val requestResult = runRequest { repository.places(if (reset) null else loadingState.nextCursor) }) {
+            is RequestResult.Success -> pagingState = completeCursorPage(
+                state = loadingState,
+                page = requestResult.response.places,
+                nextCursor = requestResult.response.nextCursor,
+                hasMore = requestResult.response.hasMore,
+                key = Place::placeId,
+            )
+            is RequestResult.Failure -> pagingState = failCursorPage(
+                loadingState,
+                requestResult.error.userMessage("Could not load places"),
             )
         }
-        MomentoPageHeader(
-            title = "Places",
-            subtitle = null,
-            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.statusBars),
-            leadingContent = null,
-            trailingContent = null,
-        )
+    }
+
+    LaunchedEffect(repository, libraryChange?.sequence) { loadPlaces(true) }
+    MomentoPageScaffold(
+        title = "Places",
+        subtitle = null,
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = null,
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
+        when {
+            !pagingState.initialized && pagingState.error != null -> ErrorState(
+                requireNotNull(pagingState.error),
+                { scope.launch { loadPlaces(true) } },
+                Modifier,
+            )
+            !pagingState.initialized -> LoadingState("Loading places", Modifier)
+            pagingState.entries.isEmpty() -> EmptyState(
+                "No places yet",
+                "Places will appear when memories contain location information.",
+                Modifier,
+            )
+            else -> PlaceTiles(
+                places = pagingState.entries,
+                repository = repository,
+                hasMore = pagingState.hasMore,
+                loading = pagingState.loading,
+                contentPadding = contentPadding,
+                loadMore = { scope.launch { loadPlaces(false) } },
+                select = openPlace,
+            )
+        }
     }
 }
 
@@ -164,6 +160,7 @@ private fun PlaceTiles(
     repository: MomentoRepository,
     hasMore: Boolean,
     loading: Boolean,
+    contentPadding: PaddingValues,
     loadMore: () -> Unit,
     select: (Place) -> Unit,
 ) {
@@ -184,7 +181,7 @@ private fun PlaceTiles(
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
             state = gridState,
-            contentPadding = PaddingValues(start = 10.dp, top = 88.dp, end = 10.dp, bottom = 92.dp),
+            contentPadding = contentPadding,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -209,16 +206,10 @@ private fun PlaceTiles(
 
 @Composable
 private fun PlaceTile(place: Place, repository: MomentoRepository, select: () -> Unit) {
-    val context = LocalContext.current
     val thumbnail by produceState<ByteArray?>(null, place.placeId) {
-        value = try {
-            decodePlaceThumbnail(repository.placeThumbnail(place.placeId))
-        } catch (_: IOException) {
-            null
-        } catch (_: HttpException) {
-            null
-        } catch (_: SerializationException) {
-            null
+        value = when (val requestResult = runRequest { repository.placeThumbnail(place.placeId) }) {
+            is RequestResult.Success -> decodePlaceThumbnail(requestResult.response)
+            is RequestResult.Failure -> null
         }
     }
     val shape = RoundedCornerShape(16.dp)
@@ -235,9 +226,9 @@ private fun PlaceTile(place: Place, repository: MomentoRepository, select: () ->
             .clickable(onClick = select),
     ) {
         if (thumbnail != null) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(thumbnail).build(),
-                imageLoader = repository.authenticatedImageLoader(context),
+            MomentoAsyncImage(
+                model = thumbnail,
+                repository = repository,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
@@ -259,84 +250,75 @@ private fun PlaceTile(place: Place, repository: MomentoRepository, select: () ->
 }
 
 @Composable
-private fun PlaceDetailScreen(
+internal fun PlaceDetailScreen(
     repository: MomentoRepository,
     place: Place,
     close: () -> Unit,
+    libraryChange: LibraryChange?,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     val placeId = place.placeId
-    var media by remember(placeId) { mutableStateOf<List<Media>?>(null) }
-    var nextCursor by remember(placeId) { mutableStateOf<String?>(null) }
-    var more by remember(placeId) { mutableStateOf(true) }
-    var requestCursor by remember(placeId) { mutableStateOf<String?>(null) }
-    var error by remember(placeId) { mutableStateOf<String?>(null) }
-    var loading by remember(placeId) { mutableStateOf(false) }
-    var retryVersion by remember(placeId) { mutableIntStateOf(0) }
+    var pagingState by remember(placeId) { mutableStateOf(emptyCursorPagingState<Media>()) }
+    val scope = rememberCoroutineScope()
 
-    LaunchedEffect(placeId, requestCursor, retryVersion) {
-        loading = true
-        try {
-            val response = repository.place(placeId, requestCursor)
-            media = appendPlaceMedia(media.orEmpty(), response.media)
-            nextCursor = response.nextCursor
-            more = response.hasMore
-            error = null
-        } catch (_: IOException) {
-            error = "Could not load this place"
-        } catch (_: HttpException) {
-            error = "Could not load this place"
-        } catch (_: SerializationException) {
-            error = "Could not load this place"
-        } finally {
-            loading = false
+    suspend fun loadPlace(reset: Boolean) {
+        val loadingState = beginCursorPage(pagingState, reset) ?: return
+        pagingState = loadingState
+        when (val requestResult = runRequest { repository.place(placeId, if (reset) null else loadingState.nextCursor) }) {
+            is RequestResult.Success -> pagingState = completeCursorPage(
+                state = loadingState,
+                page = requestResult.response.media,
+                nextCursor = requestResult.response.nextCursor,
+                hasMore = requestResult.response.hasMore,
+                key = Media::id,
+            )
+            is RequestResult.Failure -> pagingState = failCursorPage(
+                loadingState,
+                requestResult.error.userMessage("Could not load this place"),
+            )
         }
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        when {
-            media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
-            media == null -> LoadingState()
-            else -> MediaGrid(
-                media = media!!,
-                repository = repository,
-                selectedMediaIds = emptySet(),
-                contentPadding = momentoMediaViewerContentPadding,
-                headerContent = null,
-                footerContent = if (more && nextCursor != null) {
-                    {
-                        Text(
-                            if (loading) "Loading more..." else if (error == null) "Load more" else "Retry loading more",
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(enabled = !loading) {
-                                    if (error == null) requestCursor = nextCursor else retryVersion += 1
-                                }
-                                .padding(16.dp),
-                        )
-                    }
-                } else {
-                    null
-                },
-                modifier = Modifier.fillMaxSize(),
-            ) { mediaItem ->
-                openMedia(media!!, media!!.indexOf(mediaItem))
+    LaunchedEffect(placeId, libraryChange?.sequence) { loadPlace(reset = true) }
+
+    val pageState: PageState<List<Media>> = when {
+        !pagingState.initialized && pagingState.error != null ->
+            PageState.Failed(requireNotNull(pagingState.error))
+        !pagingState.initialized -> PageState.Loading
+        else -> PageState.Ready(pagingState.entries, refreshing = false)
+    }
+
+    MomentoCollectionDetail(
+        title = place.city,
+        subtitle = placeDetailSubtitle(place),
+        backContentDescription = "Back to places",
+        repository = repository,
+        pageState = pageState,
+        selectedMediaIds = emptySet(),
+        reserveBottomControls = false,
+        bottomContent = null,
+        footerContent = if (pagingState.hasMore && pagingState.nextCursor != null) {
+            {
+                Text(
+                    if (pagingState.loading) "Loading more..." else if (pagingState.error == null) "Load more" else "Retry loading more",
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !pagingState.loading) {
+                            scope.launch { loadPlace(reset = false) }
+                        }
+                        .padding(16.dp),
+                )
             }
-        }
-        MomentoDetailPageHeader(
-            title = place.city,
-            subtitle = placeDetailSubtitle(place),
-            backContentDescription = "Back to places",
-            enabled = true,
-            onBack = close,
-            modifier = Modifier.align(Alignment.TopStart),
-        )
-    }
+        } else {
+            null
+        },
+        contentError = null,
+        loadingLabel = "Loading place",
+        emptyTitle = "No media",
+        emptyExplanation = "No visible media is assigned to this place.",
+        close = close,
+        retry = { scope.launch { loadPlace(reset = true) } },
+        select = { mediaItem, media -> openMedia(media, media.indexOf(mediaItem)) },
+    )
 }
-
-fun appendPlaceMedia(existing: List<Media>, page: List<Media>): List<Media> =
-    existing + page.filter { candidate -> existing.none { it.id == candidate.id } }
-
-fun appendPlaces(existing: List<Place>, page: List<Place>): List<Place> =
-    existing + page.filter { candidate -> existing.none { it.placeId == candidate.placeId } }

@@ -19,25 +19,38 @@ class MainShellStateTest {
         assertEquals("lake", state.timelineSearchQuery)
     }
 
-    @Test fun closingChangedViewerRefreshesItsParentOnce() {
+    @Test fun viewerUsesTheRouteStackAndPublishesExplicitLibraryChanges() {
         val state = MainShellState()
         val media = listOf(media(1), media(2))
 
         state.openViewer(media, 1)
-        assertEquals(media, state.viewerMedia)
+        assertEquals(MainRoute.Viewer(media, 1), state.viewer)
         state.updateViewerIndex(0)
-        state.markViewerChanged()
+        state.markMediaChanged(2)
         state.closeViewer()
         state.closeViewer()
 
-        assertNull(state.viewerMedia)
-        assertEquals(1, state.contentRevision)
-        assertEquals(0, state.viewerIndex)
+        assertNull(state.viewer)
+        assertEquals(LibraryChange(1, 2), state.libraryChange)
+        assertEquals(listOf(MainRoute.Collection(Destination.TIMELINE)), state.routeStack)
     }
 
     @Test(expected = IllegalArgumentException::class)
     fun viewerRejectsAnInvalidStartingIndex() {
         MainShellState().openViewer(listOf(media(1)), 2)
+    }
+
+    @Test fun detailsAndViewerFormOneOrderedBackStack() {
+        val state = MainShellState()
+        state.navigate(Destination.ALBUMS)
+        state.openAlbum(42)
+        state.openViewer(listOf(media(1)), 0)
+
+        assertEquals(MainRoute.Viewer(listOf(media(1)), 0), state.currentRoute)
+        state.closeViewer()
+        assertEquals(MainRoute.AlbumDetail(42), state.currentRoute)
+        state.closeDetail()
+        assertEquals(MainRoute.Collection(Destination.ALBUMS), state.currentRoute)
     }
 
     private fun media(id: Long) = Media(

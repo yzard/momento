@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -41,6 +42,9 @@ import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
+import io.github.yzard.momento.app.designsystem.MomentoSelectionAction
+import io.github.yzard.momento.app.designsystem.MomentoSelectionDock
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.TrashMedia
 import io.github.yzard.momento.feature.media.EmptyState
@@ -142,10 +146,24 @@ fun TrashScreen(repository: MomentoRepository) {
     LaunchedEffect(repository) { refresh() }
 
     val current = trashItems
+    MomentoPageScaffold(
+        title = "Trash",
+        subtitle = null,
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = null,
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
     when {
-        current == null && error != null -> ErrorState(error!!) { scope.launch { refresh() } }
-        current == null -> LoadingState()
-        current.isEmpty() -> EmptyState("Trash is empty")
+        current == null && error != null -> ErrorState(error!!, { scope.launch { refresh() } }, Modifier)
+        current == null -> LoadingState("Loading Trash", Modifier)
+        current.isEmpty() -> EmptyState(
+            "Trash is empty",
+            "Deleted memories remain here for 30 days before permanent removal.",
+            Modifier,
+        )
         else -> {
             val now = remember(current) { Instant.now() }
             BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -153,10 +171,10 @@ fun TrashScreen(repository: MomentoRepository) {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(columns),
                     state = gridState,
-                    contentPadding = PaddingValues(bottom = 104.dp),
+                    contentPadding = contentPadding,
                 ) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
-                        Column(Modifier.fillMaxWidth().padding(start = 16.dp, top = 68.dp, end = 120.dp, bottom = 12.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(start = 4.dp, end = 108.dp, bottom = 12.dp)) {
                             Text("Recently deleted", style = MaterialTheme.typography.titleLarge)
                             Text(
                                 "Items are permanently deleted 30 days after they enter Trash.",
@@ -214,11 +232,28 @@ fun TrashScreen(repository: MomentoRepository) {
                     modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
                 )
                 if (selecting && selectedIds.isNotEmpty()) {
-                    TrashSelectionActions(
+                    MomentoSelectionDock(
                         selectedCount = selectedIds.size,
-                        enabled = !working,
-                        restore = { scope.launch { restoreSelected() } },
-                        delete = { confirmAction = TrashAction.DELETE_SELECTED },
+                        actions = listOf(
+                            MomentoSelectionAction(
+                                label = "Restore",
+                                icon = Icons.Default.RestoreFromTrash,
+                                enabled = !working,
+                                destructive = false,
+                                perform = { scope.launch { restoreSelected() } },
+                            ),
+                            MomentoSelectionAction(
+                                label = "Delete forever",
+                                icon = Icons.Default.DeleteForever,
+                                enabled = !working,
+                                destructive = true,
+                                perform = { confirmAction = TrashAction.DELETE_SELECTED },
+                            ),
+                        ),
+                        clearSelection = {
+                            selecting = false
+                            selectedIds = emptySet()
+                        },
                         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
                     )
                 } else if (!selecting) {
@@ -231,6 +266,7 @@ fun TrashScreen(repository: MomentoRepository) {
                 }
             }
         }
+    }
     }
 
     confirmAction?.let { action ->
@@ -288,37 +324,6 @@ private fun TrashSelectionControl(
                 onClick = if (selecting) cancel else start,
                 colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
             ) { Text(if (selecting) "Done ($selectedCount)" else "Select") }
-        }
-    }
-}
-
-@Composable
-private fun TrashSelectionActions(
-    selectedCount: Int,
-    enabled: Boolean,
-    restore: () -> Unit,
-    delete: () -> Unit,
-    modifier: Modifier,
-) {
-    val floatingColors = momentoFloatingControlColors()
-    Surface(
-        modifier = modifier,
-        color = floatingColors.container,
-        contentColor = floatingColors.content,
-        shape = MaterialTheme.shapes.extraLarge,
-        shadowElevation = 5.dp,
-    ) {
-        Row(Modifier.padding(horizontal = 4.dp)) {
-            TextButton(
-                onClick = restore,
-                enabled = enabled,
-                colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-            ) { Text("Restore ($selectedCount)") }
-            TextButton(
-                onClick = delete,
-                enabled = enabled,
-                colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-            ) { Text("Delete forever") }
         }
     }
 }

@@ -12,14 +12,6 @@ class PlacesScreenTest {
     @Test fun placeIdsAreOpaque() { assertTrue("city%2Fstate".isNotBlank()) }
 
     @Test
-    fun appendsUniquePlacePages() {
-        val first = Place("first", "Paris", null, "France", 2)
-        val second = Place("second", "Lyon", null, "France", 1)
-
-        assertEquals(listOf(first, second), appendPlaces(listOf(first), listOf(first, second)))
-    }
-
-    @Test
     fun placeGridUsesAvailableWidthInEveryOrientation() {
         assertEquals(1, placeGridColumns(320))
         assertEquals(2, placeGridColumns(360))

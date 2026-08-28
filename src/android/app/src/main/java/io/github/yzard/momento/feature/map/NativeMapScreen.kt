@@ -32,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.graphics.drawable.toBitmap
 import androidx.core.graphics.withClip
 import androidx.core.content.edit
 import androidx.core.view.doOnLayout
@@ -41,11 +40,13 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.yzard.momento.BuildConfig
 import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
+import io.github.yzard.momento.app.navigation.LibraryChange
 import io.github.yzard.momento.core.model.BoundingBox
 import io.github.yzard.momento.core.model.MapCluster
 import io.github.yzard.momento.core.model.Media
-import coil.request.ImageRequest
-import coil.request.SuccessResult
+import io.github.yzard.momento.core.ui.AuthenticatedImageSource
+import io.github.yzard.momento.core.ui.squareAuthenticatedImageSpec
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -182,9 +183,14 @@ private data class OwnedMapView(
 
 @OptIn(FlowPreview::class)
 @Composable
-fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int) -> Unit) {
+fun NativeMapScreen(
+    repository: MomentoRepository,
+    libraryChange: LibraryChange?,
+    showMedia: (List<Media>, Int) -> Unit,
+) {
     var error by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    val imageSource = remember(repository) { AuthenticatedImageSource(repository) }
     val viewportRequests = remember { Channel<MapViewportRequest>(Channel.CONFLATED) }
     val viewportRequestTracker = remember { MapViewportRequestTracker() }
     val clusterSelections = remember { Channel<MapClusterSelection>(Channel.CONFLATED) }
@@ -247,7 +253,7 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
         }
     }
 
-    LaunchedEffect(repository, mapView) {
+    LaunchedEffect(repository, mapView, libraryChange?.sequence) {
         viewportRequests.receiveAsFlow().debounce(VIEWPORT_DEBOUNCE_MS).collectLatest { request ->
             val viewport = request.viewport
             mapView.position()?.let { position -> saveMapPosition(context, position) }
@@ -264,7 +270,12 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
                     val loadedBatch = coroutineScope {
                         clusterBatch.map { cluster ->
                             async {
-                                cluster.id to loadClusterThumbnail(context, repository, cluster.representativeId)
+                                cluster.id to loadClusterThumbnail(
+                                    context,
+                                    repository,
+                                    imageSource,
+                                    cluster.representativeId,
+                                )
                             }
                         }.awaitAll()
                     }
@@ -338,7 +349,16 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    MomentoPageScaffold(
+        title = "Map",
+        subtitle = null,
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = null,
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { mapView },
@@ -351,7 +371,9 @@ fun NativeMapScreen(repository: MomentoRepository, showMedia: (List<Media>, Int)
 
         error?.let { message ->
             Surface(
-                modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = contentPadding.calculateTopPadding(), start = 12.dp, end = 12.dp),
                 color = MaterialTheme.colorScheme.errorContainer,
                 shape = MaterialTheme.shapes.large,
                 shadowElevation = 4.dp,
@@ -410,20 +432,16 @@ fun clusterPrefixes(clusterId: String): List<String> = listOf(clusterId)
 private suspend fun loadClusterThumbnail(
     context: Context,
     repository: MomentoRepository,
+    imageSource: AuthenticatedImageSource,
     representativeId: Long,
 ): Bitmap? {
-    val request = ImageRequest.Builder(context)
-        .data(repository.thumbnailUrl(representativeId, true))
-        .size(CLUSTER_THUMBNAIL_REQUEST_PX, CLUSTER_THUMBNAIL_REQUEST_PX)
-        .allowHardware(false)
-        .build()
-    val result = repository.authenticatedImageLoader(context).execute(request) as? SuccessResult ?: return null
-    val width = result.drawable.intrinsicWidth.coerceAtLeast(1)
-    val height = result.drawable.intrinsicHeight.coerceAtLeast(1)
-    return result.drawable.toBitmap(
-        width,
-        height,
-        Bitmap.Config.ARGB_8888,
+    return imageSource.loadBitmap(
+        context,
+        squareAuthenticatedImageSpec(
+            model = repository.thumbnailUrl(representativeId, true),
+            sizePx = CLUSTER_THUMBNAIL_REQUEST_PX,
+            allowHardware = false,
+        ),
     )
 }
 

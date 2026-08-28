@@ -1,6 +1,5 @@
 package io.github.yzard.momento.feature.albums
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -60,24 +59,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import io.github.yzard.momento.app.designsystem.MomentoActionChip
-import io.github.yzard.momento.app.designsystem.MomentoDetailPageHeader
 import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
-import io.github.yzard.momento.app.designsystem.MomentoPageHeader
-import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
+import io.github.yzard.momento.app.navigation.LibraryChange
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.model.Album
 import io.github.yzard.momento.core.model.AlbumDetail
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.ui.MemoryCardOverlay
+import io.github.yzard.momento.core.ui.MomentoAsyncImage
 import io.github.yzard.momento.feature.media.MediaGrid
+import io.github.yzard.momento.feature.media.MomentoCollectionDetail
+import io.github.yzard.momento.feature.media.PageState
 import io.github.yzard.momento.feature.media.toggleMediaSelection
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
@@ -104,9 +102,12 @@ fun albumDetailSubtitle(album: AlbumDetail): String =
     listOfNotNull(albumMemoryCountLabel(album.media.size.toLong()), album.description).joinToString(" · ")
 
 @Composable
-fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) -> Unit) {
+fun AlbumsScreen(
+    repository: MomentoRepository,
+    libraryChange: LibraryChange?,
+    openAlbum: (Long) -> Unit,
+) {
     var albums by remember { mutableStateOf<List<Album>?>(null) }
-    var selectedAlbumId by rememberSaveable { mutableStateOf<Long?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
     var albumPendingDeletion by remember { mutableStateOf<Album?>(null) }
@@ -118,24 +119,25 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
         error = if (loaded) null else "Could not load albums"
     }
 
-    LaunchedEffect(Unit) { loadAlbums() }
-    BackHandler(enabled = selectedAlbumId != null) { selectedAlbumId = null }
-
-    val albumId = selectedAlbumId
-    if (albumId != null) {
-        AlbumDetailScreen(
-            repository,
-            albumId,
-            {
-                selectedAlbumId = null
-                scope.launch { loadAlbums() }
-            },
-            openMedia,
-        )
-        return
-    }
-
-    Box(Modifier.fillMaxSize()) {
+    LaunchedEffect(repository, libraryChange?.sequence) { loadAlbums() }
+    MomentoPageScaffold(
+        title = "Albums",
+        subtitle = null,
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = {
+            MomentoActionChip(
+                label = "Create album",
+                icon = Icons.Default.Add,
+                enabled = !working,
+                onClick = { creating = true },
+                modifier = Modifier,
+            )
+        },
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
         when {
             albums == null && error == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
             error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
@@ -145,7 +147,7 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
             else -> LazyVerticalGrid(
                 columns = GridCells.Adaptive(156.dp),
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 10.dp, top = 88.dp, end = 10.dp, bottom = 88.dp),
+                contentPadding = contentPadding,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -159,27 +161,12 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
                         album = album,
                         repository = repository,
                         enabled = !working,
-                        select = { selectedAlbumId = album.id },
+                        select = { openAlbum(album.id) },
                         delete = { albumPendingDeletion = album },
                     )
                 }
             }
         }
-        MomentoPageHeader(
-            title = "Albums",
-            subtitle = null,
-            modifier = Modifier.align(Alignment.TopStart).windowInsetsPadding(WindowInsets.statusBars),
-            leadingContent = null,
-            trailingContent = {
-                MomentoActionChip(
-                    label = "Create album",
-                    icon = Icons.Default.Add,
-                    enabled = !working,
-                    onClick = { creating = true },
-                    modifier = Modifier,
-                )
-            },
-        )
     }
 
     if (creating) {
@@ -240,10 +227,11 @@ fun AlbumsScreen(repository: MomentoRepository, openMedia: (List<Media>, Int) ->
 }
 
 @Composable
-private fun AlbumDetailScreen(
+internal fun AlbumDetailScreen(
     repository: MomentoRepository,
     albumId: Long,
     close: () -> Unit,
+    libraryChange: LibraryChange?,
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     var detail by remember(albumId) { mutableStateOf<AlbumDetail?>(null) }
@@ -257,6 +245,7 @@ private fun AlbumDetailScreen(
     val scope = rememberCoroutineScope()
 
     suspend fun loadAlbum() {
+        if (detail == null) error = null
         val loaded = executeAlbumOperation { detail = repository.album(albumId) }
         if (loaded) {
             selectedIds = emptySet()
@@ -266,27 +255,8 @@ private fun AlbumDetailScreen(
         }
     }
 
-    LaunchedEffect(albumId) { loadAlbum() }
+    LaunchedEffect(albumId, libraryChange?.sequence) { loadAlbum() }
     val album = detail
-    if (album == null) {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-            Column(Modifier.align(Alignment.Center).padding(24.dp)) {
-                if (error == null) CircularProgressIndicator() else {
-                    Text(error!!, color = MaterialTheme.colorScheme.error)
-                    TextButton({ scope.launch { loadAlbum() } }) { Text("Retry") }
-                }
-            }
-            MomentoDetailPageHeader(
-                title = "Album",
-                subtitle = null,
-                backContentDescription = "Back to albums",
-                enabled = !working,
-                onBack = close,
-                modifier = Modifier.align(Alignment.TopStart),
-            )
-        }
-        return
-    }
 
     suspend fun runMutation(failure: String, action: suspend () -> Unit): Boolean {
         if (working) return false
@@ -297,81 +267,95 @@ private fun AlbumDetailScreen(
         return succeeded
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        MediaGrid(
-            media = album.media,
+    if (album == null) {
+        MomentoCollectionDetail(
+            title = "Album",
+            subtitle = "",
+            backContentDescription = "Back to albums",
             repository = repository,
-            selectedMediaIds = selectedIds,
-            contentPadding = momentoMediaViewerContentPadding,
-            headerContent = null,
+            pageState = error?.let { PageState.Failed(it) } ?: PageState.Loading,
+            selectedMediaIds = emptySet(),
+            reserveBottomControls = false,
+            bottomContent = null,
             footerContent = null,
-            modifier = Modifier.fillMaxSize(),
-        ) { media ->
+            contentError = null,
+            loadingLabel = "Loading album",
+            emptyTitle = "Empty album",
+            emptyExplanation = "Add media to this album from the timeline.",
+            close = close,
+            retry = { scope.launch { loadAlbum() } },
+            select = { _, _ -> Unit },
+        )
+        return
+    }
+
+    MomentoCollectionDetail(
+        title = album.name,
+        subtitle = albumDetailSubtitle(album),
+        backContentDescription = "Back to albums",
+        repository = repository,
+        pageState = PageState.Ready(album.media, refreshing = false),
+        selectedMediaIds = selectedIds,
+        reserveBottomControls = true,
+        bottomContent = {
+            if (selecting) {
+                AlbumSelectionActionDock(
+                    selectedCount = selectedIds.size,
+                    working = working,
+                    remove = { removingSelected = true },
+                    moveEarlier = {
+                        val selectedId = selectedIds.singleOrNull() ?: return@AlbumSelectionActionDock
+                        scope.launch {
+                            runMutation("Could not reorder media") {
+                                repository.reorderAlbumMedia(
+                                    albumId,
+                                    reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
+                                )
+                            }
+                        }
+                    },
+                    moveLater = {
+                        val selectedId = selectedIds.singleOrNull() ?: return@AlbumSelectionActionDock
+                        scope.launch {
+                            runMutation("Could not reorder media") {
+                                repository.reorderAlbumMedia(
+                                    albumId,
+                                    reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
+                                )
+                            }
+                        }
+                    },
+                    finish = {
+                        selecting = false
+                        selectedIds = emptySet()
+                    },
+                    modifier = Modifier,
+                )
+            } else {
+                AlbumPrimaryActionDock(
+                    enabled = !working,
+                    select = { selecting = true },
+                    edit = { editing = true },
+                    delete = { deleting = true },
+                    modifier = Modifier,
+                )
+            }
+        },
+        footerContent = null,
+        contentError = error,
+        loadingLabel = "Loading album",
+        emptyTitle = "Empty album",
+        emptyExplanation = "Add media to this album from the timeline.",
+        close = close,
+        retry = { scope.launch { loadAlbum() } },
+        select = { media, visibleMedia ->
             if (selecting) {
                 selectedIds = toggleMediaSelection(selectedIds, media.id)
             } else {
-                openMedia(album.media, album.media.indexOf(media))
+                openMedia(visibleMedia, visibleMedia.indexOf(media))
             }
-        }
-        MomentoDetailPageHeader(
-            title = album.name,
-            subtitle = albumDetailSubtitle(album),
-            backContentDescription = "Back to albums",
-            enabled = !working,
-            onBack = close,
-            modifier = Modifier.align(Alignment.TopStart),
-        )
-        error?.let { message ->
-            Text(
-                text = message,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 92.dp, start = 20.dp, end = 20.dp),
-            )
-        }
-        if (selecting) {
-            AlbumSelectionActionDock(
-                selectedCount = selectedIds.size,
-                working = working,
-                remove = { removingSelected = true },
-                moveEarlier = {
-                    val selectedId = selectedIds.singleOrNull() ?: return@AlbumSelectionActionDock
-                    scope.launch {
-                        runMutation("Could not reorder media") {
-                            repository.reorderAlbumMedia(
-                                albumId,
-                                reorderAlbumIds(album.media.map { it.id }, selectedId, -1),
-                            )
-                        }
-                    }
-                },
-                moveLater = {
-                    val selectedId = selectedIds.singleOrNull() ?: return@AlbumSelectionActionDock
-                    scope.launch {
-                        runMutation("Could not reorder media") {
-                            repository.reorderAlbumMedia(
-                                albumId,
-                                reorderAlbumIds(album.media.map { it.id }, selectedId, 1),
-                            )
-                        }
-                    }
-                },
-                finish = {
-                    selecting = false
-                    selectedIds = emptySet()
-                },
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
-        } else {
-            AlbumPrimaryActionDock(
-                enabled = !working,
-                select = { selecting = true },
-                edit = { editing = true },
-                delete = { deleting = true },
-                modifier = Modifier.align(Alignment.BottomCenter),
-            )
-        }
-    }
+        },
+    )
 
     if (editing) {
         AlbumEditorDialog(
@@ -652,7 +636,6 @@ private fun AlbumTile(
 
 @Composable
 private fun AlbumThumbnailCollage(album: Album, repository: MomentoRepository) {
-    val context = LocalContext.current
     val thumbnailMediaIds = album.thumbnailMediaIds.take(4)
     val urls by produceState<List<String>>(emptyList(), thumbnailMediaIds) {
         value = thumbnailMediaIds.map { mediaId -> repository.thumbnailUrl(mediaId, true) }
@@ -662,9 +645,9 @@ private fun AlbumThumbnailCollage(album: Album, repository: MomentoRepository) {
     fun Thumbnail(index: Int, modifier: Modifier) {
         Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
             urls.getOrNull(index)?.let { thumbnailUrl ->
-                AsyncImage(
-                    model = ImageRequest.Builder(context).data(thumbnailUrl).build(),
-                    imageLoader = repository.authenticatedImageLoader(context),
+                MomentoAsyncImage(
+                    model = thumbnailUrl,
+                    repository = repository,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),

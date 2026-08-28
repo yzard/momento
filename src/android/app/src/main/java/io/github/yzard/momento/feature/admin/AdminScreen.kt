@@ -73,11 +73,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import io.github.yzard.momento.app.designsystem.MomentoPageHeader
-import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
+import io.github.yzard.momento.core.data.AdministrationRepository
+import io.github.yzard.momento.core.data.RequestResult
 import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.data.SettingsStore
 import io.github.yzard.momento.core.data.ThemePreference
+import io.github.yzard.momento.core.data.runRequest
+import io.github.yzard.momento.core.data.userMessage
 import io.github.yzard.momento.core.model.AiStatusResponse
 import io.github.yzard.momento.core.model.AiFeatureSchedule
 import io.github.yzard.momento.core.model.AiJobCounts
@@ -85,7 +88,6 @@ import io.github.yzard.momento.core.model.AiTaskStatus
 import io.github.yzard.momento.core.model.ImportStatus
 import io.github.yzard.momento.core.model.JobStatus
 import io.github.yzard.momento.core.model.User
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -110,7 +112,7 @@ enum class AdminAiFeature(val identifier: String, val label: String) {
     FACE_DETECTION("face_detection", "Face detection"),
 }
 
-private val cronFieldLabels = listOf("Minute", "Hour", "Day", "Month", "Weekday")
+internal val cronFieldLabels = listOf("Minute", "Hour", "Day", "Month", "Weekday")
 
 fun splitCronExpression(cronExpression: String): List<String> {
     val fields = cronExpression.trim().split(Regex("\\s+"))
@@ -169,7 +171,7 @@ fun newUserValidation(username: String, email: String, password: String): String
 
 fun webDavUrl(origin: String?): String = origin?.trimEnd('/')?.plus("/webdav/") ?: "Server URL unavailable"
 
-private data class PendingAdminAction(
+internal data class PendingAdminAction(
     val title: String,
     val description: String,
     val confirmLabel: String,
@@ -178,7 +180,7 @@ private data class PendingAdminAction(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AdminScreen(repository: MomentoRepository, settingsStore: SettingsStore) {
+fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsStore) {
     val settings by settingsStore.settings.collectAsState(
         initial = Settings(null, false, true, ThemePreference.SYSTEM),
     )
@@ -194,94 +196,89 @@ fun AdminScreen(repository: MomentoRepository, settingsStore: SettingsStore) {
     val scope = rememberCoroutineScope()
 
     suspend fun refreshImport() {
-        try {
-            importStatus = repository.importStatus()
-            importError = null
-        } catch (_: IOException) {
-            importError = "Could not load import status"
-        } catch (_: HttpException) {
-            importError = "Could not load import status"
-        } catch (_: SerializationException) {
-            importError = "Could not load import status"
+        when (val result = runRequest { repository.importStatus() }) {
+            is RequestResult.Success -> {
+                importStatus = result.response
+                importError = null
+            }
+            is RequestResult.Failure -> {
+                importError = result.error.userMessage("Could not load import status")
+            }
         }
     }
 
     suspend fun refreshMetadata() {
-        try {
-            metadataStatus = repository.metadataStatus()
-            metadataError = null
-        } catch (_: IOException) {
-            metadataError = "Could not load metadata status"
-        } catch (_: HttpException) {
-            metadataError = "Could not load metadata status"
-        } catch (_: SerializationException) {
-            metadataError = "Could not load metadata status"
+        when (val result = runRequest { repository.metadataStatus() }) {
+            is RequestResult.Success -> {
+                metadataStatus = result.response
+                metadataError = null
+            }
+            is RequestResult.Failure -> {
+                metadataError = result.error.userMessage("Could not load metadata status")
+            }
         }
     }
 
     suspend fun refreshAi() {
-        try {
-            aiStatus = repository.aiStatus()
-            aiError = null
-        } catch (_: IOException) {
-            aiError = "Could not load AI status"
-        } catch (_: HttpException) {
-            aiError = "Could not load AI status"
-        } catch (_: SerializationException) {
-            aiError = "Could not load AI status"
+        when (val result = runRequest { repository.aiStatus() }) {
+            is RequestResult.Success -> {
+                aiStatus = result.response
+                aiError = null
+            }
+            is RequestResult.Failure -> {
+                aiError = result.error.userMessage("Could not load AI status")
+            }
         }
     }
 
-    suspend fun refreshAll() {
+    suspend fun refreshSelected(section: AdminSection) {
         if (refreshing) return
         refreshing = true
-        coroutineScope {
-            launch { refreshImport() }
-            launch { refreshMetadata() }
-            launch { refreshAi() }
+        when (section) {
+            AdminSection.USERS -> userRefreshVersion += 1
+            AdminSection.IMPORT -> refreshImport()
+            AdminSection.METADATA -> refreshMetadata()
+            AdminSection.AI -> refreshAi()
         }
         refreshing = false
     }
 
     fun refreshFromUser() {
-        userRefreshVersion += 1
-        scope.launch { refreshAll() }
+        scope.launch { refreshSelected(selectedSection) }
     }
 
-    LaunchedEffect(repository) {
+    LaunchedEffect(repository, selectedSection) {
         while (isActive) {
-            refreshAll()
+            refreshSelected(selectedSection)
             delay(3_000)
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars),
-    ) {
-        MomentoPageHeader(
-            title = "Admin",
-            subtitle = "System access and processing",
-            modifier = Modifier,
-            leadingContent = null,
-            trailingContent = {
-                IconButton(
-                    onClick = ::refreshFromUser,
-                    enabled = !refreshing,
-                ) {
-                    if (refreshing) {
-                        CircularProgressIndicator(Modifier.padding(12.dp))
-                    } else {
-                        Icon(Icons.Default.Refresh, "Refresh all admin status")
-                    }
+    MomentoPageScaffold(
+        title = "Admin",
+        subtitle = "System access and processing",
+        backContentDescription = null,
+        onBack = null,
+        trailingContent = {
+            IconButton(
+                onClick = ::refreshFromUser,
+                enabled = !refreshing,
+            ) {
+                if (refreshing) {
+                    CircularProgressIndicator(Modifier.padding(12.dp))
+                } else {
+                    Icon(Icons.Default.Refresh, "Refresh ${selectedSection.label}")
                 }
-            },
-        )
+            }
+        },
+        reserveBottomControls = true,
+        bottomContent = null,
+        modifier = Modifier,
+    ) { contentPadding ->
         AdminResponsiveLayout(
             selectedSection = selectedSection,
             selectSection = { selectedSection = it },
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.fillMaxSize().padding(contentPadding),
         ) {
             AdminSectionContent(
                 selectedSection = selectedSection,
@@ -379,7 +376,7 @@ internal fun AdminSectionTabs(
 @Composable
 private fun AdminSectionContent(
     selectedSection: AdminSection,
-    repository: MomentoRepository,
+    repository: AdministrationRepository,
     webDavUrl: String,
     importStatus: ImportStatus?,
     metadataStatus: JobStatus?,
@@ -404,692 +401,7 @@ private fun AdminSectionContent(
 }
 
 @Composable
-private fun UserAdministration(repository: MomentoRepository, refreshVersion: Int) {
-    var users by remember(repository) { mutableStateOf<List<User>?>(null) }
-    var error by remember(repository) { mutableStateOf<String?>(null) }
-    var createUser by remember { mutableStateOf(false) }
-    var pendingRoleChange by remember { mutableStateOf<Pair<User, String>?>(null) }
-    var pendingDelete by remember { mutableStateOf<User?>(null) }
-    var busyUserIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
-    val scope = rememberCoroutineScope()
-
-    suspend fun loadUsers() {
-        try {
-            users = repository.users()
-            error = null
-        } catch (_: IOException) {
-            error = "Could not load users"
-        } catch (_: HttpException) {
-            error = "Could not load users"
-        } catch (_: SerializationException) {
-            error = "Could not load users"
-        }
-    }
-
-    suspend fun updateUser(user: User, role: String?, active: Boolean?) {
-        if (user.id in busyUserIds) return
-        busyUserIds = busyUserIds + user.id
-        try {
-            repository.updateUser(user.id, role, active)
-            loadUsers()
-        } catch (_: IOException) {
-            error = "Could not update ${user.username}"
-        } catch (_: HttpException) {
-            error = "Could not update ${user.username}"
-        } catch (_: SerializationException) {
-            error = "Could not update ${user.username}"
-        } finally {
-            busyUserIds = busyUserIds - user.id
-        }
-    }
-
-    LaunchedEffect(repository, refreshVersion) { loadUsers() }
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 104.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            AdminPanel("Users", "Manage sign-in access and administrator permissions.") {
-                Button(onClick = { createUser = true }) {
-                    Icon(Icons.Default.PersonAdd, null)
-                    Text("Create user", Modifier.padding(start = 8.dp))
-                }
-                error?.let { AdminError(it) }
-            }
-        }
-        if (users == null && error == null) {
-            item { LoadingPanel("Loading users") }
-        }
-        items(users.orEmpty(), key = { it.id }) { user ->
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-                ListItem(
-                    headlineContent = { Text(user.username, fontWeight = FontWeight.SemiBold) },
-                    supportingContent = { Text(user.email) },
-                    trailingContent = {
-                        IconButton(
-                            onClick = { pendingDelete = user },
-                            enabled = user.id !in busyUserIds,
-                        ) { Icon(Icons.Default.Delete, "Delete ${user.username}") }
-                    },
-                )
-                HorizontalDivider()
-                ListItem(
-                    headlineContent = { Text("Administrator") },
-                    supportingContent = { Text("Can manage users, imports, metadata, and AI jobs") },
-                    trailingContent = {
-                        Switch(
-                            checked = user.role == "admin",
-                            onCheckedChange = { checked ->
-                                pendingRoleChange = user to if (checked) "admin" else "user"
-                            },
-                            enabled = user.id !in busyUserIds,
-                        )
-                    },
-                )
-                ListItem(
-                    headlineContent = { Text("Account active") },
-                    supportingContent = { Text(if (user.isActive) "Sign-in is allowed" else "Sign-in is blocked") },
-                    trailingContent = {
-                        Switch(
-                            checked = user.isActive,
-                            onCheckedChange = { active -> scope.launch { updateUser(user, null, active) } },
-                            enabled = user.id !in busyUserIds,
-                        )
-                    },
-                )
-            }
-        }
-    }
-
-    if (createUser) {
-        CreateUserDialog(
-            repository = repository,
-            dismiss = { createUser = false },
-            complete = {
-                createUser = false
-                scope.launch { loadUsers() }
-            },
-        )
-    }
-    pendingRoleChange?.let { (user, role) ->
-        AlertDialog(
-            onDismissRequest = { pendingRoleChange = null },
-            title = { Text("Change ${user.username}'s permission?") },
-            text = { Text(if (role == "admin") "This user will gain full system access." else "This user will lose administrator access.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    pendingRoleChange = null
-                    scope.launch { updateUser(user, role, null) }
-                }) { Text("Change permission") }
-            },
-            dismissButton = { TextButton(onClick = { pendingRoleChange = null }) { Text("Cancel") } },
-        )
-    }
-    pendingDelete?.let { user ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("Delete ${user.username}?") },
-            text = { Text("This account can no longer sign in. Existing media is not deleted.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    pendingDelete = null
-                    scope.launch {
-                        busyUserIds = busyUserIds + user.id
-                        try {
-                            repository.deleteUser(user.id)
-                            loadUsers()
-                        } catch (_: IOException) {
-                            error = "Could not delete ${user.username}"
-                        } catch (_: HttpException) {
-                            error = "Could not delete ${user.username}"
-                        } finally {
-                            busyUserIds = busyUserIds - user.id
-                        }
-                    }
-                }) { Text("Delete") }
-            },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } },
-        )
-    }
-}
-
-@Composable
-private fun CreateUserDialog(
-    repository: MomentoRepository,
-    dismiss: () -> Unit,
-    complete: () -> Unit,
-) {
-    var username by remember { mutableStateOf("") }
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var admin by remember { mutableStateOf(false) }
-    var submitting by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-
-    AlertDialog(
-        onDismissRequest = { if (!submitting) dismiss() },
-        title = { Text("Create user") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, enabled = !submitting)
-                OutlinedTextField(email, { email = it }, label = { Text("Email") }, singleLine = true, enabled = !submitting)
-                OutlinedTextField(
-                    password,
-                    { password = it },
-                    label = { Text("Temporary password") },
-                    supportingText = { Text("At least 8 characters; the user must change it after sign-in") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    enabled = !submitting,
-                )
-                ListItem(
-                    headlineContent = { Text("Administrator") },
-                    trailingContent = { Switch(admin, { admin = it }, enabled = !submitting) },
-                )
-                error?.let { AdminError(it) }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val validation = newUserValidation(username, email, password)
-                    if (validation != null) {
-                        error = validation
-                        return@TextButton
-                    }
-                    scope.launch {
-                        submitting = true
-                        try {
-                            repository.createUser(username.trim(), email.trim(), password, if (admin) "admin" else "user")
-                            complete()
-                        } catch (_: IOException) {
-                            error = "Could not create user"
-                        } catch (_: HttpException) {
-                            error = "Could not create user"
-                        } catch (_: SerializationException) {
-                            error = "Could not create user"
-                        } finally {
-                            submitting = false
-                        }
-                    }
-                },
-                enabled = !submitting,
-            ) { Text(if (submitting) "Creating" else "Create") }
-        },
-        dismissButton = { TextButton(onClick = dismiss, enabled = !submitting) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun ImportAdministration(
-    repository: MomentoRepository,
-    webDavUrl: String,
-    status: ImportStatus?,
-    error: String?,
-    refresh: () -> Unit,
-) {
-    var working by remember { mutableStateOf(false) }
-    var actionError by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 104.dp),
-    ) {
-        item {
-            AdminPanel("Local import", "Import media staged on the server or uploaded through WebDAV.") {
-                Text("Import directory", style = MaterialTheme.typography.labelLarge)
-                Text("/data/imports/", style = MaterialTheme.typography.bodyMedium)
-                Text("WebDAV URL", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
-                Text(webDavUrl, style = MaterialTheme.typography.bodyMedium)
-                Text(importStatusSummary(status), modifier = Modifier.padding(top = 16.dp))
-                status?.errors?.forEach { AdminError(it) }
-                error?.let { AdminError(it) }
-                actionError?.let { AdminError(it) }
-                Button(
-                    onClick = {
-                        if (working) return@Button
-                        scope.launch {
-                            working = true
-                            try {
-                                repository.localImport()
-                                actionError = null
-                                refresh()
-                            } catch (_: IOException) {
-                                actionError = "Could not start local import"
-                            } catch (_: HttpException) {
-                                actionError = "Could not start local import"
-                            } finally {
-                                working = false
-                            }
-                        }
-                    },
-                    enabled = !working,
-                    modifier = Modifier.padding(top = 16.dp),
-                ) {
-                    Icon(Icons.Default.PlayArrow, null)
-                    Text(if (working) "Starting" else "Start local import")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MetadataAdministration(
-    repository: MomentoRepository,
-    status: JobStatus?,
-    error: String?,
-    refresh: () -> Unit,
-) {
-    var busyAction by remember { mutableStateOf<String?>(null) }
-    var actionError by remember { mutableStateOf<String?>(null) }
-    var pendingAction by remember { mutableStateOf<PendingAdminAction?>(null) }
-    val scope = rememberCoroutineScope()
-
-    fun runAction(actionName: String, action: suspend () -> Unit) {
-        if (busyAction != null) return
-        scope.launch {
-            busyAction = actionName
-            try {
-                action()
-                actionError = null
-                refresh()
-            } catch (_: IOException) {
-                actionError = "Could not $actionName metadata"
-            } catch (_: HttpException) {
-                actionError = "Could not $actionName metadata"
-            } finally {
-                busyAction = null
-            }
-        }
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 104.dp),
-    ) {
-        item {
-            AdminPanel("Metadata", "Generate thumbnails and technical metadata before AI processing.") {
-                Text(statusSummary(status))
-                status?.errors?.forEach { AdminError(it) }
-                error?.let { AdminError(it) }
-                actionError?.let { AdminError(it) }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Button(
-                        onClick = { runAction("generate") { repository.generateMetadata() } },
-                        enabled = busyAction == null,
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (busyAction == "generate") "Generating" else "Generate") }
-                    OutlinedButton(
-                        onClick = {
-                            pendingAction = PendingAdminAction(
-                                title = "Reset metadata?",
-                                description = "Prepared metadata and related processing work will be reset and regenerated.",
-                                confirmLabel = "Reset",
-                                execute = { runAction("reset") { repository.resetMetadata() } },
-                            )
-                        },
-                        enabled = busyAction == null,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Reset") }
-                }
-            }
-        }
-    }
-    pendingAction?.let { action ->
-        ConfirmationDialog(
-            action = action,
-            confirm = {
-                pendingAction = null
-                scope.launch { action.execute() }
-            },
-            dismiss = { pendingAction = null },
-        )
-    }
-}
-
-@Composable
-private fun AiAdministration(
-    repository: MomentoRepository,
-    status: AiStatusResponse?,
-    error: String?,
-    refresh: () -> Unit,
-) {
-    val controls = listOf<Pair<AdminAiFeature?, String>>(null to "All AI jobs") +
-        AdminAiFeature.entries.map { it to it.label }
-    var busyControl by remember { mutableStateOf<String?>(null) }
-    var actionError by remember { mutableStateOf<String?>(null) }
-    var pendingAction by remember { mutableStateOf<PendingAdminAction?>(null) }
-    val scope = rememberCoroutineScope()
-
-    fun taskState(feature: AdminAiFeature?): String? {
-        if (feature == null) {
-            return if (
-                AdminAiFeature.entries.any { currentFeature ->
-                    isActiveAiState(taskState(currentFeature))
-                }
-            ) "running" else "idle"
-        }
-        if (feature == AdminAiFeature.DEDUPLICATE) return status?.deduplicate?.status
-        return status?.tasks?.firstOrNull { it.task == feature.identifier }?.state
-    }
-
-    fun runAction(
-        controlKey: String,
-        actionLabel: String,
-        action: suspend () -> Unit,
-    ) {
-        if (busyControl != null) return
-        scope.launch {
-            busyControl = controlKey
-            try {
-                action()
-                actionError = null
-                refresh()
-            } catch (_: IOException) {
-                actionError = "$actionLabel failed"
-            } catch (_: HttpException) {
-                actionError = "$actionLabel failed"
-            } catch (_: SerializationException) {
-                actionError = "$actionLabel failed"
-            } finally {
-                busyControl = null
-            }
-        }
-    }
-
-    fun actionFor(feature: AdminAiFeature?, actionName: String): suspend () -> Unit = {
-        when (actionName) {
-            "start" -> if (feature == null) repository.startAi() else repository.startAiFeature(feature.identifier)
-            "cancel" -> if (feature == null) repository.cancelAi() else repository.cancelAiFeature(feature.identifier)
-            "clean" -> if (feature == null) repository.cleanAi() else repository.cleanAiFeature(feature.identifier)
-            else -> error("Unknown AI action $actionName")
-        }
-        Unit
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 104.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            AdminPanel("AI processing", "Each task runs independently through the durable server queue.") {
-                status?.let { currentStatus ->
-                    Text("${currentStatus.faceGroups} face groups · ${currentStatus.deduplicate.clustersCreated} duplicate groups")
-                }
-                error?.let { AdminError(it) }
-                actionError?.let { AdminError(it) }
-            }
-        }
-        item {
-            AdminPanel("AI work status", "Queued, submitting, submitted, failed, and completed jobs by feature.") {
-                AiStatusTable(status)
-            }
-        }
-        items(controls, key = { it.second }) { (feature, label) ->
-            val state = taskState(feature)
-            val running = isActiveAiState(state)
-            val controlKey = feature?.identifier ?: "all"
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(state ?: "Not loaded", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (feature != null && feature != AdminAiFeature.DEDUPLICATE) {
-                        status?.tasks?.firstOrNull { it.task == feature.identifier }?.let { task ->
-                            Text(aiStatusSummary(task), style = MaterialTheme.typography.bodySmall)
-                            task.errors.forEach { AdminError(it) }
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                    ) {
-                        val primaryControlKey = "$controlKey-primary"
-                        val cleanControlKey = "$controlKey-clean"
-                        val primaryActionLabel = if (running) "Cancel $label" else "Start $label"
-                        Button(
-                            onClick = {
-                                if (running) {
-                                    pendingAction = PendingAdminAction(
-                                        title = "Cancel $label?",
-                                        description = "Queued and active work for this control will be cancelled.",
-                                        confirmLabel = "Cancel jobs",
-                                        execute = {
-                                            runAction(primaryControlKey, "Cancel $label", actionFor(feature, "cancel"))
-                                        },
-                                    )
-                                } else {
-                                    runAction(primaryControlKey, "Start $label", actionFor(feature, "start"))
-                                }
-                            },
-                            enabled = busyControl == null,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .semantics { contentDescription = primaryActionLabel },
-                            contentPadding = PaddingValues(0.dp),
-                        ) {
-                            if (busyControl == primaryControlKey) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                )
-                            } else {
-                                Icon(
-                                    if (running) Icons.Default.Stop else Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                )
-                            }
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                pendingAction = PendingAdminAction(
-                                    title = "Clean $label data?",
-                                    description = "Stored results and eligible job state for this control will be removed.",
-                                    confirmLabel = "Clean data",
-                                    execute = {
-                                        runAction(cleanControlKey, "Clean $label", actionFor(feature, "clean"))
-                                    },
-                                )
-                            },
-                            enabled = !running && busyControl == null,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .semantics { contentDescription = "Clean $label data" },
-                            contentPadding = PaddingValues(0.dp),
-                        ) {
-                            if (busyControl == cleanControlKey) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp,
-                                )
-                            } else {
-                                Icon(Icons.Default.CleaningServices, contentDescription = null)
-                            }
-                        }
-                    }
-                    if (feature != null) {
-                        status?.schedules?.firstOrNull { it.feature == feature.identifier }?.let { schedule ->
-                            AiScheduleEditor(
-                                label = label,
-                                schedule = schedule,
-                                busy = busyControl != null,
-                                save = { cronExpression ->
-                                    runAction("${controlKey}-schedule", "Save $label schedule") {
-                                        repository.updateAiSchedule(feature.identifier, cronExpression)
-                                        Unit
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-    pendingAction?.let { action ->
-        ConfirmationDialog(
-            action = action,
-            confirm = {
-                pendingAction = null
-                scope.launch { action.execute() }
-            },
-            dismiss = { pendingAction = null },
-        )
-    }
-}
-
-@Composable
-private fun AiStatusTable(status: AiStatusResponse?) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        if (maxWidth < 720.dp) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                AdminAiFeature.entries.forEach { feature ->
-                    val jobs = aiJobCounts(status, feature)
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))
-                            .padding(12.dp),
-                    ) {
-                        Text(feature.label, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${jobs?.queued ?: 0} queued · ${jobs?.submitting ?: 0} submitting · ${jobs?.submitted ?: 0} submitted",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Text(
-                            "${jobs?.failed ?: 0} failed · ${jobs?.completed ?: 0} completed",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        } else {
-            Column(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).width(720.dp),
-            ) {
-                AiStatusRow("Feature", listOf("Queued", "Submitting", "Submitted", "Failed", "Completed"), true)
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                AdminAiFeature.entries.forEach { feature ->
-                    val jobs = aiJobCounts(status, feature)
-                    AiStatusRow(
-                        feature.label,
-                        listOf(
-                            jobs?.queued?.toString() ?: "0",
-                            jobs?.submitting?.toString() ?: "0",
-                            jobs?.submitted?.toString() ?: "0",
-                            jobs?.failed?.toString() ?: "0",
-                            jobs?.completed?.toString() ?: "0",
-                        ),
-                        false,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AiStatusRow(label: String, values: List<String>, header: Boolean) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-        Text(
-            label,
-            modifier = Modifier.width(180.dp),
-            fontWeight = if (header) FontWeight.Bold else FontWeight.SemiBold,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        values.forEach { value ->
-            Text(
-                value,
-                modifier = Modifier.width(108.dp),
-                textAlign = TextAlign.End,
-                fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-    }
-}
-
-@Composable
-private fun AiScheduleEditor(
-    label: String,
-    schedule: AiFeatureSchedule,
-    busy: Boolean,
-    save: (String) -> Unit,
-) {
-    var cronFields by remember(schedule.cronExpression) {
-        mutableStateOf(splitCronExpression(schedule.cronExpression))
-    }
-    val cronExpression = joinCronFields(cronFields)
-    val fieldsValid = validCronFields(cronFields)
-    val storedExpression = joinCronFields(splitCronExpression(schedule.cronExpression))
-    Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
-        Text("Schedule · five-field cron · system timezone", style = MaterialTheme.typography.labelSmall)
-        BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-            val fieldsPerRow = cronFieldsPerRow(maxWidth.value.toInt())
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                cronFieldLabels.indices.chunked(fieldsPerRow).forEach { rowIndices ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        rowIndices.forEach { index ->
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    cronFieldLabels[index],
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                )
-                                OutlinedTextField(
-                                    value = cronFields[index],
-                                    onValueChange = { fieldValue ->
-                                        cronFields = cronFields.toMutableList().also { fields ->
-                                            fields[index] = fieldValue
-                                        }
-                                    },
-                                    singleLine = true,
-                                    isError = cronFields[index].trim().isEmpty() ||
-                                        cronFields[index].trim().contains(Regex("\\s")),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
-                        repeat(fieldsPerRow - rowIndices.size) { Box(Modifier.weight(1f)) }
-                    }
-                }
-                OutlinedButton(
-                    onClick = { save(cronExpression) },
-                    enabled = !busy && fieldsValid && cronExpression != storedExpression,
-                    modifier = Modifier.align(Alignment.End).semantics {
-                        contentDescription = "Save $label cron schedule"
-                    },
-                ) {
-                    Icon(Icons.Default.Save, contentDescription = null)
-                    Text("Save schedule", Modifier.padding(start = 8.dp))
-                }
-            }
-        }
-        if (!fieldsValid) {
-            Text(
-                "Every cron field must contain one value without spaces.",
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ConfirmationDialog(
+internal fun ConfirmationDialog(
     action: PendingAdminAction,
     confirm: () -> Unit,
     dismiss: () -> Unit,
@@ -1104,7 +416,7 @@ private fun ConfirmationDialog(
 }
 
 @Composable
-private fun AdminPanel(
+internal fun AdminPanel(
     title: String,
     description: String,
     content: @Composable ColumnScope.() -> Unit,
@@ -1126,7 +438,7 @@ private fun AdminPanel(
 }
 
 @Composable
-private fun AdminError(message: String) {
+internal fun AdminError(message: String) {
     Text(
         message,
         color = MaterialTheme.colorScheme.error,
@@ -1136,7 +448,7 @@ private fun AdminError(message: String) {
 }
 
 @Composable
-private fun LoadingPanel(label: String) {
+internal fun LoadingPanel(label: String) {
     Box(Modifier.fillMaxWidth().padding(32.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             CircularProgressIndicator()

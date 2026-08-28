@@ -8,10 +8,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TimelineScreenTest {
-    @Test fun compactSelectionActionsUseIconsBeforeTheyWouldOverflow() {
-        assertTrue(compactTimelineSelection(360))
-        assertTrue(!compactTimelineSelection(480))
-    }
     @Test
     fun timelinePagesMapToIndependentBackendFilters() {
         assertEquals(null, TimelinePage.TIMELINE.mediaType)
@@ -54,12 +50,6 @@ class TimelineScreenTest {
         assertFalse(shouldAppendTimeline(8, 10, hasOlder = true, appending = true))
         assertFalse(shouldAppendTimeline(8, 10, hasOlder = false, appending = false))
         assertFalse(shouldAppendTimeline(-1, 0, hasOlder = true, appending = false))
-    }
-
-    @Test
-    fun selectionActionsStateTheirDestination() {
-        assertEquals("Add to album (3)", addToAlbumSelectionLabel(3))
-        assertEquals("Trash (3)", trashSelectionLabel(3))
     }
 
     @Test

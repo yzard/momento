@@ -114,27 +114,31 @@ import io.github.yzard.momento.BuildConfig
 import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
 import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
-import io.github.yzard.momento.app.designsystem.MomentoPageHeader
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.navigation.Destination
+import io.github.yzard.momento.app.navigation.CapabilityState
 import io.github.yzard.momento.app.navigation.MainShellState
+import io.github.yzard.momento.app.navigation.MainRoute
+import io.github.yzard.momento.app.navigation.backupAvailable
 import io.github.yzard.momento.app.navigation.isTimelinePage
 import io.github.yzard.momento.app.navigation.isAvailable
-import io.github.yzard.momento.app.navigation.hasShellPageTitle
 import io.github.yzard.momento.app.navigation.timelineSubpageDestinations
 import io.github.yzard.momento.app.navigation.utilityDrawerDestinations
 import io.github.yzard.momento.app.navigation.webDrawerDestinations
 import io.github.yzard.momento.core.data.EncryptedTokenStore
 import io.github.yzard.momento.core.data.MomentoRepository
+import io.github.yzard.momento.core.data.RequestResult
 import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.data.SettingsStore
 import io.github.yzard.momento.core.data.ThemePreference
 import io.github.yzard.momento.core.data.normalizeServerOrigin
+import io.github.yzard.momento.core.data.runRequest
+import io.github.yzard.momento.core.data.userMessage
 import io.github.yzard.momento.core.model.Media
-import io.github.yzard.momento.core.model.Capabilities
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.admin.AdminScreen
 import io.github.yzard.momento.feature.albums.AlbumsScreen
+import io.github.yzard.momento.feature.albums.AlbumDetailScreen
 import io.github.yzard.momento.feature.auth.LoginRequirement
 import io.github.yzard.momento.feature.auth.PasswordChangeFields
 import io.github.yzard.momento.feature.auth.loginRequirement
@@ -143,9 +147,11 @@ import io.github.yzard.momento.feature.backup.currentBackupCanReadOriginalMedia
 import io.github.yzard.momento.feature.backup.schedulePeriodicBackup
 import io.github.yzard.momento.feature.deduplicate.DeduplicateScreen
 import io.github.yzard.momento.feature.faces.FacesScreen
+import io.github.yzard.momento.feature.faces.FaceGroupDetailScreen
 import io.github.yzard.momento.feature.map.NativeMapScreen
 import io.github.yzard.momento.feature.media.LoadingState
 import io.github.yzard.momento.feature.places.PlacesScreen
+import io.github.yzard.momento.feature.places.PlaceDetailScreen
 import io.github.yzard.momento.feature.settings.SettingsScreen
 import io.github.yzard.momento.feature.timeline.TimelinePage
 import io.github.yzard.momento.feature.timeline.TimelinePeriod
@@ -174,7 +180,7 @@ fun MomentoApplication(
     val loadedSettings = settings
 
     if (loadedSettings == null) {
-        MomentoTheme(ThemePreference.SYSTEM) { LoadingState() }
+        MomentoTheme(ThemePreference.SYSTEM) { LoadingState("Loading Momento", Modifier) }
         return
     }
 
@@ -546,12 +552,21 @@ private fun MainShell(
     val settings by settingsStore.settings.collectAsState(
         initial = Settings(null, false, true, ThemePreference.SYSTEM),
     )
-    var capabilities by remember { mutableStateOf<Capabilities?>(null) }
+    var capabilityState by remember { mutableStateOf<CapabilityState>(CapabilityState.Loading) }
+    var capabilityReload by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
     BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
-    BackHandler(enabled = !drawerState.isOpen && shellState.destination != Destination.TIMELINE) {
+    BackHandler(
+        enabled = !drawerState.isOpen && shellState.viewer == null && shellState.currentRoute !is MainRoute.Collection,
+    ) {
+        shellState.closeDetail()
+    }
+    BackHandler(
+        enabled = !drawerState.isOpen && shellState.currentRoute is MainRoute.Collection &&
+            shellState.destination != Destination.TIMELINE,
+    ) {
         shellState.navigate(Destination.TIMELINE)
     }
     LaunchedEffect(Unit) {
@@ -566,33 +581,32 @@ private fun MainShell(
             }
         }
     }
-    LaunchedEffect(settings.origin) {
+    LaunchedEffect(settings.origin, capabilityReload) {
         val origin = settings.origin
         if (origin == null) {
-            capabilities = null
+            capabilityState = CapabilityState.Failed("Server address is unavailable")
             return@LaunchedEffect
         }
-        capabilities = try {
-            repository.capabilities(origin)
-        } catch (_: IOException) {
-            null
-        } catch (_: HttpException) {
-            null
-        } catch (_: kotlinx.serialization.SerializationException) {
-            null
+        capabilityState = CapabilityState.Loading
+        capabilityState = when (val result = runRequest { repository.capabilities(origin) }) {
+            is RequestResult.Success -> CapabilityState.Available(result.response)
+            is RequestResult.Failure -> CapabilityState.Failed(
+                result.error.userMessage("Could not load server capabilities"),
+            )
         }
     }
-    LaunchedEffect(capabilities, shellState.destination) {
-        if (!shellState.destination.isAvailable(capabilities)) shellState.navigate(Destination.TIMELINE)
+    LaunchedEffect(capabilityState, shellState.destination) {
+        if (!shellState.destination.isAvailable(capabilityState)) shellState.navigate(Destination.TIMELINE)
     }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ModalNavigationDrawer(
             drawerState = drawerState,
-            gesturesEnabled = shellState.destination != Destination.MAP,
+            gesturesEnabled = shellState.currentRoute is MainRoute.Collection &&
+                shellState.destination != Destination.MAP,
             drawerContent = {
                 MainNavigationDrawer(
                     destination = shellState.destination,
-                    capabilities = capabilities,
+                    capabilityState = capabilityState,
                     select = { selectedDestination ->
                         scope.launch {
                             drawerState.close()
@@ -609,42 +623,76 @@ private fun MainShell(
             },
         ) {
             Box(Modifier.fillMaxSize()) {
-                key(shellState.contentRevision) {
-                    ShellDestination(
+                ShellDestination(
+                    route = shellState.contentRoute,
+                    timelinePeriod = shellState.timelinePeriod,
+                    timelineSearchQuery = shellState.timelineSearchQuery,
+                    repository = repository,
+                    settingsStore = settingsStore,
+                    user = user,
+                    capabilityState = capabilityState,
+                    libraryChange = shellState.libraryChange,
+                    openDestination = shellState::navigate,
+                    openAlbum = shellState::openAlbum,
+                    openPlace = shellState::openPlace,
+                    openFace = shellState::openFace,
+                    closeDetail = shellState::closeDetail,
+                    openMedia = { media, index ->
+                        shellState.openViewer(media, index)
+                    },
+                    logout = { scope.launch { repository.logout() } },
+                )
+                if (shellState.contentRoute is MainRoute.Collection) {
+                    ShellOverlay(
                         destination = shellState.destination,
                         timelinePeriod = shellState.timelinePeriod,
-                        timelineSearchQuery = shellState.timelineSearchQuery,
-                        repository = repository,
-                        settingsStore = settingsStore,
-                        user = user,
-                        capabilities = capabilities,
-                        openDestination = shellState::navigate,
-                        openMedia = { media, index ->
-                            shellState.openViewer(media, index)
+                        selectTimelinePeriod = shellState::selectTimelinePeriod,
+                        openMenu = { scope.launch { drawerState.open() } },
+                        search = { query ->
+                            shellState.updateTimelineSearchQuery(query)
                         },
-                        logout = { scope.launch { repository.logout() } },
                     )
                 }
-                ShellOverlay(
-                    destination = shellState.destination,
-                    timelinePeriod = shellState.timelinePeriod,
-                    selectTimelinePeriod = shellState::selectTimelinePeriod,
-                    openMenu = { scope.launch { drawerState.open() } },
-                    search = { query ->
-                        shellState.updateTimelineSearchQuery(query)
-                    },
-                )
             }
         }
-        shellState.viewerMedia?.let { media ->
+        shellState.viewer?.let { viewer ->
             ViewerScreen(
-                media = media,
-                initialIndex = shellState.viewerIndex,
+                media = viewer.media,
+                initialIndex = viewer.index,
                 repository = repository,
                 viewedIndexChanged = shellState::updateViewerIndex,
-                mediaChanged = shellState::markViewerChanged,
+                mediaChanged = shellState::markMediaChanged,
                 close = shellState::closeViewer,
             )
+        }
+        if (capabilityState is CapabilityState.Failed && shellState.viewer == null) {
+            CapabilityErrorBanner(
+                message = (capabilityState as CapabilityState.Failed).message,
+                retry = { capabilityReload += 1 },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(horizontal = 16.dp, vertical = 88.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CapabilityErrorBanner(message: String, retry: () -> Unit, modifier: Modifier) {
+    Surface(
+        modifier = modifier.widthIn(max = 520.dp),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.inverseSurface,
+        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+        shadowElevation = 3.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(message, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            TextButton(onClick = retry) { Text("Retry") }
         }
     }
 }
@@ -652,20 +700,20 @@ private fun MainShell(
 @Composable
 private fun MainNavigationDrawer(
     destination: Destination,
-    capabilities: Capabilities?,
+    capabilityState: CapabilityState,
     select: (Destination) -> Unit,
     logout: () -> Unit,
 ) {
     var timelineExpanded by rememberSaveable { mutableStateOf(true) }
     var utilityExpanded by rememberSaveable { mutableStateOf(false) }
-    val visibleTimelineDestinations = timelineSubpageDestinations.filter { it.isAvailable(capabilities) }
-    val visibleUtilityDestinations = utilityDrawerDestinations.filter { it.isAvailable(capabilities) }
+    val visibleTimelineDestinations = timelineSubpageDestinations.filter { it.isAvailable(capabilityState) }
+    val visibleUtilityDestinations = utilityDrawerDestinations.filter { it.isAvailable(capabilityState) }
     val collectionDestinations = webDrawerDestinations.filter { drawerDestination ->
         drawerDestination != Destination.TIMELINE &&
             drawerDestination !in timelineSubpageDestinations &&
             drawerDestination !in utilityDrawerDestinations &&
             drawerDestination != Destination.TRASH &&
-            drawerDestination.isAvailable(capabilities)
+            drawerDestination.isAvailable(capabilityState)
     }
     ModalDrawerSheet(
         modifier = Modifier.width(280.dp),
@@ -827,16 +875,6 @@ private fun ShellOverlay(
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .imePadding(),
         ) {
-            if (destination.hasShellPageTitle()) {
-                MomentoPageHeader(
-                    title = destination.label,
-                    subtitle = null,
-                    modifier = Modifier.align(Alignment.TopStart),
-                    leadingContent = null,
-                    trailingContent = null,
-                )
-            }
-
             MomentoFloatingButton(
                 modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
                 onClick = {
@@ -1015,42 +1053,61 @@ private fun drawerIcon(destination: Destination) = when (destination) {
 
 @Composable
 private fun ShellDestination(
-    destination: Destination,
+    route: MainRoute,
     timelinePeriod: TimelinePeriod,
     timelineSearchQuery: String,
     repository: MomentoRepository,
     settingsStore: SettingsStore,
     user: User?,
-    capabilities: Capabilities?,
+    capabilityState: CapabilityState,
+    libraryChange: io.github.yzard.momento.app.navigation.LibraryChange?,
     openDestination: (Destination) -> Unit,
+    openAlbum: (Long) -> Unit,
+    openPlace: (io.github.yzard.momento.core.model.Place) -> Unit,
+    openFace: (io.github.yzard.momento.core.model.FaceGroup) -> Unit,
+    closeDetail: () -> Unit,
     openMedia: (List<Media>, Int) -> Unit,
     logout: () -> Unit,
 ) {
-    when (destination) {
+    if (route is MainRoute.AlbumDetail) {
+        AlbumDetailScreen(repository, route.albumId, closeDetail, libraryChange, openMedia)
+        return
+    }
+    if (route is MainRoute.PlaceDetail) {
+        PlaceDetailScreen(repository, route.place, closeDetail, libraryChange, openMedia)
+        return
+    }
+    if (route is MainRoute.FaceDetail) {
+        FaceGroupDetailScreen(repository, route.group, closeDetail, libraryChange, openMedia)
+        return
+    }
+    require(route is MainRoute.Collection) { "Viewer routes are rendered by the shell overlay" }
+    when (route.destination) {
         Destination.TIMELINE,
         Destination.PHOTOS,
         Destination.VIDEOS,
         Destination.SCREENSHOTS,
         Destination.DOCUMENTS -> TimelineScreen(
             repository = repository,
-            page = timelinePage(destination),
+            page = timelinePage(route.destination),
             period = timelinePeriod,
             search = timelineSearchQuery,
+            libraryChange = libraryChange,
             openMedia = openMedia,
         )
         Destination.SETTINGS -> SettingsScreen(
             repository = repository,
             settingsStore = settingsStore,
             user = user,
-            backupAvailable = capabilities?.backup?.enabled != false,
+            backupAvailable = capabilityState.backupAvailable(),
             openAdmin = { openDestination(Destination.ADMIN) },
             logout = logout,
         )
-        Destination.ALBUMS -> AlbumsScreen(repository, openMedia)
-        Destination.MAP -> NativeMapScreen(repository, openMedia)
-        Destination.PLACES -> PlacesScreen(repository, openMedia)
-        Destination.FACES -> FacesScreen(repository, user?.role == "admin", openMedia)
-        Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin", openMedia)
+        Destination.ALBUMS -> AlbumsScreen(repository, libraryChange, openAlbum)
+        Destination.MAP -> NativeMapScreen(repository, libraryChange, openMedia)
+        Destination.PLACES -> PlacesScreen(repository, libraryChange, openPlace)
+        Destination.FACES -> FacesScreen(repository, user?.role == "admin", libraryChange, openFace)
+        Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin", libraryChange, openMedia)
         Destination.TRASH -> TrashScreen(repository)
         Destination.ADMIN -> AdminScreen(repository, settingsStore)
     }

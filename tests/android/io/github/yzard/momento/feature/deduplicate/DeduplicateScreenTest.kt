@@ -49,14 +49,6 @@ class DeduplicateScreenTest {
         assertEquals("Unknown dimensions", deduplicateDimensions(media(1)))
     }
 
-    @Test
-    fun appendsUniqueGroupPages() {
-        val first = DeduplicateGroup(10, listOf(media(1), media(2)))
-        val second = DeduplicateGroup(20, listOf(media(3), media(4)))
-
-        assertEquals(listOf(first, second), appendDeduplicateGroups(listOf(first), listOf(first, second)))
-    }
-
     private fun media(id: Long) = Media(
         id = id,
         filename = "$id.jpg",

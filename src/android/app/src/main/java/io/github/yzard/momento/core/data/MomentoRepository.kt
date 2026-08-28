@@ -21,10 +21,15 @@ class MomentoRepository(
     private val settingsStore: SettingsStore,
     private val tokenStore: EncryptedTokenStore,
     private val networkClient: NetworkClient,
-) {
+) :
+    AuthenticatedMediaRepository,
+    BackupRepository,
+    AdministrationRepository,
+    AccountRepository,
+    AndroidUpdateRepository {
     private suspend fun api(): MomentoApi = networkClient.api(requireNotNull(settingsStore.settings.first().origin) { "Choose a server first" })
 
-    suspend fun capabilities(origin: String): Capabilities = networkClient.api(origin).capabilities()
+    override suspend fun capabilities(origin: String): Capabilities = networkClient.api(origin).capabilities()
     suspend fun login(username: String, password: String): User {
         val service = api()
         tokenStore.saveTokens(service.login(basicAuthorization(username, password)))
@@ -84,43 +89,43 @@ class MomentoRepository(
     suspend fun emptyTrash(): MessageResponse = api().emptyTrash()
     suspend fun duplicateGroups(cursor: String?): DeduplicateGroupsResponse = api().duplicates(PageRequest(cursor, 20))
     suspend fun moveToTrash(ids: List<Long>): MessageResponse = api().moveToTrash(MediaIdsRequest(ids))
-    suspend fun users(): List<User> = api().users().users
-    suspend fun createUser(username: String, email: String, password: String, role: String?): User = api().createUser(AdminUserCreateRequest(username, email, password, role))
-    suspend fun updateUser(id: Long, role: String?, active: Boolean?): User = api().updateUser(AdminUserUpdateRequest(id, role, active))
-    suspend fun deleteUser(id: Long): MessageResponse = api().deleteUser(AdminUserIdRequest(id))
-    suspend fun localImport(): MessageResponse = api().triggerLocalImport()
-    suspend fun importStatus(): ImportStatus = api().importStatus()
-    suspend fun generateMetadata(): JobActionResponse = api().generateMetadata(EmptyRequest())
-    suspend fun metadataStatus(): JobStatus = api().metadataStatus(EmptyRequest())
-    suspend fun resetMetadata(): JobActionResponse = api().resetMetadata(EmptyRequest())
-    suspend fun startAi(): AiActionResponse = api().startAi()
-    suspend fun aiStatus(): AiStatusResponse = api().aiStatus()
-    suspend fun cancelAi(): AiActionResponse = api().cancelAi()
-    suspend fun cleanAi(): AiActionResponse = api().cleanAi()
-    suspend fun updateAiSchedule(feature: String, cronExpression: String): AiFeatureSchedule =
+    override suspend fun users(): List<User> = api().users().users
+    override suspend fun createUser(username: String, email: String, password: String, role: String?): User = api().createUser(AdminUserCreateRequest(username, email, password, role))
+    override suspend fun updateUser(id: Long, role: String?, active: Boolean?): User = api().updateUser(AdminUserUpdateRequest(id, role, active))
+    override suspend fun deleteUser(id: Long): MessageResponse = api().deleteUser(AdminUserIdRequest(id))
+    override suspend fun localImport(): MessageResponse = api().triggerLocalImport()
+    override suspend fun importStatus(): ImportStatus = api().importStatus()
+    override suspend fun generateMetadata(): JobActionResponse = api().generateMetadata(EmptyRequest())
+    override suspend fun metadataStatus(): JobStatus = api().metadataStatus(EmptyRequest())
+    override suspend fun resetMetadata(): JobActionResponse = api().resetMetadata(EmptyRequest())
+    override suspend fun startAi(): AiActionResponse = api().startAi()
+    override suspend fun aiStatus(): AiStatusResponse = api().aiStatus()
+    override suspend fun cancelAi(): AiActionResponse = api().cancelAi()
+    override suspend fun cleanAi(): AiActionResponse = api().cleanAi()
+    override suspend fun updateAiSchedule(feature: String, cronExpression: String): AiFeatureSchedule =
         api().updateAiSchedule(AiScheduleUpdateRequest(feature, cronExpression))
-    suspend fun startAiFeature(feature: String): AiActionResponse = api().startAiFeature(feature)
-    suspend fun cancelAiFeature(feature: String): AiActionResponse = api().cancelAiFeature(feature)
-    suspend fun cleanAiFeature(feature: String): AiActionResponse = api().cleanAiFeature(feature)
+    override suspend fun startAiFeature(feature: String): AiActionResponse = api().startAiFeature(feature)
+    override suspend fun cancelAiFeature(feature: String): AiActionResponse = api().cancelAiFeature(feature)
+    override suspend fun cleanAiFeature(feature: String): AiActionResponse = api().cleanAiFeature(feature)
     suspend fun mapClusters(bounds: BoundingBox, zoom: Int): MapClustersResponse = api().mapClusters(MapClustersRequest(bounds, zoom))
     suspend fun mapMedia(bounds: BoundingBox, prefixes: List<String>): List<Media> = api().mapMedia(MapMediaRequest(bounds, prefixes)).items
-    suspend fun changePassword(current: String, updated: String): MessageResponse {
+    override suspend fun changePassword(current: String, updated: String): MessageResponse {
         val response = api().changePassword(ChangePasswordRequest(current, updated))
         tokenStore.clear()
         return response
     }
     suspend fun originalUrl(mediaId: Long): String = mediaUrl(mediaId, "original")
     suspend fun previewUrl(mediaId: Long): String = mediaUrl(mediaId, "preview")
-    suspend fun thumbnailUrl(mediaId: Long, tiny: Boolean): String = mediaUrl(mediaId, if (tiny) "thumbnail/tiny" else "thumbnail")
-    suspend fun trashThumbnailUrl(mediaId: Long): String =
+    override suspend fun thumbnailUrl(mediaId: Long, tiny: Boolean): String = mediaUrl(mediaId, if (tiny) "thumbnail/tiny" else "thumbnail")
+    override suspend fun trashThumbnailUrl(mediaId: Long): String =
         "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/trash/$mediaId/thumbnail/tiny"
     private suspend fun mediaUrl(mediaId: Long, suffix: String): String = "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/media/$mediaId/$suffix"
     fun authorizationHeader(): String? = tokenStore.accessToken()?.let { "Bearer $it" }
     fun authenticatedHttpClient(): OkHttpClient = networkClient.httpClient()
-    fun authenticatedImageLoader(context: Context): ImageLoader = networkClient.imageLoader(context)
+    override fun authenticatedImageLoader(context: Context): ImageLoader = networkClient.imageLoader(context)
     suspend fun downloadOriginal(mediaId: Long, destination: File) =
         downloadToFile(originalUrl(mediaId), destination)
-    suspend fun downloadAndroidApk(destination: File) {
+    override suspend fun downloadAndroidApk(destination: File) {
         val origin = requireNotNull(settingsStore.settings.first().origin).trimEnd('/')
         downloadToFile("$origin/momento-android.apk", destination)
     }
@@ -139,12 +144,12 @@ class MomentoRepository(
         }
     }
 
-    suspend fun registerBackupDevice(deviceId: String, deviceName: String): BackupDeviceRegisterResponse = api().registerDevice(BackupDeviceRegisterRequest(deviceId, deviceName))
-    suspend fun createBackupUpload(request: BackupUploadCreateRequest): BackupUploadResponse = api().createUpload(request)
-    suspend fun backupUploadStatus(uploadId: String): BackupUploadResponse = api().uploadStatus(BackupUploadIdRequest(uploadId))
-    suspend fun uploadBackupChunk(uploadId: String, range: String, contentHash: String, body: RequestBody): BackupUploadResponse = api().uploadChunk(uploadId, range, contentHash, body)
-    suspend fun completeBackupUpload(uploadId: String): BackupUploadResponse = api().completeUpload(BackupUploadIdRequest(uploadId))
-    suspend fun cancelBackupUpload(uploadId: String): BackupUploadResponse = api().cancelUpload(BackupUploadIdRequest(uploadId))
+    override suspend fun registerBackupDevice(deviceId: String, deviceName: String): BackupDeviceRegisterResponse = api().registerDevice(BackupDeviceRegisterRequest(deviceId, deviceName))
+    override suspend fun createBackupUpload(request: BackupUploadCreateRequest): BackupUploadResponse = api().createUpload(request)
+    override suspend fun backupUploadStatus(uploadId: String): BackupUploadResponse = api().uploadStatus(BackupUploadIdRequest(uploadId))
+    override suspend fun uploadBackupChunk(uploadId: String, range: String, contentHash: String, body: RequestBody): BackupUploadResponse = api().uploadChunk(uploadId, range, contentHash, body)
+    override suspend fun completeBackupUpload(uploadId: String): BackupUploadResponse = api().completeUpload(BackupUploadIdRequest(uploadId))
+    override suspend fun cancelBackupUpload(uploadId: String): BackupUploadResponse = api().cancelUpload(BackupUploadIdRequest(uploadId))
 }
 
 fun timelineRequest(
