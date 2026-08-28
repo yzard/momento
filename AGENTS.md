@@ -36,6 +36,28 @@ Three rules are worth repeating because they are the ones most often violated:
 2. **Extract before you copy.** Implementing something similar to existing code means refactoring the existing code into a shared function first, then calling it from both places.
 3. **Tests ship with the change.** Every added or modified path gets a unit test at its mirrored location under `tests/`, in the same change.
 
+### Mandatory Android build entrypoint
+
+**Every Android build operation must run in Docker through the repository-root
+`./build_android_client.sh` script. This rule is non-negotiable.** It applies to compilation,
+dependency resolution, verification, lint, JVM tests, instrumented tests, debug APKs, and signed
+APK/AAB releases. Use the script command that matches the task:
+
+```bash
+./build_android_client.sh verify
+./build_android_client.sh assemble-debug
+./build_android_client.sh instrumented-test
+./build_android_client.sh shell
+./build_android_client.sh release --keystore-dir /path/to/keystore
+```
+
+Never bypass the script by running host `gradle`, `./gradlew`, Java, Android SDK, emulator, or ADB
+commands. Do not invoke the Android Dockerfiles with ad hoc `docker build` or `docker run` commands,
+and do not copy artifacts directly from Gradle build directories. The script owns the Docker build
+environment and publishes supported outputs under `build/android/` and `dist/android/`. An Android
+APK or AAB is a valid Momento build artifact only when it was produced by
+`./build_android_client.sh`.
+
 ---
 
 ## LLM Task Scheduling
@@ -515,7 +537,7 @@ decodes and crops it; conversion failures are logged and fail only the correspon
 
 Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
 seed embedding that first created each automatic group. A face joins the first automatic seed whose
-cosine similarity reaches `face_group.similarity_threshold`; the default is `0.41`, lower values
+cosine similarity reaches `face_group.similarity_threshold`; the default is `0.50`, lower values
 are more tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use
 the thumbnail representative, compare every automatic member pair, apply transitive closure, or run
 a second group-to-group merge pass. A manual merge makes every face selected by that merge a fixed

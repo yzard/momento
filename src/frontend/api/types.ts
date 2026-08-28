@@ -3,7 +3,7 @@ export interface Media {
   filename: string
   originalFilename: string
   mediaType: 'image' | 'video'
-  mimeType: string
+  mimeType: string | null
   width: number | null
   height: number | null
   fileSize: number | null

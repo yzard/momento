@@ -18,12 +18,7 @@ describe('aiApi', () => {
     await aiApi.cancel()
     await aiApi.clean()
 
-    expect(post.mock.calls).toEqual([
-      ['/ai/start'],
-      ['/ai/status'],
-      ['/ai/cancel'],
-      ['/ai/clean'],
-    ])
+    expect(post.mock.calls).toEqual([['/ai/start'], ['/ai/status'], ['/ai/cancel'], ['/ai/clean']])
   })
 
   it('uses exact task identifiers for feature controls', async () => {

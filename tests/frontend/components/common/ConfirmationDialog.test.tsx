@@ -16,7 +16,7 @@ describe('ConfirmationDialog', () => {
         destructive
         onConfirm={confirm}
         onCancel={cancel}
-      />,
+      />
     )
 
     expect(screen.getByRole('alertdialog').getAttribute('aria-modal')).toBe('true')

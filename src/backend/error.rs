@@ -6,6 +6,8 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
+const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal server error";
+
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("Authentication failed: {0}")]
@@ -16,6 +18,9 @@ pub enum AppError {
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
+
+    #[error("Password change required")]
+    PasswordChangeRequired,
 
     #[error("Not found: {0}")]
     NotFound(String),
@@ -37,6 +42,9 @@ pub enum AppError {
 
     #[error("Database is busy")]
     DatabaseBusy,
+
+    #[error("Too many authentication attempts; retry after {retry_after_seconds} seconds")]
+    RateLimited { retry_after_seconds: u64 },
 
     #[error("Pool error: {0}")]
     Pool(#[from] r2d2::Error),
@@ -66,66 +74,83 @@ impl IntoResponse for AppError {
             );
             return response;
         }
-        let (status, message) = match &self {
-            AppError::Authentication(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
-            AppError::Authorization(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Internal(msg) => {
-                tracing::error!(
-                    "Internal error: {}\nBacktrace: {:?}",
-                    msg,
-                    std::backtrace::Backtrace::capture()
-                );
-                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+        if let AppError::RateLimited {
+            retry_after_seconds,
+        } = &self
+        {
+            tracing::warn!(
+                retry_after_seconds,
+                "Password authentication request was rate limited"
+            );
+            let retry_after = retry_after_seconds.to_string();
+            let mut response = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "detail": "Too many authentication attempts; retry later" })),
+            )
+                .into_response();
+            if let Ok(header_value) = axum::http::HeaderValue::from_str(&retry_after) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, header_value);
             }
-            AppError::Database(e) => {
-                tracing::error!(
-                    "Database error: {}\nBacktrace: {:?}",
-                    e,
-                    std::backtrace::Backtrace::capture()
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Database error".to_string(),
-                )
-            }
+            return response;
+        }
+        let (status, message, error_code) = match &self {
+            AppError::Authentication(message) => (StatusCode::UNAUTHORIZED, message.clone(), None),
+            AppError::Authorization(message) => (StatusCode::FORBIDDEN, message.clone(), None),
+            AppError::Forbidden(message) => (StatusCode::FORBIDDEN, message.clone(), None),
+            AppError::PasswordChangeRequired => (
+                StatusCode::FORBIDDEN,
+                "Password change required".to_string(),
+                Some("password_change_required"),
+            ),
+            AppError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone(), None),
+            AppError::Validation(message) => (StatusCode::BAD_REQUEST, message.clone(), None),
+            AppError::Conflict(message) => (StatusCode::CONFLICT, message.clone(), None),
+            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone(), None),
+            AppError::Internal(message) => internal_server_error("Internal", message),
+            AppError::Database(error) => internal_server_error("Database", error),
             AppError::DatabaseBusy => unreachable!(),
-            AppError::Pool(e) => {
-                tracing::error!(
-                    "Pool error: {}\nBacktrace: {:?}",
-                    e,
-                    std::backtrace::Backtrace::capture()
-                );
+            AppError::RateLimited { .. } => unreachable!(),
+            AppError::Pool(error) => internal_server_error("Connection pool", error),
+            AppError::Jwt(error) => {
+                tracing::error!("JWT error: {}", error);
+                (StatusCode::UNAUTHORIZED, "Invalid token".to_string(), None)
+            }
+            AppError::Io(error) => internal_server_error("IO", error),
+            AppError::Json(error) => {
+                tracing::error!("JSON error: {}", error);
                 (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Connection pool error".to_string(),
+                    StatusCode::BAD_REQUEST,
+                    "JSON parsing error".to_string(),
+                    None,
                 )
-            }
-            AppError::Jwt(e) => {
-                tracing::error!("JWT error: {}", e);
-                (StatusCode::UNAUTHORIZED, "Invalid token".to_string())
-            }
-            AppError::Io(e) => {
-                tracing::error!(
-                    "IO error: {}\nBacktrace: {:?}",
-                    e,
-                    std::backtrace::Backtrace::capture()
-                );
-                (StatusCode::INTERNAL_SERVER_ERROR, "IO error".to_string())
-            }
-            AppError::Json(e) => {
-                tracing::error!("JSON error: {}", e);
-                (StatusCode::BAD_REQUEST, "JSON parsing error".to_string())
             }
         };
 
-        let body = Json(json!({ "detail": message }));
-        (status, body).into_response()
+        let response_body = match error_code {
+            Some(error_code) => Json(json!({ "detail": message, "code": error_code })),
+            None => Json(json!({ "detail": message })),
+        };
+        (status, response_body).into_response()
     }
+}
+
+fn internal_server_error(
+    category: &str,
+    error: &dyn std::fmt::Display,
+) -> (StatusCode, String, Option<&'static str>) {
+    tracing::error!(
+        "{} error: {}\nBacktrace: {:?}",
+        category,
+        error,
+        std::backtrace::Backtrace::capture()
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        INTERNAL_SERVER_ERROR_MESSAGE.to_string(),
+        None,
+    )
 }
 
 impl From<rusqlite::Error> for AppError {

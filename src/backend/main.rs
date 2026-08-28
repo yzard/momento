@@ -5,7 +5,9 @@ use momento_common::config_cli::{parse_config_command, ConfigCommand};
 use momento_common::logging::init_logging;
 
 use momento_api::app::create_app;
-use momento_api::auth::{ensure_default_admin, prepare_admin_password_reset};
+use momento_api::auth::{
+    cleanup_refresh_tokens, ensure_default_admin, prepare_admin_password_reset,
+};
 use momento_api::config::{
     consume_admin_password_reset, load_config, save_default_config, ConfigManager,
 };
@@ -47,6 +49,18 @@ fn start_background_tasks(
     webdav_request_gate: momento_api::webdav::WebDAVRequestGate,
 ) {
     let config = config_manager.current();
+    let refresh_token_pool = pool.clone();
+    let refresh_token_cleanup_interval =
+        std::time::Duration::from_secs(config.security.refresh_token_cleanup_interval_seconds);
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = cleanup_refresh_tokens(&refresh_token_pool) {
+                tracing::warn!("Refresh-token cleanup failed: {error}");
+            }
+            tokio::time::sleep(refresh_token_cleanup_interval).await;
+        }
+    });
+
     let pool_clone = pool.clone();
     let cronjob_transport = llm_transport.clone();
     let cronjob_config = config_manager.clone();
@@ -82,9 +96,17 @@ fn start_background_tasks(
     let ai_result_interval =
         std::time::Duration::from_secs(config.llm_result_worker.poll_interval_seconds);
     let ai_result_concurrency = config.llm_result_worker.concurrency;
+    let ai_result_process_config = config.media_process.clone();
     std::thread::Builder::new()
         .name("ai-result-writer".to_string())
-        .spawn(move || ai::result::run(ai_result_pool, ai_result_interval, ai_result_concurrency))
+        .spawn(move || {
+            ai::result::run(
+                ai_result_pool,
+                ai_result_interval,
+                ai_result_concurrency,
+                ai_result_process_config,
+            )
+        })
         .expect("failed to start the AI result writer thread");
 
     let deduplicate_pool = pool.clone();
@@ -245,5 +267,10 @@ async fn main() {
 
     tracing::info!("Starting Momento API on {}", addr);
 
-    axum::serve(listener, app).await.expect("Server failed");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("Server failed");
 }

@@ -70,13 +70,13 @@ class AssetBatcher {
 
 export const batchLoader = new AssetBatcher(
   (mediaIds) => mediaApi.getThumbnailBatch(mediaIds, 'normal'),
-  (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'normal'),
+  (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal')
 )
 export const tinyBatchLoader = new AssetBatcher(
   (mediaIds) => mediaApi.getThumbnailBatch(mediaIds, 'tiny'),
-  (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'tiny'),
+  (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'tiny')
 )
 export const trashBatchLoader = new AssetBatcher(
   (mediaIds) => trashApi.getThumbnailBatch(mediaIds, 'tiny'),
-  (mediaId) => mediaApi.getCachedThumbnailUrl(mediaId, 'tiny'),
+  (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'tiny')
 )

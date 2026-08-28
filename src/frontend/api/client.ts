@@ -1,14 +1,11 @@
-import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
+import axios, { type AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 
-const ACCESS_TOKEN_KEY = 'momento_access_token'
-const REFRESH_TOKEN_KEY = 'momento_refresh_token'
+type AuthenticationFailureHandler = () => void
 
-type ForbiddenResponseHandler = () => void
+let authenticationFailureHandler: AuthenticationFailureHandler | null = null
 
-let forbiddenResponseHandler: ForbiddenResponseHandler | null = null
-
-export function setForbiddenResponseHandler(handler: ForbiddenResponseHandler | null) {
-  forbiddenResponseHandler = handler
+export function setAuthenticationFailureHandler(handler: AuthenticationFailureHandler | null) {
+  authenticationFailureHandler = handler
 }
 
 export const apiClient = axios.create({
@@ -16,14 +13,7 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-})
-
-apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = localStorage.getItem(ACCESS_TOKEN_KEY)
-  if (token && config.headers) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-  return config
+  withCredentials: true,
 })
 
 let isRefreshing = false
@@ -33,69 +23,66 @@ let failedQueue: Array<{
 }> = []
 
 const processQueue = (error: Error | null) => {
-  failedQueue.forEach((prom) => {
+  failedQueue.forEach((pendingRequest) => {
     if (error) {
-      prom.reject(error)
+      pendingRequest.reject(error)
     } else {
-      prom.resolve(undefined)
+      pendingRequest.resolve(undefined)
     }
   })
   failedQueue = []
 }
 
-apiClient.interceptors.response.use(
-  (response) => response,
-  async (error: AxiosError) => {
-    const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
+function isBrowserSessionRequest(config: InternalAxiosRequestConfig): boolean {
+  return config.url?.includes('/user/session/') ?? false
+}
 
-    if (error.response?.status === 403) {
-      forbiddenResponseHandler?.()
-      return Promise.reject(error)
-    }
+interface RetriableRequest extends InternalAxiosRequestConfig {
+  _retry?: boolean
+}
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject })
-        }).then(() => apiClient(originalRequest))
-      }
+function isPasswordChangeRequired(error: AxiosError<{ code?: string }>): boolean {
+  return error.response?.status === 403 && error.response.data?.code === 'password_change_required'
+}
 
-      originalRequest._retry = true
-      isRefreshing = true
+function shouldRefreshSession(error: AxiosError, request: RetriableRequest): boolean {
+  return error.response?.status === 401 && !request._retry && !isBrowserSessionRequest(request)
+}
 
-      const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
-      if (!refreshToken) {
-        isRefreshing = false
-        return Promise.reject(error)
-      }
+function retryAfterCurrentRefresh(request: RetriableRequest): Promise<AxiosResponse> {
+  return new Promise((resolve, reject) => {
+    failedQueue.push({ resolve, reject })
+  }).then(() => apiClient(request))
+}
 
-      try {
-        const response = await axios.post('/api/v1/user/refresh', {
-          refreshToken: refreshToken,
-        })
-        if (localStorage.getItem(REFRESH_TOKEN_KEY) !== refreshToken) {
-          const sessionChangedError = new Error('Authentication session changed during refresh')
-          processQueue(sessionChangedError)
-          return Promise.reject(sessionChangedError)
-        }
-        const { accessToken, refreshToken: newRefreshToken } = response.data
-        localStorage.setItem(ACCESS_TOKEN_KEY, accessToken)
-        localStorage.setItem(REFRESH_TOKEN_KEY, newRefreshToken)
-        processQueue(null)
-        return apiClient(originalRequest)
-      } catch (refreshError) {
-        processQueue(refreshError as Error)
-        if (localStorage.getItem(REFRESH_TOKEN_KEY) === refreshToken) {
-          localStorage.removeItem(ACCESS_TOKEN_KEY)
-          localStorage.removeItem(REFRESH_TOKEN_KEY)
-          window.location.href = '/login'
-        }
-        return Promise.reject(refreshError)
-      } finally {
-        isRefreshing = false
-      }
-    }
+async function refreshSessionAndRetry(request: RetriableRequest): Promise<AxiosResponse> {
+  request._retry = true
+  isRefreshing = true
 
-    return Promise.reject(error)
+  try {
+    await axios.post('/api/v1/user/session/refresh', null, { withCredentials: true })
+    processQueue(null)
+    return apiClient(request)
+  } catch (refreshError) {
+    processQueue(refreshError as Error)
+    authenticationFailureHandler?.()
+    throw refreshError
+  } finally {
+    isRefreshing = false
   }
-)
+}
+
+async function handleResponseError(error: AxiosError<{ code?: string }>) {
+  const originalRequest = error.config as RetriableRequest
+
+  if (isPasswordChangeRequired(error)) {
+    authenticationFailureHandler?.()
+    throw error
+  }
+
+  if (!shouldRefreshSession(error, originalRequest)) throw error
+  if (isRefreshing) return retryAfterCurrentRefresh(originalRequest)
+  return refreshSessionAndRetry(originalRequest)
+}
+
+apiClient.interceptors.response.use((response) => response, handleResponseError)

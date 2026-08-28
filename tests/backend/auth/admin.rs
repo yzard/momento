@@ -29,7 +29,7 @@ fn ensure_default_admin_creates_one_for_an_empty_database() {
 }
 
 #[test]
-fn prepare_admin_password_reset_preserves_account_and_revokes_refresh_tokens() {
+fn prepare_admin_password_reset_preserves_account_and_deletes_refresh_tokens() {
     let pool = create_test_db();
     let admin_id = create_test_user(&pool, "existing-admin", "admin@example.com");
     let connection = pool.get().expect("database");
@@ -57,14 +57,21 @@ fn prepare_admin_password_reset_preserves_account_and_revokes_refresh_tokens() {
     prepare_admin_password_reset(&pool, admin_id).expect("prepare reset");
 
     let connection = pool.get().expect("database");
-    let (saved_hash, must_change_password, revoked): (String, i32, i32) = connection
+    let (saved_hash, must_change_password): (String, i32) = connection
         .query_row(
-            "SELECT users.hashed_password, users.must_change_password, refresh_tokens.revoked FROM users JOIN refresh_tokens ON refresh_tokens.user_id = users.id WHERE users.id = ?1",
+            "SELECT hashed_password, must_change_password FROM users WHERE id = ?1",
             [admin_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("admin state");
     assert_eq!(saved_hash, original_hash);
     assert_eq!(must_change_password, 0);
-    assert_eq!(revoked, 1);
+    let token_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = ?1",
+            [admin_id],
+            |row| row.get(0),
+        )
+        .expect("refresh-token count");
+    assert_eq!(token_count, 0);
 }

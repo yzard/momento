@@ -1,3 +1,5 @@
+use crate::test_utils::QOI_FIXTURE;
+use momento_api::config::MediaProcessConfig;
 use momento_api::processor::thumbnails::generate_image_preview;
 
 #[tokio::test]
@@ -9,7 +11,9 @@ async fn image_preview_preserves_aspect_ratio_within_the_size_bound() {
         .save(&source)
         .expect("source image");
 
-    assert!(generate_image_preview(&source, &output, 300, 85).await);
+    assert!(
+        generate_image_preview(&source, &output, 300, 85, &MediaProcessConfig::default(),).await
+    );
 
     let preview = image::open(output).expect("generated preview");
     assert_eq!((preview.width(), preview.height()), (300, 200));
@@ -36,7 +40,16 @@ async fn image_preview_decodes_avif_without_changing_the_original() {
     );
     let original_bytes = std::fs::read(&source_avif).expect("AVIF original bytes");
 
-    assert!(generate_image_preview(&source_avif, &output, 60, 85).await);
+    assert!(
+        generate_image_preview(
+            &source_avif,
+            &output,
+            60,
+            85,
+            &MediaProcessConfig::default(),
+        )
+        .await
+    );
 
     let preview = image::open(output).expect("generated AVIF preview");
     assert_eq!((preview.width(), preview.height()), (60, 40));
@@ -44,4 +57,18 @@ async fn image_preview_decodes_avif_without_changing_the_original() {
         std::fs::read(source_avif).expect("unchanged AVIF original"),
         original_bytes
     );
+}
+
+#[tokio::test]
+async fn image_preview_decodes_qoi_without_changing_the_original() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let source = directory.path().join("source.qoi");
+    let output = directory.path().join("preview.jpg");
+    std::fs::write(&source, QOI_FIXTURE).expect("QOI fixture");
+
+    assert!(generate_image_preview(&source, &output, 2, 85, &MediaProcessConfig::default(),).await);
+
+    let preview = image::open(output).expect("generated QOI preview");
+    assert_eq!((preview.width(), preview.height()), (2, 1));
+    assert_eq!(std::fs::read(source).expect("QOI original"), QOI_FIXTURE);
 }

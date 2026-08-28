@@ -16,11 +16,23 @@ describe('MediaSelectionToolbar', () => {
         onAddToAlbum={vi.fn()}
         onRemoveFromAlbum={null}
         onMoveToTrash={vi.fn()}
-      />,
+      />
     )
 
-    expect((screen.getByRole('button', { name: 'Add to album' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('button', { name: 'Move to Trash' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(
+      (
+        screen.getByRole('button', {
+          name: 'Add to album',
+        }) as HTMLButtonElement
+      ).disabled
+    ).toBe(true)
+    expect(
+      (
+        screen.getByRole('button', {
+          name: 'Move to Trash',
+        }) as HTMLButtonElement
+      ).disabled
+    ).toBe(true)
   })
 
   it('exposes the actions for the current view and finishes selection', () => {
@@ -35,7 +47,7 @@ describe('MediaSelectionToolbar', () => {
         onAddToAlbum={addToAlbum}
         onRemoveFromAlbum={null}
         onMoveToTrash={vi.fn()}
-      />,
+      />
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Add to album' }))

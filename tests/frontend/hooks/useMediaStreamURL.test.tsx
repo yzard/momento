@@ -17,12 +17,16 @@ describe('useMediaStreamURL', () => {
   it('loads only when enabled and ignores stale media responses', async () => {
     let resolveFirst!: (url: string) => void
     mocks.getFileStreamURL
-      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveFirst = resolve }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveFirst = resolve
+          })
+      )
       .mockResolvedValueOnce('/stream/2')
-    const view = renderHook(
-      ({ mediaId, enabled }) => useMediaStreamURL(mediaId, enabled),
-      { initialProps: { mediaId: 1 as number | null, enabled: false } },
-    )
+    const view = renderHook(({ mediaId, enabled }) => useMediaStreamURL(mediaId, enabled), {
+      initialProps: { mediaId: 1 as number | null, enabled: false },
+    })
 
     expect(mocks.getFileStreamURL).not.toHaveBeenCalled()
     view.rerender({ mediaId: 1, enabled: true })

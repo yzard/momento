@@ -39,7 +39,16 @@ export interface FaceGroupsMergeResponse {
   group: FaceGroup
 }
 
-const thumbnailUrlCache = new Map<number, string>()
+const thumbnailURLCache = new Map<number, string>()
+const pendingThumbnailRequests = new Map<number, Promise<string>>()
+let thumbnailCacheGeneration = 0
+
+function clearThumbnailCache(): void {
+  thumbnailCacheGeneration += 1
+  thumbnailURLCache.forEach((thumbnailURL) => URL.revokeObjectURL(thumbnailURL))
+  thumbnailURLCache.clear()
+  pendingThumbnailRequests.clear()
+}
 
 export const facesApi = {
   listGroups: async (request: FaceGroupsListRequest): Promise<FaceGroupsListResponse> => {
@@ -52,18 +61,41 @@ export const facesApi = {
     return response.data
   },
 
-  getThumbnailUrl: async (request: FaceThumbnailRequest): Promise<string> => {
-    const cachedUrl = thumbnailUrlCache.get(request.faceGroupId)
-    if (cachedUrl) return cachedUrl
+  getThumbnailURL: async (request: FaceThumbnailRequest): Promise<string> => {
+    const cachedURL = thumbnailURLCache.get(request.faceGroupId)
+    if (cachedURL) return cachedURL
 
-    const response = await apiClient.post<Blob>('/faces/thumbnails/get', request, { responseType: 'blob' })
-    const thumbnailUrl = URL.createObjectURL(response.data)
-    thumbnailUrlCache.set(request.faceGroupId, thumbnailUrl)
-    return thumbnailUrl
+    const pendingRequest = pendingThumbnailRequests.get(request.faceGroupId)
+    if (pendingRequest) return pendingRequest
+
+    const requestGeneration = thumbnailCacheGeneration
+    const thumbnailRequest = (async () => {
+      const response = await apiClient.post<Blob>('/faces/thumbnails/get', request, {
+        responseType: 'blob',
+      })
+      if (requestGeneration !== thumbnailCacheGeneration) {
+        throw new Error('Face thumbnail request was superseded')
+      }
+      const thumbnailURL = URL.createObjectURL(response.data)
+      thumbnailURLCache.set(request.faceGroupId, thumbnailURL)
+      return thumbnailURL
+    })()
+
+    pendingThumbnailRequests.set(request.faceGroupId, thumbnailRequest)
+    try {
+      return await thumbnailRequest
+    } finally {
+      if (pendingThumbnailRequests.get(request.faceGroupId) === thumbnailRequest) {
+        pendingThumbnailRequests.delete(request.faceGroupId)
+      }
+    }
   },
 
   mergeGroups: async (request: FaceGroupsMergeRequest): Promise<FaceGroupsMergeResponse> => {
     const response = await apiClient.post<FaceGroupsMergeResponse>('/faces/groups/merge', request)
+    clearThumbnailCache()
     return response.data
   },
+
+  clearThumbnailCache,
 }

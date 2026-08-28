@@ -11,7 +11,9 @@ use momento_api::{
     },
 };
 
-use crate::test_utils::{create_test_db, create_test_user, init_test_paths, lock_webdav_test};
+use crate::test_utils::{
+    create_test_db, create_test_user, init_test_paths, lock_webdav_test, QOI_FIXTURE,
+};
 
 fn mark_webdav_file_ready(pool: &momento_api::database::DbPool, user_id: i64, file_path: &str) {
     pool.get()
@@ -21,6 +23,33 @@ fn mark_webdav_file_ready(pool: &momento_api::database::DbPool, user_id: i64, fi
             rusqlite::params![user_id, file_path],
         )
         .expect("ready WebDAV file");
+}
+
+#[tokio::test]
+async fn qoi_import_uses_the_canonical_image_mime_type() {
+    init_test_paths();
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "qoi-import", "qoi-import@example.com");
+    let source_directory = tempfile::tempdir().expect("source directory");
+    let source_path = source_directory.path().join("lossless.QOI");
+    std::fs::write(&source_path, QOI_FIXTURE).expect("QOI source");
+
+    let media_id = import_staged_file(&source_path, ImportSource::Local, user_id, &pool, false)
+        .await
+        .expect("QOI import");
+
+    let (media_type, mime_type, metadata_status): (String, String, String) = pool
+        .get()
+        .expect("database")
+        .query_row(
+            "SELECT m.media_type, m.mime_type, j.status FROM media m JOIN media_metadata_jobs j ON j.media_id = m.id WHERE m.id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("imported QOI");
+    assert_eq!(media_type, "image");
+    assert_eq!(mime_type, "image/qoi");
+    assert_eq!(metadata_status, "queued");
 }
 
 #[tokio::test]

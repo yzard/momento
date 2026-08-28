@@ -5,10 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
-SOURCE_PATH = (
-    Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "ocr_server.py"
-)
+SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "ocr_server.py"
 
 
 class OcrServerTests(unittest.TestCase):
@@ -22,17 +19,12 @@ class OcrServerTests(unittest.TestCase):
         with patch.dict(sys.modules, {"image_runtime": image_runtime}):
             specification.loader.exec_module(ocr_server)
         with patch.object(
-            ocr_server.runpy,
-            "run_module",
-            side_effect=lambda *args, **kwargs: events.append((args, kwargs)),
+            ocr_server.runpy, "run_module", side_effect=lambda *args, **kwargs: events.append((args, kwargs))
         ):
             ocr_server.main()
 
         self.assertEqual(events[0], "registered")
-        self.assertEqual(
-            events[1],
-            (("vllm.entrypoints.openai.api_server",), {"run_name": "__main__"}),
-        )
+        self.assertEqual(events[1], (("vllm.entrypoints.openai.api_server",), {"run_name": "__main__"}))
 
 
 if __name__ == "__main__":

@@ -4,23 +4,20 @@
 import argparse
 import base64
 import concurrent.futures
-import json
 import math
 import sys
 from array import array
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from dynamic_batching import DynamicBatcher
 from image_runtime import (
-    InvalidImageError,
     ModelHTTPServer,
     create_inference_slots,
     decode_image,
     register_image_decoders,
     serve_until_stopped,
 )
-from runtime_input import read_runtime_input
+from runtime_http import ImageRuntimeRequestHandler
 
 EMBEDDING_DIMENSIONS = 512
 EMBEDDING_ENCODING = "float32_le"
@@ -76,12 +73,7 @@ def normalized_bounding_box(bounding_box, image_width, image_height):
     height = (bottom - top) / image_height
     if width <= 0.0 or height <= 0.0:
         raise RuntimeError("detector returned an empty face bounding box")
-    return {
-        "x": left / image_width,
-        "y": top / image_height,
-        "width": width,
-        "height": height,
-    }
+    return {"x": left / image_width, "y": top / image_height, "width": width, "height": height}
 
 
 def normalized_eye_center(keypoints, image_width, image_height):
@@ -95,25 +87,14 @@ def normalized_eye_center(keypoints, image_width, image_height):
     center_y = (float(left_eye[1]) + float(right_eye[1])) / 2.0
     if not math.isfinite(center_x) or not math.isfinite(center_y):
         raise RuntimeError("detector returned non-finite eye landmarks")
-    return {
-        "x": min(max(center_x / image_width, 0.0), 1.0),
-        "y": min(max(center_y / image_height, 0.0), 1.0),
-    }
+    return {"x": min(max(center_x / image_width, 0.0), 1.0), "y": min(max(center_y / image_height, 0.0), 1.0)}
 
 
 def face_frontality_score(keypoints):
     if keypoints is None or len(keypoints) < 5:
         raise RuntimeError("detector did not return five face landmarks")
-    landmarks = [
-        (float(keypoint[0]), float(keypoint[1]))
-        for keypoint in keypoints[:5]
-        if len(keypoint) >= 2
-    ]
-    if len(landmarks) != 5 or any(
-        not math.isfinite(coordinate)
-        for landmark in landmarks
-        for coordinate in landmark
-    ):
+    landmarks = [(float(keypoint[0]), float(keypoint[1])) for keypoint in keypoints[:5] if len(keypoint) >= 2]
+    if len(landmarks) != 5 or any(not math.isfinite(coordinate) for landmark in landmarks for coordinate in landmark):
         raise RuntimeError("detector returned invalid face landmarks")
     left_eye, right_eye, nose, left_mouth, right_mouth = landmarks
     eye_span = abs(right_eye[0] - left_eye[0])
@@ -130,21 +111,13 @@ def face_frontality_score(keypoints):
 
 
 def face_meets_thresholds(
-    confidence,
-    bounding_box,
-    image_width,
-    image_height,
-    minimum_face_likelihood,
-    minimum_face_resolution_pixels,
+    confidence, bounding_box, image_width, image_height, minimum_face_likelihood, minimum_face_resolution_pixels
 ):
     if confidence < minimum_face_likelihood:
         return False
     face_width_pixels = bounding_box["width"] * image_width
     face_height_pixels = bounding_box["height"] * image_height
-    return (
-        face_width_pixels >= minimum_face_resolution_pixels
-        and face_height_pixels >= minimum_face_resolution_pixels
-    )
+    return face_width_pixels >= minimum_face_resolution_pixels and face_height_pixels >= minimum_face_resolution_pixels
 
 
 def face_size_score(bounding_box):
@@ -175,13 +148,8 @@ def face_visibility_score(parsing_mask):
         region_pixel_count = int(numpy.count_nonzero(region_mask))
         if region_pixel_count == 0:
             raise RuntimeError("facial feature region is empty")
-        visible_fraction = (
-            float(numpy.count_nonzero(visible_pixels & region_mask))
-            / region_pixel_count
-        )
-        region_scores.append(
-            min(visible_fraction / EXPECTED_VISIBLE_REGION_FRACTION, 1.0)
-        )
+        visible_fraction = float(numpy.count_nonzero(visible_pixels & region_mask)) / region_pixel_count
+        region_scores.append(min(visible_fraction / EXPECTED_VISIBLE_REGION_FRACTION, 1.0))
     return round(sum(region_scores) / len(region_scores), 6)
 
 
@@ -192,19 +160,11 @@ def facial_feature_clarity_score(aligned_face, parsing_mask):
         raise RuntimeError("aligned face must be a BGR image")
     if parsing_mask.shape != aligned_face.shape[:2]:
         raise RuntimeError("BiSeNet parsing mask does not match aligned face")
-    grayscale = (
-        0.114 * aligned_face[:, :, 0]
-        + 0.587 * aligned_face[:, :, 1]
-        + 0.299 * aligned_face[:, :, 2]
-    ).astype(numpy.float32)
-    padded = numpy.pad(grayscale, 1, mode="edge")
-    laplacian = numpy.abs(
-        padded[:-2, 1:-1]
-        + padded[2:, 1:-1]
-        + padded[1:-1, :-2]
-        + padded[1:-1, 2:]
-        - 4.0 * grayscale
+    grayscale = (0.114 * aligned_face[:, :, 0] + 0.587 * aligned_face[:, :, 1] + 0.299 * aligned_face[:, :, 2]).astype(
+        numpy.float32
     )
+    padded = numpy.pad(grayscale, 1, mode="edge")
+    laplacian = numpy.abs(padded[:-2, 1:-1] + padded[2:, 1:-1] + padded[1:-1, :-2] + padded[1:-1, 2:] - 4.0 * grayscale)
     visible_pixels = numpy.isin(parsing_mask, tuple(VISIBLE_FACE_CLASSES))
     region_scores = []
     for region_mask in facial_feature_region_masks(*parsing_mask.shape):
@@ -226,13 +186,9 @@ def preprocess_face_parsing_batch(aligned_faces):
     tensors = []
     for aligned_face in aligned_faces:
         resized_face = cv2.resize(
-            aligned_face,
-            (FACE_PARSING_INPUT_SIZE, FACE_PARSING_INPUT_SIZE),
-            interpolation=cv2.INTER_LINEAR,
+            aligned_face, (FACE_PARSING_INPUT_SIZE, FACE_PARSING_INPUT_SIZE), interpolation=cv2.INTER_LINEAR
         )
-        rgb_face = (
-            cv2.cvtColor(resized_face, cv2.COLOR_BGR2RGB).astype(numpy.float32) / 255.0
-        )
+        rgb_face = cv2.cvtColor(resized_face, cv2.COLOR_BGR2RGB).astype(numpy.float32) / 255.0
         normalized_face = (rgb_face - input_mean) / input_standard_deviation
         tensors.append(numpy.transpose(normalized_face, (2, 0, 1)))
     return numpy.ascontiguousarray(numpy.stack(tensors), dtype=numpy.float32)
@@ -257,11 +213,7 @@ def postprocess_face_parsing_batch(model_output, aligned_faces):
     if len(parsing_masks) != len(aligned_faces):
         raise RuntimeError("BiSeNet returned a different number of masks than faces")
     return [
-        cv2.resize(
-            parsing_mask,
-            (aligned_face.shape[1], aligned_face.shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
+        cv2.resize(parsing_mask, (aligned_face.shape[1], aligned_face.shape[0]), interpolation=cv2.INTER_NEAREST)
         for parsing_mask, aligned_face in zip(parsing_masks, aligned_faces)
     ]
 
@@ -295,18 +247,11 @@ def prepare_detected_faces(
         confidence = float(detector_output[4])
         if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
             raise RuntimeError("detector returned an invalid confidence")
-        bounding_box = normalized_bounding_box(
-            detector_output, image_width, image_height
-        )
+        bounding_box = normalized_bounding_box(detector_output, image_width, image_height)
         bounding_box["width"] = min(bounding_box["width"], 1.0 - bounding_box["x"])
         bounding_box["height"] = min(bounding_box["height"], 1.0 - bounding_box["y"])
         if not face_meets_thresholds(
-            confidence,
-            bounding_box,
-            image_width,
-            image_height,
-            minimum_face_likelihood,
-            minimum_face_resolution_pixels,
+            confidence, bounding_box, image_width, image_height, minimum_face_likelihood, minimum_face_resolution_pixels
         ):
             continue
         if detected_keypoints is None or face_index >= len(detected_keypoints):
@@ -315,9 +260,7 @@ def prepare_detected_faces(
         detected_faces.append(
             {
                 "boundingBox": bounding_box,
-                "eyeCenter": normalized_eye_center(
-                    keypoints, image_width, image_height
-                ),
+                "eyeCenter": normalized_eye_center(keypoints, image_width, image_height),
                 "confidence": confidence,
                 "faceSizeScore": face_size_score(bounding_box),
                 "frontalityScore": face_frontality_score(keypoints),
@@ -374,19 +317,13 @@ class FaceDetectionRuntime:
         self.processing_slots = create_inference_slots(processing_concurrency)
         self.detection_slots = create_inference_slots(model_concurrency)
         self.application.prepare(
-            ctx_id=0,
-            det_thresh=minimum_face_likelihood,
-            det_size=(face_detection_size, face_detection_size),
+            ctx_id=0, det_thresh=minimum_face_likelihood, det_size=(face_detection_size, face_detection_size)
         )
         self.detection_model = self.application.models["detection"]
         self.recognition_model = self.application.models["recognition"]
-        if tuple(self.recognition_model.input_size) != (
-            RECOGNITION_INPUT_SIZE,
-            RECOGNITION_INPUT_SIZE,
-        ):
+        if tuple(self.recognition_model.input_size) != (RECOGNITION_INPUT_SIZE, RECOGNITION_INPUT_SIZE):
             raise RuntimeError(
-                f"{MODEL_NAME} recognition input must be "
-                f"{RECOGNITION_INPUT_SIZE}x{RECOGNITION_INPUT_SIZE}"
+                f"{MODEL_NAME} recognition input must be " f"{RECOGNITION_INPUT_SIZE}x{RECOGNITION_INPUT_SIZE}"
             )
         self.align_face = lambda image_array, keypoints: face_align.norm_crop(
             image_array, landmark=keypoints, image_size=RECOGNITION_INPUT_SIZE
@@ -396,19 +333,11 @@ class FaceDetectionRuntime:
             try:
                 model_embeddings = self.recognition_model.get_feat(aligned_faces)
             except cv2.error as error:
-                raise RuntimeError(
-                    f"failed to prepare recognition batch: {error}"
-                ) from error
-            return [
-                normalize_embedding(model_embedding)
-                for model_embedding in model_embeddings
-            ]
+                raise RuntimeError(f"failed to prepare recognition batch: {error}") from error
+            return [normalize_embedding(model_embedding) for model_embedding in model_embeddings]
 
         self.recognition_batcher = DynamicBatcher(
-            recognize_faces,
-            recognition_batch_size,
-            recognition_batch_wait_milliseconds,
-            "face-recognition-batcher",
+            recognize_faces, recognition_batch_size, recognition_batch_wait_milliseconds, "face-recognition-batcher"
         )
 
         face_parsing_session = onnxruntime.InferenceSession(
@@ -418,23 +347,17 @@ class FaceDetectionRuntime:
         face_parsing_outputs = face_parsing_session.get_outputs()
         self.face_parsing_session = face_parsing_session
         self.face_parsing_input_name = face_parsing_input.name
-        self.face_parsing_output_name = select_face_parsing_output_name(
-            face_parsing_outputs
-        )
+        self.face_parsing_output_name = select_face_parsing_output_name(face_parsing_outputs)
 
         def parse_faces(aligned_faces):
             model_input = preprocess_face_parsing_batch(aligned_faces)
             model_output = self.face_parsing_session.run(
-                [self.face_parsing_output_name],
-                {self.face_parsing_input_name: model_input},
+                [self.face_parsing_output_name], {self.face_parsing_input_name: model_input}
             )[0]
             return postprocess_face_parsing_batch(model_output, aligned_faces)
 
         self.face_parsing_batcher = DynamicBatcher(
-            parse_faces,
-            FACE_PARSING_BATCH_SIZE,
-            FACE_PARSING_BATCH_WAIT_MILLISECONDS,
-            "face-parsing-batcher",
+            parse_faces, FACE_PARSING_BATCH_SIZE, FACE_PARSING_BATCH_WAIT_MILLISECONDS, "face-parsing-batcher"
         )
         self.post_detection_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="face-post-detection"
@@ -450,10 +373,8 @@ class FaceDetectionRuntime:
             image_array = numpy.asarray(image)[:, :, ::-1]
         with self.processing_slots:
             with self.detection_slots:
-                detected_bounding_boxes, detected_keypoints = (
-                    self.detection_model.detect(
-                        image_array, max_num=0, metric="default"
-                    )
+                detected_bounding_boxes, detected_keypoints = self.detection_model.detect(
+                    image_array, max_num=0, metric="default"
                 )
         with self.processing_slots:
             detected_faces = prepare_detected_faces(
@@ -469,9 +390,7 @@ class FaceDetectionRuntime:
         del image_array
         del image
         aligned_faces = [face.pop("alignedFace") for face in detected_faces]
-        parsing_future = self.post_detection_executor.submit(
-            self.face_parsing_batcher.infer, aligned_faces
-        )
+        parsing_future = self.post_detection_executor.submit(self.face_parsing_batcher.infer, aligned_faces)
         embeddings = self.recognition_batcher.infer(aligned_faces)
         parsing_masks = parsing_future.result()
         faces = []
@@ -482,9 +401,7 @@ class FaceDetectionRuntime:
                 {
                     "index": len(faces),
                     "visibilityScore": face_visibility_score(parsing_mask),
-                    "featureClarityScore": facial_feature_clarity_score(
-                        aligned_face, parsing_mask
-                    ),
+                    "featureClarityScore": facial_feature_clarity_score(aligned_face, parsing_mask),
                     "embedding": encode_float32_le(embedding),
                     "embeddingEncoding": EMBEDDING_ENCODING,
                     "embeddingDimensions": EMBEDDING_DIMENSIONS,
@@ -499,49 +416,8 @@ class FaceDetectionRuntime:
         self.recognition_batcher.close()
 
 
-class Handler(BaseHTTPRequestHandler):
-    runtime = None
-    input_root = None
-
-    def do_GET(self):
-        if self.path != "/ready":
-            self.send_error(404)
-            return
-        self.send_json(200, {"status": "ready"})
-
-    def do_POST(self):
-        if self.path != "/infer":
-            self.send_error(404)
-            return
-        self.handle_inference()
-
-    def handle_inference(self):
-        try:
-            with read_runtime_input(self, self.input_root) as image_source:
-                response = self.runtime.infer(image_source)
-        except InvalidImageError as error:
-            self.send_json(400, {"detail": str(error)})
-            return
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.send_json(400, {"detail": f"invalid request: {error}"})
-            return
-        except RuntimeError as error:
-            self.send_json(500, {"detail": str(error)})
-            return
-        self.send_json(200, response)
-
-    def log_message(self, message_format, *args):
-        return
-
-    def send_json(self, status, payload):
-        body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+class Handler(ImageRuntimeRequestHandler):
+    pass
 
 
 def main():
@@ -555,9 +431,7 @@ def main():
     parser.add_argument("--input-root", required=True)
     parser.add_argument("--face-detection-size", type=int, required=True)
     parser.add_argument("--recognition-batch-size", type=int, required=True)
-    parser.add_argument(
-        "--recognition-batch-wait-milliseconds", type=int, required=True
-    )
+    parser.add_argument("--recognition-batch-wait-milliseconds", type=int, required=True)
     parser.add_argument("--minimum-face-likelihood", type=float, required=True)
     parser.add_argument("--minimum-face-resolution-pixels", type=int, required=True)
     parser.add_argument("--face-parsing-model", required=True)

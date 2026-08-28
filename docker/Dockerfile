@@ -33,11 +33,19 @@ WORKDIR /app
 RUN apk add --no-cache \
     ffmpeg \
     imagemagick \
+    imagemagick-heic \
+    imagemagick-tiff \
+    imagemagick-webp \
     exiftool \
     su-exec \
     tini \
-    tzdata \
-    libheif
+    tzdata
+
+COPY docker/imagemagick-policy.xml /etc/ImageMagick-7/policy.xml
+
+RUN for format in AVIF GIF HEIC QOI TIFF WEBP; do \
+        magick -list format | awk -v required_format="$format" '($1 == required_format || $1 == required_format"*") && $3 ~ /r/ { found = 1 } END { exit !found }'; \
+    done
 
 COPY --from=backend-builder /app/dist/backend/momento-api /app/momento-api
 COPY --from=frontend-builder /app/dist/frontend ./static

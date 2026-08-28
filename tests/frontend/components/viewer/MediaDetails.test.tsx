@@ -49,7 +49,7 @@ describe('MediaDetails', () => {
 
   it('uses the correct ordinal suffix for date taken', () => {
     const { rerender } = render(
-      <MediaDetails media={{ ...media, dateTaken: '2025-01-01T14:33:00' }} />,
+      <MediaDetails media={{ ...media, dateTaken: '2025-01-01T14:33:00' }} />
     )
     expect(screen.getByText('2:33PM, Jan 1st, 2025')).toBeTruthy()
 
@@ -70,7 +70,9 @@ describe('MediaDetails', () => {
     const gpsLabel = screen.getByText('GPS (Lat, Long, Alt)')
 
     expect(screen.getByText('New York, New York, United States')).toBeTruthy()
-    expect(locationLabel.compareDocumentPosition(gpsLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      locationLabel.compareDocumentPosition(gpsLabel) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 
   it('hides the location row when no reverse-geocoded fields are available', () => {
@@ -82,7 +84,7 @@ describe('MediaDetails', () => {
           locationState: null,
           locationCountry: null,
         }}
-      />,
+      />
     )
 
     expect(screen.queryByText('Location')).toBeNull()

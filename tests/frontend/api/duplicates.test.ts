@@ -20,6 +20,9 @@ describe('duplicatesApi', () => {
     post.mockResolvedValue({ data: response })
 
     await expect(duplicatesApi.list({ cursor: '12', limit: 20 })).resolves.toEqual(response)
-    expect(post).toHaveBeenCalledWith('/duplicates/list', { cursor: '12', limit: 20 })
+    expect(post).toHaveBeenCalledWith('/duplicates/list', {
+      cursor: '12',
+      limit: 20,
+    })
   })
 })

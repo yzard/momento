@@ -4,12 +4,12 @@ use std::collections::HashSet;
 use rusqlite::OptionalExtension;
 
 use crate::auth::{AppState, CurrentUser};
-use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
+use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AlbumAddMediaRequest, AlbumCreateRequest, AlbumDeleteRequest, AlbumDetailResponse,
-    AlbumGetRequest, AlbumListResponse, AlbumRemoveMediaRequest, AlbumReorderRequest,
-    AlbumResponse, AlbumUpdateRequest, MediaResponse,
+    map_media_response, AlbumAddMediaRequest, AlbumCreateRequest, AlbumDeleteRequest,
+    AlbumDetailResponse, AlbumGetRequest, AlbumListResponse, AlbumRemoveMediaRequest,
+    AlbumReorderRequest, AlbumResponse, AlbumUpdateRequest,
 };
 
 pub fn router() -> Router<AppState> {
@@ -45,46 +45,23 @@ async fn create_album(
     current_user: CurrentUser,
     Json(request): Json<AlbumCreateRequest>,
 ) -> AppResult<Json<AlbumDetailResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let album_id = insert_returning_id(
-        &conn,
+    validate_media_batch(&request.media_ids)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
         queries::albums::INSERT,
-        &[&current_user.id, &request.name, &request.description],
+        rusqlite::params![current_user.id, request.name, request.description],
     )?;
-
-    execute_query(
-        &conn,
+    let album_id = transaction.last_insert_rowid();
+    transaction.execute(
         queries::access::INSERT_ALBUM_ACCESS,
-        &[&album_id, &current_user.id, &2],
+        rusqlite::params![album_id, current_user.id, 2],
     )?;
+    insert_accessible_media(&transaction, current_user.id, album_id, &request.media_ids)?;
+    let album = load_album_detail(&transaction, album_id)?;
+    transaction.commit()?;
 
-    let album = fetch_one(&conn, queries::albums::SELECT_BY_ID, &[&album_id], |row| {
-        Ok(AlbumBasic {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            description: row.get(2)?,
-            cover_media_id: row.get(3)?,
-            created_at: row.get(5)?,
-        })
-    })?
-    .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
-
-    let media = fetch_all(
-        &conn,
-        queries::albums::SELECT_MEDIA,
-        &[&album_id],
-        map_media_row,
-    )?;
-
-    Ok(Json(AlbumDetailResponse {
-        id: album.id,
-        name: album.name,
-        description: album.description,
-        cover_media_id: album.cover_media_id,
-        media,
-        created_at: album.created_at,
-    }))
+    Ok(Json(album))
 }
 
 struct AlbumBasic {
@@ -95,37 +72,88 @@ struct AlbumBasic {
     created_at: String,
 }
 
-fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
-    Ok(MediaResponse {
-        id: row.get(0)?,
-        filename: row.get(1)?,
-        original_filename: row.get(2)?,
-        media_type: row.get(3)?,
-        mime_type: row.get(4)?,
-        width: row.get(5)?,
-        height: row.get(6)?,
-        file_size: row.get(7)?,
-        duration_seconds: row.get(8)?,
-        date_taken: row.get(9)?,
-        gps_latitude: row.get(10)?,
-        gps_longitude: row.get(11)?,
-        camera_make: row.get(12)?,
-        camera_model: row.get(13)?,
-        lens_make: row.get(14)?,
-        lens_model: row.get(15)?,
-        iso: row.get(16)?,
-        exposure_time: row.get(17)?,
-        f_number: row.get(18)?,
-        focal_length: row.get(19)?,
-        focal_length_35mm: row.get(20)?,
-        gps_altitude: row.get(21)?,
-        location_city: row.get(22)?,
-        location_state: row.get(23)?,
-        location_country: row.get(24)?,
-        video_codec: row.get(25)?,
-        keywords: row.get(26)?,
-        created_at: row.get(27)?,
-        content_hash: None,
+fn validate_media_batch(media_ids: &[i64]) -> AppResult<()> {
+    if media_ids.len() > 500 {
+        return Err(AppError::BadRequest(
+            "mediaIds must contain at most 500 IDs".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_album_ownership(
+    connection: &rusqlite::Connection,
+    album_id: i64,
+    user_id: i64,
+) -> AppResult<()> {
+    let owned_album_id = connection
+        .query_row(
+            queries::albums::CHECK_OWNERSHIP,
+            [album_id, user_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if owned_album_id.is_none() {
+        return Err(AppError::NotFound("Album not found".to_string()));
+    }
+    Ok(())
+}
+
+fn insert_accessible_media(
+    connection: &rusqlite::Connection,
+    user_id: i64,
+    album_id: i64,
+    media_ids: &[i64],
+) -> AppResult<()> {
+    if media_ids.is_empty() {
+        return Ok(());
+    }
+
+    let query = queries::albums::build_add_media_batch_query(media_ids.len());
+    let mut parameters: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(media_ids.len() * 2 + 3);
+    for (position, media_id) in media_ids.iter().enumerate() {
+        parameters.push(Box::new(*media_id));
+        parameters.push(Box::new(position as i64));
+    }
+    parameters.push(Box::new(user_id));
+    parameters.push(Box::new(album_id));
+    parameters.push(Box::new(album_id));
+    let parameter_refs = parameters
+        .iter()
+        .map(|parameter| parameter.as_ref())
+        .collect::<Vec<_>>();
+    connection.execute(&query, parameter_refs.as_slice())?;
+    Ok(())
+}
+
+fn load_album_detail(
+    connection: &rusqlite::Connection,
+    album_id: i64,
+) -> AppResult<AlbumDetailResponse> {
+    let album = connection
+        .query_row(queries::albums::SELECT_BY_ID, [album_id], |row| {
+            Ok(AlbumBasic {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                cover_media_id: row.get(3)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
+    let media = connection
+        .prepare(queries::albums::SELECT_MEDIA)?
+        .query_map([album_id], map_media_response)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(AlbumDetailResponse {
+        id: album.id,
+        name: album.name,
+        description: album.description,
+        cover_media_id: album.cover_media_id,
+        media,
+        created_at: album.created_at,
     })
 }
 
@@ -134,74 +162,23 @@ async fn update_album(
     current_user: CurrentUser,
     Json(request): Json<AlbumUpdateRequest>,
 ) -> AppResult<Json<AlbumResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
-    let exists = fetch_one(
-        &conn,
-        queries::albums::CHECK_OWNERSHIP,
-        &[&request.album_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
+    require_album_ownership(&connection, request.album_id, current_user.id)?;
+
+    execute_query(
+        &connection,
+        queries::albums::UPDATE,
+        &[
+            &request.name,
+            &request.description,
+            &request.cover_media_id,
+            &request.album_id,
+        ],
     )?;
 
-    if exists.is_none() {
-        return Err(AppError::NotFound("Album not found".to_string()));
-    }
-
-    match (&request.name, &request.description, request.cover_media_id) {
-        (Some(name), Some(description), Some(cover_media_id)) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_NAME_DESCRIPTION_COVER_MEDIA_ID,
-                &[name, description, &cover_media_id, &request.album_id],
-            )?;
-        }
-        (Some(name), Some(description), None) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_NAME_DESCRIPTION,
-                &[name, description, &request.album_id],
-            )?;
-        }
-        (Some(name), None, Some(cover_media_id)) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_NAME_COVER_MEDIA_ID,
-                &[name, &cover_media_id, &request.album_id],
-            )?;
-        }
-        (None, Some(description), Some(cover_media_id)) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_DESCRIPTION_COVER_MEDIA_ID,
-                &[description, &cover_media_id, &request.album_id],
-            )?;
-        }
-        (Some(name), None, None) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_NAME,
-                &[name, &request.album_id],
-            )?;
-        }
-        (None, Some(description), None) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_DESCRIPTION,
-                &[description, &request.album_id],
-            )?;
-        }
-        (None, None, Some(cover_media_id)) => {
-            execute_query(
-                &conn,
-                queries::albums::UPDATE_COVER_MEDIA_ID,
-                &[&cover_media_id, &request.album_id],
-            )?;
-        }
-        (None, None, None) => {}
-    }
-
     let album = fetch_one(
-        &conn,
+        &connection,
         &queries::albums::select_with_count_query(),
         &[&request.album_id],
         map_album_row,
@@ -216,21 +193,12 @@ async fn delete_album(
     current_user: CurrentUser,
     Json(request): Json<AlbumDeleteRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
-    let exists = fetch_one(
-        &conn,
-        queries::albums::CHECK_OWNERSHIP,
-        &[&request.album_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
-    )?;
-
-    if exists.is_none() {
-        return Err(AppError::NotFound("Album not found".to_string()));
-    }
+    require_album_ownership(&connection, request.album_id, current_user.id)?;
 
     execute_query(
-        &conn,
+        &connection,
         queries::albums::DELETE_ACCESS,
         &[&request.album_id, &current_user.id],
     )?;
@@ -245,41 +213,17 @@ async fn add_media_to_album(
     current_user: CurrentUser,
     Json(request): Json<AlbumAddMediaRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
-    let exists = fetch_one(
-        &conn,
-        queries::albums::CHECK_OWNERSHIP,
-        &[&request.album_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
+    require_album_ownership(&connection, request.album_id, current_user.id)?;
+
+    validate_media_batch(&request.media_ids)?;
+    insert_accessible_media(
+        &connection,
+        current_user.id,
+        request.album_id,
+        &request.media_ids,
     )?;
-
-    if exists.is_none() {
-        return Err(AppError::NotFound("Album not found".to_string()));
-    }
-
-    if request.media_ids.len() > 500 {
-        return Err(AppError::BadRequest(
-            "mediaIds must contain at most 500 IDs".to_string(),
-        ));
-    }
-    if !request.media_ids.is_empty() {
-        let query = queries::albums::build_add_media_batch_query(request.media_ids.len());
-        let mut parameters: Vec<Box<dyn rusqlite::ToSql>> =
-            Vec::with_capacity(request.media_ids.len() * 2 + 3);
-        for (position, media_id) in request.media_ids.iter().enumerate() {
-            parameters.push(Box::new(*media_id));
-            parameters.push(Box::new(position as i64));
-        }
-        parameters.push(Box::new(current_user.id));
-        parameters.push(Box::new(request.album_id));
-        parameters.push(Box::new(request.album_id));
-        let parameter_refs = parameters
-            .iter()
-            .map(|parameter| parameter.as_ref())
-            .collect::<Vec<_>>();
-        conn.execute(&query, parameter_refs.as_slice())?;
-    }
 
     Ok(Json(serde_json::json!({"message": "Media added to album"})))
 }
@@ -289,21 +233,12 @@ async fn remove_media_from_album(
     current_user: CurrentUser,
     Json(request): Json<AlbumRemoveMediaRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
-    let exists = fetch_one(
-        &conn,
-        queries::albums::CHECK_OWNERSHIP,
-        &[&request.album_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
-    )?;
-
-    if exists.is_none() {
-        return Err(AppError::NotFound("Album not found".to_string()));
-    }
+    require_album_ownership(&connection, request.album_id, current_user.id)?;
 
     for media_id in &request.media_ids {
-        conn.execute(
+        connection.execute(
             queries::albums::REMOVE_MEDIA,
             rusqlite::params![request.album_id, media_id],
         )?;
@@ -318,10 +253,10 @@ async fn list_albums(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> AppResult<Json<AlbumListResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
     let albums = fetch_all(
-        &conn,
+        &connection,
         &queries::albums::select_all_for_user_query(),
         &[&current_user.id],
         map_album_row,
@@ -335,50 +270,11 @@ async fn get_album(
     current_user: CurrentUser,
     Json(request): Json<AlbumGetRequest>,
 ) -> AppResult<Json<AlbumDetailResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
-    let exists = fetch_one(
-        &conn,
-        queries::albums::CHECK_OWNERSHIP,
-        &[&request.album_id, &current_user.id],
-        |row| row.get::<_, i64>(0),
-    )?;
+    require_album_ownership(&connection, request.album_id, current_user.id)?;
 
-    if exists.is_none() {
-        return Err(AppError::NotFound("Album not found".to_string()));
-    }
-
-    let album = fetch_one(
-        &conn,
-        queries::albums::SELECT_BY_ID,
-        &[&request.album_id],
-        |row| {
-            Ok(AlbumBasic {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                cover_media_id: row.get(3)?,
-                created_at: row.get(5)?,
-            })
-        },
-    )?
-    .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
-
-    let media = fetch_all(
-        &conn,
-        queries::albums::SELECT_MEDIA,
-        &[&request.album_id],
-        map_media_row,
-    )?;
-
-    Ok(Json(AlbumDetailResponse {
-        id: album.id,
-        name: album.name,
-        description: album.description,
-        cover_media_id: album.cover_media_id,
-        media,
-        created_at: album.created_at,
-    }))
+    Ok(Json(load_album_detail(&connection, request.album_id)?))
 }
 
 async fn reorder_album_media(
@@ -386,18 +282,9 @@ async fn reorder_album_media(
     current_user: CurrentUser,
     Json(request): Json<AlbumReorderRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let transaction = conn.unchecked_transaction()?;
-    let exists = transaction
-        .query_row(
-            queries::albums::CHECK_OWNERSHIP,
-            rusqlite::params![request.album_id, current_user.id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    if exists.is_none() {
-        return Err(AppError::NotFound("Album not found".to_string()));
-    }
+    let connection = state.pool.get().map_err(AppError::Pool)?;
+    let transaction = connection.unchecked_transaction()?;
+    require_album_ownership(&transaction, request.album_id, current_user.id)?;
 
     let current_ids = transaction
         .prepare(queries::albums::SELECT_MEDIA_IDS)?

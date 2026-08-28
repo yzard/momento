@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet'
-import type { LatLngTuple, Map as LeafletMap } from 'leaflet'
+import type { LatLngTuple } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import ClusterMarker from './ClusterMarker'
 import { useMapClusters, type MapCluster } from '../../hooks/useMapClusters'
@@ -8,6 +8,9 @@ import type { BoundingBox } from '../../api/map'
 import { Loader2 } from 'lucide-react'
 
 const VIEWPORT_STORAGE_KEY = 'map_viewport'
+const OPENSTREETMAP_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+const OPENSTREETMAP_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 
 interface SavedViewport {
   center: LatLngTuple
@@ -15,10 +18,10 @@ interface SavedViewport {
 }
 
 function getSavedViewport(): SavedViewport | null {
-  const saved = sessionStorage.getItem(VIEWPORT_STORAGE_KEY)
-  if (!saved) return null
+  const storedViewport = sessionStorage.getItem(VIEWPORT_STORAGE_KEY)
+  if (!storedViewport) return null
   try {
-    return JSON.parse(saved) as SavedViewport
+    return JSON.parse(storedViewport) as SavedViewport
   } catch (error) {
     if (error instanceof SyntaxError) return null
     throw error
@@ -42,7 +45,11 @@ function MapViewportPersistence() {
 
 interface MapViewProps {
   onPhotoClick?: (mediaId: number) => void
-  onClusterClick?: (payload: { bounds: BoundingBox; geohashPrefixes: string[]; representativeId?: number | null }) => void
+  onClusterClick?: (payload: {
+    bounds: BoundingBox
+    geohashPrefixes: string[]
+    representativeId?: number | null
+  }) => void
 }
 
 interface MapViewportUpdate {
@@ -50,118 +57,127 @@ interface MapViewportUpdate {
   zoom: number
 }
 
-function MapViewportTracker({ onViewportChange }: { onViewportChange: (update: MapViewportUpdate) => void }) {
-  const timeoutRef = useRef<number | null>(null)
-  const map = useMapEvents({
-    moveend: () => {
-      if (timeoutRef.current) window.clearTimeout(timeoutRef.current)
-      timeoutRef.current = window.setTimeout(() => {
-        const bounds = map.getBounds()
-        onViewportChange({
-          bounds: {
-            north: bounds.getNorth(),
-            south: bounds.getSouth(),
-            east: bounds.getEast(),
-            west: bounds.getWest(),
-          },
-          zoom: map.getZoom(),
-        })
-      }, 200)
-    },
-    zoomend: () => {
-      if (timeoutRef.current) window.clearTimeout(timeoutRef.current)
-      timeoutRef.current = window.setTimeout(() => {
-        const bounds = map.getBounds()
-        onViewportChange({
-          bounds: {
-            north: bounds.getNorth(),
-            south: bounds.getSouth(),
-            east: bounds.getEast(),
-            west: bounds.getWest(),
-          },
-          zoom: map.getZoom(),
-        })
-      }, 200)
-    },
-  })
-
-  useEffect(() => {
-    if (timeoutRef.current) window.clearTimeout(timeoutRef.current)
-    timeoutRef.current = window.setTimeout(() => {
-      const bounds = map.getBounds()
+function MapViewportTracker({
+  onViewportChange,
+}: {
+  onViewportChange: (update: MapViewportUpdate) => void
+}) {
+  const viewportUpdateTimeoutReference = useRef<number | null>(null)
+  const map = useMap()
+  const scheduleViewportUpdate = useCallback(() => {
+    if (viewportUpdateTimeoutReference.current) {
+      window.clearTimeout(viewportUpdateTimeoutReference.current)
+    }
+    viewportUpdateTimeoutReference.current = window.setTimeout(() => {
+      const mapBounds = map.getBounds()
       onViewportChange({
         bounds: {
-          north: bounds.getNorth(),
-          south: bounds.getSouth(),
-          east: bounds.getEast(),
-          west: bounds.getWest(),
+          north: mapBounds.getNorth(),
+          south: mapBounds.getSouth(),
+          east: mapBounds.getEast(),
+          west: mapBounds.getWest(),
         },
         zoom: map.getZoom(),
       })
     }, 200)
+  }, [map, onViewportChange])
+
+  useMapEvents({ moveend: scheduleViewportUpdate, zoomend: scheduleViewportUpdate })
+
+  useEffect(() => {
+    scheduleViewportUpdate()
 
     return () => {
-      if (timeoutRef.current) window.clearTimeout(timeoutRef.current)
+      if (viewportUpdateTimeoutReference.current) {
+        window.clearTimeout(viewportUpdateTimeoutReference.current)
+      }
     }
-  }, [map, onViewportChange])
+  }, [scheduleViewportUpdate])
 
   return null
 }
 
 function MapZoomTracker({ onZoomChange }: { onZoomChange: (zoom: number) => void }) {
-  const rafRef = useRef<number | null>(null)
+  const animationFrameReference = useRef<number | null>(null)
   const map = useMapEvents({
     zoom: () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
-      rafRef.current = requestAnimationFrame(() => {
+      if (animationFrameReference.current) cancelAnimationFrame(animationFrameReference.current)
+      animationFrameReference.current = requestAnimationFrame(() => {
         onZoomChange(map.getZoom())
       })
     },
   })
 
-  useEffect(() => () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current)
-  }, [])
+  useEffect(
+    () => () => {
+      if (animationFrameReference.current) cancelAnimationFrame(animationFrameReference.current)
+    },
+    []
+  )
 
   return null
 }
 
-function MapRefSetter({ onReady }: { onReady: (map: LeafletMap) => void }) {
-  const map = useMap()
+interface MapClusterMarkersProps {
+  clusters: MapCluster[]
+  onClusterClick: (cluster: MapCluster) => void
+}
 
-  useEffect(() => {
-    onReady(map)
-  }, [map, onReady])
+function MapClusterMarkers({ clusters, onClusterClick }: MapClusterMarkersProps) {
+  return (
+    <>
+      {clusters.map((cluster) => {
+        const [longitude, latitude] = cluster.geometry.coordinates as [number, number]
+        const { count, representativeId } = cluster.properties
+        const fallbackKey = `${latitude}-${longitude}`
+        const clusterKey = cluster.properties.cluster
+          ? `cluster-${cluster.properties.cluster_id ?? fallbackKey}`
+          : `cell-${cluster.properties.cellId ?? representativeId ?? fallbackKey}`
 
-  return null
+        return (
+          <ClusterMarker
+            key={clusterKey}
+            latitude={latitude}
+            longitude={longitude}
+            count={count}
+            representativeId={representativeId}
+            onClick={() => onClusterClick(cluster)}
+          />
+        )
+      })}
+    </>
+  )
 }
 
 export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) {
   const savedViewport = getSavedViewport()
   const initialCenter: LatLngTuple = savedViewport?.center ?? [0, 0]
   const initialZoom = savedViewport?.zoom ?? 2
-  const mapRef = useRef<LeafletMap | null>(null)
   const [bounds, setBounds] = useState<BoundingBox | null>(null)
-  const [dataZoom, setDataZoom] = useState(initialZoom)
-  const [renderZoom, setRenderZoom] = useState(initialZoom)
-  const { clusters, isLoading, supercluster, error } = useMapClusters({ bounds, zoom: renderZoom, dataZoom })
+  const [clusterDataZoom, setClusterDataZoom] = useState(initialZoom)
+  const [visibleZoom, setVisibleZoom] = useState(initialZoom)
+  const { clusters, isLoading, supercluster, error } = useMapClusters({
+    bounds,
+    zoom: visibleZoom,
+    dataZoom: clusterDataZoom,
+  })
 
   const handleViewportChange = ({ bounds: nextBounds, zoom: nextZoom }: MapViewportUpdate) => {
     setBounds(nextBounds)
-    setDataZoom(nextZoom)
-    setRenderZoom(nextZoom)
+    setClusterDataZoom(nextZoom)
+    setVisibleZoom(nextZoom)
   }
 
   const handleClusterClick = (cluster: MapCluster) => {
     const { count, representativeId, cluster_id: clusterId, cellId } = cluster.properties
 
     if (count > 1 && clusterId !== undefined && bounds) {
-      const leafLimit = Math.min(count, 500)
-      const leaves = supercluster.getLeaves(clusterId, leafLimit)
+      const maximumLeaves = Math.min(count, 500)
+      const clusterLeaves = supercluster.getLeaves(clusterId, maximumLeaves)
       const geohashPrefixes = Array.from(
         new Set(
-          leaves
-            .map((leaf) => leaf.properties.cellId)
+          clusterLeaves
+            .map((clusterLeaf) => clusterLeaf.properties.cellId)
             .filter((cellId): cellId is string => typeof cellId === 'string' && cellId.length > 0)
         )
       )
@@ -206,35 +222,16 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
         fadeAnimation
         style={{ height: '100%', width: '100%' }}
       >
-        <MapRefSetter onReady={(map) => {
-          mapRef.current = map
-        }} />
         <MapViewportPersistence />
         <MapViewportTracker onViewportChange={handleViewportChange} />
-        <MapZoomTracker onZoomChange={setRenderZoom} />
+        <MapZoomTracker onZoomChange={setVisibleZoom} />
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+          attribution={OPENSTREETMAP_ATTRIBUTION}
+          detectRetina
+          maxZoom={19}
+          url={OPENSTREETMAP_TILE_URL}
         />
-        {clusters.map((cluster) => {
-          const [lng, lat] = cluster.geometry.coordinates as [number, number]
-          const { count, representativeId } = cluster.properties
-          const fallbackKey = `${lat}-${lng}`
-          const clusterKey = cluster.properties.cluster
-            ? `cluster-${cluster.properties.cluster_id ?? fallbackKey}`
-            : `cell-${cluster.properties.cellId ?? representativeId ?? fallbackKey}`
-
-          return (
-            <ClusterMarker
-              key={clusterKey}
-              latitude={lat}
-              longitude={lng}
-              count={count}
-              representativeId={representativeId}
-              onClick={() => handleClusterClick(cluster)}
-            />
-          )
-        })}
+        <MapClusterMarkers clusters={clusters} onClusterClick={handleClusterClick} />
       </MapContainer>
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm">

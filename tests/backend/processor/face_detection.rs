@@ -1,5 +1,5 @@
 use base64::Engine;
-use momento_api::config::FaceGroupConfig;
+use momento_api::config::{FaceGroupConfig, MediaProcessConfig};
 use momento_api::database::queries;
 use momento_api::processor::face_detection;
 use momento_common::llm::JobInputResult;
@@ -104,7 +104,8 @@ fn face_callback_rejects_invalid_embedding_before_persistence() {
         media_id,
         "face_detection",
         "buffalo_l",
-        Some(&results)
+        Some(&results),
+        &MediaProcessConfig::default(),
     )
     .is_err());
     let count: i64 = connection
@@ -144,6 +145,7 @@ fn face_callback_records_success_when_no_faces_are_detected() {
         "face_detection",
         "buffalo_l",
         Some(&results),
+        &MediaProcessConfig::default(),
     )
     .expect("empty face callback");
     let transaction = connection.unchecked_transaction().expect("transaction");

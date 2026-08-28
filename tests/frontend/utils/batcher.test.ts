@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  getCachedThumbnailUrl: vi.fn(),
+  getCachedThumbnailURL: vi.fn(),
   getThumbnailBatch: vi.fn(),
   getPreviewBatch: vi.fn(),
 }))
@@ -13,7 +13,7 @@ import { batchLoader } from '../../../src/frontend/utils/batcher'
 describe('batchLoader', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-    mocks.getCachedThumbnailUrl.mockReset().mockReturnValue(undefined)
+    mocks.getCachedThumbnailURL.mockReset().mockReturnValue(undefined)
     mocks.getThumbnailBatch.mockReset().mockResolvedValue(new Map([[42, 'place-thumbnail']]))
     mocks.getPreviewBatch.mockReset()
   })
@@ -25,15 +25,17 @@ describe('batchLoader', () => {
     await vi.runAllTimersAsync()
 
     await expect(thumbnailPromise).resolves.toBe('place-thumbnail')
-    expect(mocks.getCachedThumbnailUrl).toHaveBeenCalledWith(42, 'normal')
+    expect(mocks.getCachedThumbnailURL).toHaveBeenCalledWith(42, 'normal')
     expect(mocks.getThumbnailBatch).toHaveBeenCalledWith([42], 'normal')
   })
 
   it('coalesces subscribers while a batch is in flight', async () => {
     let resolveBatch!: (value: Map<number, string>) => void
-    mocks.getThumbnailBatch.mockReturnValue(new Promise((resolve) => {
-      resolveBatch = resolve
-    }))
+    mocks.getThumbnailBatch.mockReturnValue(
+      new Promise((resolve) => {
+        resolveBatch = resolve
+      })
+    )
     const first = batchLoader.load(42)
     await vi.runAllTimersAsync()
     const second = batchLoader.load(42)

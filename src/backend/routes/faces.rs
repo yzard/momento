@@ -9,11 +9,10 @@ use crate::auth::{AppState, CurrentUser, RequireAdmin};
 use crate::database::{fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    FaceGroupMediaResponse, FaceGroupRequest, FaceGroupResponse, FaceGroupsListRequest,
-    FaceGroupsListResponse, FaceGroupsMergeRequest,
+    map_media_response, FaceGroupMediaResponse, FaceGroupRequest, FaceGroupResponse,
+    FaceGroupsListRequest, FaceGroupsListResponse, FaceGroupsMergeRequest,
 };
 use crate::processor::face_detection;
-use crate::routes::media::map_media_row;
 use crate::utils::path::resolve_existing_storage_path;
 
 pub fn router() -> Router<AppState> {
@@ -90,7 +89,7 @@ async fn get_group(
         &connection,
         queries::faces::SELECT_GROUP_MEDIA,
         &[&request.face_group_id, &current_user.id],
-        map_media_row,
+        map_media_response,
     )?;
     Ok(Json(FaceGroupMediaResponse { group, media }))
 }

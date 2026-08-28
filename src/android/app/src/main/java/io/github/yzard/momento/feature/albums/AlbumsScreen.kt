@@ -180,7 +180,7 @@ fun AlbumsScreen(
                 scope.launch {
                     if (working) return@launch
                     working = true
-                    val created = executeAlbumOperation { repository.createAlbum(name, description) }
+                    val created = executeAlbumOperation { repository.createAlbum(name, description, emptyList()) }
                     if (created) {
                         creating = false
                         loadAlbums()
@@ -508,8 +508,7 @@ fun AlbumAddMediaSheet(
                 scope.launch {
                     working = true
                     try {
-                        val album = repository.createAlbum(name, description)
-                        repository.addAlbumMedia(album.id, mediaIds)
+                        repository.createAlbum(name, description, mediaIds)
                         close()
                     } catch (_: IOException) {
                         fail("Could not create album")

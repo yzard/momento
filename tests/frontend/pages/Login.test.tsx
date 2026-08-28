@@ -13,7 +13,7 @@ describe('Login', () => {
     render(
       <MemoryRouter>
         <Login />
-      </MemoryRouter>,
+      </MemoryRouter>
     )
 
     expect(screen.getByText('v1.0.0')).toBeTruthy()

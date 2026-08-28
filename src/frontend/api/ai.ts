@@ -66,10 +66,14 @@ export interface AiFeatureSchedule {
 }
 
 export const aiApi = {
-  start: async (): Promise<AiActionResponse> => (await apiClient.post<AiActionResponse>('/ai/start')).data,
-  status: async (): Promise<AiStatusResponse> => (await apiClient.post<AiStatusResponse>('/ai/status')).data,
-  cancel: async (): Promise<AiActionResponse> => (await apiClient.post<AiActionResponse>('/ai/cancel')).data,
-  clean: async (): Promise<AiActionResponse> => (await apiClient.post<AiActionResponse>('/ai/clean')).data,
+  start: async (): Promise<AiActionResponse> =>
+    (await apiClient.post<AiActionResponse>('/ai/start')).data,
+  status: async (): Promise<AiStatusResponse> =>
+    (await apiClient.post<AiStatusResponse>('/ai/status')).data,
+  cancel: async (): Promise<AiActionResponse> =>
+    (await apiClient.post<AiActionResponse>('/ai/cancel')).data,
+  clean: async (): Promise<AiActionResponse> =>
+    (await apiClient.post<AiActionResponse>('/ai/clean')).data,
   startFeature: async (feature: AiFeature): Promise<AiActionResponse> =>
     (await apiClient.post<AiActionResponse>(`/ai/${feature}/start`)).data,
   cancelFeature: async (feature: AiFeature): Promise<AiActionResponse> =>
@@ -77,5 +81,6 @@ export const aiApi = {
   cleanFeature: async (feature: AiFeature): Promise<AiActionResponse> =>
     (await apiClient.post<AiActionResponse>(`/ai/${feature}/clean`)).data,
   updateSchedule: async (feature: AiFeature, cronExpression: string): Promise<AiFeatureSchedule> =>
-    (await apiClient.post<AiFeatureSchedule>('/ai/schedule/update', { feature, cronExpression })).data,
+    (await apiClient.post<AiFeatureSchedule>('/ai/schedule/update', { feature, cronExpression }))
+      .data,
 }

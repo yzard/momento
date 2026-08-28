@@ -14,7 +14,7 @@ export default function AndroidAppDownloadLink({ compact }: AndroidAppDownloadLi
       title="Download Android app"
       className={cn(
         'inline-flex min-h-11 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 font-semibold text-primary transition-colors hover:border-primary/40 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2',
-        compact ? 'min-w-11 p-2.5' : 'w-full gap-3 px-4 py-3 sm:w-auto',
+        compact ? 'min-w-11 p-2.5' : 'w-full gap-3 px-4 py-3 sm:w-auto'
       )}
     >
       <Smartphone className="h-5 w-5 shrink-0" aria-hidden="true" />

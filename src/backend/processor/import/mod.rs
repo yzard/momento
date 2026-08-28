@@ -8,7 +8,9 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::constants::{paths, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
+use crate::constants::{
+    image_mime_type, paths, video_mime_type, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS,
+};
 use crate::database::{execute_query, fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::processor::media_processor::{
@@ -243,10 +245,15 @@ pub async fn import_staged_file(
         .and_then(|filename| filename.to_str())
         .ok_or_else(|| AppError::BadRequest("media filename is not valid UTF-8".to_string()))?
         .to_string();
-    let mime_type = mime_guess::from_path(source_path)
-        .first_raw()
-        .unwrap_or("application/octet-stream")
-        .to_string();
+    let mime_type = match media_type {
+        "image" => image_mime_type(source_path),
+        "video" => video_mime_type(source_path),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        AppError::BadRequest(format!("unsupported media file: {}", source_path.display()))
+    })?
+    .to_string();
     let source_modified_seconds = source_metadata
         .modified()
         .ok()

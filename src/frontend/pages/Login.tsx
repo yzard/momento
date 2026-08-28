@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import ChangePassword from '../components/auth/ChangePassword'
+import PasswordChangeForm from '../components/auth/PasswordChangeForm'
 import { cn } from '../lib/utils'
 import { MOMENTO_VERSION } from '../lib/version'
 import { ArrowRight, Loader2, Aperture } from 'lucide-react'
@@ -37,90 +37,18 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex w-full font-sans bg-background text-foreground overflow-hidden selection:bg-primary/20 selection:text-foreground">
-      {/* Visual Section */}
-      <div className="hidden lg:flex lg:w-1/2 relative items-center justify-center p-12 bg-muted/20 border-r border-border">
-        <div className="relative z-10 max-w-lg">
-          <div className="mb-12 inline-flex p-4 rounded-full bg-card shadow-sm border border-border">
-            <Aperture className="w-10 h-10 text-primary" strokeWidth={1.5} />
-          </div>
-          <h1 className="text-7xl font-display font-semibold mb-8 tracking-tighter leading-[0.9] text-foreground">
-            Momento.
-          </h1>
-          <p className="text-2xl text-muted-foreground font-light leading-relaxed max-w-md">
-            Your personal gallery.<br/>
-            <span className="text-foreground font-normal">Private. Secure. Yours.</span>
-          </p>
-        </div>
-      </div>
-
-      {/* Login Form Section */}
+      <LoginBrand />
       <div className="flex-1 flex items-center justify-center bg-background p-8 lg:p-16">
         <div className="w-full max-w-sm space-y-10 animate-fade-in">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-bold tracking-tight text-foreground">Sign In</h2>
-            <p className="text-muted-foreground">Welcome back to your memories.</p>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-8">
-            {error && (
-              <div className="bg-destructive/5 text-destructive px-4 py-3 text-sm rounded-md flex items-center gap-3 border border-destructive/10 font-medium">
-                <span className="font-bold">!</span> {error}
-              </div>
-            )}
-            
-            <div className="space-y-6">
-              <div className="space-y-2 group">
-                <label htmlFor="username" className="text-xs font-bold uppercase tracking-widest text-muted-foreground group-focus-within:text-foreground transition-colors">
-                  Username
-                </label>
-                <input
-                  id="username"
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="w-full px-4 py-3 bg-card text-foreground border border-input focus:border-primary outline-none transition-all text-base rounded-lg focus:ring-4 focus:ring-primary/10 shadow-sm"
-                  placeholder="Enter your username"
-                  required
-                />
-              </div>
-              
-              <div className="space-y-2 group">
-                <label htmlFor="password" className="text-xs font-bold uppercase tracking-widest text-muted-foreground group-focus-within:text-foreground transition-colors">
-                  Password
-                </label>
-                <input
-                  id="password"
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-card text-foreground border border-input focus:border-primary outline-none transition-all text-base rounded-lg focus:ring-4 focus:ring-primary/10 shadow-sm"
-                  placeholder="••••••••"
-                  required
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={isLoading}
-              className={cn(
-                "w-full bg-foreground text-background py-3.5 font-bold text-sm uppercase tracking-widest hover:bg-foreground/90 transition-all rounded-lg flex items-center justify-center gap-3 shadow-lg hover:shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-foreground",
-                isLoading && "opacity-70 cursor-not-allowed"
-              )}
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  CONNECTING...
-                </>
-              ) : (
-                <>
-                  SIGN IN <ArrowRight className="w-4 h-4" />
-                </>
-              )}
-            </button>
-          </form>
-          
+          <LoginForm
+            username={username}
+            password={password}
+            error={error}
+            isLoading={isLoading}
+            onUsernameChange={setUsername}
+            onPasswordChange={setPassword}
+            onSubmit={handleSubmit}
+          />
           <div className="pt-8 text-center">
             <p className="text-xs font-medium text-muted-foreground/60 uppercase tracking-widest">
               v{MOMENTO_VERSION}
@@ -132,11 +60,14 @@ export default function Login() {
       {showChangePassword && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm px-4">
           <div className="bg-card text-card-foreground shadow-2xl border border-border w-full max-w-md p-8 rounded-2xl animate-scale-in">
-            <h2 className="text-2xl font-bold font-display mb-2 text-foreground">Change Password</h2>
+            <h2 className="text-2xl font-bold font-display mb-2 text-foreground">
+              Change Password
+            </h2>
             <p className="text-sm text-muted-foreground mb-8 pb-4 border-b border-border">
               Security check. Please update your password to continue.
             </p>
-            <ChangePassword
+            <PasswordChangeForm
+              layout="modal"
               onComplete={() => {
                 setShowChangePassword(false)
               }}
@@ -145,5 +76,116 @@ export default function Login() {
         </div>
       )}
     </div>
+  )
+}
+
+function LoginBrand() {
+  return (
+    <div className="relative hidden items-center justify-center border-r border-border bg-muted/20 p-12 lg:flex lg:w-1/2">
+      <div className="relative z-10 max-w-lg">
+        <div className="mb-12 inline-flex rounded-full border border-border bg-card p-4 shadow-sm">
+          <Aperture className="h-10 w-10 text-primary" strokeWidth={1.5} />
+        </div>
+        <h1 className="mb-8 font-display text-7xl font-semibold leading-[0.9] tracking-tighter text-foreground">
+          Momento.
+        </h1>
+        <p className="max-w-md text-2xl font-light leading-relaxed text-muted-foreground">
+          Your personal gallery.
+          <br />
+          <span className="font-normal text-foreground">Private. Secure. Yours.</span>
+        </p>
+      </div>
+    </div>
+  )
+}
+
+interface LoginFormProps {
+  username: string
+  password: string
+  error: string
+  isLoading: boolean
+  onUsernameChange: (value: string) => void
+  onPasswordChange: (value: string) => void
+  onSubmit: (event: FormEvent) => void
+}
+
+function LoginForm(props: LoginFormProps) {
+  const inputClassName =
+    'w-full rounded-lg border border-input bg-card px-4 py-3 text-base text-foreground shadow-sm outline-none transition-all focus:border-primary focus:ring-4 focus:ring-primary/10'
+  return (
+    <>
+      <div className="space-y-1">
+        <h2 className="text-2xl font-bold tracking-tight text-foreground">Sign In</h2>
+        <p className="text-muted-foreground">Welcome back to your memories.</p>
+      </div>
+      <form onSubmit={props.onSubmit} className="space-y-8">
+        {props.error && (
+          <div
+            role="alert"
+            className="flex items-center gap-3 rounded-md border border-destructive/10 bg-destructive/5 px-4 py-3 text-sm font-medium text-destructive"
+          >
+            <span className="font-bold">!</span>
+            {props.error}
+          </div>
+        )}
+        <div className="space-y-6">
+          <div className="group space-y-2">
+            <label
+              htmlFor="username"
+              className="text-xs font-bold uppercase tracking-widest text-muted-foreground"
+            >
+              Username
+            </label>
+            <input
+              id="username"
+              type="text"
+              value={props.username}
+              onChange={(event) => props.onUsernameChange(event.target.value)}
+              className={inputClassName}
+              placeholder="Enter your username"
+              autoComplete="username"
+              required
+            />
+          </div>
+          <div className="group space-y-2">
+            <label
+              htmlFor="password"
+              className="text-xs font-bold uppercase tracking-widest text-muted-foreground"
+            >
+              Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              value={props.password}
+              onChange={(event) => props.onPasswordChange(event.target.value)}
+              className={inputClassName}
+              placeholder="••••••••"
+              autoComplete="current-password"
+              required
+            />
+          </div>
+        </div>
+        <button
+          type="submit"
+          disabled={props.isLoading}
+          className={cn(
+            'flex w-full items-center justify-center gap-3 rounded-lg bg-foreground py-3.5 text-sm font-bold uppercase tracking-widest text-background shadow-lg transition-all hover:bg-foreground/90',
+            props.isLoading && 'cursor-not-allowed opacity-70'
+          )}
+        >
+          {props.isLoading ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              CONNECTING...
+            </>
+          ) : (
+            <>
+              SIGN IN <ArrowRight className="h-4 w-4" />
+            </>
+          )}
+        </button>
+      </form>
+    </>
   )
 }

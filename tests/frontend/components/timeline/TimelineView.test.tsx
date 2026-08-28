@@ -21,7 +21,12 @@ describe('TimelineView classification empty state', () => {
     })
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
     HTMLElement.prototype.scrollTo = vi.fn()
-    mocks.useTimelineMarkers.mockReturnValue({ data: { markers: [] }, dataUpdatedAt: 1, isLoading: false, error: null })
+    mocks.useTimelineMarkers.mockReturnValue({
+      data: { markers: [] },
+      dataUpdatedAt: 1,
+      isLoading: false,
+      error: null,
+    })
     mocks.useTimelineWindow.mockReturnValue({
       groups: [],
       hasNextPage: false,
@@ -43,16 +48,38 @@ describe('TimelineView classification empty state', () => {
   })
 
   it('shows screenshot-specific empty copy and propagates classification', () => {
-    render(<TimelineView onPhotoClick={vi.fn()} selection={null} groupBy="day" search="" mediaType="image" classification="screenshot" />)
+    render(
+      <TimelineView
+        onPhotoClick={vi.fn()}
+        selection={null}
+        groupBy="day"
+        search=""
+        mediaType="image"
+        classification="screenshot"
+      />
+    )
 
     expect(screen.getByText('No screenshots yet')).toBeTruthy()
-    expect(screen.getByText('Screenshots identified by Screenshot Detection will appear here.')).toBeTruthy()
+    expect(
+      screen.getByText('Screenshots identified by Screenshot Detection will appear here.')
+    ).toBeTruthy()
     expect(mocks.useTimelineMarkers).toHaveBeenCalledWith('image', 'screenshot', '')
-    expect(mocks.useTimelineWindow).toHaveBeenCalledWith(expect.objectContaining({ classification: 'screenshot' }))
+    expect(mocks.useTimelineWindow).toHaveBeenCalledWith(
+      expect.objectContaining({ classification: 'screenshot' })
+    )
   })
 
   it('shows document-specific search empty copy', () => {
-    render(<TimelineView onPhotoClick={vi.fn()} selection={null} groupBy="day" search="invoice" mediaType="image" classification="document" />)
+    render(
+      <TimelineView
+        onPhotoClick={vi.fn()}
+        selection={null}
+        groupBy="day"
+        search="invoice"
+        mediaType="image"
+        classification="document"
+      />
+    )
 
     expect(screen.getByText('No matching documents')).toBeTruthy()
     expect(screen.getByText('No documents matched "invoice".')).toBeTruthy()

@@ -107,6 +107,19 @@ async fn list_trash(
     Ok(Json(TrashListResponse { items, total_count }))
 }
 
+fn trash_media_query_parameters(
+    media_ids: &[i64],
+    user_id: i64,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let placeholders = vec!["?"; media_ids.len()].join(",");
+    let mut parameters = media_ids
+        .iter()
+        .map(|media_id| Box::new(*media_id) as Box<dyn rusqlite::ToSql>)
+        .collect::<Vec<_>>();
+    parameters.push(Box::new(user_id));
+    (placeholders, parameters)
+}
+
 async fn restore_from_trash(
     State(state): State<AppState>,
     current_user: CurrentUser,
@@ -121,23 +134,15 @@ async fn restore_from_trash(
 
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let placeholders: String = request
-        .media_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = request
-        .media_ids
-        .iter()
-        .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
-        .collect();
-    params.push(Box::new(current_user.id));
+    let (placeholders, parameters) =
+        trash_media_query_parameters(&request.media_ids, current_user.id);
 
     let sql = queries::trash::RESTORE_MEDIA.replace("{}", &placeholders);
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    execute_query(&conn, &sql, &param_refs)?;
+    let parameter_references = parameters
+        .iter()
+        .map(|parameter| parameter.as_ref())
+        .collect::<Vec<_>>();
+    execute_query(&conn, &sql, &parameter_references)?;
 
     Ok(Json(TrashResponse {
         message: "Media restored successfully".to_string(),
@@ -159,24 +164,16 @@ async fn permanently_delete(
 
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let placeholders: String = request
-        .media_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = request
-        .media_ids
-        .iter()
-        .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
-        .collect();
-    params.push(Box::new(current_user.id));
+    let (placeholders, parameters) =
+        trash_media_query_parameters(&request.media_ids, current_user.id);
 
     let sql = queries::trash::SELECT_FOR_DELETE.replace("{}", &placeholders);
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let parameter_references = parameters
+        .iter()
+        .map(|parameter| parameter.as_ref())
+        .collect::<Vec<_>>();
 
-    let rows: Vec<MediaFileInfo> = fetch_all(&conn, &sql, &param_refs, |row| {
+    let rows: Vec<MediaFileInfo> = fetch_all(&conn, &sql, &parameter_references, |row| {
         Ok(MediaFileInfo {
             id: row.get(0)?,
             file_path: row.get(1)?,

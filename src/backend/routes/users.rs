@@ -1,6 +1,6 @@
 use axum::{extract::State, routing::post, Json, Router};
 
-use crate::auth::{hash_password, AppState, CurrentUser, RequireAdmin};
+use crate::auth::{AppState, CurrentUser, RequireAdmin};
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -41,8 +41,17 @@ async fn create_user(
     RequireAdmin(_): RequireAdmin,
     Json(request): Json<UserCreateRequest>,
 ) -> AppResult<Json<UserResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    if request.password.len() < 8 {
+        return Err(AppError::BadRequest(
+            "Password must be at least 8 characters".to_string(),
+        ));
+    }
+    let hashed = state
+        .authentication_protection
+        .hash_password(&request.password)
+        .await?;
 
+    let conn = state.pool.get().map_err(AppError::Pool)?;
     // Check existing
     let existing = fetch_one(
         &conn,
@@ -56,15 +65,6 @@ async fn create_user(
             "Username or email already exists".to_string(),
         ));
     }
-
-    if request.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "Password must be at least 8 characters".to_string(),
-        ));
-    }
-
-    let hashed = hash_password(&request.password)
-        .map_err(|e| AppError::Internal(format!("Failed to hash password: {}", e)))?;
 
     let user_id = insert_returning_id(
         &conn,

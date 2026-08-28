@@ -13,6 +13,7 @@ export interface ImportStatus {
 }
 
 export const importApi = {
-  triggerLocal: async (): Promise<{ message: string; status: string }> => (await apiClient.post('/import/local', {})).data,
+  triggerLocal: async (): Promise<{ message: string; status: string }> =>
+    (await apiClient.post('/import/local', {})).data,
   getStatus: async (): Promise<ImportStatus> => (await apiClient.post('/import/status', {})).data,
 }

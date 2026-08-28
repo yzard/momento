@@ -25,7 +25,7 @@ fn insert_aesthetic_score(
 }
 
 #[tokio::test]
-async fn album_create_and_add_media_use_the_shared_album_contract() {
+async fn album_create_atomically_associates_accessible_media() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "album-owner", "album-owner@example.com");
     let media_id = create_test_media(&pool, "album-media.jpg");
@@ -36,19 +36,12 @@ async fn album_create_and_add_media_use_the_shared_album_contract() {
     let created = server
         .post("/api/v1/album/create")
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({ "name": "Trip", "description": "Summer" }))
+        .json(&json!({ "name": "Trip", "description": "Summer", "mediaIds": [media_id] }))
         .await;
     created.assert_status_ok();
     let album: Value = created.json();
     let album_id = album["id"].as_i64().expect("album ID");
-    assert_eq!(album["media"], json!([]));
-
-    server
-        .post("/api/v1/album/add-media")
-        .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({ "albumId": album_id, "mediaIds": [media_id] }))
-        .await
-        .assert_status_ok();
+    assert_eq!(album["media"][0]["id"], json!(media_id));
 
     let detail = server
         .post("/api/v1/album/get")
@@ -58,6 +51,33 @@ async fn album_create_and_add_media_use_the_shared_album_contract() {
     detail.assert_status_ok();
     let detail: Value = detail.json();
     assert_eq!(detail["media"][0]["id"], json!(media_id));
+}
+
+#[tokio::test]
+async fn rejected_album_create_does_not_leave_a_partial_album() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "album-limit", "album-limit@example.com");
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    server
+        .post("/api/v1/album/create")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({
+            "name": "Too large",
+            "mediaIds": (1..=501).collect::<Vec<_>>()
+        }))
+        .await
+        .assert_status_bad_request();
+
+    let album_count = pool
+        .get()
+        .expect("database")
+        .query_row("SELECT COUNT(*) FROM albums", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("album count");
+    assert_eq!(album_count, 0);
 }
 
 #[tokio::test]
@@ -74,7 +94,7 @@ async fn album_add_media_batches_access_checks_and_preserves_accessible_request_
     let created = server
         .post("/api/v1/album/create")
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({ "name": "Batch" }))
+        .json(&json!({ "name": "Batch", "mediaIds": [] }))
         .await;
     created.assert_status_ok();
     let album_id = created.json::<Value>()["id"].as_i64().expect("album ID");
@@ -129,7 +149,7 @@ async fn album_reorder_requires_and_atomically_applies_a_complete_permutation() 
     let created = server
         .post("/api/v1/album/create")
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({ "name": "Ordered" }))
+        .json(&json!({ "name": "Ordered", "mediaIds": [] }))
         .await;
     let album_id = created.json::<Value>()["id"].as_i64().expect("album ID");
     server
@@ -215,7 +235,7 @@ async fn album_list_selects_four_highest_aesthetic_thumbnails_and_treats_missing
     let created = server
         .post("/api/v1/album/create")
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({ "name": "Best four" }))
+        .json(&json!({ "name": "Best four", "mediaIds": [] }))
         .await;
     let album_id = created.json::<Value>()["id"].as_i64().expect("album ID");
     server
@@ -240,10 +260,7 @@ async fn album_list_selects_four_highest_aesthetic_thumbnails_and_treats_missing
 
     let updated = server
         .post("/api/v1/album/update")
-        .add_header(
-            AUTHORIZATION,
-            format!("Bearer {}", access_token(user_id)),
-        )
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user_id)))
         .json(&json!({ "albumId": album_id, "name": "Still the best four" }))
         .await;
     updated.assert_status_ok();

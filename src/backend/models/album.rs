@@ -35,6 +35,7 @@ pub struct AlbumGetRequest {
 pub struct AlbumCreateRequest {
     pub name: String,
     pub description: Option<String>,
+    pub media_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]

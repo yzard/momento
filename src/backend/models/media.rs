@@ -34,6 +34,56 @@ pub struct MediaResponse {
     pub created_at: String,
 }
 
+pub fn map_media_response(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
+    map_media_response_columns(row, None, 27)
+}
+
+pub fn map_media_response_with_content_hash(
+    row: &rusqlite::Row,
+) -> rusqlite::Result<MediaResponse> {
+    map_media_response_columns(row, Some(27), 28)
+}
+
+fn map_media_response_columns(
+    row: &rusqlite::Row,
+    content_hash_column: Option<usize>,
+    created_at_column: usize,
+) -> rusqlite::Result<MediaResponse> {
+    Ok(MediaResponse {
+        id: row.get(0)?,
+        filename: row.get(1)?,
+        original_filename: row.get(2)?,
+        media_type: row.get(3)?,
+        mime_type: row.get(4)?,
+        width: row.get(5)?,
+        height: row.get(6)?,
+        file_size: row.get(7)?,
+        duration_seconds: row.get(8)?,
+        date_taken: row.get(9)?,
+        gps_latitude: row.get(10)?,
+        gps_longitude: row.get(11)?,
+        camera_make: row.get(12)?,
+        camera_model: row.get(13)?,
+        lens_make: row.get(14)?,
+        lens_model: row.get(15)?,
+        iso: row.get(16)?,
+        exposure_time: row.get(17)?,
+        f_number: row.get(18)?,
+        focal_length: row.get(19)?,
+        focal_length_35mm: row.get(20)?,
+        gps_altitude: row.get(21)?,
+        location_city: row.get(22)?,
+        location_state: row.get(23)?,
+        location_country: row.get(24)?,
+        video_codec: row.get(25)?,
+        keywords: row.get(26)?,
+        content_hash: content_hash_column
+            .map(|column| row.get(column))
+            .transpose()?,
+        created_at: row.get(created_at_column)?,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaBatchRequest {

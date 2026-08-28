@@ -5,10 +5,7 @@ import types
 import unittest
 from pathlib import Path
 
-
-SOURCE_PATH = (
-    Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "ram_server.py"
-)
+SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "ram_server.py"
 
 
 class RamServerTests(unittest.TestCase):

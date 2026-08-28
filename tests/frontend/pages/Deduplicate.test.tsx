@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   lightbox: vi.fn(),
   loadThumbnail: vi.fn(),
+  deleteMedia: vi.fn(),
   observers: [] as Array<{
     callback: IntersectionObserverCallback
     root: Element | Document | null
@@ -31,10 +32,21 @@ vi.mock('../../../src/frontend/utils/batcher', () => ({
   batchLoader: { load: mocks.loadThumbnail },
 }))
 
+vi.mock('../../../src/frontend/api/media', () => ({
+  mediaApi: {
+    delete: mocks.deleteMedia,
+    getCachedThumbnailURL: () => null,
+  },
+}))
+
 vi.mock('../../../src/frontend/components/viewer/Lightbox', () => ({
   default: (props: { mediaIds: number[]; currentIndex: number }) => {
     mocks.lightbox(props)
-    return <div data-testid="lightbox">{props.mediaIds.join(',')}:{props.currentIndex}</div>
+    return (
+      <div data-testid="lightbox">
+        {props.mediaIds.join(',')}:{props.currentIndex}
+      </div>
+    )
   },
 }))
 
@@ -81,7 +93,7 @@ function renderPage() {
   render(
     <QueryClientProvider client={queryClient}>
       <Deduplicate />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   )
 }
 
@@ -91,6 +103,7 @@ describe('Deduplicate page', () => {
     mocks.list.mockReset()
     mocks.lightbox.mockReset()
     mocks.loadThumbnail.mockReset()
+    mocks.deleteMedia.mockReset()
     mocks.loadThumbnail.mockResolvedValue(null)
     mocks.observers.length = 0
     class MockIntersectionObserver {
@@ -99,7 +112,10 @@ describe('Deduplicate page', () => {
       readonly thresholds = [0]
       target: Element | null = null
 
-      constructor(readonly callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+      constructor(
+        readonly callback: IntersectionObserverCallback,
+        options?: IntersectionObserverInit
+      ) {
         this.root = options?.root ?? null
         mocks.observers.push(this)
       }
@@ -110,7 +126,9 @@ describe('Deduplicate page', () => {
 
       disconnect() {}
       unobserve() {}
-      takeRecords(): IntersectionObserverEntry[] { return [] }
+      takeRecords(): IntersectionObserverEntry[] {
+        return []
+      }
     }
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
     mocks.list.mockResolvedValue({
@@ -146,8 +164,14 @@ describe('Deduplicate page', () => {
   })
 
   it('automatically loads the next page near the end of the scroll container', async () => {
-    const firstGroup = { clusterId: 10, items: [createMedia(1, 'one.jpg'), createMedia(2, 'two.jpg')] }
-    const secondGroup = { clusterId: 20, items: [createMedia(3, 'three.jpg'), createMedia(4, 'four.jpg')] }
+    const firstGroup = {
+      clusterId: 10,
+      items: [createMedia(1, 'one.jpg'), createMedia(2, 'two.jpg')],
+    }
+    const secondGroup = {
+      clusterId: 20,
+      items: [createMedia(3, 'three.jpg'), createMedia(4, 'four.jpg')],
+    }
     mocks.list
       .mockResolvedValueOnce({
         groups: [firstGroup],
@@ -166,13 +190,21 @@ describe('Deduplicate page', () => {
     renderPage()
 
     expect(await screen.findByText('Similar group 10')).toBeTruthy()
-    await waitFor(() => expect(mocks.observers.some((observer) => observer.root !== null)).toBe(true))
+    await waitFor(() =>
+      expect(mocks.observers.some((observer) => observer.root !== null)).toBe(true)
+    )
     const paginationObserver = mocks.observers.find((observer) => observer.root !== null)
     expect(paginationObserver?.target).toBeTruthy()
     act(() => {
-      paginationObserver?.callback([
-        { isIntersecting: true, target: paginationObserver.target } as IntersectionObserverEntry,
-      ], paginationObserver as unknown as IntersectionObserver)
+      paginationObserver?.callback(
+        [
+          {
+            isIntersecting: true,
+            target: paginationObserver.target,
+          } as IntersectionObserverEntry,
+        ],
+        paginationObserver as unknown as IntersectionObserver
+      )
     })
 
     expect(await screen.findByText('Similar group 20')).toBeTruthy()
@@ -184,10 +216,12 @@ describe('Deduplicate page', () => {
   it('opens media for inspection while selection remains a separate action', async () => {
     const user = userEvent.setup()
     mocks.list.mockResolvedValue({
-      groups: [{
-        clusterId: 10,
-        items: [createMedia(1, 'two.jpg'), createMedia(2, 'one.jpg')],
-      }],
+      groups: [
+        {
+          clusterId: 10,
+          items: [createMedia(1, 'two.jpg'), createMedia(2, 'one.jpg')],
+        },
+      ],
       nextCursor: null,
       hasMore: false,
       totalGroups: 1,
@@ -195,7 +229,9 @@ describe('Deduplicate page', () => {
     })
     renderPage()
 
-    const inspectButtons = await screen.findAllByRole('button', { name: /^Inspect / })
+    const inspectButtons = await screen.findAllByRole('button', {
+      name: /^Inspect /,
+    })
     expect(inspectButtons.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Inspect one.jpg',
       'Inspect two.jpg',
@@ -207,9 +243,40 @@ describe('Deduplicate page', () => {
 
     await user.click(screen.getByRole('button', { name: 'Inspect two.jpg' }))
     expect(screen.getByTestId('lightbox').textContent).toBe('2,1:1')
-    expect(mocks.lightbox).toHaveBeenCalledWith(expect.objectContaining({
-      mediaIds: [2, 1],
-      currentIndex: 1,
-    }))
+    expect(mocks.lightbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaIds: [2, 1],
+        currentIndex: 1,
+      })
+    )
+  })
+
+  it('requires explicit confirmation before moving selected media to Trash', async () => {
+    const user = userEvent.setup()
+    mocks.deleteMedia.mockResolvedValue(undefined)
+    mocks.list.mockResolvedValue({
+      groups: [
+        {
+          clusterId: 10,
+          items: [createMedia(1, 'one.jpg'), createMedia(2, 'two.jpg')],
+        },
+      ],
+      nextCursor: null,
+      hasMore: false,
+      totalGroups: 1,
+      totalMedia: 2,
+    })
+    renderPage()
+
+    await user.click(await screen.findByRole('button', { name: 'Select one.jpg' }))
+    await user.click(screen.getByRole('button', { name: 'Move to Trash' }))
+    expect(mocks.deleteMedia).not.toHaveBeenCalled()
+    await user.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', {
+        name: 'Move to Trash',
+      })
+    )
+
+    await waitFor(() => expect(mocks.deleteMedia).toHaveBeenCalledWith([1]))
   })
 })

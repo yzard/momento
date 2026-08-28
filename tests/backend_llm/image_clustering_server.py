@@ -1,6 +1,6 @@
 import base64
-import io
 import importlib.util
+import io
 import struct
 import unittest
 from pathlib import Path

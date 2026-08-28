@@ -2,12 +2,14 @@ import { useState, useEffect, useRef } from 'react'
 import { useAlbum, useRemoveAlbumMedia, useReorderAlbum } from '../../hooks/useAlbums'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
-import { ArrowLeft, Check, Circle, Loader2 } from 'lucide-react'
+import { ArrowLeft, Loader2 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { batchLoader } from '../../utils/batcher'
 import { useMediaSelection } from '../../hooks/useMediaSelection'
 import ConfirmationDialog from '../common/ConfirmationDialog'
 import MediaSelectionToolbar, { MediaSelectButton } from '../media/MediaSelectionToolbar'
+import MediaSelectionOverlay from '../media/MediaSelectionOverlay'
+import { useLazyImage } from '../../hooks/useLazyImage'
 
 interface AlbumViewProps {
   albumId: number
@@ -15,19 +17,177 @@ interface AlbumViewProps {
   onPhotoClick: (media: Media, allMedia: Media[]) => void
 }
 
-export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewProps) {
-  const { data: album, isLoading, error } = useAlbum(albumId)
+function useAlbumOrdering(
+  albumId: number,
+  albumMedia: Media[] | undefined,
+  selectionMode: boolean
+) {
   const reorderAlbum = useReorderAlbum()
-  const removeAlbumMedia = useRemoveAlbumMedia()
-
   const [items, setItems] = useState<Media[]>([])
   const [draggedId, setDraggedId] = useState<number | null>(null)
-  const [reorderError, setReorderError] = useState<string | null>(null)
-  const [removeError, setRemoveError] = useState<string | null>(null)
-  const [showRemoveConfirmation, setShowRemoveConfirmation] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const itemsRef = useRef<Media[]>([])
   const confirmedItemsRef = useRef<Media[]>([])
-  const reorderInFlightRef = useRef(false)
+  const inFlightRef = useRef(false)
+
+  useEffect(() => {
+    if (!albumMedia || draggedId !== null || inFlightRef.current) return
+    itemsRef.current = albumMedia
+    confirmedItemsRef.current = albumMedia
+    setItems(albumMedia)
+  }, [albumMedia, draggedId])
+
+  const dragStart = (event: React.DragEvent, mediaId: number) => {
+    if (selectionMode) return
+    setDraggedId(mediaId)
+    event.dataTransfer.effectAllowed = 'move'
+  }
+  const dragOver = (event: React.DragEvent, targetId: number) => {
+    event.preventDefault()
+    if (selectionMode || draggedId === null || draggedId === targetId) return
+    const nextItems = moveAlbumMedia(itemsRef.current, draggedId, targetId)
+    itemsRef.current = nextItems
+    setItems(nextItems)
+  }
+  const drop = (event: React.DragEvent) => {
+    event.preventDefault()
+    if (selectionMode || draggedId === null || itemsRef.current.length === 0 || inFlightRef.current)
+      return
+    const desiredItems = itemsRef.current
+    const confirmedItems = confirmedItemsRef.current
+    setDraggedId(null)
+    if (desiredItems.every((item, index) => item.id === confirmedItems[index]?.id)) return
+    inFlightRef.current = true
+    setError(null)
+    void reorderAlbum
+      .mutateAsync({ albumId, mediaIds: desiredItems.map((item) => item.id) })
+      .then(() => {
+        confirmedItemsRef.current = desiredItems
+      })
+      .catch(() => {
+        itemsRef.current = confirmedItems
+        setItems(confirmedItems)
+        setError('Could not save the album order.')
+      })
+      .finally(() => {
+        inFlightRef.current = false
+      })
+  }
+  const removeItems = (mediaIds: ReadonlySet<number>) => {
+    const remainingItems = itemsRef.current.filter((item) => !mediaIds.has(item.id))
+    itemsRef.current = remainingItems
+    confirmedItemsRef.current = remainingItems
+    setItems(remainingItems)
+  }
+  return { items, draggedId, error, dragStart, dragOver, drop, removeItems }
+}
+
+interface AlbumHeaderProps {
+  name: string
+  description: string | null
+  itemCount: number
+  selectionMode: boolean
+  selectedCount: number
+  isRemoving: boolean
+  onBack: () => void
+  onStartSelection: () => void
+  onClearSelection: () => void
+  onCancelSelection: () => void
+  onRemoveRequest: () => void
+}
+
+function AlbumHeader(props: AlbumHeaderProps) {
+  return (
+    <div className="mb-8 flex flex-col gap-6">
+      <button
+        onClick={props.onBack}
+        className="group flex w-fit items-center gap-2 text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <span className="rounded-full bg-muted/50 p-2 transition-colors group-hover:bg-muted">
+          <ArrowLeft className="h-4 w-4" />
+        </span>
+        <span className="text-sm font-medium">Back to Albums</span>
+      </button>
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-4xl font-bold tracking-tight text-foreground">
+            {props.name}
+          </h2>
+          {!props.selectionMode && <MediaSelectButton onClick={props.onStartSelection} />}
+        </div>
+        <div className="flex items-center gap-4 text-sm text-muted-foreground">
+          <span className="rounded-md bg-secondary px-2.5 py-0.5 font-medium text-secondary-foreground">
+            {props.itemCount} items
+          </span>
+          {props.description && <span>{props.description}</span>}
+        </div>
+        {props.selectionMode && (
+          <MediaSelectionToolbar
+            selectedCount={props.selectedCount}
+            isProcessing={props.isRemoving}
+            onClear={props.onClearSelection}
+            onDone={props.onCancelSelection}
+            onAddToAlbum={null}
+            onRemoveFromAlbum={props.onRemoveRequest}
+            onMoveToTrash={null}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+interface AlbumMediaGridProps {
+  items: Media[]
+  draggedId: number | null
+  selectionMode: boolean
+  selectedMediaIds: ReadonlySet<number>
+  onToggleSelection: (mediaId: number) => void
+  onPhotoClick: (media: Media, allMedia: Media[]) => void
+  onDragStart: (event: React.DragEvent, mediaId: number) => void
+  onDragOver: (event: React.DragEvent, mediaId: number) => void
+  onDrop: (event: React.DragEvent) => void
+}
+
+function AlbumMediaGrid(props: AlbumMediaGridProps) {
+  if (props.items.length === 0) {
+    return (
+      <div className="rounded-2xl border-2 border-dashed border-border bg-muted/20 py-20 text-center text-muted-foreground">
+        <p>No photos in this album yet.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
+      {props.items.map((item) => (
+        <AlbumMediaItem
+          key={item.id}
+          item={item}
+          isDragged={props.draggedId === item.id}
+          selectionMode={props.selectionMode}
+          selected={props.selectedMediaIds.has(item.id)}
+          onDragStart={(event) => props.onDragStart(event, item.id)}
+          onDragOver={(event) => props.onDragOver(event, item.id)}
+          onDrop={props.onDrop}
+          onClick={() => {
+            if (props.selectionMode) {
+              props.onToggleSelection(item.id)
+              return
+            }
+            props.onPhotoClick(item, props.items)
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
+export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewProps) {
+  const { data: album, isLoading, error } = useAlbum(albumId)
+  const removeAlbumMedia = useRemoveAlbumMedia()
+  const [removeError, setRemoveError] = useState<string | null>(null)
+  const [showRemoveConfirmation, setShowRemoveConfirmation] = useState(false)
   const {
     selectionMode,
     selectedMediaIds,
@@ -36,57 +196,13 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
     cancelSelection,
     toggleSelection,
   } = useMediaSelection()
+  const ordering = useAlbumOrdering(albumId, album?.media, selectionMode)
 
   useEffect(() => {
     cancelSelection()
     setShowRemoveConfirmation(false)
     setRemoveError(null)
   }, [albumId, cancelSelection])
-
-  useEffect(() => {
-    if (!album || draggedId !== null || reorderInFlightRef.current) return
-    itemsRef.current = album.media
-    confirmedItemsRef.current = album.media
-    setItems(album.media)
-  }, [album, draggedId])
-
-  const handleDragStart = (e: React.DragEvent, id: number) => {
-    if (selectionMode) return
-    setDraggedId(id)
-    e.dataTransfer.effectAllowed = 'move'
-  }
-
-  const handleDragOver = (e: React.DragEvent, targetId: number) => {
-    e.preventDefault()
-    if (selectionMode || draggedId === null || draggedId === targetId) return
-    const nextItems = moveAlbumMedia(itemsRef.current, draggedId, targetId)
-    itemsRef.current = nextItems
-    setItems(nextItems)
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    if (selectionMode || draggedId === null || itemsRef.current.length === 0 || reorderInFlightRef.current) return
-    const desiredItems = itemsRef.current
-    const confirmedItems = confirmedItemsRef.current
-    setDraggedId(null)
-    if (desiredItems.every((item, index) => item.id === confirmedItems[index]?.id)) return
-
-    reorderInFlightRef.current = true
-    setReorderError(null)
-    void reorderAlbum.mutateAsync({
-      albumId,
-      mediaIds: desiredItems.map((item) => item.id),
-    }).then(() => {
-      confirmedItemsRef.current = desiredItems
-    }).catch(() => {
-      itemsRef.current = confirmedItems
-      setItems(confirmedItems)
-      setReorderError('Could not save the album order.')
-    }).finally(() => {
-      reorderInFlightRef.current = false
-    })
-  }
 
   const handleRemoveSelected = () => {
     if (selectedMediaIds.size === 0 || removeAlbumMedia.isPending) return
@@ -97,18 +213,17 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
       { albumId, mediaIds },
       {
         onSuccess: () => {
-          const remainingItems = itemsRef.current.filter((item) => !removedMediaIds.has(item.id))
-          itemsRef.current = remainingItems
-          confirmedItemsRef.current = remainingItems
-          setItems(remainingItems)
+          ordering.removeItems(removedMediaIds)
           setShowRemoveConfirmation(false)
           cancelSelection()
         },
         onError: () => {
           setShowRemoveConfirmation(false)
-          setRemoveError('Could not remove the selected media from this album. Nothing was removed.')
+          setRemoveError(
+            'Could not remove the selected media from this album. Nothing was removed.'
+          )
         },
-      },
+      }
     )
   }
 
@@ -134,69 +249,41 @@ export default function AlbumView({ albumId, onBack, onPhotoClick }: AlbumViewPr
 
   return (
     <div className="animate-fade-in">
-      <div className="flex flex-col gap-6 mb-8">
-        <button 
-          onClick={onBack} 
-          className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors w-fit group"
-        >
-          <div className="p-2 rounded-full bg-muted/50 group-hover:bg-muted transition-colors">
-            <ArrowLeft className="w-4 h-4" />
-          </div>
-          <span className="font-medium text-sm">Back to Albums</span>
-        </button>
-        
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-4xl font-display font-bold text-foreground tracking-tight">{album.name}</h2>
-            {!selectionMode && <MediaSelectButton onClick={startSelection} />}
-          </div>
-          <div className="flex items-center gap-4 text-sm text-muted-foreground">
-            <span className="font-medium bg-secondary px-2.5 py-0.5 rounded-md text-secondary-foreground">{items.length} items</span>
-            {album.description && <span>{album.description}</span>}
-          </div>
-          {selectionMode && (
-            <MediaSelectionToolbar
-              selectedCount={selectedMediaIds.size}
-              isProcessing={removeAlbumMedia.isPending}
-              onClear={clearSelection}
-              onDone={cancelSelection}
-              onAddToAlbum={null}
-              onRemoveFromAlbum={() => setShowRemoveConfirmation(true)}
-              onMoveToTrash={null}
-            />
-          )}
-        </div>
-      </div>
+      <AlbumHeader
+        name={album.name}
+        description={album.description}
+        itemCount={ordering.items.length}
+        selectionMode={selectionMode}
+        selectedCount={selectedMediaIds.size}
+        isRemoving={removeAlbumMedia.isPending}
+        onBack={onBack}
+        onStartSelection={startSelection}
+        onClearSelection={clearSelection}
+        onCancelSelection={cancelSelection}
+        onRemoveRequest={() => setShowRemoveConfirmation(true)}
+      />
 
-      {items.length === 0 ? (
-        <div className="text-muted-foreground text-center py-20 bg-muted/20 rounded-2xl border-2 border-dashed border-border">
-          <p>No photos in this album yet.</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2">
-          {items.map((item) => (
-            <AlbumMediaItem
-              key={item.id}
-              item={item}
-              isDragged={draggedId === item.id}
-              selectionMode={selectionMode}
-              selected={selectedMediaIds.has(item.id)}
-              onDragStart={(e) => handleDragStart(e, item.id)}
-              onDragOver={(e) => handleDragOver(e, item.id)}
-              onDrop={handleDrop}
-              onClick={() => {
-                if (selectionMode) {
-                  toggleSelection(item.id)
-                  return
-                }
-                onPhotoClick(item, items)
-              }}
-            />
-          ))}
-        </div>
+      <AlbumMediaGrid
+        items={ordering.items}
+        draggedId={ordering.draggedId}
+        selectionMode={selectionMode}
+        selectedMediaIds={selectedMediaIds}
+        onToggleSelection={toggleSelection}
+        onPhotoClick={onPhotoClick}
+        onDragStart={ordering.dragStart}
+        onDragOver={ordering.dragOver}
+        onDrop={ordering.drop}
+      />
+      {ordering.error && (
+        <p role="alert" className="mt-4 text-sm text-destructive">
+          {ordering.error}
+        </p>
       )}
-      {reorderError && <p role="alert" className="mt-4 text-sm text-destructive">{reorderError}</p>}
-      {removeError && <p role="alert" className="mt-4 text-sm text-destructive">{removeError}</p>}
+      {removeError && (
+        <p role="alert" className="mt-4 text-sm text-destructive">
+          {removeError}
+        </p>
+      )}
       {showRemoveConfirmation && (
         <ConfirmationDialog
           title={`Remove ${selectedMediaIds.size} selected item${selectedMediaIds.size === 1 ? '' : 's'}?`}
@@ -235,41 +322,22 @@ interface AlbumMediaItemProps {
   onClick: () => void
 }
 
-function AlbumMediaItem({ item, isDragged, selectionMode, selected, onDragStart, onDragOver, onDrop, onClick }: AlbumMediaItemProps) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => 
-    mediaApi.getCachedThumbnailUrl(item.id) || null
-  )
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (thumbnailUrl || !containerRef.current) return
-    let cancelled = false
-
-    const loadThumbnail = async () => {
-      try {
-        const url = await batchLoader.load(item.id)
-        if (!cancelled) setThumbnailUrl(url)
-      } catch (err) {
-        console.error('Failed to load thumbnail:', err)
-      }
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          loadThumbnail()
-          observer.disconnect()
-        }
-      },
-      { rootMargin: '100px' }
-    )
-    observer.observe(containerRef.current)
-
-    return () => {
-      cancelled = true
-      observer.disconnect()
-    }
-  }, [item.id, thumbnailUrl])
+function AlbumMediaItem({
+  item,
+  isDragged,
+  selectionMode,
+  selected,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onClick,
+}: AlbumMediaItemProps) {
+  const { targetRef: containerRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
+    resourceId: item.id,
+    loader: batchLoader,
+    getCachedUrl: (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal'),
+    rootMargin: '400px',
+  })
 
   return (
     <div
@@ -281,13 +349,21 @@ function AlbumMediaItem({ item, isDragged, selectionMode, selected, onDragStart,
       className={cn(
         'aspect-square relative cursor-pointer group overflow-hidden rounded-xl bg-muted shadow-sm transition-[box-shadow,opacity,transform] duration-200 motion-reduce:transition-none',
         isDragged && 'cursor-move opacity-25 ring-2 ring-primary',
-        !isDragged && selected && 'ring-4 ring-primary ring-offset-2 ring-offset-background shadow-lg',
-        !isDragged && !selected && 'opacity-100 hover:shadow-md hover:ring-2 hover:ring-primary/30 active:scale-[0.98]'
+        !isDragged &&
+          selected &&
+          'ring-4 ring-primary ring-offset-2 ring-offset-background shadow-lg',
+        !isDragged &&
+          !selected &&
+          'opacity-100 hover:shadow-md hover:ring-2 hover:ring-primary/30 active:scale-[0.98]'
       )}
       role="button"
       tabIndex={0}
       aria-pressed={selectionMode ? selected : undefined}
-      aria-label={selectionMode ? `${selected ? 'Deselect' : 'Select'} ${item.originalFilename}` : `Open ${item.originalFilename}`}
+      aria-label={
+        selectionMode
+          ? `${selected ? 'Deselect' : 'Select'} ${item.originalFilename}`
+          : `Open ${item.originalFilename}`
+      }
       onClick={onClick}
       onKeyDown={(event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return
@@ -304,15 +380,7 @@ function AlbumMediaItem({ item, isDragged, selectionMode, selected, onDragStart,
       ) : (
         <div className="w-full h-full animate-pulse" />
       )}
-      {selectionMode && (
-        <div className={`absolute inset-0 transition-colors duration-150 motion-reduce:transition-none ${selected ? 'bg-primary/25' : 'bg-black/10'}`}>
-          <span className={`absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full border-2 shadow-sm transition-colors duration-150 ${
-            selected ? 'border-primary bg-primary text-primary-foreground' : 'border-white/90 bg-black/35 text-white'
-          }`}>
-            {selected ? <Check className="h-4 w-4" strokeWidth={3} /> : <Circle className="h-4 w-4" />}
-          </span>
-        </div>
-      )}
+      {selectionMode && <MediaSelectionOverlay selected={selected} />}
     </div>
   )
 }

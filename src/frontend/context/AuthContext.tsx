@@ -1,22 +1,20 @@
-import { createContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { authApi, type TokenResponse, type User } from '../api/auth'
-import { setForbiddenResponseHandler } from '../api/client'
+import {
+  createContext,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  type Dispatch,
+  type MutableRefObject,
+  type ReactNode,
+  type SetStateAction,
+} from 'react'
+import { useNavigate, type NavigateFunction } from 'react-router-dom'
+import { authApi, type User } from '../api/auth'
+import { setAuthenticationFailureHandler } from '../api/client'
+import { facesApi } from '../api/faces'
 import { mediaApi } from '../api/media'
 import { queryClient } from '../lib/queryClient'
-
-const ACCESS_TOKEN_KEY = 'momento_access_token'
-const REFRESH_TOKEN_KEY = 'momento_refresh_token'
-
-function saveTokens(tokens: TokenResponse) {
-  localStorage.setItem(ACCESS_TOKEN_KEY, tokens.accessToken)
-  localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken)
-}
-
-function clearTokens() {
-  localStorage.removeItem(ACCESS_TOKEN_KEY)
-  localStorage.removeItem(REFRESH_TOKEN_KEY)
-}
 
 interface AuthContextType {
   user: User | null
@@ -25,11 +23,74 @@ interface AuthContextType {
   login: (username: string, password: string) => Promise<User>
   logout: () => Promise<void>
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>
-  refreshToken: () => Promise<boolean>
   refreshUser: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
+
+interface AuthenticationActionsOptions {
+  navigate: NavigateFunction
+  sessionGeneration: MutableRefObject<number>
+  setUser: Dispatch<SetStateAction<User | null>>
+  clearSession: () => void
+}
+
+function useAuthenticationActions(options: AuthenticationActionsOptions) {
+  const refreshUser = useCallback(async () => {
+    const generation = options.sessionGeneration.current
+    const userData = await authApi.getMe()
+    if (generation !== options.sessionGeneration.current) return
+    options.setUser(userData)
+  }, [options])
+
+  const login = useCallback(
+    async (username: string, password: string) => {
+      const generation = options.sessionGeneration.current + 1
+      options.sessionGeneration.current = generation
+      await authApi.login(username, password)
+      if (generation !== options.sessionGeneration.current)
+        throw new Error('Authentication request was superseded')
+      let userData: User
+      try {
+        userData = await authApi.getMe()
+      } catch (error) {
+        if (generation !== options.sessionGeneration.current)
+          throw new Error('Authentication request was superseded')
+        try {
+          await authApi.logout()
+        } finally {
+          options.clearSession()
+        }
+        throw error
+      }
+      if (generation !== options.sessionGeneration.current)
+        throw new Error('Authentication request was superseded')
+      options.setUser(userData)
+      return userData
+    },
+    [options]
+  )
+
+  const logout = useCallback(async () => {
+    options.clearSession()
+    try {
+      await authApi.logout()
+    } catch {
+      // The local session is already cleared.
+    }
+  }, [options])
+
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string) => {
+      await authApi.changePassword(currentPassword, newPassword)
+      options.clearSession()
+      options.navigate('/login', { replace: true })
+    },
+    [options]
+  )
+
+  return { login, logout, changePassword, refreshUser }
+}
 
 function AuthProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
@@ -39,119 +100,40 @@ function AuthProvider({ children }: { children: ReactNode }) {
 
   const clearSession = useCallback(() => {
     sessionGeneration.current += 1
-    clearTokens()
     setUser(null)
     setIsLoading(false)
     queryClient.clear()
     mediaApi.clearCache()
+    facesApi.clearThumbnailCache()
   }, [])
 
   useEffect(() => {
-    setForbiddenResponseHandler(() => {
+    setAuthenticationFailureHandler(() => {
       clearSession()
       navigate('/login', { replace: true })
     })
 
-    return () => setForbiddenResponseHandler(null)
+    return () => setAuthenticationFailureHandler(null)
   }, [clearSession, navigate])
-
-  const refreshToken = useCallback(async (): Promise<boolean> => {
-    const generation = sessionGeneration.current
-    const storedRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
-    if (!storedRefreshToken) return false
-
-    try {
-      const tokens = await authApi.refresh(storedRefreshToken)
-      if (
-        generation !== sessionGeneration.current
-        || localStorage.getItem(REFRESH_TOKEN_KEY) !== storedRefreshToken
-      ) return false
-      saveTokens(tokens)
-      return true
-    } catch {
-      if (
-        generation !== sessionGeneration.current
-        || localStorage.getItem(REFRESH_TOKEN_KEY) !== storedRefreshToken
-      ) return false
-      clearTokens()
-      setUser(null)
-      return false
-    }
-  }, [])
 
   const fetchUser = useCallback(async () => {
     const generation = sessionGeneration.current
-    const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY)
-    if (!accessToken) {
-      if (generation === sessionGeneration.current) setIsLoading(false)
-      return
-    }
-
     try {
       const userData = await authApi.getMe()
       if (generation !== sessionGeneration.current) return
       setUser(userData)
     } catch {
       if (generation !== sessionGeneration.current) return
-      const refreshed = await refreshToken()
-      if (refreshed) {
-        try {
-          const userData = await authApi.getMe()
-          if (generation !== sessionGeneration.current) return
-          setUser(userData)
-        } catch {
-          if (generation === sessionGeneration.current) clearTokens()
-        }
-      }
+      setUser(null)
     } finally {
       if (generation === sessionGeneration.current) setIsLoading(false)
     }
-  }, [refreshToken])
-
-  const refreshUser = useCallback(async () => {
-    const generation = sessionGeneration.current
-    const userData = await authApi.getMe()
-    if (generation !== sessionGeneration.current) return
-    setUser(userData)
   }, [])
 
   useEffect(() => {
     fetchUser()
   }, [fetchUser])
-
-  const login = async (username: string, password: string) => {
-    const generation = sessionGeneration.current + 1
-    sessionGeneration.current = generation
-    const tokens = await authApi.login(username, password)
-    if (generation !== sessionGeneration.current) {
-      throw new Error('Authentication request was superseded')
-    }
-    saveTokens(tokens)
-    const userData = await authApi.getMe()
-    if (generation !== sessionGeneration.current) {
-      throw new Error('Authentication request was superseded')
-    }
-    setUser(userData)
-    return userData
-  }
-
-  const logout = async () => {
-    const refreshTokenValue = localStorage.getItem(REFRESH_TOKEN_KEY)
-    clearSession()
-    if (refreshTokenValue) {
-      try {
-        await authApi.logout(refreshTokenValue)
-      } catch {
-        // Ignore logout errors
-      }
-    }
-  }
-
-  const changePassword = async (currentPassword: string, newPassword: string) => {
-    await authApi.changePassword(currentPassword, newPassword)
-    clearSession()
-    navigate('/login', { replace: true })
-  }
+  const actions = useAuthenticationActions({ navigate, sessionGeneration, setUser, clearSession })
 
   return (
     <AuthContext.Provider
@@ -159,11 +141,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
         user,
         isAuthenticated: !!user,
         isLoading,
-        login,
-        logout,
-        changePassword,
-        refreshToken,
-        refreshUser,
+        ...actions,
       }}
     >
       {children}

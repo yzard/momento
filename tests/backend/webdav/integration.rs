@@ -14,6 +14,39 @@ use crate::test_utils::{
 };
 
 #[tokio::test]
+async fn webdav_password_authentication_is_rate_limited() {
+    let _webdav_test_guard = lock_webdav_test().await;
+    init_test_paths();
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.security.password_attempts_per_identity = 1;
+    config.security.password_attempts_per_source = 10;
+    let app = create_app(
+        create_test_config_manager(config),
+        pool,
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let server =
+        TestServer::new_with_config(app, TestServerConfig::builder().http_transport().build())
+            .expect("server");
+    let credentials = base64::engine::general_purpose::STANDARD.encode("missing-user:wrong");
+    let authorization = format!("Basic {credentials}");
+
+    server
+        .get("/webdav/")
+        .add_header(header::AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_unauthorized();
+    server
+        .get("/webdav/")
+        .add_header(header::AUTHORIZATION, authorization)
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload() {
     let _webdav_test_guard = lock_webdav_test().await;
     init_test_paths();

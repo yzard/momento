@@ -12,7 +12,9 @@ describe('useTheme', () => {
       setPreference: () => undefined,
     }
     const { result } = renderHook(() => useTheme(), {
-      wrapper: ({ children }) => <ThemeContext.Provider value={theme}>{children}</ThemeContext.Provider>,
+      wrapper: ({ children }) => (
+        <ThemeContext.Provider value={theme}>{children}</ThemeContext.Provider>
+      ),
     })
 
     expect(result.current).toBe(theme)

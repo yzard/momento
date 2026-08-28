@@ -455,13 +455,25 @@ impl ActiveService {
         &self,
         inputs: Vec<InferenceInput>,
     ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
+        let mut responses = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            responses.push(InputInferenceResponse {
+                sequence: input.sequence,
+                frame_timestamp_ms: input.frame_timestamp_ms,
+                response: self.infer(&input).await?,
+            });
+        }
+        Ok(responses)
+    }
+
+    async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
         match self {
-            Self::Ocr(provider) => provider.infer_inputs(inputs).await,
-            Self::ImageTagging(provider) => provider.infer_inputs(inputs).await,
-            Self::ImageClustering(provider) => provider.infer_inputs(inputs).await,
-            Self::ImageAesthetics(provider) => provider.infer_inputs(inputs).await,
-            Self::FaceDetection(provider) => provider.infer_inputs(inputs).await,
-            Self::Classifier(provider) => provider.infer_inputs(inputs).await,
+            Self::Ocr(provider) => provider.infer(input).await,
+            Self::ImageTagging(provider) => provider.infer(input).await,
+            Self::ImageClustering(provider) => provider.infer(input).await,
+            Self::ImageAesthetics(provider) => provider.infer(input).await,
+            Self::FaceDetection(provider) => provider.infer(input).await,
+            Self::Classifier(provider) => provider.infer(input).await,
         }
     }
 }
@@ -802,21 +814,6 @@ impl LocalProvider {
     fn name(&self) -> &'static str {
         "local"
     }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input).await?,
-            });
-        }
-        Ok(responses)
-    }
 }
 
 struct ManagedRuntime {
@@ -929,6 +926,37 @@ impl ManagedRuntime {
             })?
             .is_none())
     }
+
+    async fn infer_response_body(
+        &self,
+        input: &InferenceInput,
+        runtime_name: &str,
+    ) -> Result<String, ServiceError> {
+        let url = format!("{}/infer", self.spec.base_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(url)
+            .json(&runtime_input_descriptor(input))
+            .send()
+            .await
+            .map_err(|error| {
+                ServiceError::RuntimeUnavailable(format!("{runtime_name} request failed: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            ServiceError::Upstream(format!("failed to read {runtime_name} response: {error}"))
+        })?;
+        if status.is_success() {
+            return Ok(body);
+        }
+
+        let message = format!("{runtime_name} runtime returned {status}: {body}");
+        if status.is_client_error() {
+            Err(ServiceError::BadRequest(message))
+        } else {
+            Err(ServiceError::Upstream(message))
+        }
+    }
 }
 
 pub struct RamProvider {
@@ -947,26 +975,7 @@ impl RamProvider {
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
-        let response = self
-            .runtime
-            .client
-            .post(url)
-            .json(&runtime_input_descriptor(input))
-            .send()
-            .await
-            .map_err(|error| {
-                ServiceError::RuntimeUnavailable(format!("RAM++ request failed: {error}"))
-            })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read RAM++ response: {error}"))
-        })?;
-        if !status.is_success() {
-            return Err(ServiceError::BadRequest(format!(
-                "RAM++ runtime returned {status}: {body}"
-            )));
-        }
+        let body = self.runtime.infer_response_body(input, "RAM++").await?;
         let result: TaggingResponse = serde_json::from_str(&body)
             .map_err(|error| ServiceError::Upstream(format!("invalid RAM++ response: {error}")))?;
         let text = result.tags.join("\n");
@@ -992,21 +1001,6 @@ impl RamProvider {
             detected: None,
             confidence: None,
         })
-    }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input).await?,
-            });
-        }
-        Ok(responses)
     }
 
     async fn shutdown(&self) -> Result<(), ServiceError> {
@@ -1040,29 +1034,7 @@ impl ImageClusteringProvider {
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
-        let response = self
-            .runtime
-            .client
-            .post(url)
-            .json(&runtime_input_descriptor(input))
-            .send()
-            .await
-            .map_err(|error| {
-                ServiceError::RuntimeUnavailable(format!("DINOv2 request failed: {error}"))
-            })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read DINOv2 response: {error}"))
-        })?;
-        if !status.is_success() {
-            let message = format!("DINOv2 runtime returned {status}: {body}");
-            return if status.is_client_error() {
-                Err(ServiceError::BadRequest(message))
-            } else {
-                Err(ServiceError::Upstream(message))
-            };
-        }
+        let body = self.runtime.infer_response_body(input, "DINOv2").await?;
 
         let clustering_response: ImageClusteringRuntimeResponse = serde_json::from_str(&body)
             .map_err(|error| ServiceError::Upstream(format!("invalid DINOv2 response: {error}")))?;
@@ -1090,21 +1062,6 @@ impl ImageClusteringProvider {
             detected: None,
             confidence: None,
         })
-    }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input).await?,
-            });
-        }
-        Ok(responses)
     }
 
     fn validate_response(
@@ -1177,29 +1134,10 @@ impl ImageAestheticsProvider {
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
-        let response = self
+        let body = self
             .runtime
-            .client
-            .post(url)
-            .json(&runtime_input_descriptor(input))
-            .send()
-            .await
-            .map_err(|error| {
-                ServiceError::RuntimeUnavailable(format!("CLIP aesthetics request failed: {error}"))
-            })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read CLIP aesthetics response: {error}"))
-        })?;
-        if !status.is_success() {
-            let message = format!("CLIP aesthetics runtime returned {status}: {body}");
-            return if status.is_client_error() {
-                Err(ServiceError::BadRequest(message))
-            } else {
-                Err(ServiceError::Upstream(message))
-            };
-        }
+            .infer_response_body(input, "CLIP aesthetics")
+            .await?;
 
         let runtime_response: ImageAestheticsRuntimeResponse = serde_json::from_str(&body)
             .map_err(|error| {
@@ -1229,21 +1167,6 @@ impl ImageAestheticsProvider {
             detected: None,
             confidence: None,
         })
-    }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input).await?,
-            });
-        }
-        Ok(responses)
     }
 
     fn validate_response(
@@ -1321,29 +1244,10 @@ impl FaceDetectionProvider {
     }
 
     pub async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
-        let response = self
+        let body = self
             .runtime
-            .client
-            .post(url)
-            .json(&runtime_input_descriptor(input))
-            .send()
-            .await
-            .map_err(|error| {
-                ServiceError::RuntimeUnavailable(format!("InsightFace request failed: {error}"))
-            })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read InsightFace response: {error}"))
-        })?;
-        if !status.is_success() {
-            let message = format!("InsightFace runtime returned {status}: {body}");
-            return if status.is_client_error() {
-                Err(ServiceError::BadRequest(message))
-            } else {
-                Err(ServiceError::Upstream(message))
-            };
-        }
+            .infer_response_body(input, "InsightFace")
+            .await?;
         let runtime_response: FaceDetectionRuntimeResponse =
             serde_json::from_str(&body).map_err(|error| {
                 ServiceError::Upstream(format!("invalid InsightFace response: {error}"))
@@ -1397,21 +1301,6 @@ impl FaceDetectionProvider {
             detected: None,
             confidence: None,
         })
-    }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input).await?,
-            });
-        }
-        Ok(responses)
     }
 
     fn validate_response(
@@ -1497,38 +1386,10 @@ impl ClassifierProvider {
     }
 
     async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let url = format!("{}/infer", self.runtime.spec.base_url.trim_end_matches('/'));
-        let response = self
+        let body = self
             .runtime
-            .client
-            .post(url)
-            .json(&runtime_input_descriptor(input))
-            .send()
-            .await
-            .map_err(|error| {
-                ServiceError::RuntimeUnavailable(format!(
-                    "{} request failed: {error}",
-                    self.service_type.as_str()
-                ))
-            })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!(
-                "failed to read {} response: {error}",
-                self.service_type.as_str()
-            ))
-        })?;
-        if !status.is_success() {
-            let message = format!(
-                "{} runtime returned {status}: {body}",
-                self.service_type.as_str()
-            );
-            return if status.is_client_error() {
-                Err(ServiceError::BadRequest(message))
-            } else {
-                Err(ServiceError::Upstream(message))
-            };
-        }
+            .infer_response_body(input, self.service_type.as_str())
+            .await?;
         let runtime_response: ClassifierRuntimeResponse =
             serde_json::from_str(&body).map_err(|error| {
                 ServiceError::Upstream(format!(
@@ -1565,21 +1426,6 @@ impl ClassifierProvider {
             detected: Some(runtime_response.detected),
             confidence: Some(runtime_response.confidence),
         })
-    }
-
-    async fn infer_inputs(
-        &self,
-        inputs: Vec<InferenceInput>,
-    ) -> Result<Vec<InputInferenceResponse>, ServiceError> {
-        let mut responses = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            responses.push(InputInferenceResponse {
-                sequence: input.sequence,
-                frame_timestamp_ms: input.frame_timestamp_ms,
-                response: self.infer(&input).await?,
-            });
-        }
-        Ok(responses)
     }
 
     async fn shutdown(&self) -> Result<(), ServiceError> {

@@ -17,9 +17,7 @@ describe('usePollingStatus', () => {
   it('ignores an older status response that resolves after a refresh', async () => {
     const older = deferred<{ value: string }>()
     const newer = deferred<{ value: string }>()
-    const load = vi.fn()
-      .mockReturnValueOnce(older.promise)
-      .mockReturnValueOnce(newer.promise)
+    const load = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise)
     const { result } = renderHook(() => usePollingStatus(load, 'failed', 60_000))
     await waitFor(() => expect(load).toHaveBeenCalledOnce())
 

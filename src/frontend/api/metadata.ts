@@ -10,7 +10,10 @@ export interface MetadataStatus {
 }
 
 export const metadataApi = {
-  generate: async (): Promise<{ message: string; queuedJobs: number }> => (await apiClient.post('/metadata/generate', {})).data,
-  getStatus: async (): Promise<MetadataStatus> => (await apiClient.post('/metadata/status', {})).data,
-  reset: async (): Promise<{ message: string; queuedJobs: number }> => (await apiClient.post('/metadata/reset', {})).data,
+  generate: async (): Promise<{ message: string; queuedJobs: number }> =>
+    (await apiClient.post('/metadata/generate', {})).data,
+  getStatus: async (): Promise<MetadataStatus> =>
+    (await apiClient.post('/metadata/status', {})).data,
+  reset: async (): Promise<{ message: string; queuedJobs: number }> =>
+    (await apiClient.post('/metadata/reset', {})).data,
 }

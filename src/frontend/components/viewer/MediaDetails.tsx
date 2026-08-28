@@ -23,10 +23,12 @@ function formatDateTaken(dateTaken: string | null): string | null {
   const date = new Date(dateTaken)
   if (Number.isNaN(date.getTime())) return null
 
-  const time = date.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).replace(/\s/g, '')
+  const time = date
+    .toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    })
+    .replace(/\s/g, '')
   const month = date.toLocaleDateString('en-US', { month: 'short' })
   return `${time}, ${month} ${ordinalDay(date.getDate())}, ${date.getFullYear()}`
 }
@@ -47,25 +49,41 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
   const formatGpsValue = (value: number | null) =>
     value === null ? null : Number(value.toFixed(5)).toString()
   const combineValues = (...values: Array<string | number | null>) =>
-    values.map(rawValue).filter((value): value is string => value !== null).join(', ') || null
-  const hasValidGps = media.gpsLatitude !== null && media.gpsLongitude !== null &&
-    media.gpsLatitude !== 0 && media.gpsLongitude !== 0
-  const deviceName = `${media.cameraMake ?? ''} ${media.cameraModel ?? ''}`.toLowerCase()
-  const isPhone = ['iphone', 'samsung', 'pixel', 'android'].some(name => deviceName.includes(name))
-  const gpsValue = hasValidGps
-    ? [formatGpsValue(media.gpsLatitude), formatGpsValue(media.gpsLongitude), formatGpsValue(media.gpsAltitude)]
+    values
+      .map(rawValue)
       .filter((value): value is string => value !== null)
-      .join(', ')
+      .join(', ') || null
+  const hasValidGps =
+    media.gpsLatitude !== null &&
+    media.gpsLongitude !== null &&
+    media.gpsLatitude !== 0 &&
+    media.gpsLongitude !== 0
+  const deviceName = `${media.cameraMake ?? ''} ${media.cameraModel ?? ''}`.toLowerCase()
+  const isPhone = ['iphone', 'samsung', 'pixel', 'android'].some((name) =>
+    deviceName.includes(name)
+  )
+  const gpsValue = hasValidGps
+    ? [
+        formatGpsValue(media.gpsLatitude),
+        formatGpsValue(media.gpsLongitude),
+        formatGpsValue(media.gpsAltitude),
+      ]
+        .filter((value): value is string => value !== null)
+        .join(', ')
     : null
   const locationValue = combineValues(
     media.locationCity,
     media.locationState,
-    media.locationCountry,
+    media.locationCountry
   )
 
   const details = [
     { icon: Calendar, label: 'Date Taken', value: formatDateTaken(media.dateTaken) },
-    { icon: isPhone ? Smartphone : Camera, label: 'Camera', value: combineValues(media.cameraMake, media.cameraModel) },
+    {
+      icon: isPhone ? Smartphone : Camera,
+      label: 'Camera',
+      value: combineValues(media.cameraMake, media.cameraModel),
+    },
     { icon: Camera, label: 'Lens', value: combineValues(media.lensMake, media.lensModel) },
     { icon: Camera, label: 'ISO', value: rawValue(media.iso) },
     { icon: Camera, label: 'Exposure Time', value: rawValue(media.exposureTime) },
@@ -74,9 +92,14 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     { icon: Camera, label: 'Focal Length 35mm', value: rawValue(media.focalLength35mm) },
     { icon: FileType, label: 'Media Type', value: rawValue(media.mediaType) },
     { icon: FileType, label: 'MIME Type', value: rawValue(media.mimeType) },
-    { icon: FileType, label: 'Dimensions', value: media.width !== null && media.height !== null
-      ? `${rawValue(media.width)} × ${rawValue(media.height)}`
-      : null },
+    {
+      icon: FileType,
+      label: 'Dimensions',
+      value:
+        media.width !== null && media.height !== null
+          ? `${rawValue(media.width)} × ${rawValue(media.height)}`
+          : null,
+    },
     { icon: FileType, label: 'Duration Seconds', value: rawValue(media.durationSeconds) },
     { icon: FileType, label: 'File Size', value: formatFileSize(media.fileSize) },
     { icon: FileType, label: 'Video Codec', value: rawValue(media.videoCodec) },
@@ -86,10 +109,15 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     { icon: KeyRound, label: 'Keywords', value: rawValue(media.keywords) },
     { icon: KeyRound, label: 'Content Hash', value: rawValue(media.contentHash) },
     { icon: Calendar, label: 'Created At', value: rawValue(media.createdAt) },
-  ].filter(item => item.value !== null)
+  ].filter((item) => item.value !== null)
 
   return (
-    <div className={cn("backdrop-blur-xl bg-card/95 rounded-2xl p-6 text-foreground border border-border shadow-2xl", className)}>
+    <div
+      className={cn(
+        'backdrop-blur-xl bg-card/95 rounded-2xl p-6 text-foreground border border-border shadow-2xl',
+        className
+      )}
+    >
       <div className="mb-6 pb-4 border-b border-border">
         <h3 className="font-semibold text-base text-foreground break-all leading-relaxed">
           {media.originalFilename}
@@ -106,9 +134,7 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
               <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold block mb-0.5">
                 {item.label}
               </span>
-              <div className="text-sm text-foreground/90 font-medium break-all">
-                {item.value}
-              </div>
+              <div className="text-sm text-foreground/90 font-medium break-all">{item.value}</div>
             </div>
           </div>
         ))}

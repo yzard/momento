@@ -1,10 +1,15 @@
-use crate::test_utils::{create_test_app, create_test_media, create_test_user};
+use crate::test_utils::{
+    create_test_app, create_test_config_manager, create_test_db, create_test_media,
+    create_test_user, init_test_paths,
+};
 use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use axum::http::StatusCode;
 use axum_test::TestServer;
+use momento_api::app::create_app;
 use momento_api::auth::{create_access_token, hash_password};
 use momento_api::config::Config;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 fn authorization(user_id: i64, username: &str) -> String {
     let token = create_access_token(user_id, username, "user", &Config::default(), None)
@@ -205,6 +210,46 @@ async fn password_verification_rejects_expired_links() {
         .json(&json!({ "password": "anything" }))
         .await;
     assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn public_share_password_verification_is_rate_limited() {
+    init_test_paths();
+    let pool = create_test_db();
+    let owner_id = create_test_user(&pool, "limited-owner", "limited-owner@example.com");
+    let media_id = create_test_media(&pool, "limited.jpg");
+    let password_hash = hash_password("secret").expect("password hash");
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO share_links (user_id, media_id, token, password_hash) VALUES (?1, ?2, 'limited-token', ?3)",
+            rusqlite::params![owner_id, media_id, password_hash],
+        )
+        .expect("share link");
+    let mut config = Config::default();
+    config.security.password_attempts_per_identity = 2;
+    config.security.password_attempts_per_source = 10;
+    let app = create_app(
+        create_test_config_manager(config),
+        pool,
+        Default::default(),
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        None,
+    );
+    let server = TestServer::new(app).expect("server");
+
+    for _ in 0..2 {
+        server
+            .post("/api/v1/public/share/limited-token/verify")
+            .json(&json!({"password": "wrong"}))
+            .await
+            .assert_status_ok();
+    }
+    server
+        .post("/api/v1/public/share/limited-token/verify")
+        .json(&json!({"password": "wrong"}))
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]

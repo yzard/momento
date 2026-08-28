@@ -18,7 +18,7 @@ async fn capabilities_exposes_version_extensions_features_and_backup_limits() {
         .expect("extensions")
         .iter()
         .any(|extension| extension == ".jpg"));
-    for lossless_camera_extension in [".avif", ".dng", ".arw", ".srw"] {
+    for lossless_camera_extension in [".avif", ".dng", ".arw", ".srw", ".qoi"] {
         assert!(body["supportedMediaExtensions"]
             .as_array()
             .expect("extensions")

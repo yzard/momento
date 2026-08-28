@@ -2,7 +2,7 @@ use axum::{extract::State, routing::post, Json, Router};
 use chrono::{Duration, Utc};
 use rand::Rng;
 
-use crate::auth::{hash_password, AppState, CurrentUser};
+use crate::auth::{AppState, CurrentUser};
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -67,6 +67,16 @@ async fn create_share_link(
         ));
     }
 
+    let password_hash = match request.password.as_deref() {
+        Some(password) => Some(
+            state
+                .authentication_protection
+                .hash_password(password)
+                .await?,
+        ),
+        None => None,
+    };
+
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
     if let Some(media_id) = request.media_id {
@@ -100,13 +110,6 @@ async fn create_share_link(
         .take(22)
         .map(char::from)
         .collect();
-
-    let password_hash = request
-        .password
-        .as_ref()
-        .map(|p| hash_password(p))
-        .transpose()
-        .map_err(|e| AppError::Internal(format!("Failed to hash password: {}", e)))?;
 
     let expires_at = request
         .expires_in_days

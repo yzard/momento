@@ -25,6 +25,29 @@ refresh_token_expire_days = {{REFRESH_TOKEN_EXPIRE_DAYS}}
 media_access_ticket_expire_hours = {{MEDIA_ACCESS_TICKET_EXPIRE_HOURS}}
 # Password-protected public shares use a path-scoped browser session instead of URL passwords.
 share_session_expire_hours = {{SHARE_SESSION_EXPIRE_HOURS}}
+# Password attempts are bounded independently by normalized identity and source address.
+password_attempt_window_seconds = {{PASSWORD_ATTEMPT_WINDOW_SECONDS}}
+password_attempts_per_identity = {{PASSWORD_ATTEMPTS_PER_IDENTITY}}
+password_attempts_per_source = {{PASSWORD_ATTEMPTS_PER_SOURCE}}
+password_lockout_seconds = {{PASSWORD_LOCKOUT_SECONDS}}
+# Bounds simultaneous Argon2 work so authentication cannot exhaust the blocking worker pool.
+password_hash_max_concurrent = {{PASSWORD_HASH_MAX_CONCURRENT}}
+# Forwarded client addresses are used only when the direct peer is in this explicit list.
+trusted_proxy_ip_addresses = []
+refresh_token_cleanup_interval_seconds = {{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}
+
+[media_process]
+# Every media parser/converter runs in an isolated process group with bounded time and output.
+timeout_seconds = {{MEDIA_PROCESS_TIMEOUT_SECONDS}}
+termination_grace_seconds = {{MEDIA_PROCESS_TERMINATION_GRACE_SECONDS}}
+maximum_stderr_bytes = {{MEDIA_PROCESS_MAXIMUM_STDERR_BYTES}}
+maximum_metadata_output_bytes = {{MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES}}
+maximum_normalized_image_output_bytes = {{MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES}}
+maximum_decoded_image_pixels = {{MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS}}
+imagemagick_memory_limit_mebibytes = {{IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES}}
+imagemagick_map_limit_mebibytes = {{IMAGEMAGICK_MAP_LIMIT_MEBIBYTES}}
+imagemagick_disk_limit_mebibytes = {{IMAGEMAGICK_DISK_LIMIT_MEBIBYTES}}
+imagemagick_maximum_threads = {{IMAGEMAGICK_MAXIMUM_THREADS}}
 
 [webdav]
 # WebDAV is always available; uploads are staged below data_dir/webdav and imported automatically.

@@ -21,7 +21,11 @@ describe('AI administrator API', () => {
   })
 
   it('loads every task from one aggregate status endpoint', async () => {
-    const response = { tasks: [], deduplicate: { status: 'idle' }, faceGroups: 8 }
+    const response = {
+      tasks: [],
+      deduplicate: { status: 'idle' },
+      faceGroups: 8,
+    }
     post.mockResolvedValue({ data: response })
 
     await expect(aiApi.status()).resolves.toEqual(response)

@@ -43,7 +43,7 @@ async fn result_delivery_waits_for_matching_momento_receipt() {
     let message = serde_json::from_str::<ServiceControlMessage>(&message).expect("result control");
     assert!(matches!(message, ServiceControlMessage::Result { .. }));
     registry
-            .complete_result_delivery(
+        .complete_result_delivery(
             "client_a",
             connection.generation,
             "018f36e77c917cc89f7054252a33eaf0",

@@ -23,6 +23,22 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         Some(runtime_defaults.security.share_session_expire_hours)
     );
     assert_eq!(
+        template["security"]["password_attempts_per_identity"].as_integer(),
+        Some(i64::from(
+            runtime_defaults.security.password_attempts_per_identity
+        ))
+    );
+    assert_eq!(
+        template["security"]["trusted_proxy_ip_addresses"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        template["media_process"]["maximum_decoded_image_pixels"].as_integer(),
+        Some(runtime_defaults.media_process.maximum_decoded_image_pixels as i64)
+    );
+    assert_eq!(
         template["webdav"]["max_upload_bytes"].as_integer(),
         Some(50 * 1024 * 1024 * 1024)
     );

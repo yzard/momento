@@ -15,7 +15,7 @@ path = "main.rs"
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["macros", "ws"] }
-tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.5", features = ["trace", "fs"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -35,8 +35,8 @@ r2d2_sqlite = "0.24"
 jsonwebtoken = "9"
 argon2 = "0.5"
 
-# Image processing
-image = "0.25"
+# ImageMagick normalizes source formats; Rust decodes PNG and writes JPEG crops.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "rayon"] }
 
 # Utils
 num_cpus = "1.16"
@@ -50,12 +50,12 @@ tracing = "0.1"
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+libc = "0.2"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 glob = "0.3"
 filetime = "0.2"
 serde_urlencoded = "0.7"
 futures = "0.3"
-mime_guess = "2"
 percent-encoding = "2"
 csv = "1"
 flate2 = "1"
@@ -66,7 +66,7 @@ momento-common = { path = "../common" }
 geohash = "0.13"
 
 # WebDAV server
-dav-server = "0.7"
+dav-server = "0.11"
 http-body-util = "0.1"
 
 [dev-dependencies]

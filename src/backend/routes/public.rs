@@ -1,20 +1,20 @@
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
+use std::net::SocketAddr;
 
 use crate::auth::{
-    create_share_session_token, decode_share_session_token, share_token_hash, verify_password,
-    AppState,
+    create_share_session_token, decode_share_session_token, share_token_hash, AppState,
 };
 use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries, DbConn};
 use crate::error::{AppError, AppResult};
-use crate::models::{MediaResponse, ShareVerifyRequest, ShareVerifyResponse};
+use crate::models::{map_media_response, ShareVerifyRequest, ShareVerifyResponse};
 use crate::utils::path::resolve_existing_storage_path;
 
 use super::file_stream::{serve_file, ContentDisposition};
@@ -97,38 +97,29 @@ struct AlbumBasic {
     description: Option<String>,
 }
 
-fn map_public_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
-    Ok(MediaResponse {
-        id: row.get(0)?,
-        filename: row.get(1)?,
-        original_filename: row.get(2)?,
-        media_type: row.get(3)?,
-        mime_type: row.get(4)?,
-        width: row.get(5)?,
-        height: row.get(6)?,
-        file_size: row.get(7)?,
-        duration_seconds: row.get(8)?,
-        date_taken: row.get(9)?,
-        gps_latitude: row.get(10)?,
-        gps_longitude: row.get(11)?,
-        camera_make: row.get(12)?,
-        camera_model: row.get(13)?,
-        lens_make: row.get(14)?,
-        lens_model: row.get(15)?,
-        iso: row.get(16)?,
-        exposure_time: row.get(17)?,
-        f_number: row.get(18)?,
-        focal_length: row.get(19)?,
-        focal_length_35mm: row.get(20)?,
-        gps_altitude: row.get(21)?,
-        location_city: row.get(22)?,
-        location_state: row.get(23)?,
-        location_country: row.get(24)?,
-        video_codec: row.get(25)?,
-        keywords: row.get(26)?,
-        created_at: row.get(27)?,
-        content_hash: None,
-    })
+fn require_media_in_share(connection: &DbConn, share: &ShareRow, media_id: i64) -> AppResult<()> {
+    if share
+        .media_id
+        .is_some_and(|shared_media_id| shared_media_id != media_id)
+    {
+        return Err(AppError::Authorization("Media not in share".to_string()));
+    }
+
+    let Some(album_id) = share.album_id else {
+        return Ok(());
+    };
+    let media_is_in_album = fetch_one(
+        connection,
+        queries::public::CHECK_ALBUM_MEDIA,
+        &[&album_id, &media_id],
+        |row| row.get::<_, i32>(0),
+    )?;
+    if media_is_in_album.is_none() {
+        return Err(AppError::Authorization(
+            "Media not in shared album".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn get_shared_content(
@@ -147,7 +138,7 @@ async fn get_shared_content(
             &conn,
             queries::media::SELECT_BY_ID,
             &[&media_id],
-            map_public_media_row,
+            map_media_response,
         )?
         .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
@@ -176,7 +167,7 @@ async fn get_shared_content(
             &conn,
             queries::public::SELECT_ALBUM_MEDIA,
             &[&album_id],
-            map_public_media_row,
+            map_media_response,
         )?;
 
         return Ok(public_json_response(serde_json::json!({
@@ -195,7 +186,9 @@ async fn get_shared_content(
 
 async fn verify_share_password(
     State(state): State<AppState>,
+    peer_address: Option<ConnectInfo<SocketAddr>>,
     Path(token): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<ShareVerifyRequest>,
 ) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
@@ -206,9 +199,23 @@ async fn verify_share_password(
         return share_verify_response(true, "No password required", None);
     };
 
-    if !verify_password(&request.password, &password_hash) {
+    let password_identity = format!("share:{}", share_token_hash(&token));
+    let client_source = state
+        .authentication_protection
+        .client_source(&headers, peer_address.map(|peer| peer.0));
+    state
+        .authentication_protection
+        .begin_password_attempt(&client_source, &password_identity)?;
+    if !state
+        .authentication_protection
+        .verify_password(&request.password, Some(&password_hash))
+        .await?
+    {
         return share_verify_response(false, "Invalid password", None);
     }
+    state
+        .authentication_protection
+        .record_password_success(&client_source, &password_identity);
 
     let share_expiration = parse_share_expiration(share.expires_at.as_deref())?;
     let config = state.config.current();
@@ -228,28 +235,7 @@ async fn get_shared_media_file(
 ) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
     let share = validate_share_access(&conn, &token, &headers, &state)?;
-
-    // Verify media is in share
-    if let Some(share_media_id) = share.media_id {
-        if share_media_id != media_id {
-            return Err(AppError::Authorization("Media not in share".to_string()));
-        }
-    }
-
-    if let Some(album_id) = share.album_id {
-        let in_album = fetch_one(
-            &conn,
-            queries::public::CHECK_ALBUM_MEDIA,
-            &[&album_id, &media_id],
-            |row| row.get::<_, i32>(0),
-        )?;
-
-        if in_album.is_none() {
-            return Err(AppError::Authorization(
-                "Media not in shared album".to_string(),
-            ));
-        }
-    }
+    require_media_in_share(&conn, &share, media_id)?;
 
     let media = fetch_one(
         &conn,
@@ -293,28 +279,7 @@ async fn get_shared_thumbnail(
 ) -> AppResult<Response> {
     let conn = state.pool.get().map_err(AppError::Pool)?;
     let share = validate_share_access(&conn, &token, &headers, &state)?;
-
-    // Verify media is in share
-    if let Some(share_media_id) = share.media_id {
-        if share_media_id != media_id {
-            return Err(AppError::Authorization("Media not in share".to_string()));
-        }
-    }
-
-    if let Some(album_id) = share.album_id {
-        let in_album = fetch_one(
-            &conn,
-            queries::public::CHECK_ALBUM_MEDIA,
-            &[&album_id, &media_id],
-            |row| row.get::<_, i32>(0),
-        )?;
-
-        if in_album.is_none() {
-            return Err(AppError::Authorization(
-                "Media not in shared album".to_string(),
-            ));
-        }
-    }
+    require_media_in_share(&conn, &share, media_id)?;
 
     let thumbnail_path: Option<String> = fetch_one(
         &conn,

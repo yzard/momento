@@ -1,16 +1,21 @@
 use axum::{
-    extract::State,
-    http::{header::AUTHORIZATION, HeaderMap},
+    extract::{ConnectInfo, State},
+    http::{header::AUTHORIZATION, header::SET_COOKIE, HeaderMap},
+    response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{OptionalExtension, TransactionBehavior};
+use std::net::SocketAddr;
 
 use crate::auth::{
-    create_access_token, create_refresh_token, hash_password, hash_refresh_token, verify_password,
-    AppState, CurrentUser, TEMPORARY_ADMIN_PASSWORD, TEMPORARY_ADMIN_USERNAME,
+    clear_access_token_cookie, clear_refresh_token_cookie, create_access_token,
+    create_access_token_cookie, create_refresh_token, create_refresh_token_cookie,
+    hash_refresh_token, refresh_token_cookie, AppState, CurrentUser, TEMPORARY_ADMIN_PASSWORD,
+    TEMPORARY_ADMIN_USERNAME,
 };
+use crate::config::Config;
 use crate::database::{execute_query, fetch_one, insert_returning_id, queries, DbConn};
 use crate::error::{AppError, AppResult};
 use crate::models::{ChangePasswordRequest, LogoutRequest, RefreshTokenRequest, TokenResponse};
@@ -20,14 +25,40 @@ pub fn router() -> Router<AppState> {
         .route("/user/authenticate", post(login))
         .route("/user/refresh", post(refresh))
         .route("/user/logout", post(logout))
+        .route("/user/session/create", post(create_browser_session))
+        .route("/user/session/refresh", post(refresh_browser_session))
+        .route("/user/session/delete", post(delete_browser_session))
         .route("/user/change-password", post(change_password))
 }
 
 async fn login(
     State(state): State<AppState>,
+    peer_address: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> AppResult<Json<TokenResponse>> {
-    // Extract Basic auth credentials
+    Ok(Json(
+        authenticate(&state, &headers, peer_address.map(|peer| peer.0)).await?,
+    ))
+}
+
+async fn create_browser_session(
+    State(state): State<AppState>,
+    peer_address: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let tokens = authenticate(&state, &headers, peer_address.map(|peer| peer.0)).await?;
+    session_response(
+        serde_json::json!({"message": "Authenticated successfully"}),
+        &tokens,
+        &state.config.current(),
+    )
+}
+
+async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer_address: Option<SocketAddr>,
+) -> AppResult<TokenResponse> {
     let auth_header = headers
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -48,7 +79,14 @@ async fn login(
         .split_once(':')
         .ok_or_else(|| AppError::Authentication("Invalid credentials format".to_string()))?;
 
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let client_source = state
+        .authentication_protection
+        .client_source(headers, peer_address);
+    state
+        .authentication_protection
+        .begin_password_attempt(&client_source, username)?;
+
+    let connection = state.pool.get().map_err(AppError::Pool)?;
 
     let temporary_admin_reset = (username == TEMPORARY_ADMIN_USERNAME
         && password == TEMPORARY_ADMIN_PASSWORD)
@@ -56,22 +94,37 @@ async fn login(
         .flatten();
     let temporary_admin_login = temporary_admin_reset.is_some();
     let user = if let Some((admin_id, _)) = &temporary_admin_reset {
-        load_user_for_auth(&conn, queries::auth::SELECT_USER_BY_ID, admin_id)?
+        load_user_for_auth(&connection, queries::auth::SELECT_USER_BY_ID, admin_id)?
     } else {
-        load_user_for_auth(&conn, queries::auth::SELECT_USER_BY_USERNAME, &username)?
-    }
-    .ok_or_else(|| AppError::Authentication("Invalid credentials".to_string()))?;
-
-    if temporary_admin_login && user.role != "admin" {
+        load_user_for_auth(
+            &connection,
+            queries::auth::SELECT_USER_BY_USERNAME,
+            &username,
+        )?
+    };
+    let verified = state
+        .authentication_protection
+        .verify_password(
+            password,
+            (!temporary_admin_login)
+                .then(|| user.as_ref().map(|row| row.hashed_password.as_str()))
+                .flatten(),
+        )
+        .await?;
+    let user = user.filter(|user| {
+        user.is_active != 0
+            && if temporary_admin_login {
+                user.role == "admin"
+            } else {
+                verified
+            }
+    });
+    let Some(user) = user else {
         return Err(AppError::Authentication("Invalid credentials".to_string()));
-    }
-    if !temporary_admin_login && !verify_password(password, &user.hashed_password) {
-        return Err(AppError::Authentication("Invalid credentials".to_string()));
-    }
-
-    if user.is_active == 0 {
-        return Err(AppError::Authentication("User is inactive".to_string()));
-    }
+    };
+    state
+        .authentication_protection
+        .record_password_success(&client_source, username);
 
     let config = state.config.current();
     let access_token = create_access_token(
@@ -87,13 +140,13 @@ async fn login(
 
     if !temporary_admin_login {
         insert_returning_id(
-            &conn,
+            &connection,
             queries::auth::INSERT_REFRESH_TOKEN,
             &[&token_hash, &user.id, &expires_at.to_rfc3339()],
         )?;
     }
 
-    Ok(Json(TokenResponse::new(access_token, raw_refresh)))
+    Ok(TokenResponse::new(access_token, raw_refresh))
 }
 
 fn load_user_for_auth(
@@ -124,9 +177,27 @@ async fn refresh(
     State(state): State<AppState>,
     Json(request): Json<RefreshTokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
-    let token_hash = hash_refresh_token(&request.refresh_token);
-    let mut conn = state.pool.get().map_err(AppError::Pool)?;
-    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    Ok(Json(rotate_refresh_token(&state, &request.refresh_token)?))
+}
+
+async fn refresh_browser_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let refresh_token = refresh_token_cookie(&headers)
+        .ok_or_else(|| AppError::Authentication("Refresh session is required".to_string()))?;
+    let tokens = rotate_refresh_token(&state, &refresh_token)?;
+    session_response(
+        serde_json::json!({"message": "Session refreshed successfully"}),
+        &tokens,
+        &state.config.current(),
+    )
+}
+
+fn rotate_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<TokenResponse> {
+    let token_hash = hash_refresh_token(refresh_token);
+    let mut connection = state.pool.get().map_err(AppError::Pool)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = chrono::Utc::now().to_rfc3339();
     let token_row = transaction
         .query_row(
@@ -179,7 +250,7 @@ async fn refresh(
     )?;
     transaction.commit()?;
 
-    Ok(Json(TokenResponse::new(access_token, raw_refresh)))
+    Ok(TokenResponse::new(access_token, raw_refresh))
 }
 
 struct RefreshTokenRow {
@@ -194,33 +265,49 @@ async fn logout(
     State(state): State<AppState>,
     Json(request): Json<LogoutRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let token_hash = hash_refresh_token(&request.refresh_token);
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    execute_query(
-        &conn,
-        queries::auth::REVOKE_REFRESH_TOKEN_BY_HASH,
-        &[&token_hash],
-    )?;
+    revoke_refresh_token(&state, &request.refresh_token)?;
 
     Ok(Json(
         serde_json::json!({"message": "Logged out successfully"}),
     ))
 }
 
+async fn delete_browser_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    if let Some(refresh_token) = refresh_token_cookie(&headers) {
+        revoke_refresh_token(&state, &refresh_token)?;
+    }
+    cleared_session_response(serde_json::json!({"message": "Logged out successfully"}))
+}
+
+fn revoke_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<()> {
+    let token_hash = hash_refresh_token(refresh_token);
+    let connection = state.pool.get().map_err(AppError::Pool)?;
+    execute_query(
+        &connection,
+        queries::auth::DELETE_REFRESH_TOKEN_BY_HASH,
+        &[&token_hash],
+    )?;
+    Ok(())
+}
+
 async fn change_password(
     State(state): State<AppState>,
+    peer_address: Option<ConnectInfo<SocketAddr>>,
     current_user: CurrentUser,
+    headers: HeaderMap,
     Json(request): Json<ChangePasswordRequest>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Response> {
     if request.new_password.len() < 8 {
         return Err(AppError::BadRequest(
             "Password must be at least 8 characters".to_string(),
         ));
     }
 
-    let mut conn = state.pool.get().map_err(AppError::Pool)?;
-    let user = conn
+    let mut connection = state.pool.get().map_err(AppError::Pool)?;
+    let user = connection
         .query_row(
             queries::auth::SELECT_PASSWORD_HASH,
             [current_user.id],
@@ -233,14 +320,33 @@ async fn change_password(
         .requires_password_change(current_user.id)
         && current_user.must_change_password
         && request.current_password == TEMPORARY_ADMIN_PASSWORD;
-    if !temporary_admin_password && !verify_password(&request.current_password, &user) {
+    let password_identity = format!("user:{}", current_user.id);
+    let client_source = state
+        .authentication_protection
+        .client_source(&headers, peer_address.map(|peer| peer.0));
+    state
+        .authentication_protection
+        .begin_password_attempt(&client_source, &password_identity)?;
+    let verified = state
+        .authentication_protection
+        .verify_password(
+            &request.current_password,
+            (!temporary_admin_password).then_some(user.as_str()),
+        )
+        .await?;
+    if !temporary_admin_password && !verified {
         return Err(AppError::BadRequest(
             "Current password is incorrect".to_string(),
         ));
     }
-    let new_hash = hash_password(&request.new_password)
-        .map_err(|e| AppError::Internal(format!("Failed to hash password: {}", e)))?;
-    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    state
+        .authentication_protection
+        .record_password_success(&client_source, &password_identity);
+    let new_hash = state
+        .authentication_protection
+        .hash_password(&request.new_password)
+        .await?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let changed = transaction.execute(
         queries::auth::UPDATE_PASSWORD_AND_RESET_FLAG_IF_UNCHANGED,
         rusqlite::params![new_hash, current_user.id, user],
@@ -250,11 +356,45 @@ async fn change_password(
             "Password changed concurrently; retry with the current password".to_string(),
         ));
     }
-    transaction.execute(queries::auth::REVOKE_ALL_USER_TOKENS, [current_user.id])?;
+    transaction.execute(queries::auth::DELETE_ALL_USER_TOKENS, [current_user.id])?;
     transaction.commit()?;
     state.admin_password_reset.complete(current_user.id);
 
-    Ok(Json(
-        serde_json::json!({"message": "Password changed successfully"}),
-    ))
+    cleared_session_response(serde_json::json!({
+        "message": "Password changed successfully"
+    }))
+}
+
+fn session_response(
+    body: serde_json::Value,
+    tokens: &TokenResponse,
+    config: &Config,
+) -> AppResult<Response> {
+    let mut response = Json(body).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        create_access_token_cookie(
+            &tokens.access_token,
+            config.security.access_token_expire_minutes * 60,
+        )?,
+    );
+    response.headers_mut().append(
+        SET_COOKIE,
+        create_refresh_token_cookie(
+            &tokens.refresh_token,
+            config.security.refresh_token_expire_days * 24 * 60 * 60,
+        )?,
+    );
+    Ok(response)
+}
+
+fn cleared_session_response(body: serde_json::Value) -> AppResult<Response> {
+    let mut response = Json(body).into_response();
+    response
+        .headers_mut()
+        .append(SET_COOKIE, clear_access_token_cookie());
+    response
+        .headers_mut()
+        .append(SET_COOKIE, clear_refresh_token_cookie());
+    Ok(response)
 }

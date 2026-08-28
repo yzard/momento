@@ -1,101 +1,126 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { trashApi, type TrashMedia } from '../api/trash'
 import { Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { trashBatchLoader } from '../utils/batcher'
+import { invalidateMediaConsumers, queryKeys } from '../lib/queryKeys'
+import { useLazyImage } from '../hooks/useLazyImage'
+import ConfirmationDialog from '../components/common/ConfirmationDialog'
 
-export default function Trash() {
+type TrashConfirmation = 'selected' | 'all' | null
+
+function formatDaysRemaining(deletedAt: string): string {
+  const expiry = new Date(new Date(deletedAt).getTime() + 30 * 24 * 60 * 60 * 1000)
+  const daysLeft = Math.ceil((expiry.getTime() - Date.now()) / (24 * 60 * 60 * 1000))
+  return daysLeft > 0 ? `${daysLeft} days left` : 'Expiring soon'
+}
+
+function useTrashActions(items: TrashMedia[]) {
   const queryClient = useQueryClient()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const mutationOptions = {
+    onSuccess: () => {
+      void invalidateMediaConsumers(queryClient)
+      setSelectedIds(new Set())
+    },
+  }
+  const restoreMutation = useMutation({ mutationFn: trashApi.restore, ...mutationOptions })
+  const deleteMutation = useMutation({ mutationFn: trashApi.permanentlyDelete, ...mutationOptions })
+  const emptyMutation = useMutation({ mutationFn: trashApi.emptyTrash, ...mutationOptions })
+  const toggle = (id: number) =>
+    setSelectedIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  const restore = () => {
+    if (selectedIds.size > 0) restoreMutation.mutate(Array.from(selectedIds))
+  }
+  const permanentlyDelete = async () => {
+    if (selectedIds.size > 0) await deleteMutation.mutateAsync(Array.from(selectedIds))
+  }
+  const empty = async () => {
+    await emptyMutation.mutateAsync()
+  }
+  return {
+    selectedIds,
+    toggle,
+    selectAll: () => setSelectedIds(new Set(items.map((item) => item.id))),
+    deselectAll: () => setSelectedIds(new Set()),
+    restore,
+    permanentlyDelete,
+    empty,
+    isProcessing: restoreMutation.isPending || deleteMutation.isPending || emptyMutation.isPending,
+    hasError: restoreMutation.isError || deleteMutation.isError || emptyMutation.isError,
+  }
+}
 
+interface TrashToolbarProps {
+  actions: ReturnType<typeof useTrashActions>
+  onDeleteRequest: () => void
+  onEmptyRequest: () => void
+}
+
+function TrashToolbar({ actions, onDeleteRequest, onEmptyRequest }: TrashToolbarProps) {
+  if (actions.selectedIds.size > 0) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={actions.deselectAll}
+          className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+        >
+          Deselect ({actions.selectedIds.size})
+        </button>
+        <button
+          onClick={actions.restore}
+          disabled={actions.isProcessing}
+          className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-bold uppercase tracking-wider text-primary-foreground disabled:opacity-50"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Restore
+        </button>
+        <button
+          onClick={onDeleteRequest}
+          disabled={actions.isProcessing}
+          className="flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-bold uppercase tracking-wider text-destructive-foreground disabled:opacity-50"
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete Forever
+        </button>
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        onClick={actions.selectAll}
+        className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+      >
+        Select All
+      </button>
+      <button
+        onClick={onEmptyRequest}
+        disabled={actions.isProcessing}
+        className="flex items-center gap-2 rounded-lg bg-destructive/10 px-4 py-2 text-sm font-bold uppercase tracking-wider text-destructive disabled:opacity-50"
+      >
+        <Trash2 className="h-4 w-4" />
+        Empty Trash
+      </button>
+    </div>
+  )
+}
+
+export default function Trash() {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['trash'],
+    queryKey: queryKeys.trash.all,
     queryFn: trashApi.list,
   })
 
-  const restoreMutation = useMutation({
-    mutationFn: trashApi.restore,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
-      queryClient.invalidateQueries({ queryKey: ['timeline'] })
-      queryClient.invalidateQueries({ queryKey: ['media'] })
-      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
-      setSelectedIds(new Set())
-    },
-  })
-
-  const deleteMutation = useMutation({
-    mutationFn: trashApi.permanentlyDelete,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
-      queryClient.invalidateQueries({ queryKey: ['timeline'] })
-      queryClient.invalidateQueries({ queryKey: ['media'] })
-      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
-      setSelectedIds(new Set())
-    },
-  })
-
-  const emptyMutation = useMutation({
-    mutationFn: trashApi.emptyTrash,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
-      queryClient.invalidateQueries({ queryKey: ['timeline'] })
-      queryClient.invalidateQueries({ queryKey: ['media'] })
-      queryClient.invalidateQueries({ queryKey: ['deduplicate', 'groups'] })
-      setSelectedIds(new Set())
-    },
-  })
-
-  const toggleSelect = (id: number) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
-      return next
-    })
-  }
-
-  const selectAll = () => {
-    if (data?.items) {
-      setSelectedIds(new Set(data.items.map((item) => item.id)))
-    }
-  }
-
-  const deselectAll = () => {
-    setSelectedIds(new Set())
-  }
-
-  const handleRestore = () => {
-    if (selectedIds.size > 0) {
-      restoreMutation.mutate(Array.from(selectedIds))
-    }
-  }
-
-  const handleDelete = () => {
-    if (selectedIds.size > 0 && confirm('Permanently delete selected items? This cannot be undone.')) {
-      deleteMutation.mutate(Array.from(selectedIds))
-    }
-  }
-
-  const handleEmptyTrash = () => {
-    if (confirm('Permanently delete ALL items in trash? This cannot be undone.')) {
-      emptyMutation.mutate()
-    }
-  }
-
-  const formatDaysRemaining = (deletedAt: string): string => {
-    const deleted = new Date(deletedAt)
-    const expiry = new Date(deleted.getTime() + 30 * 24 * 60 * 60 * 1000)
-    const now = new Date()
-    const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
-    return daysLeft > 0 ? `${daysLeft} days left` : 'Expiring soon'
-  }
-
-  const isProcessing = restoreMutation.isPending || deleteMutation.isPending || emptyMutation.isPending
+  const items = data?.items ?? []
+  const actions = useTrashActions(items)
+  const [confirmation, setConfirmation] = useState<TrashConfirmation>(null)
 
   if (isLoading) {
     return (
@@ -113,8 +138,6 @@ export default function Trash() {
     )
   }
 
-  const items = data?.items || []
-
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
       <div className="max-w-7xl mx-auto animate-fade-in px-6 md:px-10 py-6 md:py-10">
@@ -126,51 +149,11 @@ export default function Trash() {
           </div>
 
           {items.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {selectedIds.size > 0 ? (
-                <>
-                  <button
-                    onClick={deselectAll}
-                    className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    Deselect ({selectedIds.size})
-                  </button>
-                  <button
-                    onClick={handleRestore}
-                    disabled={isProcessing}
-                    className="px-4 py-2 bg-primary text-primary-foreground text-sm font-bold uppercase tracking-wider rounded-lg hover:bg-primary/90 disabled:opacity-50 flex items-center gap-2"
-                  >
-                    <RotateCcw className="w-4 h-4" />
-                    Restore
-                  </button>
-                  <button
-                    onClick={handleDelete}
-                    disabled={isProcessing}
-                    className="px-4 py-2 bg-destructive text-destructive-foreground text-sm font-bold uppercase tracking-wider rounded-lg hover:bg-destructive/90 disabled:opacity-50 flex items-center gap-2"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                    Delete Forever
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={selectAll}
-                    className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    Select All
-                  </button>
-                  <button
-                    onClick={handleEmptyTrash}
-                    disabled={isProcessing}
-                    className="px-4 py-2 bg-destructive/10 text-destructive text-sm font-bold uppercase tracking-wider rounded-lg hover:bg-destructive/20 disabled:opacity-50 flex items-center gap-2"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                    Empty Trash
-                  </button>
-                </>
-              )}
-            </div>
+            <TrashToolbar
+              actions={actions}
+              onDeleteRequest={() => setConfirmation('selected')}
+              onEmptyRequest={() => setConfirmation('all')}
+            />
           )}
         </div>
 
@@ -186,14 +169,40 @@ export default function Trash() {
               <TrashItem
                 key={item.id}
                 item={item}
-                selected={selectedIds.has(item.id)}
-                onToggle={() => toggleSelect(item.id)}
+                selected={actions.selectedIds.has(item.id)}
+                onToggle={() => actions.toggle(item.id)}
                 daysRemaining={formatDaysRemaining(item.deletedAt)}
               />
             ))}
           </div>
         )}
+        {actions.hasError && (
+          <p
+            role="alert"
+            className="mt-6 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive"
+          >
+            The Trash operation failed. No unconfirmed changes were applied.
+          </p>
+        )}
       </div>
+      {confirmation && (
+        <ConfirmationDialog
+          title={
+            confirmation === 'all'
+              ? 'Permanently empty Trash?'
+              : `Permanently delete ${actions.selectedIds.size} selected item${actions.selectedIds.size === 1 ? '' : 's'}?`
+          }
+          description="This operation cannot be undone. The original files will be permanently removed."
+          confirmLabel={confirmation === 'all' ? 'Empty Trash' : 'Delete forever'}
+          isProcessing={actions.isProcessing}
+          destructive
+          onConfirm={() => {
+            const operation = confirmation === 'all' ? actions.empty() : actions.permanentlyDelete()
+            void operation.finally(() => setConfirmation(null))
+          }}
+          onCancel={() => setConfirmation(null)}
+        />
+      )}
     </div>
   )
 }
@@ -206,45 +215,19 @@ interface TrashItemProps {
 }
 
 function TrashItem({ item, selected, onToggle, daysRemaining }: TrashItemProps) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!containerRef.current) return
-    let cancelled = false
-
-    const loadThumbnail = async () => {
-      try {
-        const url = await trashBatchLoader.load(item.id)
-        if (!cancelled && url) setThumbnailUrl(url)
-      } catch (err) {
-        console.error('Failed to load thumbnail:', err)
-      }
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          loadThumbnail()
-          observer.disconnect()
-        }
-      },
-      { rootMargin: '100px' }
-    )
-    observer.observe(containerRef.current)
-
-    return () => {
-      cancelled = true
-      observer.disconnect()
-    }
-  }, [item.id])
+  const { targetRef: containerRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
+    resourceId: item.id,
+    loader: trashBatchLoader,
+    getCachedUrl: null,
+    rootMargin: '400px',
+  })
 
   return (
     <div
       ref={containerRef}
       className={cn(
-        "relative aspect-square rounded-lg overflow-hidden cursor-pointer group transition-all",
-        selected ? "ring-4 ring-primary" : "hover:ring-2 hover:ring-primary/50"
+        'relative aspect-square rounded-lg overflow-hidden cursor-pointer group transition-all',
+        selected ? 'ring-4 ring-primary' : 'hover:ring-2 hover:ring-primary/50'
       )}
       onClick={onToggle}
     >
@@ -263,10 +246,10 @@ function TrashItem({ item, selected, onToggle, daysRemaining }: TrashItemProps) 
       <div className="absolute top-2 left-2">
         <div
           className={cn(
-            "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors",
+            'w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors',
             selected
-              ? "bg-primary border-primary text-primary-foreground"
-              : "bg-black/50 border-white/50 group-hover:border-white"
+              ? 'bg-primary border-primary text-primary-foreground'
+              : 'bg-black/50 border-white/50 group-hover:border-white'
           )}
         >
           {selected && <span className="text-xs font-bold">✓</span>}

@@ -5,7 +5,6 @@ import json
 import os
 import stat
 
-
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 MAX_INPUT_BYTES = 32 * 1024 * 1024 * 1024
 DESCRIPTOR_FIELDS = {"jobId", "sequence", "byteSize", "contentHash", "mimeType"}
@@ -16,9 +15,7 @@ def read_runtime_input(handler, input_root):
         raise ValueError("Content-Type must be application/json")
     content_length = int(handler.headers.get("Content-Length", "0"))
     if content_length <= 0 or content_length > MAX_DESCRIPTOR_BYTES:
-        raise ValueError(
-            f"Content-Length must be between 1 and {MAX_DESCRIPTOR_BYTES}"
-        )
+        raise ValueError(f"Content-Length must be between 1 and {MAX_DESCRIPTOR_BYTES}")
     descriptor = json.loads(handler.rfile.read(content_length))
     if not isinstance(descriptor, dict) or set(descriptor) != DESCRIPTOR_FIELDS:
         raise ValueError("runtime input descriptor has invalid fields")
@@ -36,11 +33,7 @@ def read_runtime_input(handler, input_root):
         raise ValueError("jobId must be non-empty hexadecimal text")
     if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
         raise ValueError("sequence must be a non-negative integer")
-    if (
-        isinstance(byte_size, bool)
-        or not isinstance(byte_size, int)
-        or not 0 < byte_size <= MAX_INPUT_BYTES
-    ):
+    if isinstance(byte_size, bool) or not isinstance(byte_size, int) or not 0 < byte_size <= MAX_INPUT_BYTES:
         raise ValueError(f"byteSize must be between 1 and {MAX_INPUT_BYTES}")
     if (
         not isinstance(content_hash, str)
@@ -59,9 +52,7 @@ def read_runtime_input(handler, input_root):
     try:
         job_fd = os.open(job_id, root_flags | no_follow, dir_fd=root_fd)
         try:
-            input_fd = os.open(
-                f"input-{sequence}", os.O_RDONLY | no_follow, dir_fd=job_fd
-            )
+            input_fd = os.open(f"input-{sequence}", os.O_RDONLY | no_follow, dir_fd=job_fd)
         finally:
             os.close(job_fd)
     finally:

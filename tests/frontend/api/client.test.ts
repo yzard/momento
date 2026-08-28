@@ -1,67 +1,94 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { apiClient, setForbiddenResponseHandler } from '../../../src/frontend/api/client'
+import { apiClient, setAuthenticationFailureHandler } from '../../../src/frontend/api/client'
 
-function rejectedResponse(status: number) {
-  return (config: InternalAxiosRequestConfig) => Promise.reject({
-    config,
-    isAxiosError: true,
-    response: {
+function rejectedResponse(status: number, data: { code?: string }) {
+  return (config: InternalAxiosRequestConfig) =>
+    Promise.reject({
       config,
-      data: {},
-      headers: {},
-      status,
-      statusText: 'Forbidden',
-    },
-  })
+      isAxiosError: true,
+      response: {
+        config,
+        data,
+        headers: {},
+        status,
+        statusText: 'Forbidden',
+      },
+    })
 }
 
-beforeEach(() => vi.stubGlobal('localStorage', {
-  getItem: vi.fn().mockReturnValue(null),
-}))
-
 afterEach(() => {
-  setForbiddenResponseHandler(null)
-  vi.unstubAllGlobals()
+  setAuthenticationFailureHandler(null)
+  vi.restoreAllMocks()
 })
 
 describe('apiClient', () => {
-  it('notifies the authentication provider when any API request returns 403', async () => {
-    const forbiddenResponseHandler = vi.fn()
-    setForbiddenResponseHandler(forbiddenResponseHandler)
+  it('notifies the authentication provider when password change is required', async () => {
+    const authenticationFailureHandler = vi.fn()
+    setAuthenticationFailureHandler(authenticationFailureHandler)
 
-    await expect(apiClient.get('/protected', { adapter: rejectedResponse(403) })).rejects.toMatchObject({
+    await expect(
+      apiClient.get('/protected', {
+        adapter: rejectedResponse(403, { code: 'password_change_required' }),
+      })
+    ).rejects.toMatchObject({
       response: { status: 403 },
     })
 
-    expect(forbiddenResponseHandler).toHaveBeenCalledOnce()
+    expect(authenticationFailureHandler).toHaveBeenCalledOnce()
   })
 
-  it('does not apply an old refresh result after the session changes', async () => {
-    const values = new Map([
-      ['momento_access_token', 'old-access'],
-      ['momento_refresh_token', 'old-refresh'],
-    ])
-    vi.stubGlobal('localStorage', {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-      removeItem: (key: string) => values.delete(key),
-    })
-    let resolveRefresh!: (value: unknown) => void
-    const refresh = new Promise((resolve) => {
-      resolveRefresh = resolve
-    })
-    vi.spyOn(axios, 'post').mockReturnValue(refresh as ReturnType<typeof axios.post>)
-    const request = apiClient.get('/protected', { adapter: rejectedResponse(401) })
-    await vi.waitFor(() => expect(axios.post).toHaveBeenCalledOnce())
+  it('does not end the session for an ordinary authorization failure', async () => {
+    const authenticationFailureHandler = vi.fn()
+    setAuthenticationFailureHandler(authenticationFailureHandler)
 
-    values.set('momento_access_token', 'new-access')
-    values.set('momento_refresh_token', 'new-refresh')
-    resolveRefresh({ data: { accessToken: 'stale-access', refreshToken: 'stale-refresh' } })
+    await expect(
+      apiClient.get('/protected', {
+        adapter: rejectedResponse(403, {}),
+      })
+    ).rejects.toMatchObject({ response: { status: 403 } })
 
-    await expect(request).rejects.toThrow('Authentication session changed during refresh')
-    expect(values.get('momento_access_token')).toBe('new-access')
-    expect(values.get('momento_refresh_token')).toBe('new-refresh')
+    expect(authenticationFailureHandler).not.toHaveBeenCalled()
+  })
+
+  it('refreshes an expired browser session with HttpOnly cookies', async () => {
+    vi.spyOn(axios, 'post').mockResolvedValue({ data: {} })
+
+    await expect(
+      apiClient.get('/protected', {
+        adapter: rejectedResponse(401, {}),
+      })
+    ).rejects.toMatchObject({ response: { status: 401 } })
+
+    expect(axios.post).toHaveBeenCalledWith('/api/v1/user/session/refresh', null, {
+      withCredentials: true,
+    })
+  })
+
+  it('reports a failed browser session refresh', async () => {
+    const authenticationFailureHandler = vi.fn()
+    setAuthenticationFailureHandler(authenticationFailureHandler)
+    vi.spyOn(axios, 'post').mockRejectedValue(new Error('refresh failed'))
+
+    await expect(
+      apiClient.get('/protected', {
+        adapter: rejectedResponse(401, {}),
+      })
+    ).rejects.toThrow('refresh failed')
+
+    expect(authenticationFailureHandler).toHaveBeenCalledOnce()
+  })
+
+  it('does not recursively refresh a browser session endpoint', async () => {
+    vi.spyOn(axios, 'post')
+
+    await expect(
+      apiClient.post('/user/session/create', null, {
+        adapter: rejectedResponse(401, {}),
+      })
+    ).rejects.toMatchObject({ response: { status: 401 } })
+
+    expect(axios.post).not.toHaveBeenCalled()
   })
 })

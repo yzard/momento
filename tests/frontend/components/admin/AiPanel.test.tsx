@@ -89,7 +89,11 @@ function renderPanel() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
-  render(<QueryClientProvider client={queryClient}><AiPanel /></QueryClientProvider>)
+  render(
+    <QueryClientProvider client={queryClient}>
+      <AiPanel />
+    </QueryClientProvider>
+  )
 }
 
 describe('AiPanel', () => {
@@ -103,7 +107,10 @@ describe('AiPanel', () => {
     mocks.startFeature.mockResolvedValue(action)
     mocks.cancelFeature.mockResolvedValue({ ...action, action: 'cancel' })
     mocks.cleanFeature.mockResolvedValue({ ...action, action: 'clean' })
-    mocks.updateSchedule.mockImplementation(async (feature: string, cronExpression: string) => ({ feature, cronExpression }))
+    mocks.updateSchedule.mockImplementation(async (feature: string, cronExpression: string) => ({
+      feature,
+      cronExpression,
+    }))
   })
 
   afterEach(() => {
@@ -132,21 +139,49 @@ describe('AiPanel', () => {
     }
     const rows = within(table).getAllByRole('row')
     expect(rows).toHaveLength(8)
-    expect(within(within(table).getByRole('row', { name: 'OCR 1 2 3 4 12' })).getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['1', '2', '3', '4', '12'])
+    expect(
+      within(within(table).getByRole('row', { name: 'OCR 1 2 3 4 12' }))
+        .getAllByRole('cell')
+        .map((cell) => cell.textContent)
+    ).toEqual(['1', '2', '3', '4', '12'])
     expect(mocks.status).toHaveBeenCalledOnce()
   })
 
   it('renders every feature as one cron control-table row with the requested columns', async () => {
     renderPanel()
 
-    const table = await screen.findByRole('table', { name: 'AI feature controls' })
-    for (const column of ['Feature', 'Minute', 'Hour', 'Day', 'Month', 'Weekday', 'Save', 'Start / Cancel', 'Clean']) {
+    const table = await screen.findByRole('table', {
+      name: 'AI feature controls',
+    })
+    for (const column of [
+      'Feature',
+      'Minute',
+      'Hour',
+      'Day',
+      'Month',
+      'Weekday',
+      'Save',
+      'Start / Cancel',
+      'Clean',
+    ]) {
       expect(within(table).getByRole('columnheader', { name: column })).toBeTruthy()
     }
     expect(within(table).getAllByRole('row')).toHaveLength(8)
     expect(within(table).getAllByRole('rowheader')).toHaveLength(7)
-    for (const feature of ['OCR', 'Image Tagging', 'Screenshot Detection', 'Document Detection', 'Image Aesthetics', 'Deduplicate', 'Face Detection']) {
-      expect(within(table).getByRole('rowheader', { name: new RegExp(`^${feature}`) })).toBeTruthy()
+    for (const feature of [
+      'OCR',
+      'Image Tagging',
+      'Screenshot Detection',
+      'Document Detection',
+      'Image Aesthetics',
+      'Deduplicate',
+      'Face Detection',
+    ]) {
+      expect(
+        within(table).getByRole('rowheader', {
+          name: new RegExp(`^${feature}`),
+        })
+      ).toBeTruthy()
     }
     expect(within(table).queryByText('All AI Jobs')).toBeNull()
   })
@@ -156,8 +191,12 @@ describe('AiPanel', () => {
     await screen.findByRole('cell', { name: '12' })
     const user = userEvent.setup()
 
-    const startAllButton = screen.getByRole('button', { name: 'Start All AI Jobs' })
-    const startDeduplicateButton = screen.getByRole('button', { name: 'Start Deduplicate' })
+    const startAllButton = screen.getByRole('button', {
+      name: 'Start All AI Jobs',
+    })
+    const startDeduplicateButton = screen.getByRole('button', {
+      name: 'Start Deduplicate',
+    })
     expect(startAllButton.textContent).toBe('Start all')
     expect(startDeduplicateButton.textContent).toBe('Start')
 
@@ -170,10 +209,12 @@ describe('AiPanel', () => {
   })
 
   it('cancels each independently active task', async () => {
-    mocks.status.mockResolvedValue(statusFixture({
-      screenshot_detection: 'submitted',
-      document_detection: 'queued',
-    }))
+    mocks.status.mockResolvedValue(
+      statusFixture({
+        screenshot_detection: 'submitted',
+        document_detection: 'queued',
+      })
+    )
     renderPanel()
     await screen.findByRole('cell', { name: '12' })
 
@@ -183,7 +224,7 @@ describe('AiPanel', () => {
     await waitFor(() => expect(mocks.cancelFeature).toHaveBeenCalledWith('document_detection'))
   })
 
-  it('exposes cleanup for each feature and calls the generic contract', async () => {
+  it('requires confirmation before cleaning a feature', async () => {
     renderPanel()
     await screen.findByRole('cell', { name: '12' })
 
@@ -197,16 +238,35 @@ describe('AiPanel', () => {
     expect(screen.getByRole('button', { name: 'Clean Face Detection Data' })).toBeTruthy()
 
     await userEvent.click(screen.getByRole('button', { name: 'Clean Face Detection Data' }))
+    expect(mocks.cleanFeature).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog', { name: 'Clean Face Detection data?' })).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Clean data' }))
     await waitFor(() => expect(mocks.cleanFeature).toHaveBeenCalledWith('face_detection'))
+  })
+
+  it('allows a global cleanup confirmation to be cancelled without deleting data', async () => {
+    renderPanel()
+    await screen.findByRole('cell', { name: '12' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clean All AI Data' }))
+    expect(screen.getByRole('alertdialog', { name: 'Clean all AI data?' })).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(mocks.clean).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
   })
 
   it('edits and saves each feature cron schedule', async () => {
     renderPanel()
-    const minuteInput = await screen.findByRole('textbox', { name: 'OCR cron minute' })
+    const minuteInput = await screen.findByRole('textbox', {
+      name: 'OCR cron minute',
+    })
     const hourInput = screen.getByRole('textbox', { name: 'OCR cron hour' })
     const dayInput = screen.getByRole('textbox', { name: 'OCR cron day' })
     const monthInput = screen.getByRole('textbox', { name: 'OCR cron month' })
-    const weekdayInput = screen.getByRole('textbox', { name: 'OCR cron weekday' })
+    const weekdayInput = screen.getByRole('textbox', {
+      name: 'OCR cron weekday',
+    })
     const user = userEvent.setup()
 
     await waitFor(() => expect((minuteInput as HTMLInputElement).value).toBe('0'))

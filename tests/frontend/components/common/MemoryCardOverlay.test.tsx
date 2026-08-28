@@ -13,7 +13,7 @@ describe('MemoryCardOverlay', () => {
         subtitle="Ile-de-France, France"
         badge="8 media"
         headingLevel="h2"
-      />,
+      />
     )
 
     expect(screen.getByRole('heading', { level: 2, name: 'Paris' })).toBeTruthy()
@@ -21,12 +21,7 @@ describe('MemoryCardOverlay', () => {
     expect(screen.getByText('8 media')).toBeTruthy()
 
     rerender(
-      <MemoryCardOverlay
-        title="Trip"
-        subtitle={null}
-        badge="4 memories"
-        headingLevel="h3"
-      />,
+      <MemoryCardOverlay title="Trip" subtitle={null} badge="4 memories" headingLevel="h3" />
     )
 
     expect(screen.getByRole('heading', { level: 3, name: 'Trip' })).toBeTruthy()

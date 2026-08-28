@@ -24,7 +24,7 @@ describe('AlbumCard', () => {
         thumbnailUrls={['first-cover', 'second-cover', 'third-cover', 'fourth-cover']}
         onClick={onClick}
         onDelete={vi.fn()}
-      />,
+      />
     )
 
     const card = screen.getByRole('button', { name: 'Trip, 4 memories' })
@@ -48,7 +48,7 @@ describe('AlbumCard', () => {
         thumbnailUrls={['only-cover']}
         onClick={vi.fn()}
         onDelete={vi.fn()}
-      />,
+      />
     )
 
     expect(screen.getByText('1 memory')).toBeTruthy()

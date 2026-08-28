@@ -16,11 +16,12 @@ use crate::constants::paths;
 use crate::database::{execute_query, fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DeleteMediaResponse, MediaAccessResource, MediaAccessTicketRequest, MediaAccessTicketResponse,
-    MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest, MediaResponse, MediaUpdateRequest,
-    PreviewBatchRequest, PreviewBatchResponse, ThumbnailBatchRequest, ThumbnailBatchResponse,
-    ThumbnailSize, TimelineDirection, TimelineListRequest, TimelineListResponse, TimelineMarker,
-    TimelineMarkersRequest, TimelineMarkersResponse,
+    map_media_response, DeleteMediaResponse, MediaAccessResource, MediaAccessTicketRequest,
+    MediaAccessTicketResponse, MediaBatchRequest, MediaBatchResponse, MediaDeleteRequest,
+    MediaResponse, MediaUpdateRequest, PreviewBatchRequest, PreviewBatchResponse,
+    ThumbnailBatchRequest, ThumbnailBatchResponse, ThumbnailSize, TimelineDirection,
+    TimelineListRequest, TimelineListResponse, TimelineMarker, TimelineMarkersRequest,
+    TimelineMarkersResponse,
 };
 use crate::processor::media_processor::{calculate_geohash, delete_from_rtree, insert_into_rtree};
 use crate::processor::metadata::reverse_geocoding::reverse_geocode;
@@ -60,136 +61,6 @@ pub fn thumbnail_router() -> Router<AppState> {
 
 pub fn preview_router() -> Router<AppState> {
     Router::new().route("/preview/get", post(get_media_preview_batch))
-}
-
-struct MediaRowData {
-    id: i64,
-    filename: String,
-    original_filename: String,
-    media_type: String,
-    mime_type: Option<String>,
-    width: Option<i32>,
-    height: Option<i32>,
-    file_size: Option<i64>,
-    duration_seconds: Option<f64>,
-    date_taken: Option<String>,
-    gps_latitude: Option<f64>,
-    gps_longitude: Option<f64>,
-    camera_make: Option<String>,
-    camera_model: Option<String>,
-    lens_make: Option<String>,
-    lens_model: Option<String>,
-    iso: Option<i32>,
-    exposure_time: Option<String>,
-    f_number: Option<f64>,
-    focal_length: Option<f64>,
-    focal_length_35mm: Option<f64>,
-    gps_altitude: Option<f64>,
-    location_city: Option<String>,
-    location_state: Option<String>,
-    location_country: Option<String>,
-    video_codec: Option<String>,
-    keywords: Option<String>,
-    created_at: String,
-}
-
-impl MediaRowData {
-    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: row.get(0)?,
-            filename: row.get(1)?,
-            original_filename: row.get(2)?,
-            media_type: row.get(3)?,
-            mime_type: row.get(4)?,
-            width: row.get(5)?,
-            height: row.get(6)?,
-            file_size: row.get(7)?,
-            duration_seconds: row.get(8)?,
-            date_taken: row.get(9)?,
-            gps_latitude: row.get(10)?,
-            gps_longitude: row.get(11)?,
-            camera_make: row.get(12)?,
-            camera_model: row.get(13)?,
-            lens_make: row.get(14)?,
-            lens_model: row.get(15)?,
-            iso: row.get(16)?,
-            exposure_time: row.get(17)?,
-            f_number: row.get(18)?,
-            focal_length: row.get(19)?,
-            focal_length_35mm: row.get(20)?,
-            gps_altitude: row.get(21)?,
-            location_city: row.get(22)?,
-            location_state: row.get(23)?,
-            location_country: row.get(24)?,
-            video_codec: row.get(25)?,
-            keywords: row.get(26)?,
-            created_at: row.get(27)?,
-        })
-    }
-}
-
-fn row_to_media_response(row: MediaRowData) -> MediaResponse {
-    let MediaRowData {
-        id,
-        filename,
-        original_filename,
-        media_type,
-        mime_type,
-        width,
-        height,
-        file_size,
-        duration_seconds,
-        date_taken,
-        gps_latitude,
-        gps_longitude,
-        camera_make,
-        camera_model,
-        lens_make,
-        lens_model,
-        iso,
-        exposure_time,
-        f_number,
-        focal_length,
-        focal_length_35mm,
-        gps_altitude,
-        location_city,
-        location_state,
-        location_country,
-        video_codec,
-        keywords,
-        created_at,
-    } = row;
-    MediaResponse {
-        id,
-        filename,
-        original_filename,
-        media_type,
-        mime_type,
-        width,
-        height,
-        file_size,
-        duration_seconds,
-        date_taken,
-        gps_latitude,
-        gps_longitude,
-        camera_make,
-        camera_model,
-        lens_make,
-        lens_model,
-        iso,
-        exposure_time,
-        f_number,
-        focal_length,
-        focal_length_35mm,
-        gps_altitude,
-        location_city,
-        location_state,
-        location_country,
-        video_codec,
-        keywords,
-        created_at,
-        content_hash: None,
-    }
 }
 
 async fn list_timeline(
@@ -429,7 +300,7 @@ async fn get_media_batch(
     }
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|param| param.as_ref()).collect();
-    let items = fetch_all(&conn, &query, &param_refs, map_media_row)?;
+    let items = fetch_all(&conn, &query, &param_refs, map_media_response)?;
 
     let mut by_id = std::collections::HashMap::new();
     for item in items {
@@ -485,7 +356,7 @@ async fn update_media(
         &conn,
         queries::media::SELECT_BY_ID_AND_USER,
         &[&request.media_id, &current_user.id],
-        map_media_row,
+        map_media_response,
     )?
     .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
 
@@ -554,11 +425,6 @@ async fn delete_media(
     Ok(Json(DeleteMediaResponse {
         message: format!("{} media moved to trash", deleted_count),
     }))
-}
-
-pub(crate) fn map_media_row(row: &rusqlite::Row) -> rusqlite::Result<MediaResponse> {
-    let media_row = MediaRowData::from_row(row)?;
-    Ok(row_to_media_response(media_row))
 }
 
 fn timeline_group_key(date_taken: Option<&str>, group_by: &str) -> String {
@@ -803,83 +669,56 @@ fn fetch_timeline_period(
 
     if direction == TimelineDirection::Older {
         if let Some((cursor_date, cursor_id)) = parse_timeline_cursor(cursor)? {
-            let mut rows = fetch_all(
+            let mut parameters = query_params.to_vec();
+            parameters.push(&cursor_date);
+            parameters.push(&cursor_date);
+            parameters.push(&cursor_id);
+            parameters.push(&max_rows);
+            let rows = fetch_all(
                 conn,
                 queries::timeline::SELECT_PAGINATED_WINDOW,
-                &[
-                    query_params[0],
-                    query_params[1],
-                    query_params[2],
-                    query_params[3],
-                    query_params[4],
-                    query_params[5],
-                    query_params[6],
-                    query_params[7],
-                    query_params[8],
-                    query_params[9],
-                    &cursor_date,
-                    &cursor_date,
-                    &cursor_id,
-                    &max_rows,
-                ],
+                &parameters,
                 map_timeline_row,
             )?;
-            let has_more = rows.len() > limit as usize;
-            rows.truncate(limit as usize);
-            return Ok((rows, has_more));
+            return Ok(limit_timeline_rows(rows, limit));
         }
-        let mut rows = fetch_all(
+        let mut parameters = query_params.to_vec();
+        parameters.push(&period_end);
+        parameters.push(&max_rows);
+        let rows = fetch_all(
             conn,
             queries::timeline::SELECT_WINDOW,
-            &[
-                query_params[0],
-                query_params[1],
-                query_params[2],
-                query_params[3],
-                query_params[4],
-                query_params[5],
-                query_params[6],
-                query_params[7],
-                query_params[8],
-                query_params[9],
-                &period_end,
-                &max_rows,
-            ],
+            &parameters,
             map_timeline_row,
         )?;
-        let has_more = rows.len() > limit as usize;
-        rows.truncate(limit as usize);
-        return Ok((rows, has_more));
+        return Ok(limit_timeline_rows(rows, limit));
     }
 
     let (cursor_date, cursor_id) = match parse_timeline_cursor(cursor)? {
         Some(cursor) => cursor,
         None => (period_start.to_string(), -1),
     };
-    let mut rows = fetch_all(
+    let mut parameters = query_params.to_vec();
+    parameters.push(&cursor_date);
+    parameters.push(&cursor_date);
+    parameters.push(&cursor_id);
+    parameters.push(&max_rows);
+    let rows = fetch_all(
         conn,
         queries::timeline::SELECT_PAGINATED_WINDOW_ASC,
-        &[
-            query_params[0],
-            query_params[1],
-            query_params[2],
-            query_params[3],
-            query_params[4],
-            query_params[5],
-            query_params[6],
-            query_params[7],
-            query_params[8],
-            query_params[9],
-            &cursor_date,
-            &cursor_date,
-            &cursor_id,
-            &max_rows,
-        ],
+        &parameters,
         map_timeline_row,
     )?;
+    Ok(limit_timeline_rows(rows, limit))
+}
+
+fn limit_timeline_rows(
+    mut rows: Vec<(MediaResponse, Option<String>)>,
+    limit: u32,
+) -> (Vec<(MediaResponse, Option<String>)>, bool) {
     let has_more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
-    Ok((rows, has_more))
+    (rows, has_more)
 }
 
 fn parse_timeline_cursor(cursor: Option<&str>) -> AppResult<Option<(String, i64)>> {
@@ -896,9 +735,8 @@ fn parse_timeline_cursor(cursor: Option<&str>) -> AppResult<Option<(String, i64)
 }
 
 fn map_timeline_row(row: &rusqlite::Row) -> rusqlite::Result<(MediaResponse, Option<String>)> {
-    let media_row = MediaRowData::from_row(row)?;
-    let date_taken = media_row.date_taken.clone();
-    let media = row_to_media_response(media_row);
+    let media = map_media_response(row)?;
+    let date_taken = media.date_taken.clone();
 
     Ok((media, date_taken))
 }
@@ -998,7 +836,9 @@ async fn get_media_preview(
         media_id,
         queries::media::SELECT_BINARY_MEDIA_INFO,
     )?;
-    let (path, content_type) = resolve_preview_path(&media, current_user.id).await?;
+    let config = state.config.current();
+    let (path, content_type) =
+        resolve_preview_path(&media, current_user.id, &config.media_process).await?;
     serve_file(
         path,
         &content_type,
@@ -1120,6 +960,7 @@ fn thumbnail_base_directory(size: ThumbnailSize) -> &'static std::path::Path {
 async fn resolve_preview_path(
     media: &BinaryMediaInfo,
     user_id: i64,
+    process_config: &crate::config::MediaProcessConfig,
 ) -> AppResult<(PathBuf, String)> {
     let original_path = resolve_existing_storage_path(&paths().originals, &media.file_path).await?;
     if media.media_type == "video" {
@@ -1149,7 +990,7 @@ async fn resolve_preview_path(
             .parent()
             .ok_or_else(|| AppError::Internal("Preview path has no parent".to_string()))?;
         tokio::fs::create_dir_all(parent).await?;
-        generate_image_preview(&original_path, &preview_path, 2048, 90).await;
+        generate_image_preview(&original_path, &preview_path, 2048, 90, process_config).await;
     }
     if !preview_path.is_file() {
         return Err(AppError::NotFound("Preview not found".to_string()));
@@ -1294,7 +1135,12 @@ async fn get_media_preview_batch(
             media_type,
             thumbnail_path: None,
         };
-        let Ok((preview_path, mime_type)) = resolve_preview_path(&media, current_user.id).await
+        let Ok((preview_path, mime_type)) = resolve_preview_path(
+            &media,
+            current_user.id,
+            &state.config.current().media_process,
+        )
+        .await
         else {
             previews.insert(media_id, None);
             continue;

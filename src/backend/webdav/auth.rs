@@ -1,14 +1,15 @@
 use axum::{
     body::Body,
-    extract::State,
-    http::{header, HeaderMap, Request, StatusCode},
+    extract::{ConnectInfo, State},
+    http::{header, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use base64::Engine;
+use std::net::SocketAddr;
 use tracing::{error, warn};
 
-use crate::auth::{verify_password, AppState};
+use crate::auth::AppState;
 use crate::database::{fetch_one, queries};
 
 #[derive(Clone)]
@@ -27,7 +28,13 @@ pub async fn basic_auth_middleware(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
-    let client_ip = client_ip(request.headers());
+    let peer_address = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|peer| peer.0);
+    let client_ip = state
+        .authentication_protection
+        .client_source(request.headers(), peer_address);
 
     let Some(auth_value) = auth_header else {
         warn!(
@@ -74,6 +81,12 @@ pub async fn basic_auth_middleware(
         );
         return unauthorized_response(&config.webdav.realm);
     };
+    if let Err(error) = state
+        .authentication_protection
+        .begin_password_attempt(&client_ip, username)
+    {
+        return error.into_response();
+    }
 
     let conn = match state.pool.get() {
         Ok(c) => c,
@@ -83,7 +96,7 @@ pub async fn basic_auth_middleware(
         }
     };
 
-    let user_result: Option<(i64, String, String, i32)> = fetch_one(
+    let user_result: Option<(i64, String, String, i32)> = match fetch_one(
         &conn,
         queries::auth::SELECT_USER_BY_USERNAME,
         &[&username],
@@ -95,11 +108,27 @@ pub async fn basic_auth_middleware(
                 row.get::<_, i32>(5)?,
             ))
         },
-    )
-    .ok()
-    .flatten();
+    ) {
+        Ok(user) => user,
+        Err(error) => {
+            error!("WebDAV auth failed: database error: {}", error);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+        }
+    };
+    drop(conn);
+    let verified = match state
+        .authentication_protection
+        .verify_password(
+            password,
+            user_result.as_ref().map(|(_, _, hash, _)| hash.as_str()),
+        )
+        .await
+    {
+        Ok(verified) => verified,
+        Err(error) => return error.into_response(),
+    };
 
-    let Some((user_id, db_username, hash, is_active)) = user_result else {
+    let Some((user_id, db_username, _, is_active)) = user_result else {
         warn!(
             "WebDAV auth failed: unknown user {} from {}",
             username, client_ip
@@ -107,13 +136,16 @@ pub async fn basic_auth_middleware(
         return unauthorized_response(&config.webdav.realm);
     };
 
-    if is_active == 0 || !verify_password(password, &hash) {
+    if is_active == 0 || !verified {
         warn!(
             "WebDAV auth failed: invalid credentials for user {} from {}",
             db_username, client_ip
         );
         return unauthorized_response(&config.webdav.realm);
     }
+    state
+        .authentication_protection
+        .record_password_success(&client_ip, username);
 
     request.extensions_mut().insert(WebDAVUser {
         id: user_id,
@@ -125,7 +157,10 @@ pub async fn basic_auth_middleware(
 
 pub async fn path_guard_middleware(request: Request<Body>, next: Next) -> Response {
     let webdav_user = request.extensions().get::<WebDAVUser>().cloned();
-    let client_ip = client_ip(request.headers());
+    let client_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or_else(|| "unknown".to_string(), |peer| peer.ip().to_string());
 
     match webdav_user {
         Some(_) => next.run(request).await,
@@ -149,30 +184,4 @@ fn unauthorized_response(realm: &str) -> Response {
         "Authentication required",
     )
         .into_response()
-}
-
-fn client_ip(headers: &HeaderMap) -> String {
-    if let Some(value) = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-    {
-        if let Some(ip) = value.split(',').next() {
-            let trimmed = ip.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-    }
-
-    if let Some(value) = headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-    {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    "unknown".to_string()
 }

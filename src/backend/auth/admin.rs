@@ -96,7 +96,7 @@ pub fn prepare_admin_password_reset(pool: &DbPool, admin_id: i64) -> AppResult<(
     }
     execute_query(
         &connection,
-        queries::auth::REVOKE_ALL_USER_TOKENS,
+        queries::auth::DELETE_ALL_USER_TOKENS,
         &[&admin_id],
     )?;
     Ok(())

@@ -41,6 +41,10 @@ class MomentoApiContractTest {
         assertEquals("api/v1/album/remove-media", requireNotNull(remove.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/album/reorder", requireNotNull(reorder.getAnnotation(POST::class.java)).value)
         assertEquals("api/v1/map/clusters", requireNotNull(map.getAnnotation(POST::class.java)).value)
+        assertEquals(
+            "{\"name\":\"Trip\",\"description\":null,\"mediaIds\":[7,8]}",
+            Json.encodeToString(AlbumCreateRequest("Trip", null, listOf(7, 8))),
+        )
     }
 
     @Test fun aiActionsUseBodylessAggregateAndExactFeatureRoutes() {

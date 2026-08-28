@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Marker } from 'react-leaflet'
 import { DivIcon } from 'leaflet'
 import { tinyBatchLoader } from '../../utils/batcher'
+import { clusterIconSize, createClusterIconElement } from './clusterIcon'
 
 interface ClusterMarkerProps {
   latitude: number
@@ -11,9 +12,13 @@ interface ClusterMarkerProps {
   onClick?: () => void
 }
 
-const THUMB_SIZE = 52
-
-export default function ClusterMarker({ latitude, longitude, count, representativeId, onClick }: ClusterMarkerProps) {
+export default function ClusterMarker({
+  latitude,
+  longitude,
+  count,
+  representativeId,
+  onClick,
+}: ClusterMarkerProps) {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -38,21 +43,17 @@ export default function ClusterMarker({ latitude, longitude, count, representati
     }
   }, [representativeId])
 
-  const badgeText = `${count}`
-  const showBadge = count > 1
-
-  const icon = useMemo(() => new DivIcon({
-    className: '',
-    iconSize: [THUMB_SIZE, THUMB_SIZE],
-    iconAnchor: [THUMB_SIZE / 2, THUMB_SIZE / 2],
-    popupAnchor: [0, -THUMB_SIZE / 2],
-    html: `<div class="map-marker" style="position:relative;">
-      <div class="map-marker__bubble" style="width:${THUMB_SIZE}px;height:${THUMB_SIZE}px;">
-        ${thumbnailUrl ? `<img src="${thumbnailUrl}" class="map-marker__image" />` : '<div class="map-marker__placeholder"></div>'}
-      </div>
-      ${showBadge ? `<span class="map-marker__badge">${badgeText}</span>` : ''}
-    </div>`,
-  }), [badgeText, showBadge, thumbnailUrl])
+  const icon = useMemo(
+    () =>
+      new DivIcon({
+        className: '',
+        iconSize: [clusterIconSize, clusterIconSize],
+        iconAnchor: [clusterIconSize / 2, clusterIconSize / 2],
+        popupAnchor: [0, -clusterIconSize / 2],
+        html: createClusterIconElement(thumbnailUrl, count),
+      }),
+    [count, thumbnailUrl]
+  )
 
   return (
     <Marker

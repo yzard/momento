@@ -16,6 +16,11 @@ static USER_ID_COUNTER: AtomicI64 = AtomicI64::new(1);
 static PATHS_INIT: Once = Once::new();
 static WEBDAV_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+pub const QOI_FIXTURE: &[u8] = &[
+    0x71, 0x6f, 0x69, 0x66, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x03, 0x01, 0xfe, 0x0a,
+    0x14, 0x1e, 0xc4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+];
+
 /// Points the process-wide paths at a scratch directory. `init_paths` may only run once
 /// per process, so every test that reaches path-using code goes through this.
 pub fn init_test_paths() {

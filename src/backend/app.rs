@@ -1,18 +1,17 @@
 use axum::{
     body::Body,
     extract::DefaultBodyLimit,
-    http::{Request, StatusCode},
+    http::{header::HeaderName, HeaderValue, Request, StatusCode},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use serde::Serialize;
 use tower::ServiceExt;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::auth::{password_change_guard, AdminPasswordReset, AppState};
+use crate::auth::{password_change_guard, AdminPasswordReset, AppState, AuthenticationProtection};
 use crate::config::ConfigManager;
 use crate::database::DbPool;
 use crate::logging::request_logger;
@@ -37,6 +36,34 @@ async fn api_not_found() -> StatusCode {
     StatusCode::NOT_FOUND
 }
 
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+async fn browser_security_headers(request: Request<Body>, next: middleware::Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), geolocation=(), microphone=()"),
+    );
+    response
+}
+
 pub fn create_app(
     config_manager: ConfigManager,
     pool: DbPool,
@@ -45,18 +72,15 @@ pub fn create_app(
     admin_password_reset_user_id: Option<i64>,
 ) -> Router {
     let config = config_manager.current();
+    let authentication_protection = AuthenticationProtection::new(&config.security);
     let state = AppState {
         config: config_manager,
         pool,
         llm_transport,
         webdav_request_gate,
         admin_password_reset: AdminPasswordReset::new(admin_password_reset_user_id),
+        authentication_protection,
     };
-
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
 
     let api_routes = Router::new()
         .route("/healthcheck", get(healthcheck))
@@ -68,7 +92,6 @@ pub fn create_app(
             state.clone(),
             password_change_guard,
         ))
-        .layer(cors)
         .fallback(api_not_found);
 
     let mut app = Router::new()
@@ -78,6 +101,7 @@ pub fn create_app(
             config.server.request_log_body_max_bytes,
             request_logger,
         ))
+        .layer(middleware::from_fn(browser_security_headers))
         .with_state(state);
 
     // Serve static files if frontend exists

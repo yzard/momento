@@ -61,10 +61,7 @@ class DynamicBatcher(Generic[BatchInput, BatchOutput]):
         self.worker.start()
 
     def infer(self, input_values: Sequence[BatchInput]) -> list[BatchOutput]:
-        pending_items = [
-            PendingBatchItem[BatchInput, BatchOutput](input_value)
-            for input_value in input_values
-        ]
+        pending_items = [PendingBatchItem[BatchInput, BatchOutput](input_value) for input_value in input_values]
         for pending_item in pending_items:
             self.pending_items.put(pending_item)
         return [pending_item.wait(self.worker_name) for pending_item in pending_items]
@@ -100,22 +97,14 @@ class DynamicBatcher(Generic[BatchInput, BatchOutput]):
                 break
             if pending_item is STOP_BATCH_WORKER:
                 return pending_batch, True
-            pending_batch.append(
-                cast(PendingBatchItem[BatchInput, BatchOutput], pending_item)
-            )
+            pending_batch.append(cast(PendingBatchItem[BatchInput, BatchOutput], pending_item))
         return pending_batch, False
 
-    def _process_batch(
-        self, pending_batch: list[PendingBatchItem[BatchInput, BatchOutput]]
-    ) -> None:
+    def _process_batch(self, pending_batch: list[PendingBatchItem[BatchInput, BatchOutput]]) -> None:
         try:
-            output_values = self.process_batch(
-                [pending_item.input_value for pending_item in pending_batch]
-            )
+            output_values = self.process_batch([pending_item.input_value for pending_item in pending_batch])
             if len(output_values) != len(pending_batch):
-                raise RuntimeError(
-                    "dynamic batch processor returned a different number of outputs than inputs"
-                )
+                raise RuntimeError("dynamic batch processor returned a different number of outputs than inputs")
         except (RuntimeError, TypeError, ValueError) as error:
             for pending_item in pending_batch:
                 pending_item.fail(error)

@@ -15,7 +15,9 @@ vi.mock('../../../src/frontend/components/timeline/TimelineView', () => ({
       <div>
         Timeline content
         {props.selection && (
-          <button type="button" onClick={() => props.selection?.toggleSelection(42)}>Select mock media</button>
+          <button type="button" onClick={() => props.selection?.toggleSelection(42)}>
+            Select mock media
+          </button>
         )}
       </div>
     )
@@ -33,13 +35,15 @@ vi.mock('../../../src/frontend/api/media', () => ({
 import Timeline from '../../../src/frontend/pages/Timeline'
 
 function renderTimeline(classification: 'screenshot' | 'document') {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
   render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <Timeline mediaType="image" classification={classification} />
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   )
 }
 
@@ -66,7 +70,11 @@ describe('Timeline classification UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select' }))
     fireEvent.click(screen.getByRole('button', { name: 'Select mock media' }))
     fireEvent.click(screen.getByRole('button', { name: 'Move to Trash' }))
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Move to Trash' }))
+    fireEvent.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', {
+        name: 'Move to Trash',
+      })
+    )
 
     await waitFor(() => expect(mocks.deleteMedia).toHaveBeenCalledWith([42], expect.anything()))
   })
@@ -79,7 +87,9 @@ describe('Timeline classification UI', () => {
 
     expect(screen.getByRole('heading', { name: title })).toBeTruthy()
     expect(screen.getByPlaceholderText(placeholder)).toBeTruthy()
-    expect(mocks.timelineView).toHaveBeenCalledWith(expect.objectContaining({ mediaType: 'image', classification }))
+    expect(mocks.timelineView).toHaveBeenCalledWith(
+      expect.objectContaining({ mediaType: 'image', classification })
+    )
   })
 
   it.each([
@@ -88,25 +98,37 @@ describe('Timeline classification UI', () => {
     ['video', null],
     ['image', 'screenshot'],
     ['image', 'document'],
-  ] as const)('keeps the active timeline filters when searching %s %s', (mediaType, classification) => {
-    vi.useFakeTimers()
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-    render(
-      <QueryClientProvider client={queryClient}>
-        <MemoryRouter>
-          <Timeline mediaType={mediaType} classification={classification} />
-        </MemoryRouter>
-      </QueryClientProvider>,
-    )
+  ] as const)(
+    'keeps the active timeline filters when searching %s %s',
+    (mediaType, classification) => {
+      vi.useFakeTimers()
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false },
+          mutations: { retry: false },
+        },
+      })
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <Timeline mediaType={mediaType} classification={classification} />
+          </MemoryRouter>
+        </QueryClientProvider>
+      )
 
-    fireEvent.change(screen.getByRole('searchbox', { name: 'Search media' }), { target: { value: ' receipt ' } })
-    act(() => vi.advanceTimersByTime(250))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Search media' }), {
+        target: { value: ' receipt ' },
+      })
+      act(() => vi.advanceTimersByTime(250))
 
-    expect(mocks.timelineView).toHaveBeenLastCalledWith(expect.objectContaining({
-      search: 'receipt',
-      mediaType,
-      classification,
-    }))
-    vi.useRealTimers()
-  })
+      expect(mocks.timelineView).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          search: 'receipt',
+          mediaType,
+          classification,
+        })
+      )
+      vi.useRealTimers()
+    }
+  )
 })

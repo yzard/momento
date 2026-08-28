@@ -1,9 +1,12 @@
-import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react'
+import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
 import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
-import { Check, Circle, Play } from 'lucide-react'
+import { Play } from 'lucide-react'
 import { batchLoader } from '../../utils/batcher'
 import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
+import { useLazyImage } from '../../hooks/useLazyImage'
+import { mediaFormatBadge } from '../../lib/mediaFormat'
+import MediaSelectionOverlay from '../media/MediaSelectionOverlay'
 
 export interface PhotoGridSelection {
   selectedMediaIds: ReadonlySet<number>
@@ -16,46 +19,11 @@ interface PhotoGridProps {
   selection: PhotoGridSelection | null
 }
 
-function getFormatBadge(mimeType: string | null, filename: string, mediaType: 'image' | 'video'): string | null {
-  const lowerMime = mimeType ? mimeType.toLowerCase() : ''
-  const ext = filename.split('.').pop()?.toLowerCase() || ''
-
-  if (mediaType === 'video') {
-    if (lowerMime.includes('mp4') || ext === 'mp4') return 'MP4'
-    if (lowerMime.includes('quicktime') || lowerMime.includes('mov') || ext === 'mov') return 'MOV'
-    if (lowerMime.includes('webm') || ext === 'webm') return 'WEBM'
-    if (lowerMime.includes('avi') || ext === 'avi') return 'AVI'
-    if (lowerMime.includes('mkv') || ext === 'mkv') return 'MKV'
-    return null
-  }
-
-  // Image formats
-  if (lowerMime.includes('jpeg') || lowerMime.includes('jpg') || ext === 'jpg' || ext === 'jpeg') return 'JPG'
-  if (lowerMime.includes('png') || ext === 'png') return 'PNG'
-  if (lowerMime.includes('gif') || ext === 'gif') return 'GIF'
-  if (lowerMime.includes('webp') || ext === 'webp') return 'WEBP'
-  if (lowerMime.includes('heic') || lowerMime.includes('heif') || ext === 'heic' || ext === 'heif') return 'HEIC'
-  if (lowerMime.includes('tiff') || ext === 'tiff' || ext === 'tif') return 'TIFF'
-  if (lowerMime.includes('bmp') || ext === 'bmp') return 'BMP'
-  if (lowerMime.includes('apng')) return 'APNG'
-  if (lowerMime.includes('dng') || ext === 'dng') return 'RAW'
-  if (lowerMime.includes('cr2') || ext === 'cr2') return 'RAW'
-  if (lowerMime.includes('arw') || ext === 'arw') return 'RAW'
-  if (lowerMime.includes('nef') || ext === 'nef') return 'RAW'
-
-  return null
-}
-
 export default function PhotoGrid({ media, onPhotoClick, selection }: PhotoGridProps) {
   return (
     <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 px-1 pb-8">
       {media.map((item) => (
-        <MediaItem
-          key={item.id}
-          item={item}
-          onPhotoClick={onPhotoClick}
-          selection={selection}
-        />
+        <MediaItem key={item.id} item={item} onPhotoClick={onPhotoClick} selection={selection} />
       ))}
     </div>
   )
@@ -67,93 +35,218 @@ interface MediaItemProps {
   selection: PhotoGridSelection | null
 }
 
-function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
+interface MediaItemContentProps {
+  item: Media
+  thumbnailUrl: string | null
+  previewUrl: string | null
+  videoReference: React.RefObject<HTMLVideoElement>
+  selectionMode: boolean
+  selected: boolean
+  isHovering: boolean
+  showPreview: boolean
+  isVideo: boolean
+  isGif: boolean
+  isVideoPlaying: boolean
+  formatBadge: string | null
+  currentTime: number
+  onVideoPlay: () => void
+  onVideoTimeUpdate: () => void
+  onPreviewError: () => void
+}
+
+function MediaThumbnail({
+  filename,
+  thumbnailUrl,
+  hidden,
+}: {
+  filename: string
+  thumbnailUrl: string | null
+  hidden: boolean
+}) {
+  if (!thumbnailUrl) {
+    return <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
+  }
+
+  return (
+    <img
+      src={thumbnailUrl}
+      alt={filename}
+      className={`h-full w-full object-cover transition-opacity duration-200 motion-reduce:transition-none ${hidden ? 'opacity-0' : 'opacity-100'}`}
+    />
+  )
+}
+
+function HoverPreview({
+  filename,
+  previewUrl,
+  isGif,
+  videoReference,
+  onVideoPlay,
+  onVideoTimeUpdate,
+  onPreviewError,
+}: Pick<
+  MediaItemContentProps,
+  'previewUrl' | 'isGif' | 'videoReference' | 'onVideoPlay' | 'onVideoTimeUpdate' | 'onPreviewError'
+> & { filename: string }) {
+  if (!previewUrl) return null
+  if (isGif) {
+    return (
+      <img
+        src={previewUrl}
+        alt={filename}
+        className="absolute inset-0 h-full w-full object-cover"
+        onError={onPreviewError}
+      />
+    )
+  }
+
+  return (
+    <video
+      ref={videoReference}
+      src={previewUrl}
+      className="absolute inset-0 h-full w-full object-cover"
+      autoPlay
+      muted
+      playsInline
+      onPlay={onVideoPlay}
+      onTimeUpdate={onVideoTimeUpdate}
+      onError={onPreviewError}
+    />
+  )
+}
+
+function FormatBadge({
+  item,
+  formatBadge,
+  isVideo,
+  previewVisible,
+  currentTime,
+}: Pick<MediaItemContentProps, 'item' | 'formatBadge' | 'isVideo' | 'currentTime'> & {
+  previewVisible: boolean
+}) {
+  if (isVideo) {
+    const displayedDuration = previewVisible ? currentTime : (item.durationSeconds ?? 0)
+    return (
+      <div className="absolute right-2 top-2 rounded-md border border-white/10 bg-black/60 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white backdrop-blur-sm">
+        {formatDuration(displayedDuration)}
+      </div>
+    )
+  }
+  if (!formatBadge) return null
+
+  return (
+    <div className="absolute right-2 top-2 rounded-md border border-white/10 bg-black/60 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white backdrop-blur-sm">
+      {formatBadge}
+    </div>
+  )
+}
+
+function MediaItemContent(props: MediaItemContentProps) {
+  const previewVisible = props.isHovering && props.showPreview
+
+  return (
+    <>
+      <MediaThumbnail
+        filename={props.item.originalFilename}
+        thumbnailUrl={props.thumbnailUrl}
+        hidden={props.isVideoPlaying}
+      />
+      {props.selectionMode && <MediaSelectionOverlay selected={props.selected} />}
+      {previewVisible && (
+        <HoverPreview
+          filename={props.item.originalFilename}
+          previewUrl={props.previewUrl}
+          isGif={props.isGif}
+          videoReference={props.videoReference}
+          onVideoPlay={props.onVideoPlay}
+          onVideoTimeUpdate={props.onVideoTimeUpdate}
+          onPreviewError={props.onPreviewError}
+        />
+      )}
+      {props.isVideo && !previewVisible && (
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20 bg-black/40 p-3 text-white opacity-0 backdrop-blur-md transition-opacity group-hover:opacity-100">
+          <Play className="ml-0.5 h-6 w-6 fill-white" strokeWidth={1.5} />
+        </div>
+      )}
+      <FormatBadge
+        item={props.item}
+        formatBadge={props.formatBadge}
+        isVideo={props.isVideo}
+        previewVisible={previewVisible}
+        currentTime={props.currentTime}
+      />
+    </>
+  )
+}
+
+function useHoverPreview(item: Media, shouldPreview: boolean) {
   const [isHovering, setIsHovering] = useState(false)
-  const [showVideo, setShowVideo] = useState(false)
+  const [showPreview, setShowPreview] = useState(false)
   const [isVideoPlaying, setIsVideoPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => 
-    mediaApi.getCachedThumbnailUrl(item.id) || null
+  const videoReference = useRef<HTMLVideoElement>(null)
+  const hoverDelayReference = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { streamURL: previewUrl, retryStreamOnce } = useMediaStreamURL(
+    shouldPreview ? item.id : null,
+    showPreview
   )
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  const isVideo = item.mediaType === 'video'
-  const isGif = item.mimeType?.toLowerCase().includes('gif') || item.originalFilename.toLowerCase().endsWith('.gif')
-  const shouldPreview = isVideo || isGif
-  const selectionMode = selection !== null
-  const selected = selection?.selectedMediaIds.has(item.id) ?? false
-  const formatBadge = getFormatBadge(item.mimeType, item.originalFilename, item.mediaType)
-  const {
-    streamURL: previewUrl,
-    retryStreamOnce,
-  } = useMediaStreamURL(shouldPreview ? item.id : null, showVideo)
-
-  // Load thumbnail with IntersectionObserver for lazy loading
-  useEffect(() => {
-    if (thumbnailUrl || !containerRef.current) return
-
-    let cancelled = false
-
-    const loadThumbnail = async () => {
-      try {
-        const url = await batchLoader.load(item.id)
-        if (!cancelled && url) setThumbnailUrl(url)
-      } catch {
-        console.error('Failed to load thumbnail')
-      }
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          loadThumbnail()
-          observer.disconnect()
-        }
-      },
-      { rootMargin: '400px' }
-    )
-    observer.observe(containerRef.current)
-
-    return () => {
-      cancelled = true
-      observer.disconnect()
-    }
-  }, [item.id, thumbnailUrl])
 
   const handleMouseEnter = useCallback(() => {
     setIsHovering(true)
-    if (shouldPreview) {
-      hoverTimeoutRef.current = setTimeout(() => {
-        setShowVideo(true)
-      }, 500)
-    }
+    if (!shouldPreview) return
+    hoverDelayReference.current = setTimeout(() => setShowPreview(true), 500)
   }, [shouldPreview])
 
   const handleMouseLeave = useCallback(() => {
     setIsHovering(false)
-    setShowVideo(false)
+    setShowPreview(false)
     setIsVideoPlaying(false)
     setCurrentTime(0)
-    if (hoverTimeoutRef.current) {
-      clearTimeout(hoverTimeoutRef.current)
-      hoverTimeoutRef.current = null
-    }
-    if (videoRef.current) {
-      videoRef.current.pause()
-      videoRef.current.currentTime = 0
-    }
+    if (hoverDelayReference.current) clearTimeout(hoverDelayReference.current)
+    hoverDelayReference.current = null
+    if (!videoReference.current) return
+    videoReference.current.pause()
+    videoReference.current.currentTime = 0
   }, [])
 
   const handleVideoTimeUpdate = useCallback(() => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime)
-      if (videoRef.current.currentTime >= 10) {
-        videoRef.current.currentTime = 0
-      }
-    }
+    if (!videoReference.current) return
+    setCurrentTime(videoReference.current.currentTime)
+    if (videoReference.current.currentTime >= 10) videoReference.current.currentTime = 0
   }, [])
+
+  return {
+    isHovering,
+    showPreview,
+    isVideoPlaying,
+    currentTime,
+    videoReference,
+    previewUrl,
+    retryStreamOnce,
+    handleMouseEnter,
+    handleMouseLeave,
+    handleVideoTimeUpdate,
+    markVideoPlaying: () => setIsVideoPlaying(true),
+  }
+}
+
+function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
+  const { targetRef: containerRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
+    resourceId: item.id,
+    loader: batchLoader,
+    getCachedUrl: (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal'),
+    rootMargin: '400px',
+  })
+
+  const isVideo = item.mediaType === 'video'
+  const isGif =
+    item.mimeType?.toLowerCase().includes('gif') ||
+    item.originalFilename.toLowerCase().endsWith('.gif')
+  const shouldPreview = isVideo || isGif
+  const selectionMode = selection !== null
+  const selected = selection?.selectedMediaIds.has(item.id) ?? false
+  const formatBadge = mediaFormatBadge(item.mimeType, item.originalFilename, item.mediaType)
+  const preview = useHoverPreview(item, shouldPreview)
 
   const activateMedia = useCallback(() => {
     if (selection) {
@@ -163,11 +256,14 @@ function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
     onPhotoClick(item)
   }, [item, onPhotoClick, selection])
 
-  const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return
-    event.preventDefault()
-    activateMedia()
-  }, [activateMedia])
+  const handleKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      activateMedia()
+    },
+    [activateMedia]
+  )
 
   return (
     <div
@@ -175,7 +271,11 @@ function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
       role="button"
       tabIndex={0}
       aria-pressed={selectionMode ? selected : undefined}
-      aria-label={selectionMode ? `${selected ? 'Deselect' : 'Select'} ${item.originalFilename}` : `Open ${item.originalFilename}`}
+      aria-label={
+        selectionMode
+          ? `${selected ? 'Deselect' : 'Select'} ${item.originalFilename}`
+          : `Open ${item.originalFilename}`
+      }
       className={`aspect-square relative cursor-pointer group overflow-hidden bg-muted rounded-lg outline-none transition-[box-shadow,transform] duration-200 motion-reduce:transition-none ${
         selected
           ? 'z-10 ring-4 ring-primary ring-offset-2 ring-offset-background shadow-lg'
@@ -185,79 +285,27 @@ function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
       }`}
       onClick={activateMedia}
       onKeyDown={handleKeyDown}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      onMouseEnter={preview.handleMouseEnter}
+      onMouseLeave={preview.handleMouseLeave}
     >
-      {thumbnailUrl ? (
-        <img
-          src={thumbnailUrl}
-          alt={item.originalFilename}
-          className={`w-full h-full object-cover transition-opacity duration-200 motion-reduce:transition-none ${isVideoPlaying ? 'opacity-0' : 'opacity-100'}`}
-        />
-      ) : (
-        <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
-      )}
-
-      {selectionMode && (
-        <div className={`absolute inset-0 transition-colors duration-150 motion-reduce:transition-none ${selected ? 'bg-primary/25' : 'bg-black/10'}`}>
-          <span className={`absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-full border-2 shadow-sm transition-colors duration-150 ${
-            selected
-              ? 'border-primary bg-primary text-primary-foreground'
-              : 'border-white/90 bg-black/35 text-white'
-          }`}>
-            {selected ? <Check className="h-4 w-4" strokeWidth={3} /> : <Circle className="h-4 w-4" />}
-          </span>
-        </div>
-      )}
-
-      {isHovering && showVideo && shouldPreview && previewUrl && (
-        isGif ? (
-          <img
-            src={previewUrl}
-            alt={item.originalFilename}
-            className="absolute inset-0 w-full h-full object-cover"
-            onError={retryStreamOnce}
-          />
-        ) : (
-          <video
-            ref={videoRef}
-            src={previewUrl}
-            className="absolute inset-0 w-full h-full object-cover"
-            autoPlay
-            muted
-            loop={false}
-            playsInline
-            onPlay={() => setIsVideoPlaying(true)}
-            onTimeUpdate={handleVideoTimeUpdate}
-            onError={retryStreamOnce}
-          />
-        )
-      )}
-
-      {isVideo && (!isHovering || !showVideo) && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/40 backdrop-blur-md text-white p-3 rounded-full opacity-0 group-hover:opacity-100 transition-opacity border border-white/20">
-          <Play className="w-6 h-6 fill-white ml-0.5" strokeWidth={1.5} />
-        </div>
-      )}
-
-      {/* Format badge - top right */}
-      {formatBadge && !isVideo && (
-        <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider border border-white/10">
-          {formatBadge}
-        </div>
-      )}
-
-      {/* Video duration badge - top right for videos */}
-      {isVideo && (
-        <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-sm text-white text-[10px] font-bold px-2 py-1 rounded-md uppercase tracking-wider border border-white/10">
-          {(isHovering && showVideo)
-            ? formatDuration(currentTime)
-            : (item.durationSeconds
-              ? formatDuration(item.durationSeconds)
-              : '0:00')}
-        </div>
-      )}
-
+      <MediaItemContent
+        item={item}
+        thumbnailUrl={thumbnailUrl}
+        previewUrl={preview.previewUrl}
+        videoReference={preview.videoReference}
+        selectionMode={selectionMode}
+        selected={selected}
+        isHovering={preview.isHovering}
+        showPreview={preview.showPreview && shouldPreview}
+        isVideo={isVideo}
+        isGif={isGif}
+        isVideoPlaying={preview.isVideoPlaying}
+        formatBadge={formatBadge}
+        currentTime={preview.currentTime}
+        onVideoPlay={preview.markVideoPlaying}
+        onVideoTimeUpdate={preview.handleVideoTimeUpdate}
+        onPreviewError={preview.retryStreamOnce}
+      />
     </div>
   )
 }

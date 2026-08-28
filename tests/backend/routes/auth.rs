@@ -1,4 +1,4 @@
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use axum_test::TestServer;
 use base64::Engine;
 use momento_api::{
@@ -34,8 +34,16 @@ fn create_admin_fixture() -> (momento_api::database::DbPool, i64) {
 }
 
 fn create_server(pool: momento_api::database::DbPool, reset_user_id: Option<i64>) -> TestServer {
+    create_server_with_config(pool, reset_user_id, Config::default())
+}
+
+fn create_server_with_config(
+    pool: momento_api::database::DbPool,
+    reset_user_id: Option<i64>,
+    config: Config,
+) -> TestServer {
     init_test_paths();
-    let config_manager = create_test_config_manager(Config::default());
+    let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
         pool,
@@ -44,6 +52,34 @@ fn create_server(pool: momento_api::database::DbPool, reset_user_id: Option<i64>
         reset_user_id,
     );
     TestServer::new(app).expect("server")
+}
+
+#[tokio::test]
+async fn token_and_browser_password_logins_share_the_same_rate_limit() {
+    let pool = create_test_db();
+    let mut config = Config::default();
+    config.security.password_attempts_per_identity = 2;
+    config.security.password_attempts_per_source = 10;
+    let server = create_server_with_config(pool, None, config);
+
+    server
+        .post("/api/v1/user/authenticate")
+        .add_header(AUTHORIZATION, basic_credentials("missing-user", "wrong"))
+        .await
+        .assert_status_unauthorized();
+    server
+        .post("/api/v1/user/session/create")
+        .add_header(AUTHORIZATION, basic_credentials("missing-user", "wrong"))
+        .await
+        .assert_status_unauthorized();
+    let limited = server
+        .post("/api/v1/user/authenticate")
+        .add_header(AUTHORIZATION, basic_credentials("missing-user", "wrong"))
+        .await;
+    limited.assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited
+        .headers()
+        .contains_key(axum::http::header::RETRY_AFTER));
 }
 
 #[tokio::test]
@@ -247,4 +283,142 @@ async fn refresh_rejects_expired_tokens_and_rotates_a_token_once() {
         .json(&json!({"refreshToken": expired_token}))
         .await
         .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn browser_authentication_uses_http_only_cookies_without_returning_tokens() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "browser-user", "browser@example.com");
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE users SET hashed_password = ?, must_change_password = 0 WHERE id = ?",
+            rusqlite::params![
+                hash_password("browser-password").expect("password hash"),
+                user_id
+            ],
+        )
+        .expect("password");
+    let server = create_server(pool.clone(), None);
+
+    let login = server
+        .post("/api/v1/user/session/create")
+        .add_header(
+            AUTHORIZATION,
+            basic_credentials("browser-user", "browser-password"),
+        )
+        .await;
+    login.assert_status_ok();
+    assert!(login.json::<Value>().get("accessToken").is_none());
+    let set_cookies = login
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().expect("set-cookie").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(set_cookies.len(), 2);
+    assert!(set_cookies.iter().all(|cookie| cookie.contains("HttpOnly")));
+    assert!(set_cookies.iter().all(|cookie| cookie.contains("Secure")));
+    assert!(set_cookies
+        .iter()
+        .all(|cookie| cookie.contains("SameSite=Strict")));
+
+    let access_cookie = set_cookies
+        .iter()
+        .find(|cookie| cookie.starts_with("momento_access_token="))
+        .expect("access cookie")
+        .split(';')
+        .next()
+        .expect("access cookie pair");
+    let current_user = server
+        .post("/api/v1/user/get")
+        .add_header(COOKIE, access_cookie)
+        .await;
+    current_user.assert_status_ok();
+    assert_eq!(current_user.json::<Value>()["username"], "browser-user");
+}
+
+#[tokio::test]
+async fn browser_refresh_rotates_cookie_and_logout_clears_both_cookies() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "cookie-user", "cookie@example.com");
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE users SET hashed_password = ?, must_change_password = 0 WHERE id = ?",
+            rusqlite::params![
+                hash_password("cookie-password").expect("password hash"),
+                user_id
+            ],
+        )
+        .expect("password");
+    let server = create_server(pool.clone(), None);
+
+    let login = server
+        .post("/api/v1/user/session/create")
+        .add_header(
+            AUTHORIZATION,
+            basic_credentials("cookie-user", "cookie-password"),
+        )
+        .await;
+    let refresh_cookie = login
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .find_map(|value| {
+            let cookie = value.to_str().ok()?;
+            cookie
+                .starts_with("momento_refresh_token=")
+                .then(|| cookie.split(';').next().expect("cookie pair").to_string())
+        })
+        .expect("refresh cookie");
+
+    let refreshed = server
+        .post("/api/v1/user/session/refresh")
+        .add_header(COOKIE, &refresh_cookie)
+        .await;
+    refreshed.assert_status_ok();
+    assert_eq!(refreshed.headers().get_all(SET_COOKIE).iter().count(), 2);
+    server
+        .post("/api/v1/user/session/refresh")
+        .add_header(COOKIE, refresh_cookie)
+        .await
+        .assert_status_unauthorized();
+
+    let rotated_refresh_cookie = refreshed
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .find_map(|value| {
+            let cookie = value.to_str().ok()?;
+            cookie
+                .starts_with("momento_refresh_token=")
+                .then(|| cookie.split(';').next().expect("cookie pair").to_string())
+        })
+        .expect("rotated refresh cookie");
+    let logout = server
+        .post("/api/v1/user/session/delete")
+        .add_header(COOKIE, rotated_refresh_cookie)
+        .await;
+    logout.assert_status_ok();
+    let cleared_cookies = logout
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().expect("clear cookie"))
+        .collect::<Vec<_>>();
+    assert_eq!(cleared_cookies.len(), 2);
+    assert!(cleared_cookies
+        .iter()
+        .all(|cookie| cookie.contains("Max-Age=0")));
+    let token_count: i64 = pool
+        .get()
+        .expect("database")
+        .query_row(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = ?1",
+            [user_id],
+            |row| row.get(0),
+        )
+        .expect("refresh-token count");
+    assert_eq!(token_count, 0);
 }

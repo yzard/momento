@@ -36,7 +36,9 @@ export default function AlbumCard({ album, thumbnailUrls, onClick, onDelete }: A
         onClick={onClick}
       >
         {thumbnailCount > 0 ? (
-          <div className={`grid h-full w-full gap-px bg-black/20 ${collageGridClass(thumbnailCount)}`}>
+          <div
+            className={`grid h-full w-full gap-px bg-black/20 ${collageGridClass(thumbnailCount)}`}
+          >
             {thumbnailUrls.map((thumbnailUrl, index) => (
               <div
                 key={album.thumbnailMediaIds[index]}
@@ -55,7 +57,11 @@ export default function AlbumCard({ album, thumbnailUrls, onClick, onDelete }: A
           </div>
         ) : (
           <div className="flex h-full w-full items-center justify-center bg-muted">
-            <Folder className="h-12 w-12 text-muted-foreground/40" aria-hidden="true" strokeWidth={1.25} />
+            <Folder
+              className="h-12 w-12 text-muted-foreground/40"
+              aria-hidden="true"
+              strokeWidth={1.25}
+            />
           </div>
         )}
         <MemoryCardOverlay

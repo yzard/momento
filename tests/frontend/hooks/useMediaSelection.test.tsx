@@ -1,7 +1,10 @@
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import { toggleSelectedMediaId, useMediaSelection } from '../../../src/frontend/hooks/useMediaSelection'
+import {
+  toggleSelectedMediaId,
+  useMediaSelection,
+} from '../../../src/frontend/hooks/useMediaSelection'
 
 describe('useMediaSelection', () => {
   it('toggles media identifiers without mutating the previous set', () => {

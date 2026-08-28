@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 pub(crate) const SERVER_HOST: &str = "0.0.0.0";
@@ -12,6 +13,22 @@ pub(crate) const ACCESS_TOKEN_EXPIRE_MINUTES: i64 = 30;
 pub(crate) const REFRESH_TOKEN_EXPIRE_DAYS: i64 = 7;
 pub(crate) const MEDIA_ACCESS_TICKET_EXPIRE_HOURS: i64 = 24;
 pub(crate) const SHARE_SESSION_EXPIRE_HOURS: i64 = 24;
+pub(crate) const PASSWORD_ATTEMPT_WINDOW_SECONDS: u64 = 60;
+pub(crate) const PASSWORD_ATTEMPTS_PER_IDENTITY: u32 = 5;
+pub(crate) const PASSWORD_ATTEMPTS_PER_SOURCE: u32 = 30;
+pub(crate) const PASSWORD_LOCKOUT_SECONDS: u64 = 900;
+pub(crate) const PASSWORD_HASH_MAX_CONCURRENT: usize = 4;
+pub(crate) const REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS: u64 = 3600;
+pub(crate) const MEDIA_PROCESS_TIMEOUT_SECONDS: u64 = 60;
+pub(crate) const MEDIA_PROCESS_TERMINATION_GRACE_SECONDS: u64 = 2;
+pub(crate) const MEDIA_PROCESS_MAXIMUM_STDERR_BYTES: usize = 1024 * 1024;
+pub(crate) const MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS: u64 = 200_000_000;
+pub(crate) const IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES: u64 = 512;
+pub(crate) const IMAGEMAGICK_MAP_LIMIT_MEBIBYTES: u64 = 1024;
+pub(crate) const IMAGEMAGICK_DISK_LIMIT_MEBIBYTES: u64 = 4096;
+pub(crate) const IMAGEMAGICK_MAXIMUM_THREADS: usize = 2;
 pub(crate) const WEBDAV_MOUNT_PATH: &str = "/webdav";
 pub(crate) const WEBDAV_REALM: &str = "Momento WebDAV";
 pub(crate) const WEBDAV_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
@@ -32,7 +49,7 @@ pub(crate) const LLM_SUBMISSION_POLL_INTERVAL_SECONDS: u64 = 5;
 pub(crate) const LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS: usize = 128;
 pub(crate) const LLM_RESULT_POLL_INTERVAL_SECONDS: u64 = 1;
 pub(crate) const LLM_RESULT_CONCURRENCY: usize = 8;
-pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.41;
+pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.50;
 pub(crate) const FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT: f64 = 0.05;
 pub(crate) const FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT: f64 = 0.10;
 pub(crate) const FACE_REPRESENTATIVE_CENTER_PROXIMITY_WEIGHT: f64 = 0.10;
@@ -131,6 +148,74 @@ pub(crate) fn media_access_ticket_expire_hours() -> i64 {
 
 pub(crate) fn share_session_expire_hours() -> i64 {
     SHARE_SESSION_EXPIRE_HOURS
+}
+
+pub(crate) fn password_attempt_window_seconds() -> u64 {
+    PASSWORD_ATTEMPT_WINDOW_SECONDS
+}
+
+pub(crate) fn password_attempts_per_identity() -> u32 {
+    PASSWORD_ATTEMPTS_PER_IDENTITY
+}
+
+pub(crate) fn password_attempts_per_source() -> u32 {
+    PASSWORD_ATTEMPTS_PER_SOURCE
+}
+
+pub(crate) fn password_lockout_seconds() -> u64 {
+    PASSWORD_LOCKOUT_SECONDS
+}
+
+pub(crate) fn password_hash_max_concurrent() -> usize {
+    PASSWORD_HASH_MAX_CONCURRENT
+}
+
+pub(crate) fn trusted_proxy_ip_addresses() -> Vec<IpAddr> {
+    Vec::new()
+}
+
+pub(crate) fn refresh_token_cleanup_interval_seconds() -> u64 {
+    REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS
+}
+
+pub(crate) fn media_process_timeout_seconds() -> u64 {
+    MEDIA_PROCESS_TIMEOUT_SECONDS
+}
+
+pub(crate) fn media_process_termination_grace_seconds() -> u64 {
+    MEDIA_PROCESS_TERMINATION_GRACE_SECONDS
+}
+
+pub(crate) fn media_process_maximum_stderr_bytes() -> usize {
+    MEDIA_PROCESS_MAXIMUM_STDERR_BYTES
+}
+
+pub(crate) fn media_process_maximum_metadata_output_bytes() -> usize {
+    MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES
+}
+
+pub(crate) fn media_process_maximum_normalized_image_output_bytes() -> usize {
+    MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES
+}
+
+pub(crate) fn media_process_maximum_decoded_image_pixels() -> u64 {
+    MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS
+}
+
+pub(crate) fn imagemagick_memory_limit_mebibytes() -> u64 {
+    IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES
+}
+
+pub(crate) fn imagemagick_map_limit_mebibytes() -> u64 {
+    IMAGEMAGICK_MAP_LIMIT_MEBIBYTES
+}
+
+pub(crate) fn imagemagick_disk_limit_mebibytes() -> u64 {
+    IMAGEMAGICK_DISK_LIMIT_MEBIBYTES
+}
+
+pub(crate) fn imagemagick_maximum_threads() -> usize {
+    IMAGEMAGICK_MAXIMUM_THREADS
 }
 
 pub(crate) fn webdav_mount_path() -> String {
@@ -340,6 +425,70 @@ pub(crate) fn render_template(source: &str) -> String {
             "{{SHARE_SESSION_EXPIRE_HOURS}}",
             SHARE_SESSION_EXPIRE_HOURS.to_string(),
         ),
+        (
+            "{{PASSWORD_ATTEMPT_WINDOW_SECONDS}}",
+            PASSWORD_ATTEMPT_WINDOW_SECONDS.to_string(),
+        ),
+        (
+            "{{PASSWORD_ATTEMPTS_PER_IDENTITY}}",
+            PASSWORD_ATTEMPTS_PER_IDENTITY.to_string(),
+        ),
+        (
+            "{{PASSWORD_ATTEMPTS_PER_SOURCE}}",
+            PASSWORD_ATTEMPTS_PER_SOURCE.to_string(),
+        ),
+        (
+            "{{PASSWORD_LOCKOUT_SECONDS}}",
+            PASSWORD_LOCKOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{PASSWORD_HASH_MAX_CONCURRENT}}",
+            PASSWORD_HASH_MAX_CONCURRENT.to_string(),
+        ),
+        (
+            "{{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}",
+            REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS.to_string(),
+        ),
+        (
+            "{{MEDIA_PROCESS_TIMEOUT_SECONDS}}",
+            MEDIA_PROCESS_TIMEOUT_SECONDS.to_string(),
+        ),
+        (
+            "{{MEDIA_PROCESS_TERMINATION_GRACE_SECONDS}}",
+            MEDIA_PROCESS_TERMINATION_GRACE_SECONDS.to_string(),
+        ),
+        (
+            "{{MEDIA_PROCESS_MAXIMUM_STDERR_BYTES}}",
+            MEDIA_PROCESS_MAXIMUM_STDERR_BYTES.to_string(),
+        ),
+        (
+            "{{MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES}}",
+            MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES.to_string(),
+        ),
+        (
+            "{{MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES}}",
+            MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES.to_string(),
+        ),
+        (
+            "{{MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS}}",
+            MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS.to_string(),
+        ),
+        (
+            "{{IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES}}",
+            IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES.to_string(),
+        ),
+        (
+            "{{IMAGEMAGICK_MAP_LIMIT_MEBIBYTES}}",
+            IMAGEMAGICK_MAP_LIMIT_MEBIBYTES.to_string(),
+        ),
+        (
+            "{{IMAGEMAGICK_DISK_LIMIT_MEBIBYTES}}",
+            IMAGEMAGICK_DISK_LIMIT_MEBIBYTES.to_string(),
+        ),
+        (
+            "{{IMAGEMAGICK_MAXIMUM_THREADS}}",
+            IMAGEMAGICK_MAXIMUM_THREADS.to_string(),
+        ),
         ("{{WEBDAV_MOUNT_PATH}}", WEBDAV_MOUNT_PATH.to_string()),
         ("{{WEBDAV_REALM}}", WEBDAV_REALM.to_string()),
         (
@@ -443,7 +592,7 @@ pub(crate) fn render_template(source: &str) -> String {
         ("{{LLM_API_KEY}}", template::LLM_API_KEY.to_string()),
         (
             "{{FACE_GROUP_SIMILARITY_THRESHOLD}}",
-            FACE_GROUP_SIMILARITY_THRESHOLD.to_string(),
+            format!("{FACE_GROUP_SIMILARITY_THRESHOLD:.2}"),
         ),
         (
             "{{FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT}}",

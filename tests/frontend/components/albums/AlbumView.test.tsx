@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   batchLoad: vi.fn(),
-  getCachedThumbnailUrl: vi.fn(),
+  getCachedThumbnailURL: vi.fn(),
   reorder: vi.fn(),
   removeMedia: vi.fn(),
   album: {
@@ -25,7 +25,7 @@ vi.mock('../../../../src/frontend/utils/batcher', () => ({
 }))
 
 vi.mock('../../../../src/frontend/api/media', () => ({
-  mediaApi: { getCachedThumbnailUrl: mocks.getCachedThumbnailUrl },
+  mediaApi: { getCachedThumbnailURL: mocks.getCachedThumbnailURL },
 }))
 
 vi.mock('../../../../src/frontend/hooks/useAlbums', () => ({
@@ -36,7 +36,10 @@ vi.mock('../../../../src/frontend/hooks/useAlbums', () => ({
   }),
   useReorderAlbum: () => ({ mutateAsync: mocks.reorder, isPending: false }),
   useRemoveAlbumMedia: () => ({
-    mutate: (variables: { albumId: number; mediaIds: number[] }, callbacks: { onSuccess: () => void }) => {
+    mutate: (
+      variables: { albumId: number; mediaIds: number[] },
+      callbacks: { onSuccess: () => void }
+    ) => {
       mocks.removeMedia(variables)
       callbacks.onSuccess()
     },
@@ -57,14 +60,16 @@ class VisibleIntersectionObserver implements IntersectionObserver {
 
   disconnect(): void {}
   observe(): void {}
-  takeRecords(): IntersectionObserverEntry[] { return [] }
+  takeRecords(): IntersectionObserverEntry[] {
+    return []
+  }
   unobserve(): void {}
 }
 
 describe('AlbumView', () => {
   beforeEach(() => {
     vi.stubGlobal('IntersectionObserver', VisibleIntersectionObserver)
-    mocks.getCachedThumbnailUrl.mockReturnValue(null)
+    mocks.getCachedThumbnailURL.mockReturnValue(null)
     mocks.batchLoad.mockResolvedValue('batched-thumbnail')
     mocks.reorder.mockResolvedValue(undefined)
     mocks.removeMedia.mockResolvedValue(undefined)
@@ -77,12 +82,18 @@ describe('AlbumView', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Select first.jpg' }))
     fireEvent.click(screen.getByRole('button', { name: 'Select third.jpg' }))
     fireEvent.click(screen.getByRole('button', { name: 'Remove from album' }))
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove from album' }))
+    fireEvent.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', {
+        name: 'Remove from album',
+      })
+    )
 
-    await waitFor(() => expect(mocks.removeMedia).toHaveBeenCalledWith({
-      albumId: 7,
-      mediaIds: [42, 44],
-    }))
+    await waitFor(() =>
+      expect(mocks.removeMedia).toHaveBeenCalledWith({
+        albumId: 7,
+        mediaIds: [42, 44],
+      })
+    )
     expect(screen.queryByRole('img', { name: 'first.jpg' })).toBeNull()
     expect(screen.getByRole('img', { name: 'second.jpg' })).toBeTruthy()
   })
@@ -97,9 +108,9 @@ describe('AlbumView', () => {
     render(<AlbumView albumId={7} onBack={vi.fn()} onPhotoClick={vi.fn()} />)
 
     await waitFor(() => expect(mocks.batchLoad).toHaveBeenCalledWith(42))
-    expect(
-      (await screen.findByRole('img', { name: 'first.jpg' })).getAttribute('src'),
-    ).toBe('batched-thumbnail')
+    expect((await screen.findByRole('img', { name: 'first.jpg' })).getAttribute('src')).toBe(
+      'batched-thumbnail'
+    )
   })
 
   it('submits the complete latest order after a drag', async () => {
@@ -112,10 +123,12 @@ describe('AlbumView', () => {
     fireEvent.dragOver(third)
     fireEvent.drop(third)
 
-    await waitFor(() => expect(mocks.reorder).toHaveBeenCalledWith({
-      albumId: 7,
-      mediaIds: [43, 44, 42],
-    }))
+    await waitFor(() =>
+      expect(mocks.reorder).toHaveBeenCalledWith({
+        albumId: 7,
+        mediaIds: [43, 44, 42],
+      })
+    )
   })
 
   it('rolls back the local order when persistence fails', async () => {

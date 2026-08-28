@@ -13,6 +13,7 @@ export interface AlbumDetail {
 interface AlbumCreateRequest {
   name: string
   description?: string
+  mediaIds: number[]
 }
 
 interface AlbumUpdateRequest {

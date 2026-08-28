@@ -7,12 +7,21 @@ export const adminApi = {
     return response.data.users
   },
 
-  createUser: async (data: { username: string; email: string; password: string; role?: 'admin' | 'user' }): Promise<User> => {
+  createUser: async (data: {
+    username: string
+    email: string
+    password: string
+    role?: 'admin' | 'user'
+  }): Promise<User> => {
     const response = await apiClient.post<User>('/user/create', data)
     return response.data
   },
 
-  updateUser: async (data: { userId: number; role?: 'admin' | 'user'; isActive?: boolean }): Promise<User> => {
+  updateUser: async (data: {
+    userId: number
+    role?: 'admin' | 'user'
+    isActive?: boolean
+  }): Promise<User> => {
     const response = await apiClient.post<User>('/user/update', data)
     return response.data
   },
@@ -20,5 +29,4 @@ export const adminApi = {
   deleteUser: async (userId: number): Promise<void> => {
     await apiClient.post('/user/delete', { userId })
   },
-
 }

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -14,6 +15,7 @@ use crate::processor::thumbnails::{
 };
 use crate::utils::hash::calculate_file_hash;
 use crate::utils::path::resolve_existing_storage_path;
+use crate::utils::process::{process_limits, ExternalProcess};
 
 pub async fn generate_media_metadata(
     pool: &DbPool,
@@ -53,7 +55,8 @@ pub async fn generate_media_metadata(
             .await
             .map_err(|error| error.to_string())?,
     };
-    let complete_metadata = generate_complete_metadata(&original_path, &media_type).await;
+    let complete_metadata =
+        generate_complete_metadata(&original_path, &media_type, &config.media_process).await;
     let metadata = &complete_metadata.metadata;
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
@@ -99,6 +102,7 @@ pub async fn generate_media_metadata(
             &place_thumbnail_path,
             config.metadata.thumbnails_max_size,
             config.metadata.thumbnails_quality,
+            &config.media_process,
         )
         .await
     } else {
@@ -108,6 +112,7 @@ pub async fn generate_media_metadata(
             config.metadata.thumbnails_max_size,
             config.metadata.thumbnails_quality,
             config.metadata.thumbnails_video_frame_quality,
+            &config.media_process,
         )
         .await
     };
@@ -207,6 +212,7 @@ pub async fn generate_media_metadata(
             content_hash: &content_hash,
         },
         &media_type,
+        &config.media_process,
     )
     .await?;
     Ok(())
@@ -232,6 +238,7 @@ async fn generate_thumbnail(
             output_path,
             maximum_size,
             config.metadata.thumbnails_quality,
+            &config.media_process,
         )
         .await;
     }
@@ -241,6 +248,7 @@ async fn generate_thumbnail(
         maximum_size,
         config.metadata.thumbnails_quality,
         config.metadata.thumbnails_video_frame_quality,
+        &config.media_process,
     )
     .await
 }
@@ -251,13 +259,14 @@ async fn prepare_ai_inputs(
     original_path: &Path,
     original: OriginalAiInput<'_>,
     media_type: &str,
+    process_config: &crate::config::MediaProcessConfig,
 ) -> Result<(), String> {
     let output_directory = paths().previews.join("ai").join(media_id.to_string());
     let input = if media_type == "video" {
         let filename = format!("{}.png", original.content_hash);
         let frame_path = output_directory.join("frames").join(&filename);
         if !frame_path.is_file() {
-            extract_first_video_frame(original_path, &frame_path)?;
+            extract_first_video_frame(original_path, &frame_path, process_config).await?;
         }
         let byte_size = std::fs::metadata(&frame_path)
             .map_err(|error| error.to_string())?
@@ -367,22 +376,42 @@ struct AiInputDescriptor {
     frame_timestamp_ms: Option<i64>,
 }
 
-fn extract_first_video_frame(
+async fn extract_first_video_frame(
     original_path: &std::path::Path,
     output_path: &std::path::Path,
+    process_config: &crate::config::MediaProcessConfig,
 ) -> Result<(), String> {
     let frames_directory = output_path
         .parent()
         .ok_or_else(|| "video frame path has no parent".to_string())?;
     std::fs::create_dir_all(frames_directory).map_err(|error| error.to_string())?;
     let temporary_path = frames_directory.join(format!(".frame-{}.png", uuid::Uuid::new_v4()));
-    let output = std::process::Command::new("ffmpeg")
-        .args(["-y", "-ss", "0", "-i"])
-        .arg(original_path)
-        .args(["-map", "0:v:0", "-frames:v", "1", "-c:v", "png"])
-        .arg(&temporary_path)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
+    let output = ExternalProcess::new(
+        "ffmpeg",
+        vec![
+            OsString::from("-nostdin"),
+            OsString::from("-y"),
+            OsString::from("-ss"),
+            OsString::from("0"),
+            OsString::from("-i"),
+            original_path.as_os_str().to_os_string(),
+            OsString::from("-map"),
+            OsString::from("0:v:0"),
+            OsString::from("-frames:v"),
+            OsString::from("1"),
+            OsString::from("-c:v"),
+            OsString::from("png"),
+            temporary_path.as_os_str().to_os_string(),
+        ],
+        timeout,
+        termination_grace,
+        0,
+        maximum_stderr_bytes,
+    )
+    .run()
+    .await
+    .map_err(|error| error.to_string())?;
     if !output.status.success() || !temporary_path.is_file() {
         let _ = std::fs::remove_file(&temporary_path);
         return Err(format!(

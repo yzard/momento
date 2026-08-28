@@ -1,4 +1,4 @@
-use crate::test_utils::{create_test_db, create_test_media, init_test_paths};
+use crate::test_utils::{create_test_db, create_test_media, init_test_paths, QOI_FIXTURE};
 use chrono::{TimeZone, Utc};
 use momento_api::config::Config;
 use momento_api::constants::paths;
@@ -10,6 +10,49 @@ use std::fs;
 
 mod reset;
 mod reverse_geocoding;
+
+#[tokio::test]
+async fn qoi_original_is_preserved_for_every_photo_inference_task() {
+    init_test_paths();
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "inference-source.qoi");
+    let relative_path = format!("inference-source-{media_id}.qoi");
+    let original_path = paths().originals.join(&relative_path);
+    fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
+    fs::write(&original_path, QOI_FIXTURE).expect("QOI original");
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "UPDATE media SET file_path = ?, mime_type = 'image/qoi', import_state = 'imported' WHERE id = ?",
+            rusqlite::params![relative_path, media_id],
+        )
+        .expect("QOI media");
+
+    momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
+        .await
+        .expect("QOI metadata generation");
+
+    let connection = pool.get().expect("database connection");
+    let inputs = connection
+        .prepare("SELECT storage_root, file_path, mime_type FROM media_ai_inputs WHERE media_id = ? ORDER BY task")
+        .expect("QOI input query")
+        .query_map([media_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("QOI input rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("QOI inputs");
+    assert_eq!(inputs.len(), 7);
+    for (storage_root, input_path, mime_type) in inputs {
+        assert_eq!(storage_root, "originals");
+        assert_eq!(input_path, relative_path);
+        assert_eq!(mime_type, "image/qoi");
+    }
+}
 
 #[tokio::test]
 async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {

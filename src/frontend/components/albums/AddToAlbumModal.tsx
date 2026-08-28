@@ -3,10 +3,99 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { albumsApi } from '../../api/albums'
 import { X, Folder, Plus, Loader2 } from 'lucide-react'
 import { cn } from '../../lib/utils'
+import { queryKeys } from '../../lib/queryKeys'
+import type { Album } from '../../api/types'
 
 interface AddToAlbumModalProps {
   mediaIds: number[]
   onClose: () => void
+}
+
+interface AlbumPickerContentProps {
+  albums: Album[] | undefined
+  isLoading: boolean
+  isProcessing: boolean
+  errorMessage: string | null
+  showNewAlbum: boolean
+  newAlbumName: string
+  onAlbumSelect: (albumId: number) => void
+  onShowNewAlbum: () => void
+  onHideNewAlbum: () => void
+  onNameChange: (name: string) => void
+  onCreate: (event: React.FormEvent) => void
+}
+
+function AlbumPickerContent(props: AlbumPickerContentProps) {
+  if (props.isLoading)
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    )
+  return (
+    <>
+      {props.errorMessage && (
+        <p role="alert" className="mb-3 text-sm text-destructive">
+          {props.errorMessage}
+        </p>
+      )}
+      {props.albums && props.albums.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {props.albums.map((album) => (
+            <button
+              key={album.id}
+              onClick={() => props.onAlbumSelect(album.id)}
+              disabled={props.isProcessing}
+              className={cn(
+                'flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors',
+                'hover:bg-muted disabled:opacity-50'
+              )}
+            >
+              <Folder className="h-5 w-5 text-primary" />
+              <span className="flex-1 font-medium">{album.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {!props.showNewAlbum ? (
+        <button
+          onClick={props.onShowNewAlbum}
+          className="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-lg px-4 py-3 text-left font-medium text-primary transition-colors hover:bg-muted"
+        >
+          <Plus className="h-5 w-5" />
+          Create new album
+        </button>
+      ) : (
+        <form onSubmit={props.onCreate} className="space-y-3">
+          <input
+            type="text"
+            value={props.newAlbumName}
+            onChange={(event) => props.onNameChange(event.target.value)}
+            placeholder="Album name"
+            aria-label="Album name"
+            autoFocus
+            className="w-full rounded-lg border border-border bg-muted px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={props.onHideNewAlbum}
+              className="min-h-11 cursor-pointer px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!props.newAlbumName.trim() || props.isProcessing}
+              className="min-h-11 cursor-pointer rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Create & Add
+            </button>
+          </div>
+        </form>
+      )}
+    </>
+  )
 }
 
 export default function AddToAlbumModal({ mediaIds, onClose }: AddToAlbumModalProps) {
@@ -15,27 +104,23 @@ export default function AddToAlbumModal({ mediaIds, onClose }: AddToAlbumModalPr
   const [showNewAlbum, setShowNewAlbum] = useState(false)
 
   const { data: albums, isLoading } = useQuery({
-    queryKey: ['albums'],
+    queryKey: queryKeys.albums.all,
     queryFn: albumsApi.list,
   })
 
   const addMutation = useMutation({
     mutationFn: (albumId: number) => albumsApi.addMedia(albumId, mediaIds),
     onSuccess: (_, albumId) => {
-      void queryClient.invalidateQueries({ queryKey: ['albums'] })
-      void queryClient.invalidateQueries({ queryKey: ['album', albumId] })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.albums.all })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.albums.detail(albumId) })
       onClose()
     },
   })
 
   const createMutation = useMutation({
-    mutationFn: async () => {
-      const album = await albumsApi.create({ name: newAlbumName })
-      await albumsApi.addMedia(album.id, mediaIds)
-      return album
-    },
+    mutationFn: () => albumsApi.create({ name: newAlbumName.trim(), mediaIds }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['albums'] })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.albums.all })
       onClose()
     },
   })
@@ -62,7 +147,9 @@ export default function AddToAlbumModal({ mediaIds, onClose }: AddToAlbumModalPr
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-      onClick={() => { if (!isProcessing) onClose() }}
+      onClick={() => {
+        if (!isProcessing) onClose()
+      }}
     >
       <div
         role="dialog"
@@ -73,7 +160,9 @@ export default function AddToAlbumModal({ mediaIds, onClose }: AddToAlbumModalPr
       >
         <div className="flex items-center justify-between p-4 border-b border-border">
           <div>
-            <h2 id="add-to-album-title" className="text-lg font-semibold">Add to album</h2>
+            <h2 id="add-to-album-title" className="text-lg font-semibold">
+              Add to album
+            </h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {mediaIds.length} selected item{mediaIds.length === 1 ? '' : 's'}
             </p>
@@ -88,72 +177,20 @@ export default function AddToAlbumModal({ mediaIds, onClose }: AddToAlbumModalPr
           </button>
         </div>
 
-        <div className="p-4 max-h-80 overflow-y-auto">
-          {errorMessage && <p role="alert" className="mb-3 text-sm text-destructive">{errorMessage}</p>}
-          {isLoading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
-            <>
-              {albums && albums.length > 0 && (
-                <div className="space-y-2 mb-4">
-                  {albums.map((album) => (
-                    <button
-                      key={album.id}
-                      onClick={() => handleAddToAlbum(album.id)}
-                      disabled={isProcessing}
-                      className={cn(
-                        "w-full min-h-11 cursor-pointer flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors duration-200",
-                        "hover:bg-muted disabled:opacity-50"
-                      )}
-                    >
-                      <Folder className="w-5 h-5 text-primary" />
-                      <span className="flex-1 font-medium">{album.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {!showNewAlbum ? (
-                <button
-                  onClick={() => setShowNewAlbum(true)}
-                  className="w-full min-h-11 cursor-pointer flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors duration-200 hover:bg-muted text-primary"
-                >
-                  <Plus className="w-5 h-5" />
-                  <span className="font-medium">Create new album</span>
-                </button>
-              ) : (
-                <form onSubmit={handleCreateAndAdd} className="space-y-3">
-                  <input
-                    type="text"
-                    value={newAlbumName}
-                    onChange={(e) => setNewAlbumName(e.target.value)}
-                    placeholder="Album name"
-                    aria-label="Album name"
-                    autoFocus
-                    className="w-full px-4 py-2 bg-muted border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
-                  />
-                  <div className="flex gap-2 justify-end">
-                    <button
-                      type="button"
-                      onClick={() => setShowNewAlbum(false)}
-                      className="min-h-11 cursor-pointer px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors duration-200"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={!newAlbumName.trim() || isProcessing}
-                      className="min-h-11 cursor-pointer px-4 py-2 bg-primary text-primary-foreground text-sm font-semibold rounded-lg hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Create & Add
-                    </button>
-                  </div>
-                </form>
-              )}
-            </>
-          )}
+        <div className="max-h-80 overflow-y-auto p-4">
+          <AlbumPickerContent
+            albums={albums}
+            isLoading={isLoading}
+            isProcessing={isProcessing}
+            errorMessage={errorMessage}
+            showNewAlbum={showNewAlbum}
+            newAlbumName={newAlbumName}
+            onAlbumSelect={handleAddToAlbum}
+            onShowNewAlbum={() => setShowNewAlbum(true)}
+            onHideNewAlbum={() => setShowNewAlbum(false)}
+            onNameChange={setNewAlbumName}
+            onCreate={handleCreateAndAdd}
+          />
         </div>
       </div>
     </div>

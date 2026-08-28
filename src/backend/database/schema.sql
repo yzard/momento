@@ -659,6 +659,9 @@ CREATE INDEX IF NOT EXISTS idx_share_token
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
     ON refresh_tokens (user_id, revoked);
 
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_cleanup
+    ON refresh_tokens (revoked, expires_at);
+
 CREATE INDEX IF NOT EXISTS idx_media_access_user_deleted
     ON media_access (user_id, deleted_at)
     WHERE deleted_at IS NOT NULL;

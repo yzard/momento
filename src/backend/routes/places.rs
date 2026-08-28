@@ -10,12 +10,10 @@ use crate::constants::paths;
 use crate::database::{fetch_all, fetch_one, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    PlaceGetRequest, PlaceGetResponse, PlaceSummary, PlaceThumbnailRequest, PlaceThumbnailResponse,
-    PlacesListRequest, PlacesListResponse,
+    map_media_response, PlaceGetRequest, PlaceGetResponse, PlaceSummary, PlaceThumbnailRequest,
+    PlaceThumbnailResponse, PlacesListRequest, PlacesListResponse,
 };
 use crate::utils::path::resolve_existing_storage_path;
-
-use super::media::map_media_row;
 
 const MAX_PAGE_LIMIT: i64 = 200;
 
@@ -142,7 +140,7 @@ async fn get_place(
             &(request.limit + 1),
             &offset,
         ],
-        map_media_row,
+        map_media_response,
     )?;
     let has_more = media.len() > request.limit as usize;
     media.truncate(request.limit as usize);

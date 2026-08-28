@@ -10,7 +10,9 @@ const testLocalStorage = {
   setItem: (key: string, value: string) => storedValues.set(key, value),
 }
 
-vi.mock('../../src/frontend/context/AuthContext', () => ({ AuthProvider: ({ children }: { children: React.ReactNode }) => children }))
+vi.mock('../../src/frontend/context/AuthContext', () => ({
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+}))
 vi.mock('../../src/frontend/hooks/useAuth', () => ({
   useAuth: () => ({
     user: { id: 1, username: 'user', role: 'user' },
@@ -19,10 +21,22 @@ vi.mock('../../src/frontend/hooks/useAuth', () => ({
     logout: vi.fn(),
   }),
 }))
-vi.mock('../../src/frontend/pages/Places', () => ({ default: () => <div>Places route</div> }))
+vi.mock('../../src/frontend/pages/Places', () => ({
+  default: () => <div>Places route</div>,
+}))
 vi.mock('../../src/frontend/pages/Timeline', () => ({
-  default: ({ mediaType, classification }: { mediaType: string | null; classification: string | null }) => (
-    <div data-testid="timeline-route" data-media-type={mediaType ?? 'all'} data-classification={classification ?? 'all'} />
+  default: ({
+    mediaType,
+    classification,
+  }: {
+    mediaType: string | null
+    classification: string | null
+  }) => (
+    <div
+      data-testid="timeline-route"
+      data-media-type={mediaType ?? 'all'}
+      data-classification={classification ?? 'all'}
+    />
   ),
 }))
 
@@ -42,7 +56,11 @@ afterEach(() => {
 
 describe('App Places routes', () => {
   it.each(['/places', '/places/paris-france'])('renders Places at %s', async (path) => {
-    render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    )
     expect(await screen.findByText('Places route')).toBeTruthy()
   })
 })
@@ -53,7 +71,11 @@ describe('App timeline routes', () => {
     ['/timeline/documents', 'image', 'document'],
     ['/timeline/photos', 'image', 'all'],
   ])('renders the timeline filters for %s', async (path, mediaType, classification) => {
-    render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>)
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    )
 
     const timeline = await screen.findByTestId('timeline-route')
     expect(timeline.getAttribute('data-media-type')).toBe(mediaType)
@@ -61,7 +83,11 @@ describe('App timeline routes', () => {
   })
 
   it('redirects the retired admin route to account settings', async () => {
-    render(<MemoryRouter initialEntries={['/admin']}><App /></MemoryRouter>)
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <App />
+      </MemoryRouter>
+    )
 
     expect(await screen.findByRole('heading', { name: 'Account Settings' })).toBeTruthy()
   })
@@ -71,7 +97,11 @@ describe('App theme routes', () => {
   it('applies a stored dark theme to the login route', async () => {
     localStorage.setItem('momento-theme', 'dark')
 
-    render(<MemoryRouter initialEntries={['/login']}><App /></MemoryRouter>)
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <App />
+      </MemoryRouter>
+    )
 
     expect(await screen.findByRole('heading', { name: 'Sign In' })).toBeTruthy()
     expect(document.documentElement.classList.contains('dark')).toBe(true)

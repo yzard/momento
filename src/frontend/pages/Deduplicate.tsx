@@ -1,21 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import {
-  AlertCircle,
-  Check,
-  ImageOff,
-  Loader2,
-  Play,
-  Square,
-  Trash2,
-} from 'lucide-react'
+import { AlertCircle, Check, ImageOff, Loader2, Play, Square, Trash2 } from 'lucide-react'
 import { duplicatesApi, type DuplicateGroup } from '../api/duplicates'
 import { mediaApi } from '../api/media'
 import type { Media } from '../api/types'
-import Lightbox from '../components/viewer/Lightbox'
+import PageState from '../components/common/PageState'
+import ManagedLightbox from '../components/viewer/ManagedLightbox'
+import ConfirmationDialog from '../components/common/ConfirmationDialog'
 import { useAuth } from '../hooks/useAuth'
+import { useInfiniteScroll } from '../hooks/useInfiniteScroll'
 import { cn } from '../lib/utils'
+import { invalidateMediaConsumers, queryKeys } from '../lib/queryKeys'
 import { batchLoader } from '../utils/batcher'
+import { useLazyImage } from '../hooks/useLazyImage'
+import { useLightbox } from '../hooks/useLightbox'
 
 const GROUP_PAGE_SIZE = 20
 const originalFilenameCollator = new Intl.Collator(undefined, {
@@ -36,211 +34,291 @@ function formatDimensions(media: Media): string {
 }
 
 function sortByOriginalFilename(mediaItems: Media[]): Media[] {
-  return [...mediaItems].sort((left, right) =>
-    originalFilenameCollator.compare(left.originalFilename, right.originalFilename) || left.id - right.id)
+  return [...mediaItems].sort(
+    (left, right) =>
+      originalFilenameCollator.compare(left.originalFilename, right.originalFilename) ||
+      left.id - right.id
+  )
+}
+
+function toggleMediaId(currentIds: Set<number>, mediaId: number): Set<number> {
+  const nextIds = new Set(currentIds)
+  if (nextIds.has(mediaId)) nextIds.delete(mediaId)
+  else nextIds.add(mediaId)
+  return nextIds
+}
+
+interface DuplicateGroupsContentProps {
+  groups: DuplicateGroup[]
+  isLoading: boolean
+  isError: boolean
+  hasNextPage: boolean
+  isFetchNextPageError: boolean
+  isFetchingNextPage: boolean
+  loadMoreRef: RefObject<HTMLDivElement>
+  selectedIds: Set<number>
+  onRetry: () => void
+  onLoadMore: () => void
+  onToggle: (mediaId: number) => void
+  onInspect: (media: Media, groupItems: Media[]) => void
+}
+
+function DuplicateGroupsContent(props: DuplicateGroupsContentProps) {
+  if (props.isLoading) {
+    return (
+      <PageState
+        icon={<Loader2 className="h-9 w-9 animate-spin text-primary" />}
+        title="Loading duplicate groups"
+        description="Checking your accessible media..."
+      />
+    )
+  }
+  if (props.isError) {
+    return (
+      <PageState
+        icon={<AlertCircle className="h-9 w-9 text-destructive" />}
+        title="Unable to load duplicate groups"
+        description="Try the request again. Existing media has not been changed."
+        action={
+          <button
+            type="button"
+            onClick={props.onRetry}
+            className="min-h-11 rounded-lg bg-foreground px-5 py-2 text-sm font-bold text-background hover:bg-foreground/90"
+          >
+            Try again
+          </button>
+        }
+      />
+    )
+  }
+  if (props.groups.length === 0) {
+    return (
+      <PageState
+        icon={<ImageOff className="h-10 w-10 text-muted-foreground/60" />}
+        title="No duplicate groups"
+        description="No similar media is currently available in your library."
+      />
+    )
+  }
+
+  return (
+    <div className="space-y-8">
+      {props.groups.map((group) => (
+        <DuplicateGroupSection
+          key={group.clusterId}
+          group={group}
+          selectedIds={props.selectedIds}
+          onToggle={props.onToggle}
+          onInspect={props.onInspect}
+        />
+      ))}
+      {(props.hasNextPage || props.isFetchNextPageError) && (
+        <div
+          ref={props.loadMoreRef}
+          className="flex min-h-11 justify-center pt-2"
+          role="status"
+          aria-live="polite"
+        >
+          {props.isFetchNextPageError ? (
+            <button
+              type="button"
+              onClick={props.onLoadMore}
+              className="min-h-11 rounded-lg border border-border bg-card px-6 py-2.5 text-sm font-bold text-foreground shadow-sm transition-colors hover:bg-muted/40"
+            >
+              Retry loading groups
+            </button>
+          ) : props.isFetchingNextPage ? (
+            <span className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading more groups...
+            </span>
+          ) : (
+            <span className="sr-only">More groups load automatically while scrolling</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+interface DeduplicateSelectionBarProps {
+  selectedCount: number
+  isPending: boolean
+  onClear: () => void
+  onMoveToTrash: () => void
+}
+
+function DeduplicateSelectionBar(props: DeduplicateSelectionBarProps) {
+  if (props.selectedCount === 0) return null
+  return (
+    <div className="sticky bottom-4 z-30 mt-8 flex flex-col gap-3 rounded-xl border border-border bg-background/95 p-3 shadow-xl backdrop-blur-md sm:flex-row sm:items-center sm:justify-between sm:p-4">
+      <div className="px-1">
+        <p className="font-bold text-foreground">{props.selectedCount} selected</p>
+        <p className="text-xs text-muted-foreground">Only selected media will be moved.</p>
+      </div>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={props.onClear}
+          disabled={props.isPending}
+          className="min-h-11 flex-1 rounded-lg px-4 py-2 text-sm font-bold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 sm:flex-none"
+        >
+          Clear
+        </button>
+        <button
+          type="button"
+          onClick={props.onMoveToTrash}
+          disabled={props.isPending}
+          className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-destructive px-5 py-2 text-sm font-bold text-destructive-foreground transition-colors hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
+        >
+          {props.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Trash2 className="h-4 w-4" />
+          )}
+          {props.isPending ? 'Moving...' : 'Move to Trash'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function DeduplicateTotals({
+  totalGroups,
+  totalMedia,
+}: {
+  totalGroups: number
+  totalMedia: number
+}) {
+  return (
+    <div
+      className="mb-8 flex flex-wrap gap-3 text-sm text-muted-foreground"
+      aria-label="Deduplicate totals"
+    >
+      <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
+        Total {totalGroups} Similar Groups
+      </span>
+      <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
+        Total {totalMedia} Media
+      </span>
+    </div>
+  )
 }
 
 export default function Deduplicate() {
   const { user } = useAuth()
   const queryClient = useQueryClient()
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [viewer, setViewer] = useState<{ mediaIds: number[]; currentIndex: number } | null>(null)
+  const [showTrashConfirmation, setShowTrashConfirmation] = useState(false)
+  const lightbox = useLightbox()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const loadMoreRef = useRef<HTMLDivElement>(null)
-  const closeViewer = useCallback(() => setViewer(null), [])
-  const changeViewerIndex = useCallback((currentIndex: number) => {
-    setViewer((current) => current ? { ...current, currentIndex } : null)
-  }, [])
 
   const groupsQuery = useInfiniteQuery({
-    queryKey: ['duplicates', 'list', user?.id],
+    queryKey: queryKeys.duplicates.list(user?.id),
     queryFn: ({ pageParam }) => duplicatesApi.list({ cursor: pageParam, limit: GROUP_PAGE_SIZE }),
     initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.hasMore && lastPage.nextCursor
-      ? lastPage.nextCursor
-      : undefined,
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore && lastPage.nextCursor ? lastPage.nextCursor : undefined,
   })
-  const {
-    fetchNextPage,
-    hasNextPage,
-    isFetchNextPageError,
-    isFetchingNextPage,
-  } = groupsQuery
+  const { fetchNextPage, hasNextPage, isFetchNextPageError, isFetchingNextPage } = groupsQuery
 
-  useEffect(() => {
-    const target = loadMoreRef.current
-    const root = scrollContainerRef.current
-    if (!target || !root || !hasNextPage || isFetchNextPageError) return
-
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries[0]?.isIntersecting || isFetchingNextPage) return
-      void fetchNextPage()
-    }, { root, rootMargin: '0px 0px 320px 0px' })
-    observer.observe(target)
-    return () => observer.disconnect()
-  }, [
-    fetchNextPage,
+  useInfiniteScroll({
+    scrollContainerRef,
+    loadMoreRef,
     hasNextPage,
-    isFetchNextPageError,
     isFetchingNextPage,
-  ])
+    isFetchNextPageError,
+    fetchNextPage,
+  })
 
   const trashMutation = useMutation({
     mutationFn: (mediaIds: number[]) => mediaApi.delete(mediaIds),
     onSuccess: () => {
       setSelectedIds(new Set())
-      queryClient.invalidateQueries({ queryKey: ['duplicates', 'list'] })
-      queryClient.invalidateQueries({ queryKey: ['timeline'] })
-      queryClient.invalidateQueries({ queryKey: ['media'] })
-      queryClient.invalidateQueries({ queryKey: ['mapMedia'] })
-      queryClient.invalidateQueries({ queryKey: ['map-clusters'] })
-      queryClient.invalidateQueries({ queryKey: ['trash'] })
-      queryClient.invalidateQueries({ queryKey: ['albums'] })
-      queryClient.invalidateQueries({ queryKey: ['album'] })
+      setShowTrashConfirmation(false)
+      void invalidateMediaConsumers(queryClient)
     },
+    onError: () => setShowTrashConfirmation(false),
   })
 
   const groups = groupsQuery.data?.pages.flatMap((page) => page.groups) ?? []
   const totals = groupsQuery.data?.pages[0]
 
   const toggleSelection = (mediaId: number) => {
-    setSelectedIds((currentIds) => {
-      const nextIds = new Set(currentIds)
-      if (nextIds.has(mediaId)) {
-        nextIds.delete(mediaId)
-      } else {
-        nextIds.add(mediaId)
-      }
-      return nextIds
-    })
+    setSelectedIds((currentIds) => toggleMediaId(currentIds, mediaId))
   }
 
   const handleMoveToTrash = () => {
     if (selectedIds.size === 0) return
-    const confirmed = window.confirm(
-      `Move ${selectedIds.size} selected ${selectedIds.size === 1 ? 'item' : 'items'} to Trash?`,
-    )
-    if (!confirmed) return
     trashMutation.mutate(Array.from(selectedIds))
   }
 
   const handleInspect = (media: Media, groupItems: Media[]) => {
-    const currentIndex = groupItems.findIndex((item) => item.id === media.id)
-    setViewer({
-      mediaIds: groupItems.map((item) => item.id),
-      currentIndex: currentIndex >= 0 ? currentIndex : 0,
-    })
+    lightbox.open(
+      media.id,
+      groupItems.map((item) => item.id)
+    )
   }
 
   return (
-    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+    <div
+      ref={scrollContainerRef}
+      className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent"
+    >
       <div className="container max-w-[1800px] mx-auto px-4 py-6 sm:px-6 md:px-10 md:py-10 animate-fade-in pb-28">
         {!groupsQuery.isLoading && !groupsQuery.isError && totals && (
-          <div className="mb-8 flex flex-wrap gap-3 text-sm text-muted-foreground" aria-label="Deduplicate totals">
-            <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
-              Total {totals.totalGroups} Similar Groups
-            </span>
-            <span className="rounded-lg border border-border bg-card px-3 py-2 font-medium">
-              Total {totals.totalMedia} Media
-            </span>
-          </div>
+          <DeduplicateTotals totalGroups={totals.totalGroups} totalMedia={totals.totalMedia} />
         )}
 
-        {groupsQuery.isLoading ? (
-          <PageState icon={<Loader2 className="h-9 w-9 animate-spin text-primary" />} title="Loading duplicate groups" description="Checking your accessible media..." />
-        ) : groupsQuery.isError ? (
-          <PageState
-            icon={<AlertCircle className="h-9 w-9 text-destructive" />}
-            title="Unable to load duplicate groups"
-            description="Try the request again. Existing media has not been changed."
-            action={(
-              <button type="button" onClick={() => groupsQuery.refetch()} className="min-h-11 rounded-lg bg-foreground px-5 py-2 text-sm font-bold text-background hover:bg-foreground/90">
-                Try again
-              </button>
-            )}
-          />
-        ) : groups.length === 0 ? (
-          <PageState
-            icon={<ImageOff className="h-10 w-10 text-muted-foreground/60" />}
-            title="No duplicate groups"
-            description="No similar media is currently available in your library."
-          />
-        ) : (
-          <div className="space-y-8">
-            {groups.map((group) => (
-              <DuplicateGroupSection
-                key={group.clusterId}
-                group={group}
-                selectedIds={selectedIds}
-                onToggle={toggleSelection}
-                onInspect={handleInspect}
-              />
-            ))}
-
-            {(hasNextPage || isFetchNextPageError) && (
-              <div ref={loadMoreRef} className="flex min-h-11 justify-center pt-2" role="status" aria-live="polite">
-                {isFetchNextPageError ? (
-                  <button
-                    type="button"
-                    onClick={() => fetchNextPage()}
-                    className="min-h-11 rounded-lg border border-border bg-card px-6 py-2.5 text-sm font-bold text-foreground shadow-sm transition-colors hover:bg-muted/40"
-                  >
-                    Retry loading groups
-                  </button>
-                ) : isFetchingNextPage ? (
-                  <span className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Loading more groups...
-                  </span>
-                ) : (
-                  <span className="sr-only">More groups load automatically while scrolling</span>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+        <DuplicateGroupsContent
+          groups={groups}
+          isLoading={groupsQuery.isLoading}
+          isError={groupsQuery.isError}
+          hasNextPage={hasNextPage}
+          isFetchNextPageError={isFetchNextPageError}
+          isFetchingNextPage={isFetchingNextPage}
+          loadMoreRef={loadMoreRef}
+          selectedIds={selectedIds}
+          onRetry={() => {
+            void groupsQuery.refetch()
+          }}
+          onLoadMore={() => {
+            void fetchNextPage()
+          }}
+          onToggle={toggleSelection}
+          onInspect={handleInspect}
+        />
 
         {trashMutation.isError && (
-          <div role="alert" className="mt-6 flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-4 text-sm text-destructive">
+          <div
+            role="alert"
+            className="mt-6 flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-4 text-sm text-destructive"
+          >
             <AlertCircle className="h-4 w-4 shrink-0" />
             Failed to move the selected media to Trash. Nothing was removed from this view.
           </div>
         )}
 
-        {selectedIds.size > 0 && !groupsQuery.isFetching && (
-          <div className="sticky bottom-4 z-30 mt-8 flex flex-col gap-3 rounded-xl border border-border bg-background/95 p-3 shadow-xl backdrop-blur-md sm:flex-row sm:items-center sm:justify-between sm:p-4">
-            <div className="px-1">
-              <p className="font-bold text-foreground">{selectedIds.size} selected</p>
-              <p className="text-xs text-muted-foreground">Only selected media will be moved.</p>
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setSelectedIds(new Set())}
-                disabled={trashMutation.isPending}
-                className="min-h-11 flex-1 rounded-lg px-4 py-2 text-sm font-bold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 sm:flex-none"
-              >
-                Clear
-              </button>
-              <button
-                type="button"
-                onClick={handleMoveToTrash}
-                disabled={trashMutation.isPending}
-                className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-destructive px-5 py-2 text-sm font-bold text-destructive-foreground transition-colors hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
-              >
-                {trashMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                {trashMutation.isPending ? 'Moving...' : 'Move to Trash'}
-              </button>
-            </div>
-          </div>
+        {!groupsQuery.isFetching && (
+          <DeduplicateSelectionBar
+            selectedCount={selectedIds.size}
+            isPending={trashMutation.isPending}
+            onClear={() => setSelectedIds(new Set())}
+            onMoveToTrash={() => setShowTrashConfirmation(true)}
+          />
         )}
       </div>
-      {viewer && (
-        <Lightbox
-          mediaIds={viewer.mediaIds}
-          currentIndex={viewer.currentIndex}
-          onClose={closeViewer}
-          onIndexChange={changeViewerIndex}
+      <ManagedLightbox controller={lightbox} />
+      {showTrashConfirmation && (
+        <ConfirmationDialog
+          title={`Move ${selectedIds.size} selected item${selectedIds.size === 1 ? '' : 's'} to Trash?`}
+          description="The selected media will leave the duplicate groups and remain recoverable from Trash."
+          confirmLabel="Move to Trash"
+          isProcessing={trashMutation.isPending}
+          destructive
+          onConfirm={handleMoveToTrash}
+          onCancel={() => setShowTrashConfirmation(false)}
         />
       )}
     </div>
@@ -254,15 +332,26 @@ interface DuplicateGroupSectionProps {
   onInspect: (media: Media, groupItems: Media[]) => void
 }
 
-function DuplicateGroupSection({ group, selectedIds, onToggle, onInspect }: DuplicateGroupSectionProps) {
+function DuplicateGroupSection({
+  group,
+  selectedIds,
+  onToggle,
+  onInspect,
+}: DuplicateGroupSectionProps) {
   const sortedItems = sortByOriginalFilename(group.items)
   const selectedCount = sortedItems.filter((media) => selectedIds.has(media.id)).length
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm" aria-labelledby={`duplicate-group-${group.clusterId}`}>
+    <section
+      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
+      aria-labelledby={`duplicate-group-${group.clusterId}`}
+    >
       <div className="flex items-center justify-between gap-4 border-b border-border bg-muted/20 px-4 py-4 sm:px-6">
         <div>
-          <h2 id={`duplicate-group-${group.clusterId}`} className="font-display text-lg font-semibold text-foreground">
+          <h2
+            id={`duplicate-group-${group.clusterId}`}
+            className="font-display text-lg font-semibold text-foreground"
+          >
             Similar group {group.clusterId}
           </h2>
           <p className="mt-0.5 text-xs font-medium text-muted-foreground">
@@ -298,38 +387,21 @@ interface DuplicateMediaCardProps {
 }
 
 function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateMediaCardProps) {
-  const cardRef = useRef<HTMLDivElement>(null)
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => mediaApi.getCachedThumbnailUrl(media.id) ?? null)
-
-  useEffect(() => {
-    if (thumbnailUrl || !cardRef.current) return
-    let cancelled = false
-
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries[0]?.isIntersecting) return
-      observer.disconnect()
-      batchLoader.load(media.id)
-        .then((url) => {
-          if (!cancelled && url) setThumbnailUrl(url)
-        })
-        .catch(() => {
-          console.error(`Failed to load thumbnail for media ${media.id}`)
-        })
-    }, { rootMargin: '300px' })
-
-    observer.observe(cardRef.current)
-    return () => {
-      cancelled = true
-      observer.disconnect()
-    }
-  }, [media.id, thumbnailUrl])
+  const { targetRef: cardRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
+    resourceId: media.id,
+    loader: batchLoader,
+    getCachedUrl: (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal'),
+    rootMargin: '400px',
+  })
 
   return (
     <div
       ref={cardRef}
       className={cn(
         'group relative min-h-11 overflow-hidden rounded-lg border bg-background text-left transition-all focus-visible:ring-offset-2',
-        selected ? 'border-primary ring-2 ring-primary' : 'border-border hover:border-primary/50 hover:shadow-md',
+        selected
+          ? 'border-primary ring-2 ring-primary'
+          : 'border-border hover:border-primary/50 hover:shadow-md'
       )}
     >
       <button
@@ -340,7 +412,11 @@ function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateM
       >
         <div className="relative aspect-square overflow-hidden bg-muted">
           {thumbnailUrl ? (
-            <img src={thumbnailUrl} alt="" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+            <img
+              src={thumbnailUrl}
+              alt=""
+              className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+            />
           ) : (
             <div className="h-full w-full animate-pulse bg-muted" aria-hidden="true" />
           )}
@@ -351,8 +427,12 @@ function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateM
           )}
         </div>
         <div className="space-y-1 p-3">
-          <p className="truncate text-xs font-bold text-foreground" title={media.originalFilename}>{media.originalFilename}</p>
-          <p className="truncate text-[11px] font-medium text-muted-foreground">{formatFileSize(media.fileSize)}</p>
+          <p className="truncate text-xs font-bold text-foreground" title={media.originalFilename}>
+            {media.originalFilename}
+          </p>
+          <p className="truncate text-[11px] font-medium text-muted-foreground">
+            {formatFileSize(media.fileSize)}
+          </p>
           <p className="truncate text-[11px] text-muted-foreground">{formatDimensions(media)}</p>
         </div>
       </button>
@@ -363,31 +443,13 @@ function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateM
         onClick={onToggle}
         className={cn(
           'absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-md border-2 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2',
-          selected ? 'border-primary bg-primary text-primary-foreground' : 'border-white/80 bg-black/40 text-white hover:bg-black/60',
+          selected
+            ? 'border-primary bg-primary text-primary-foreground'
+            : 'border-white/80 bg-black/40 text-white hover:bg-black/60'
         )}
       >
         {selected ? <Check className="h-4 w-4" /> : <Square className="h-3.5 w-3.5" />}
       </button>
-    </div>
-  )
-}
-
-interface PageStateProps {
-  icon: React.ReactNode
-  title: string
-  description: string
-  action?: React.ReactNode
-}
-
-function PageState({ icon, title, description, action }: PageStateProps) {
-  return (
-    <div className="flex min-h-[360px] flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/10 px-6 py-16 text-center">
-      <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-border bg-background shadow-sm">
-        {icon}
-      </div>
-      <h2 className="font-display text-xl font-semibold text-foreground">{title}</h2>
-      <p className="mt-2 max-w-md text-sm text-muted-foreground">{description}</p>
-      {action && <div className="mt-6">{action}</div>}
     </div>
   )
 }

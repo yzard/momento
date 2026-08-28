@@ -28,9 +28,9 @@ export function useMediaSelection() {
   }, [])
 
   const toggleSelection = useCallback((mediaId: number) => {
-    setSelectedMediaIds((currentSelectedMediaIds) => (
+    setSelectedMediaIds((currentSelectedMediaIds) =>
       toggleSelectedMediaId(currentSelectedMediaIds, mediaId)
-    ))
+    )
   }, [])
 
   return {

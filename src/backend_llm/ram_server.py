@@ -11,8 +11,6 @@ import torch
 
 warnings.filterwarnings("ignore", category=FutureWarning, module=r"fairscale\..*")
 
-from ram import get_transform, inference_ram
-from ram.models import ram_plus
 from image_runtime import (
     InvalidImageError,
     ModelHTTPServer,
@@ -21,6 +19,8 @@ from image_runtime import (
     register_image_decoders,
     serve_until_stopped,
 )
+from ram import get_transform, inference_ram
+from ram.models import ram_plus
 from runtime_input import read_runtime_input
 
 

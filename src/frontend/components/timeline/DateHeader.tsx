@@ -45,7 +45,9 @@ export default function DateHeader({ date, count, groupBy }: DateHeaderProps) {
         {formatDate(date, groupBy)}
       </h3>
       <div className="h-px flex-1 bg-border/40"></div>
-      <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider bg-muted/50 px-2.5 py-1 rounded-full border border-border/50">{count} items</span>
+      <span className="text-xs font-bold text-muted-foreground uppercase tracking-wider bg-muted/50 px-2.5 py-1 rounded-full border border-border/50">
+        {count} items
+      </span>
     </div>
   )
 }

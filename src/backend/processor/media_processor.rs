@@ -4,6 +4,7 @@ use geohash::{encode, Coord};
 use std::fs;
 use std::path::Path;
 
+use crate::config::MediaProcessConfig;
 use crate::constants::paths;
 use crate::database::{queries, DbConn};
 use crate::processor::metadata::{
@@ -57,11 +58,12 @@ pub struct CompleteMediaMetadata {
 pub async fn generate_complete_metadata(
     source_path: &Path,
     media_type: &str,
+    process_config: &MediaProcessConfig,
 ) -> CompleteMediaMetadata {
     let mut extracted = if media_type == "image" {
-        extract_image_metadata(source_path).await
+        extract_image_metadata(source_path, process_config).await
     } else {
-        extract_video_metadata(source_path).await
+        extract_video_metadata(source_path, process_config).await
     };
 
     if let Some(supplemental_metadata) = load_supplemental_metadata(source_path) {

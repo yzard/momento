@@ -4,6 +4,7 @@ mod settings;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
@@ -87,6 +88,20 @@ pub struct SecurityConfig {
     pub media_access_ticket_expire_hours: i64,
     #[serde(default = "defaults::share_session_expire_hours")]
     pub share_session_expire_hours: i64,
+    #[serde(default = "defaults::password_attempt_window_seconds")]
+    pub password_attempt_window_seconds: u64,
+    #[serde(default = "defaults::password_attempts_per_identity")]
+    pub password_attempts_per_identity: u32,
+    #[serde(default = "defaults::password_attempts_per_source")]
+    pub password_attempts_per_source: u32,
+    #[serde(default = "defaults::password_lockout_seconds")]
+    pub password_lockout_seconds: u64,
+    #[serde(default = "defaults::password_hash_max_concurrent")]
+    pub password_hash_max_concurrent: usize,
+    #[serde(default = "defaults::trusted_proxy_ip_addresses")]
+    pub trusted_proxy_ip_addresses: Vec<IpAddr>,
+    #[serde(default = "defaults::refresh_token_cleanup_interval_seconds")]
+    pub refresh_token_cleanup_interval_seconds: u64,
 }
 
 impl Default for SecurityConfig {
@@ -97,6 +112,14 @@ impl Default for SecurityConfig {
             refresh_token_expire_days: defaults::REFRESH_TOKEN_EXPIRE_DAYS,
             media_access_ticket_expire_hours: defaults::MEDIA_ACCESS_TICKET_EXPIRE_HOURS,
             share_session_expire_hours: defaults::SHARE_SESSION_EXPIRE_HOURS,
+            password_attempt_window_seconds: defaults::PASSWORD_ATTEMPT_WINDOW_SECONDS,
+            password_attempts_per_identity: defaults::PASSWORD_ATTEMPTS_PER_IDENTITY,
+            password_attempts_per_source: defaults::PASSWORD_ATTEMPTS_PER_SOURCE,
+            password_lockout_seconds: defaults::PASSWORD_LOCKOUT_SECONDS,
+            password_hash_max_concurrent: defaults::PASSWORD_HASH_MAX_CONCURRENT,
+            trusted_proxy_ip_addresses: defaults::trusted_proxy_ip_addresses(),
+            refresh_token_cleanup_interval_seconds:
+                defaults::REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS,
         }
     }
 }
@@ -118,6 +141,17 @@ impl SecurityConfig {
         {
             return Err(std::io::Error::other(
                 "security media ticket and share session expirations must be within 1..=168 hours",
+            ));
+        }
+        if self.password_attempt_window_seconds == 0
+            || self.password_attempts_per_identity == 0
+            || self.password_attempts_per_source == 0
+            || self.password_lockout_seconds == 0
+            || self.password_hash_max_concurrent == 0
+            || self.refresh_token_cleanup_interval_seconds == 0
+        {
+            return Err(std::io::Error::other(
+                "security password limits and refresh-token cleanup interval must be positive",
             ));
         }
         Ok(())
@@ -265,6 +299,77 @@ impl Default for MetadataConfig {
             thumbnails_quality: defaults::fallback::THUMBNAILS_QUALITY,
             thumbnails_video_frame_quality: defaults::fallback::THUMBNAILS_VIDEO_FRAME_QUALITY,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaProcessConfig {
+    #[serde(default = "defaults::media_process_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "defaults::media_process_termination_grace_seconds")]
+    pub termination_grace_seconds: u64,
+    #[serde(default = "defaults::media_process_maximum_stderr_bytes")]
+    pub maximum_stderr_bytes: usize,
+    #[serde(default = "defaults::media_process_maximum_metadata_output_bytes")]
+    pub maximum_metadata_output_bytes: usize,
+    #[serde(default = "defaults::media_process_maximum_normalized_image_output_bytes")]
+    pub maximum_normalized_image_output_bytes: usize,
+    #[serde(default = "defaults::media_process_maximum_decoded_image_pixels")]
+    pub maximum_decoded_image_pixels: u64,
+    #[serde(default = "defaults::imagemagick_memory_limit_mebibytes")]
+    pub imagemagick_memory_limit_mebibytes: u64,
+    #[serde(default = "defaults::imagemagick_map_limit_mebibytes")]
+    pub imagemagick_map_limit_mebibytes: u64,
+    #[serde(default = "defaults::imagemagick_disk_limit_mebibytes")]
+    pub imagemagick_disk_limit_mebibytes: u64,
+    #[serde(default = "defaults::imagemagick_maximum_threads")]
+    pub imagemagick_maximum_threads: usize,
+}
+
+impl Default for MediaProcessConfig {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: defaults::MEDIA_PROCESS_TIMEOUT_SECONDS,
+            termination_grace_seconds: defaults::MEDIA_PROCESS_TERMINATION_GRACE_SECONDS,
+            maximum_stderr_bytes: defaults::MEDIA_PROCESS_MAXIMUM_STDERR_BYTES,
+            maximum_metadata_output_bytes: defaults::MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES,
+            maximum_normalized_image_output_bytes:
+                defaults::MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES,
+            maximum_decoded_image_pixels: defaults::MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS,
+            imagemagick_memory_limit_mebibytes: defaults::IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES,
+            imagemagick_map_limit_mebibytes: defaults::IMAGEMAGICK_MAP_LIMIT_MEBIBYTES,
+            imagemagick_disk_limit_mebibytes: defaults::IMAGEMAGICK_DISK_LIMIT_MEBIBYTES,
+            imagemagick_maximum_threads: defaults::IMAGEMAGICK_MAXIMUM_THREADS,
+        }
+    }
+}
+
+impl MediaProcessConfig {
+    fn validate(&self) -> std::io::Result<()> {
+        if self.timeout_seconds == 0
+            || self.termination_grace_seconds == 0
+            || self.maximum_stderr_bytes == 0
+            || self.maximum_metadata_output_bytes == 0
+            || self.maximum_normalized_image_output_bytes == 0
+            || self.maximum_decoded_image_pixels == 0
+            || self.imagemagick_memory_limit_mebibytes == 0
+            || self.imagemagick_map_limit_mebibytes == 0
+            || self.imagemagick_disk_limit_mebibytes == 0
+            || self.imagemagick_maximum_threads == 0
+        {
+            return Err(std::io::Error::other(
+                "media_process limits must all be positive",
+            ));
+        }
+        if self.imagemagick_memory_limit_mebibytes > self.imagemagick_map_limit_mebibytes
+            || self.imagemagick_map_limit_mebibytes > self.imagemagick_disk_limit_mebibytes
+        {
+            return Err(std::io::Error::other(
+                "media_process ImageMagick memory limit must not exceed map, and map must not exceed disk",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -534,6 +639,8 @@ pub struct Config {
     #[serde(default)]
     pub metadata: MetadataConfig,
     #[serde(default)]
+    pub media_process: MediaProcessConfig,
+    #[serde(default)]
     pub regenerate: RegenerateConfig,
     #[serde(default)]
     pub metadata_worker: MetadataWorkerConfig,
@@ -641,6 +748,7 @@ fn parse_config_contents(config_path: &Path, content: &str) -> std::io::Result<C
     config.security.validate()?;
     config.webdav.validate()?;
     config.backup.validate()?;
+    config.media_process.validate()?;
     config.llm.validate()?;
     config.face_group.validate()?;
     config.llm_submission_worker.validate()?;

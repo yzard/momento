@@ -15,8 +15,10 @@ function themeStorage(): Storage | null {
 }
 
 function storageUnavailable(error: unknown): boolean {
-  return error instanceof DOMException &&
+  return (
+    error instanceof DOMException &&
     (error.name === 'SecurityError' || error.name === 'QuotaExceededError')
+  )
 }
 
 export function parseThemePreference(value: string | null): ThemePreference {

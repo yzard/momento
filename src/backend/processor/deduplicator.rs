@@ -201,22 +201,24 @@ pub fn latest_run(pool: &DbPool) -> AppResult<Option<DeduplicateRunStatus>> {
         &connection,
         queries::deduplicate::SELECT_LATEST_RUN,
         &[],
-        |row| {
-            Ok(DeduplicateRunStatus {
-                id: row.get(0)?,
-                trigger: row.get(1)?,
-                status: row.get(2)?,
-                scheduled_for: row.get(3)?,
-                started_at: row.get(4)?,
-                completed_at: row.get(5)?,
-                indexed_media: row.get(6)?,
-                processed_media: row.get(7)?,
-                candidate_comparisons: row.get(8)?,
-                clusters_created: row.get(9)?,
-                error: row.get(10)?,
-            })
-        },
+        map_run_status,
     )
+}
+
+pub(crate) fn map_run_status(row: &rusqlite::Row) -> rusqlite::Result<DeduplicateRunStatus> {
+    Ok(DeduplicateRunStatus {
+        id: row.get(0)?,
+        trigger: row.get(1)?,
+        status: row.get(2)?,
+        scheduled_for: row.get(3)?,
+        started_at: row.get(4)?,
+        completed_at: row.get(5)?,
+        indexed_media: row.get(6)?,
+        processed_media: row.get(7)?,
+        candidate_comparisons: row.get(8)?,
+        clusters_created: row.get(9)?,
+        error: row.get(10)?,
+    })
 }
 
 pub fn request_cancel(pool: &DbPool) -> AppResult<bool> {

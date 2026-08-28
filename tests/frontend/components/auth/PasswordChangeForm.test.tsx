@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import ChangePassword from '../../../../src/frontend/components/auth/ChangePassword'
+import PasswordChangeForm from '../../../../src/frontend/components/auth/PasswordChangeForm'
 
 const mocks = vi.hoisted(() => ({ changePassword: vi.fn() }))
 
@@ -12,11 +12,11 @@ vi.mock('../../../../src/frontend/hooks/useAuth', () => ({
 
 beforeEach(() => mocks.changePassword.mockResolvedValue(undefined))
 
-describe('ChangePassword', () => {
+describe('PasswordChangeForm', () => {
   it('uses the session-ending password change operation', async () => {
     const user = userEvent.setup()
     const onComplete = vi.fn()
-    render(<ChangePassword onComplete={onComplete} />)
+    render(<PasswordChangeForm onComplete={onComplete} layout="modal" />)
 
     await user.type(screen.getByLabelText('Current Password'), 'old-password')
     await user.type(screen.getByLabelText('New Password'), 'new-password')

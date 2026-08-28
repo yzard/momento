@@ -47,27 +47,31 @@ describe('Lightbox', () => {
   it('does not let an old preview overwrite the newly selected media', async () => {
     const first = deferred<Map<number, string | null>>()
     const second = deferred<Map<number, string | null>>()
-    mocks.getPreviewBatch.mockImplementation(([id]: number[]) => (
+    mocks.getPreviewBatch.mockImplementation(([id]: number[]) =>
       id === 1 ? first.promise : second.promise
-    ))
+    )
     const view = render(
       <MemoryRouter>
         <Lightbox mediaIds={[1, 2]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
-      </MemoryRouter>,
+      </MemoryRouter>
     )
     await waitFor(() => expect(mocks.getPreviewBatch).toHaveBeenCalledWith([1]))
 
     view.rerender(
       <MemoryRouter>
         <Lightbox mediaIds={[1, 2]} currentIndex={1} onClose={vi.fn()} onIndexChange={vi.fn()} />
-      </MemoryRouter>,
+      </MemoryRouter>
     )
     await waitFor(() => expect(mocks.getPreviewBatch).toHaveBeenCalledWith([2]))
-    await act(async () => second.resolve(new Map([[2, 'second-preview']])) )
-    expect((await screen.findByRole('img', { name: 'second.jpg' })).getAttribute('src')).toBe('second-preview')
+    await act(async () => second.resolve(new Map([[2, 'second-preview']])))
+    expect((await screen.findByRole('img', { name: 'second.jpg' })).getAttribute('src')).toBe(
+      'second-preview'
+    )
 
-    await act(async () => first.resolve(new Map([[1, 'first-preview']])) )
-    expect(screen.getByRole('img', { name: 'second.jpg' }).getAttribute('src')).toBe('second-preview')
+    await act(async () => first.resolve(new Map([[1, 'first-preview']])))
+    expect(screen.getByRole('img', { name: 'second.jpg' }).getAttribute('src')).toBe(
+      'second-preview'
+    )
   })
 
   it('loads video through an asynchronous media access ticket', async () => {
@@ -78,11 +82,13 @@ describe('Lightbox', () => {
     const view = render(
       <MemoryRouter>
         <Lightbox mediaIds={[7]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
-      </MemoryRouter>,
+      </MemoryRouter>
     )
 
     await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(7))
-    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/7'))
+    await waitFor(() =>
+      expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/7')
+    )
   })
 
   it('restores video position after refreshing a failed stream ticket', async () => {
@@ -95,13 +101,17 @@ describe('Lightbox', () => {
     const view = render(
       <MemoryRouter>
         <Lightbox mediaIds={[8]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
-      </MemoryRouter>,
+      </MemoryRouter>
     )
-    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/8/first'))
+    await waitFor(() =>
+      expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/8/first')
+    )
     const firstVideo = view.container.querySelector('video') as HTMLVideoElement
     firstVideo.currentTime = 321
     fireEvent.error(firstVideo)
-    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/8/refreshed'))
+    await waitFor(() =>
+      expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/8/refreshed')
+    )
     const refreshedVideo = view.container.querySelector('video') as HTMLVideoElement
     fireEvent.loadedMetadata(refreshedVideo)
 

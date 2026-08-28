@@ -1,7 +1,11 @@
+use std::ffi::OsString;
 use std::path::Path;
-use std::process::Stdio;
-use tokio::process::Command;
 use tracing::error;
+
+use crate::config::MediaProcessConfig;
+use crate::utils::process::{
+    image_magick_resource_arguments, process_limits, validate_image_dimensions, ExternalProcess,
+};
 
 #[derive(Clone, Copy)]
 enum ImageVariant {
@@ -9,21 +13,38 @@ enum ImageVariant {
     AspectRatioPreview,
 }
 
-async fn run_command(command: &[String], _timeout_seconds: u64) -> bool {
-    match Command::new(&command[0]).args(&command[1..]).output().await {
+async fn run_command(
+    executable: &str,
+    arguments: Vec<OsString>,
+    maximum_stdout_bytes: usize,
+    process_config: &MediaProcessConfig,
+) -> bool {
+    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
+    match ExternalProcess::new(
+        executable,
+        arguments,
+        timeout,
+        termination_grace,
+        maximum_stdout_bytes,
+        maximum_stderr_bytes,
+    )
+    .run()
+    .await
+    {
         Ok(output) => {
             if !output.status.success() {
                 error!(
-                    "Command failed: {:?}\nStderr: {}",
-                    command,
-                    String::from_utf8_lossy(&output.stderr)
+                    executable,
+                    stderr = %output.stderr_text(),
+                    stderr_truncated = output.stderr_truncated,
+                    "Media command failed"
                 );
                 return false;
             }
             true
         }
-        Err(e) => {
-            error!("Failed to execute command {:?}: {}", command, e);
+        Err(error) => {
+            error!(executable, error = %error, "Failed to execute media command");
             false
         }
     }
@@ -34,6 +55,7 @@ pub async fn generate_image_thumbnail(
     output_path: &Path,
     max_size: u32,
     quality: u8,
+    process_config: &MediaProcessConfig,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
         if tokio::fs::create_dir_all(parent).await.is_err() {
@@ -47,6 +69,7 @@ pub async fn generate_image_thumbnail(
         max_size,
         quality,
         ImageVariant::CroppedThumbnail,
+        process_config,
     )
     .await
 }
@@ -57,6 +80,7 @@ pub async fn generate_video_thumbnail(
     max_size: u32,
     quality: u8,
     video_frame_quality: u8,
+    process_config: &MediaProcessConfig,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
         if tokio::fs::create_dir_all(parent).await.is_err() {
@@ -65,7 +89,14 @@ pub async fn generate_video_thumbnail(
     }
 
     let temp_frame = output_path.with_extension("temp.jpg");
-    if !extract_video_frame(source_path, &temp_frame, video_frame_quality).await {
+    if !extract_video_frame(
+        source_path,
+        &temp_frame,
+        video_frame_quality,
+        process_config,
+    )
+    .await
+    {
         error!(
             "Failed to extract video frame for thumbnail: {:?}",
             source_path
@@ -73,7 +104,9 @@ pub async fn generate_video_thumbnail(
         return false;
     }
 
-    let success = generate_montage_thumbnail(&temp_frame, output_path, max_size, quality).await;
+    let success =
+        generate_montage_thumbnail(&temp_frame, output_path, max_size, quality, process_config)
+            .await;
     if !success {
         error!("Failed to generate montage thumbnail: {:?}", output_path);
     }
@@ -88,6 +121,7 @@ pub async fn generate_image_preview(
     output_path: &Path,
     max_size: u32,
     quality: u8,
+    process_config: &MediaProcessConfig,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
         if tokio::fs::create_dir_all(parent).await.is_err() {
@@ -101,6 +135,7 @@ pub async fn generate_image_preview(
         max_size,
         quality,
         ImageVariant::AspectRatioPreview,
+        process_config,
     )
     .await
 }
@@ -111,6 +146,7 @@ pub async fn generate_video_preview(
     max_size: u32,
     quality: u8,
     video_frame_quality: u8,
+    process_config: &MediaProcessConfig,
 ) -> bool {
     if let Some(parent) = output_path.parent() {
         if tokio::fs::create_dir_all(parent).await.is_err() {
@@ -119,10 +155,24 @@ pub async fn generate_video_preview(
     }
 
     let temporary_frame = output_path.with_extension("temp.jpg");
-    if !extract_video_frame(source_path, &temporary_frame, video_frame_quality).await {
+    if !extract_video_frame(
+        source_path,
+        &temporary_frame,
+        video_frame_quality,
+        process_config,
+    )
+    .await
+    {
         return false;
     }
-    let generated = generate_image_preview(&temporary_frame, output_path, max_size, quality).await;
+    let generated = generate_image_preview(
+        &temporary_frame,
+        output_path,
+        max_size,
+        quality,
+        process_config,
+    )
+    .await;
     let _ = tokio::fs::remove_file(&temporary_frame).await;
     generated
 }
@@ -132,6 +182,7 @@ async fn generate_montage_thumbnail(
     output_path: &Path,
     max_size: u32,
     quality: u8,
+    process_config: &MediaProcessConfig,
 ) -> bool {
     generate_image_variant(
         source_path,
@@ -139,6 +190,7 @@ async fn generate_montage_thumbnail(
         max_size,
         quality,
         ImageVariant::CroppedThumbnail,
+        process_config,
     )
     .await
 }
@@ -149,14 +201,24 @@ async fn generate_image_variant_with_fallback(
     maximum_size: u32,
     quality: u8,
     variant: ImageVariant,
+    process_config: &MediaProcessConfig,
 ) -> bool {
-    if generate_image_variant(source_path, output_path, maximum_size, quality, variant).await {
+    if generate_image_variant(
+        source_path,
+        output_path,
+        maximum_size,
+        quality,
+        variant,
+        process_config,
+    )
+    .await
+    {
         return true;
     }
     let _ = tokio::fs::remove_file(output_path).await;
 
     let embedded_preview_path = output_path.with_extension("embedded-preview.jpg");
-    if !extract_embedded_image_preview(source_path, &embedded_preview_path).await {
+    if !extract_embedded_image_preview(source_path, &embedded_preview_path, process_config).await {
         return false;
     }
     let generated = generate_image_variant(
@@ -165,6 +227,7 @@ async fn generate_image_variant_with_fallback(
         maximum_size,
         quality,
         variant,
+        process_config,
     )
     .await;
     let _ = tokio::fs::remove_file(embedded_preview_path).await;
@@ -180,51 +243,77 @@ async fn generate_image_variant(
     maximum_size: u32,
     quality: u8,
     variant: ImageVariant,
+    process_config: &MediaProcessConfig,
 ) -> bool {
-    let source_input = format!("{}[0]", source_path.to_str().unwrap_or(""));
+    if let Err(error) = validate_image_dimensions(source_path, process_config).await {
+        error!(
+            source_path = %source_path.display(),
+            error = %error,
+            "Image input failed dimension validation"
+        );
+        return false;
+    }
+    let mut source_input = source_path.as_os_str().to_os_string();
+    source_input.push("[0]");
     let size = format!("{maximum_size}x{maximum_size}");
-    let mut command = vec![
-        "convert".to_string(),
-        source_input,
-        "-auto-orient".to_string(),
-    ];
+    let mut arguments = image_magick_resource_arguments(process_config);
+    arguments.extend([source_input, OsString::from("-auto-orient")]);
     match variant {
-        ImageVariant::CroppedThumbnail => command.extend([
-            "-thumbnail".to_string(),
-            format!("{size}^"),
-            "-gravity".to_string(),
-            "center".to_string(),
-            "-extent".to_string(),
-            size,
+        ImageVariant::CroppedThumbnail => arguments.extend([
+            OsString::from("-thumbnail"),
+            OsString::from(format!("{size}^")),
+            OsString::from("-gravity"),
+            OsString::from("center"),
+            OsString::from("-extent"),
+            OsString::from(size),
         ]),
         ImageVariant::AspectRatioPreview => {
-            command.extend(["-resize".to_string(), format!("{size}>")]);
+            arguments.extend([
+                OsString::from("-resize"),
+                OsString::from(format!("{size}>")),
+            ]);
         }
     }
-    command.extend([
-        "-quality".to_string(),
-        quality.to_string(),
-        output_path.to_string_lossy().into_owned(),
+    arguments.extend([
+        OsString::from("-quality"),
+        OsString::from(quality.to_string()),
+        output_path.as_os_str().to_os_string(),
     ]);
 
-    run_command(&command, 60).await && output_path.exists()
+    run_command("magick", arguments, 0, process_config).await && output_path.exists()
 }
 
-async fn extract_embedded_image_preview(source_path: &Path, output_path: &Path) -> bool {
+async fn extract_embedded_image_preview(
+    source_path: &Path,
+    output_path: &Path,
+    process_config: &MediaProcessConfig,
+) -> bool {
     for preview_tag in ["PreviewImage", "JpgFromRaw", "ThumbnailImage"] {
-        let Ok(output_file) = std::fs::File::create(output_path) else {
-            return false;
+        let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
+        let command_output = ExternalProcess::new(
+            "exiftool",
+            vec![
+                OsString::from("-b"),
+                OsString::from(format!("-{preview_tag}")),
+                source_path.as_os_str().to_os_string(),
+            ],
+            timeout,
+            termination_grace,
+            process_config.maximum_normalized_image_output_bytes,
+            maximum_stderr_bytes,
+        )
+        .run()
+        .await;
+        let extracted = match command_output {
+            Ok(output)
+                if output.status.success()
+                    && !output.stdout.is_empty()
+                    && !output.stdout_truncated =>
+            {
+                tokio::fs::write(output_path, output.stdout).await.is_ok()
+            }
+            _ => false,
         };
-        let command_output = Command::new("exiftool")
-            .args(["-b", &format!("-{preview_tag}")])
-            .arg(source_path)
-            .stdout(Stdio::from(output_file))
-            .output()
-            .await;
-        let extracted = command_output
-            .as_ref()
-            .is_ok_and(|output| output.status.success())
-            && std::fs::metadata(output_path).is_ok_and(|metadata| metadata.len() > 0);
         if extracted {
             return true;
         }
@@ -238,22 +327,23 @@ async fn extract_video_frame(
     source_path: &Path,
     output_path: &Path,
     video_frame_quality: u8,
+    process_config: &MediaProcessConfig,
 ) -> bool {
     let seek_time = "00:00:00";
 
-    let command = vec![
-        "ffmpeg".to_string(),
-        "-y".to_string(),
-        "-ss".to_string(),
-        seek_time.to_string(),
-        "-i".to_string(),
-        source_path.to_string_lossy().into_owned(),
-        "-vframes".to_string(),
-        "1".to_string(),
-        "-q:v".to_string(),
-        video_frame_quality.to_string(),
-        output_path.to_string_lossy().into_owned(),
+    let arguments = vec![
+        OsString::from("-nostdin"),
+        OsString::from("-y"),
+        OsString::from("-ss"),
+        OsString::from(seek_time),
+        OsString::from("-i"),
+        source_path.as_os_str().to_os_string(),
+        OsString::from("-vframes"),
+        OsString::from("1"),
+        OsString::from("-q:v"),
+        OsString::from(video_frame_quality.to_string()),
+        output_path.as_os_str().to_os_string(),
     ];
 
-    run_command(&command, 60).await && output_path.exists()
+    run_command("ffmpeg", arguments, 0, process_config).await && output_path.exists()
 }

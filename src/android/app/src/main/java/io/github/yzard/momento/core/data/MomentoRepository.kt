@@ -69,7 +69,8 @@ class MomentoRepository(
         timelineRequest(cursor, groupBy, search, mediaType, classification, direction, anchorDate),
     )
     suspend fun albums(): List<Album> = api().albums().albums
-    suspend fun createAlbum(name: String, description: String?): AlbumDetail = api().createAlbum(AlbumCreateRequest(name, description))
+    suspend fun createAlbum(name: String, description: String?, mediaIds: List<Long>): AlbumDetail =
+        api().createAlbum(AlbumCreateRequest(name, description, mediaIds))
     suspend fun deleteAlbum(id: Long): MessageResponse = api().deleteAlbum(AlbumIdRequest(id))
     suspend fun album(id: Long): AlbumDetail = api().album(AlbumIdRequest(id))
     suspend fun updateAlbum(id: Long, name: String?, description: String?, coverMediaId: Long?): Album = api().updateAlbum(AlbumUpdateRequest(id, name, description, coverMediaId))

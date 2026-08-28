@@ -4,13 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Media } from '../../../../src/frontend/api/types'
 
 const mocks = vi.hoisted(() => ({
-  getCachedThumbnailUrl: vi.fn(),
+  getCachedThumbnailURL: vi.fn(),
   getFileStreamURL: vi.fn(),
 }))
 
 vi.mock('../../../../src/frontend/api/media', () => ({
   mediaApi: {
-    getCachedThumbnailUrl: mocks.getCachedThumbnailUrl,
+    getCachedThumbnailURL: mocks.getCachedThumbnailURL,
     getFileStreamURL: mocks.getFileStreamURL,
   },
 }))
@@ -32,9 +32,9 @@ const video = {
 describe('PhotoGrid', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-    mocks.getCachedThumbnailUrl.mockReset()
+    mocks.getCachedThumbnailURL.mockReset()
     mocks.getFileStreamURL.mockReset()
-    mocks.getCachedThumbnailUrl.mockReturnValue('/thumbnail/5')
+    mocks.getCachedThumbnailURL.mockReturnValue('/thumbnail/5')
     mocks.getFileStreamURL.mockResolvedValue('/stream/5?ticket=signed')
   })
 
@@ -56,7 +56,7 @@ describe('PhotoGrid', () => {
 
     expect(mocks.getFileStreamURL).toHaveBeenCalledWith(5)
     expect(view.container.querySelector('video')?.getAttribute('src')).toBe(
-      '/stream/5?ticket=signed',
+      '/stream/5?ticket=signed'
     )
   })
 
@@ -68,7 +68,7 @@ describe('PhotoGrid', () => {
         media={[video]}
         onPhotoClick={openMedia}
         selection={{ selectedMediaIds: new Set([5]), toggleSelection }}
-      />,
+      />
     )
 
     fireEvent.click(view.getByRole('button', { name: 'Deselect preview.mp4' }))

@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { initializeTheme, parseThemePreference, readThemePreference, resolveTheme, writeThemePreference } from '../../../src/frontend/lib/theme'
+import {
+  initializeTheme,
+  parseThemePreference,
+  readThemePreference,
+  resolveTheme,
+  writeThemePreference,
+} from '../../../src/frontend/lib/theme'
 
 const storedValues = new Map<string, string>()
 const testLocalStorage = {
@@ -14,7 +20,10 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', testLocalStorage)
   localStorage.clear()
   document.documentElement.classList.remove('dark')
-  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false })))
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn(() => ({ matches: false }))
+  )
 })
 
 afterEach(() => {
@@ -42,8 +51,12 @@ describe('theme', () => {
 
   it('continues with system mode when browser storage is blocked', () => {
     vi.stubGlobal('localStorage', {
-      getItem: () => { throw new DOMException('Blocked', 'SecurityError') },
-      setItem: () => { throw new DOMException('Blocked', 'SecurityError') },
+      getItem: () => {
+        throw new DOMException('Blocked', 'SecurityError')
+      },
+      setItem: () => {
+        throw new DOMException('Blocked', 'SecurityError')
+      },
     })
 
     expect(readThemePreference()).toBe('system')

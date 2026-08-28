@@ -398,21 +398,11 @@ pub fn status(
         .remove(AiFeature::Deduplicate.inference_task())
         .unwrap_or_default();
     let run = transaction
-        .query_row(queries::deduplicate::SELECT_LATEST_RUN, [], |row| {
-            Ok(deduplicator::DeduplicateRunStatus {
-                id: row.get(0)?,
-                trigger: row.get(1)?,
-                status: row.get(2)?,
-                scheduled_for: row.get(3)?,
-                started_at: row.get(4)?,
-                completed_at: row.get(5)?,
-                indexed_media: row.get(6)?,
-                processed_media: row.get(7)?,
-                candidate_comparisons: row.get(8)?,
-                clusters_created: row.get(9)?,
-                error: row.get(10)?,
-            })
-        })
+        .query_row(
+            queries::deduplicate::SELECT_LATEST_RUN,
+            [],
+            deduplicator::map_run_status,
+        )
         .optional()?;
     let ensembled_media =
         transaction.query_row(queries::deduplicate::COUNT_ENSEMBLED_MEDIA, [], |row| {

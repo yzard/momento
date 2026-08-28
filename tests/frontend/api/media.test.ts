@@ -10,10 +10,13 @@ describe('mediaApi timeline classification', () => {
   beforeEach(() => {
     post.mockReset()
     post.mockResolvedValue({ data: { groups: [], markers: [] } })
+    mediaApi.clearCache()
   })
 
   it('decodes only valid thumbnail payloads', () => {
-    expect(thumbnailResponseMap({ '7': 'thumbnail', invalid: 'ignored', '8': null })).toEqual(new Map([[7, 'thumbnail']]))
+    expect(thumbnailResponseMap({ '7': 'thumbnail', invalid: 'ignored', '8': null })).toEqual(
+      new Map([[7, 'thumbnail']])
+    )
   })
 
   it('posts classification with timeline page requests', async () => {
@@ -49,11 +52,29 @@ describe('mediaApi timeline classification', () => {
     })
 
     await expect(mediaApi.getFileStreamURL(42)).resolves.toBe(
-      '/api/v1/media/42/original?ticket=signed',
+      '/api/v1/media/42/original?ticket=signed'
     )
     expect(post).toHaveBeenCalledWith('/media/access-ticket', {
       mediaId: 42,
       resource: 'original',
     })
+  })
+
+  it('does not cache a thumbnail response after the session cache is cleared', async () => {
+    let resolveThumbnails!: (value: { data: { thumbnails: Record<string, string> } }) => void
+    post.mockReturnValue(
+      new Promise((resolve) => {
+        resolveThumbnails = resolve
+      })
+    )
+    const pendingBatch = mediaApi.getThumbnailBatch([42], 'normal')
+
+    mediaApi.clearCache()
+    resolveThumbnails({
+      data: { thumbnails: { '42': 'data:image/webp;base64,stale' } },
+    })
+
+    await expect(pendingBatch).rejects.toThrow('Thumbnail request was superseded')
+    expect(mediaApi.getCachedThumbnailURL(42, 'normal')).toBeUndefined()
   })
 })

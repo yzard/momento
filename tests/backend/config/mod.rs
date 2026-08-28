@@ -49,6 +49,40 @@ fn security_scoped_credential_expirations_must_be_within_one_week() {
 }
 
 #[test]
+fn security_password_and_cleanup_limits_must_be_positive() {
+    for field in [
+        "password_attempt_window_seconds",
+        "password_attempts_per_identity",
+        "password_attempts_per_source",
+        "password_lockout_seconds",
+        "password_hash_max_concurrent",
+        "refresh_token_cleanup_interval_seconds",
+    ] {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = write_config(&directory, &format!("[security]\n{field} = 0\n"));
+
+        let error = load_config(&path).expect_err("zero security limit must fail");
+        assert!(error
+            .to_string()
+            .contains("security password limits and refresh-token cleanup interval"));
+    }
+}
+
+#[test]
+fn media_process_limits_must_be_positive_and_ordered() {
+    let directory = TempDir::new().expect("temporary config directory");
+    for invalid_config in [
+        "timeout_seconds = 0",
+        "maximum_decoded_image_pixels = 0",
+        "imagemagick_memory_limit_mebibytes = 2048\nimagemagick_map_limit_mebibytes = 1024",
+    ] {
+        let path = write_config(&directory, &format!("[media_process]\n{invalid_config}\n"));
+        let error = load_config(&path).expect_err("invalid media process limit must fail");
+        assert!(error.to_string().contains("media_process"));
+    }
+}
+
+#[test]
 fn config_environment_resolves_the_llm_service_address() {
     let resolved = resolve_config_environment(
         "server_address = \"${LLM_SERVICE_ADDRESS}\"",
@@ -653,7 +687,7 @@ fn test_load_config_uses_disabled_global_llm_default_when_section_is_missing() {
 
     assert!(!config.llm.enabled);
     assert_eq!(config.llm.ocr_cron, "0 1 * * *");
-    assert_eq!(config.face_group.similarity_threshold, 0.41);
+    assert_eq!(config.face_group.similarity_threshold, 0.50);
 }
 
 #[test]

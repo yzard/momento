@@ -1,5 +1,6 @@
 use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
 use filetime::{set_file_times, FileTime};
+use momento_api::config::MediaProcessConfig;
 use momento_api::constants::paths;
 use momento_api::database::{queries, DbConn};
 use momento_api::processor::import::{
@@ -26,7 +27,8 @@ async fn complete_metadata_uses_local_reverse_geocoding() {
         r#"{"geoData":{"latitude":40.759,"longitude":-73.9859}}"#,
     )
     .expect("Failed to save supplemental metadata fixture");
-    let complete_metadata = generate_complete_metadata(&media_path, "image").await;
+    let complete_metadata =
+        generate_complete_metadata(&media_path, "image", &MediaProcessConfig::default()).await;
     let metadata = complete_metadata.metadata;
 
     assert_eq!(metadata.gps_latitude, Some(40.759));

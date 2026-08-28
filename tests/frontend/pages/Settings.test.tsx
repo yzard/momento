@@ -20,10 +20,18 @@ const testLocalStorage = {
 vi.mock('../../../src/frontend/hooks/useAuth', () => ({
   useAuth: () => ({ user: mocks.user, changePassword: mocks.changePassword }),
 }))
-vi.mock('../../../src/frontend/components/admin/ImportPanel', () => ({ default: () => <div data-testid="import-panel" /> }))
-vi.mock('../../../src/frontend/components/admin/MetadataPanel', () => ({ default: () => <div data-testid="metadata-panel" /> }))
-vi.mock('../../../src/frontend/components/admin/AiPanel', () => ({ default: () => <div data-testid="ai-panel" /> }))
-vi.mock('../../../src/frontend/components/admin/UserManagement', () => ({ default: () => <div data-testid="user-panel" /> }))
+vi.mock('../../../src/frontend/components/admin/ImportPanel', () => ({
+  default: () => <div data-testid="import-panel" />,
+}))
+vi.mock('../../../src/frontend/components/admin/MetadataPanel', () => ({
+  default: () => <div data-testid="metadata-panel" />,
+}))
+vi.mock('../../../src/frontend/components/admin/AiPanel', () => ({
+  default: () => <div data-testid="ai-panel" />,
+}))
+vi.mock('../../../src/frontend/components/admin/UserManagement', () => ({
+  default: () => <div data-testid="user-panel" />,
+}))
 
 beforeEach(() => {
   vi.stubGlobal('localStorage', testLocalStorage)
@@ -40,14 +48,20 @@ afterEach(() => {
 })
 
 function renderSettings() {
-  return render(<ThemeProvider><Settings /></ThemeProvider>)
+  return render(
+    <ThemeProvider>
+      <Settings />
+    </ThemeProvider>
+  )
 }
 
 describe('Settings', () => {
   it('offers the server-bundled Android release', () => {
     renderSettings()
 
-    const downloadLink = screen.getByRole('link', { name: 'Download Android app' })
+    const downloadLink = screen.getByRole('link', {
+      name: 'Download Android app',
+    })
     expect(downloadLink.getAttribute('href')).toBe('/momento-android.apk')
     expect(downloadLink.getAttribute('download')).toBe('momento-android.apk')
     expect(screen.getByText(/Install the release APK provided by this Momento server/)).toBeTruthy()

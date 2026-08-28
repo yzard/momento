@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policymap [
+  <!ELEMENT policymap (policy)*>
+  <!ATTLIST policymap xmlns CDATA #FIXED ''>
+  <!ELEMENT policy EMPTY>
+  <!ATTLIST policy xmlns CDATA #FIXED '' domain NMTOKEN #REQUIRED
+    name NMTOKEN #IMPLIED pattern CDATA #IMPLIED rights NMTOKEN #IMPLIED
+    stealth NMTOKEN #IMPLIED value CDATA #IMPLIED>
+]>
+<policymap>
+  <policy domain="resource" name="memory" value="512MiB"/>
+  <policy domain="resource" name="map" value="1GiB"/>
+  <policy domain="resource" name="disk" value="4GiB"/>
+  <policy domain="resource" name="area" value="200MP"/>
+  <policy domain="resource" name="width" value="64KP"/>
+  <policy domain="resource" name="height" value="64KP"/>
+  <policy domain="resource" name="thread" value="2"/>
+  <policy domain="resource" name="time" value="60"/>
+  <policy domain="resource" name="list-length" value="32"/>
+  <policy domain="resource" name="file" value="128"/>
+  <policy domain="system" name="max-memory-request" value="256MiB"/>
+
+  <policy domain="delegate" rights="none" pattern="*"/>
+  <policy domain="filter" rights="none" pattern="*"/>
+  <policy domain="path" rights="none" pattern="@*"/>
+  <policy domain="module" rights="none" pattern="{EPHEMERAL,FTP,HTTP,HTTPS,INLINE,MIFF,MSL,MVG,PDF,PS,PS2,PS3,EPS,SVG,TEXT,URL,XPS}"/>
+  <policy domain="coder" rights="none" pattern="{EPHEMERAL,FTP,HTTP,HTTPS,INLINE,MIFF,MSL,MVG,PDF,PS,PS2,PS3,EPS,SVG,TEXT,URL,XPS}"/>
+</policymap>

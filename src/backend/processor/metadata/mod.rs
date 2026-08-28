@@ -1,12 +1,14 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
-use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, MediaProcessConfig};
+use crate::constants::{image_mime_type, video_mime_type};
 use crate::database::DbPool;
+use crate::utils::process::{process_limits, ExternalProcess};
 
 #[derive(Debug, Default, Clone)]
 pub struct MediaMetadata {
@@ -223,40 +225,17 @@ pub fn normalize_gps_coordinates(metadata: &mut MediaMetadata) {
     metadata.gps_longitude = None;
 }
 
-pub async fn extract_image_metadata(file_path: &Path) -> ExtractedMediaMetadata {
-    let mut extracted = extract_exif_metadata(file_path).await;
+pub async fn extract_image_metadata(
+    file_path: &Path,
+    process_config: &MediaProcessConfig,
+) -> ExtractedMediaMetadata {
+    let mut extracted = extract_exif_metadata(file_path, process_config).await;
 
     if extracted.metadata.mime_type.is_none() {
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
         extracted.metadata.mime_type = Some(
-            match ext.as_str() {
-                "jpg" | "jpeg" => "image/jpeg",
-                "png" => "image/png",
-                "gif" => "image/gif",
-                "webp" => "image/webp",
-                "heic" | "heif" => "image/heic",
-                "tiff" | "tif" => "image/tiff",
-                "bmp" => "image/bmp",
-                "avif" => "image/avif",
-                "dng" => "image/x-adobe-dng",
-                "cr2" => "image/x-canon-cr2",
-                "cr3" => "image/x-canon-cr3",
-                "nef" | "nrw" => "image/x-nikon-nef",
-                "arw" => "image/x-sony-arw",
-                "rw2" => "image/x-panasonic-rw2",
-                "orf" => "image/x-olympus-orf",
-                "raf" => "image/x-fuji-raf",
-                "pef" => "image/x-pentax-pef",
-                "srw" => "image/x-samsung-srw",
-                "raw" => "image/x-raw",
-                "svg" => "image/svg+xml",
-                _ => "application/octet-stream",
-            }
-            .to_string(),
+            image_mime_type(file_path)
+                .unwrap_or("application/octet-stream")
+                .to_string(),
         );
     }
 
@@ -264,14 +243,28 @@ pub async fn extract_image_metadata(file_path: &Path) -> ExtractedMediaMetadata 
     extracted
 }
 
-async fn extract_exif_metadata(file_path: &Path) -> ExtractedMediaMetadata {
+async fn extract_exif_metadata(
+    file_path: &Path,
+    process_config: &MediaProcessConfig,
+) -> ExtractedMediaMetadata {
     let mut metadata = MediaMetadata::default();
     let mut sources = Vec::new();
 
-    let output = Command::new("exiftool")
-        .args(["-json", "-n", file_path.to_str().unwrap_or("")])
-        .output()
-        .await;
+    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
+    let output = ExternalProcess::new(
+        "exiftool",
+        vec![
+            OsString::from("-json"),
+            OsString::from("-n"),
+            file_path.as_os_str().to_os_string(),
+        ],
+        timeout,
+        termination_grace,
+        process_config.maximum_metadata_output_bytes,
+        maximum_stderr_bytes,
+    )
+    .run()
+    .await;
 
     match output {
         Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
@@ -435,22 +428,32 @@ fn parse_exif_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-pub async fn extract_video_metadata(file_path: &Path) -> ExtractedMediaMetadata {
-    let mut extracted = extract_exif_metadata(file_path).await;
+pub async fn extract_video_metadata(
+    file_path: &Path,
+    process_config: &MediaProcessConfig,
+) -> ExtractedMediaMetadata {
+    let mut extracted = extract_exif_metadata(file_path, process_config).await;
 
     // Run ffprobe
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            file_path.to_str().unwrap_or(""),
-        ])
-        .output()
-        .await;
+    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
+    let output = ExternalProcess::new(
+        "ffprobe",
+        vec![
+            OsString::from("-v"),
+            OsString::from("quiet"),
+            OsString::from("-print_format"),
+            OsString::from("json"),
+            OsString::from("-show_format"),
+            OsString::from("-show_streams"),
+            file_path.as_os_str().to_os_string(),
+        ],
+        timeout,
+        termination_grace,
+        process_config.maximum_metadata_output_bytes,
+        maximum_stderr_bytes,
+    )
+    .run()
+    .await;
 
     let output = match output {
         Ok(o) if o.status.success() => o,
@@ -531,27 +534,13 @@ pub async fn extract_video_metadata(file_path: &Path) -> ExtractedMediaMetadata 
         }
     }
 
-    // MIME type from extension
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
     metadata.mime_type = Some(
-        match ext.as_str() {
-            "mp4" => "video/mp4",
-            "mov" => "video/quicktime",
-            "avi" => "video/x-msvideo",
-            "mkv" => "video/x-matroska",
-            "webm" => "video/webm",
-            "m4v" => "video/x-m4v",
-            _ => "video/mp4",
-        }
-        .to_string(),
+        video_mime_type(file_path)
+            .unwrap_or("application/octet-stream")
+            .to_string(),
     );
 
-    log_extracted_metadata(file_path, &metadata);
+    log_extracted_metadata(file_path, metadata);
     extracted
 }
 

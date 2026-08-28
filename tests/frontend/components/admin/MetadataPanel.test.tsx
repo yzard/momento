@@ -16,7 +16,14 @@ import MetadataPanel from '../../../../src/frontend/components/admin/MetadataPan
 describe('MetadataPanel', () => {
   beforeEach(() => {
     for (const mock of Object.values(mocks)) mock.mockReset()
-    mocks.getStatus.mockResolvedValue({ status: 'idle', queuedJobs: 2, processingJobs: 1, completedJobs: 8, failedJobs: 0, errors: [] })
+    mocks.getStatus.mockResolvedValue({
+      status: 'idle',
+      queuedJobs: 2,
+      processingJobs: 1,
+      completedJobs: 8,
+      failedJobs: 0,
+      errors: [],
+    })
     mocks.generate.mockResolvedValue({ message: 'queued', queuedJobs: 2 })
   })
 
@@ -25,11 +32,15 @@ describe('MetadataPanel', () => {
   it('generates metadata and shows status metrics', async () => {
     render(<MetadataPanel />)
 
-    const generateButton = await screen.findByRole('button', { name: 'Generate' })
+    const generateButton = await screen.findByRole('button', {
+      name: 'Generate',
+    })
     const statusGrid = screen.getByText('Queued').parentElement?.parentElement
 
     expect(screen.queryByRole('button', { name: 'Reset & Generate All' })).toBeNull()
-    expect(statusGrid?.compareDocumentPosition(generateButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      statusGrid?.compareDocumentPosition(generateButton) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     await userEvent.click(generateButton)
 
     expect(mocks.generate).toHaveBeenCalledOnce()
@@ -42,6 +53,8 @@ describe('MetadataPanel', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Generate' }))
 
-    expect((await screen.findByRole('alert')).textContent).toBe('Could not complete the metadata action.')
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'Could not complete the metadata action.'
+    )
   })
 })

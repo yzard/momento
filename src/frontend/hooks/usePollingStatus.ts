@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 export function usePollingStatus<T>(
   load: () => Promise<T>,
   loadErrorMessage: string,
-  intervalMilliseconds: number,
+  intervalMilliseconds: number
 ) {
   const requestGeneration = useRef(0)
   const [status, setStatus] = useState<T | null>(null)

@@ -386,7 +386,7 @@ COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 
 RUN set -e; \
     for python in /opt/venvs/ocr/bin/python /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/paddleocr/bin/python; do \
-        PYTHONPATH=/app/runtimes "$python" -c "import io; from PIL import Image; import pillow_heif; from image_runtime import register_image_decoders; output = io.BytesIO(); pillow_heif.from_pillow(Image.new('RGB', (3, 2), color=(10, 20, 30))).save(output); assert output.getvalue()[4:12] == b'ftypheic'; register_image_decoders(); output.seek(0); decoded = Image.open(output); decoded.load(); assert decoded.format == 'HEIF'; assert decoded.size == (3, 2)"; \
+        PYTHONPATH=/app/runtimes "$python" -c "import io; from PIL import Image; import pillow_heif; from image_runtime import decode_image, register_image_decoders; register_image_decoders(); sources = {'QOI': io.BytesIO(bytes.fromhex('716f696600000003000000020301fe0a141ec40000000000000001'))}; [(lambda output, image_format: (Image.new('RGB', (3, 2), color=(10, 20, 30)).save(output, format=image_format), output.seek(0), sources.__setitem__(image_format, output)))(io.BytesIO(), image_format) for image_format in ('GIF', 'TIFF', 'WEBP')]; heif = io.BytesIO(); pillow_heif.from_pillow(Image.new('RGB', (3, 2), color=(10, 20, 30))).save(heif); heif.seek(0); sources['HEIF'] = heif; assert all(decode_image(source).size == (3, 2) for source in sources.values())"; \
     done \
     && chmod +x /entrypoint_llm.sh \
     && mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs

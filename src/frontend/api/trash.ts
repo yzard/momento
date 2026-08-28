@@ -32,10 +32,13 @@ export const trashApi = {
     return response.data
   },
 
-  getThumbnailBatch: async (mediaIds: number[], size: ThumbnailSize): Promise<Map<number, string>> => {
+  getThumbnailBatch: async (
+    mediaIds: number[],
+    size: ThumbnailSize
+  ): Promise<Map<number, string>> => {
     const response = await apiClient.post<{ thumbnails: Record<string, string | null> }>(
       '/trash/thumbnails/get',
-      { mediaIds, size },
+      { mediaIds, size }
     )
     return thumbnailResponseMap(response.data.thumbnails)
   },

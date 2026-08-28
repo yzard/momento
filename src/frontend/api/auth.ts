@@ -1,11 +1,5 @@
 import { apiClient } from './client'
 
-export interface TokenResponse {
-  accessToken: string
-  refreshToken: string
-  tokenType: string
-}
-
 export interface User {
   id: number
   username: string
@@ -17,22 +11,18 @@ export interface User {
 }
 
 export const authApi = {
-  login: async (username: string, password: string): Promise<TokenResponse> => {
-    const response = await apiClient.post<TokenResponse>('/user/authenticate', null, {
+  login: async (username: string, password: string): Promise<void> => {
+    await apiClient.post('/user/session/create', null, {
       auth: { username, password },
     })
-    return response.data
   },
 
-  refresh: async (refreshToken: string): Promise<TokenResponse> => {
-    const response = await apiClient.post<TokenResponse>('/user/refresh', {
-      refreshToken,
-    })
-    return response.data
+  refresh: async (): Promise<void> => {
+    await apiClient.post('/user/session/refresh')
   },
 
-  logout: async (refreshToken: string): Promise<void> => {
-    await apiClient.post('/user/logout', { refreshToken })
+  logout: async (): Promise<void> => {
+    await apiClient.post('/user/session/delete')
   },
 
   getMe: async (): Promise<User> => {

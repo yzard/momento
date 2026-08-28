@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::config::MediaProcessConfig;
 use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
@@ -226,14 +227,18 @@ struct ResultPipeline {
 }
 
 impl ResultPipeline {
-    fn new(pool: DbPool, concurrency: usize) -> AppResult<Self> {
+    fn new(
+        pool: DbPool,
+        concurrency: usize,
+        process_config: MediaProcessConfig,
+    ) -> AppResult<Self> {
         let preparation_pool = pool.clone();
         let cpu_workers =
             RollingCpuWorkers::new(concurrency, "ai-result-cpu", move |queued: QueuedResult| {
                 let job_id = queued.job_id.clone();
                 let prepared = (|| {
                     let connection = preparation_pool.get()?;
-                    prepare_queued_result(&connection, queued)
+                    prepare_queued_result(&connection, queued, &process_config)
                 })();
                 PreparedResultCompletion { job_id, prepared }
             })?;
@@ -324,8 +329,13 @@ impl ResultPipeline {
     }
 }
 
-pub fn run(pool: DbPool, interval: Duration, concurrency: usize) -> ! {
-    let mut pipeline = ResultPipeline::new(pool, concurrency)
+pub fn run(
+    pool: DbPool,
+    interval: Duration,
+    concurrency: usize,
+    process_config: MediaProcessConfig,
+) -> ! {
+    let mut pipeline = ResultPipeline::new(pool, concurrency, process_config)
         .expect("validated LLM result CPU pipeline must start");
     loop {
         if let Err(error) = pipeline.refill() {
@@ -356,8 +366,12 @@ pub fn run(pool: DbPool, interval: Duration, concurrency: usize) -> ! {
     }
 }
 
-pub fn process_available_results(pool: &DbPool, concurrency: usize) -> AppResult<usize> {
-    let mut pipeline = ResultPipeline::new(pool.clone(), concurrency)?;
+pub fn process_available_results(
+    pool: &DbPool,
+    process_config: MediaProcessConfig,
+    concurrency: usize,
+) -> AppResult<usize> {
+    let mut pipeline = ResultPipeline::new(pool.clone(), concurrency, process_config)?;
     pipeline.refill()?;
     let mut processed = 0;
     while pipeline.in_flight_count() > 0 {
@@ -400,6 +414,7 @@ fn select_result_candidates(
 fn prepare_queued_result(
     connection: &Connection,
     queued: QueuedResult,
+    process_config: &MediaProcessConfig,
 ) -> AppResult<PreparedQueuedResult> {
     let request = match serde_json::from_str::<JobResult>(&queued.payload) {
         Ok(request) => request,
@@ -410,7 +425,7 @@ fn prepare_queued_result(
             });
         }
     };
-    let face = match prepare_face_result(connection, &request) {
+    let face = match prepare_face_result(connection, &request, process_config) {
         Ok(face) => face,
         Err(error) if result_error_is_retryable(&error) => return Err(error),
         Err(error) => {
@@ -427,9 +442,13 @@ fn prepare_queued_result(
     })
 }
 
-pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
+pub fn process_result(
+    pool: &DbPool,
+    process_config: &MediaProcessConfig,
+    request: JobResult,
+) -> AppResult<()> {
     let connection = pool.get()?;
-    let face = prepare_face_result(&connection, &request)?;
+    let face = prepare_face_result(&connection, &request, process_config)?;
     let transaction = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
     let face_file_changes = persist_result(&transaction, request, face)?;
     transaction.commit()?;
@@ -442,6 +461,7 @@ pub fn process_result(pool: &DbPool, request: JobResult) -> AppResult<()> {
 fn prepare_face_result(
     connection: &Connection,
     request: &JobResult,
+    process_config: &MediaProcessConfig,
 ) -> AppResult<Option<crate::processor::face_detection::PreparedFaceDetectionResult>> {
     if request.status != "completed" || request.task != "face_detection" {
         return Ok(None);
@@ -478,6 +498,7 @@ fn prepare_face_result(
         model_type,
         model_version,
         request.input_results.as_deref(),
+        process_config,
     )
     .map(Some)
 }

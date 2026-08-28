@@ -109,15 +109,23 @@ interface SelectionActionButtonProps {
   destructive: boolean
 }
 
-function SelectionActionButton({ label, disabled, onClick, icon, destructive }: SelectionActionButtonProps) {
+function SelectionActionButton({
+  label,
+  disabled,
+  onClick,
+  icon,
+  destructive,
+}: SelectionActionButtonProps) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={destructive
-        ? 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-destructive transition-colors duration-200 hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40'
-        : 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-opacity duration-200 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40'}
+      className={
+        destructive
+          ? 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-destructive transition-colors duration-200 hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40'
+          : 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-opacity duration-200 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40'
+      }
     >
       {icon}
       {label}

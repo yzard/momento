@@ -938,7 +938,9 @@ impl Scheduler {
                 if let Err(error) = transition_directory(&path, &deleting_path) {
                     self.fail(
                         path,
-                        format!("result received by Momento but cleanup transition failed: {error}"),
+                        format!(
+                            "result received by Momento but cleanup transition failed: {error}"
+                        ),
                     );
                     return;
                 }

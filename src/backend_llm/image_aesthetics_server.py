@@ -2,16 +2,13 @@
 """On-demand CLIP and LAION image aesthetics scoring runtime."""
 
 import argparse
-import json
 import math
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 from dynamic_batching import DynamicBatcher
 from image_runtime import (
-    InvalidImageError,
     ModelHTTPServer,
     create_inference_slots,
     decode_image,
@@ -20,7 +17,11 @@ from image_runtime import (
     select_cuda_device,
     serve_until_stopped,
 )
-from runtime_input import read_runtime_input
+from runtime_http import (
+    ImageRuntimeRequestHandler,
+    add_batched_image_runtime_arguments,
+    validate_batched_image_runtime_arguments,
+)
 
 CLIP_EMBEDDING_DIMENSIONS = 512
 CLIP_IMAGE_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -234,67 +235,17 @@ class ImageAestheticsRuntime:
         return create_aesthetics_responses(prepared_inputs, raw_model_scores)
 
 
-class Handler(BaseHTTPRequestHandler):
-    runtime = None
-    input_root = None
-
-    def do_GET(self):
-        if self.path != "/ready":
-            self.send_error(404)
-            return
-        self.send_json(200, {"status": "ready"})
-
-    def do_POST(self):
-        if self.path != "/infer":
-            self.send_error(404)
-            return
-        self.handle_inference()
-
-    def handle_inference(self):
-        try:
-            with read_runtime_input(self, self.input_root) as image_source:
-                response = self.runtime.infer(image_source)
-        except InvalidImageError as error:
-            self.send_json(400, {"detail": str(error)})
-            return
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.send_json(400, {"detail": f"invalid request: {error}"})
-            return
-        except RuntimeError as error:
-            self.send_json(500, {"detail": str(error)})
-            return
-        self.send_json(200, response)
-
-    def log_message(self, message_format, *args):
-        return
-
-    def send_json(self, status, payload):
-        body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+class Handler(ImageRuntimeRequestHandler):
+    pass
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--clip-model", required=True)
     parser.add_argument("--aesthetic-head", required=True)
-    parser.add_argument("--device", required=True)
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--processing-concurrency", type=int, required=True)
-    parser.add_argument("--model-concurrency", type=int, required=True)
-    parser.add_argument("--model-batch-wait-milliseconds", type=int, required=True)
-    parser.add_argument("--input-root", required=True)
+    add_batched_image_runtime_arguments(parser)
     arguments = parser.parse_args()
-    if arguments.processing_concurrency <= 0:
-        parser.error("--processing-concurrency must be positive")
-    if arguments.model_concurrency <= 0:
-        parser.error("--model-concurrency must be positive")
-    if arguments.model_batch_wait_milliseconds < 0:
-        parser.error("--model-batch-wait-milliseconds must not be negative")
+    validate_batched_image_runtime_arguments(parser, arguments)
 
     register_image_decoders()
     Handler.runtime = ImageAestheticsRuntime(

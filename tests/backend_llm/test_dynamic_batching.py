@@ -20,10 +20,7 @@ class DynamicBatcherTests(unittest.TestCase):
             start_barrier.wait()
             outputs.append(batcher.infer([input_value])[0])
 
-        workers = [
-            threading.Thread(target=infer_value, args=(input_value,))
-            for input_value in range(4)
-        ]
+        workers = [threading.Thread(target=infer_value, args=(input_value,)) for input_value in range(4)]
         for worker in workers:
             worker.start()
         start_barrier.wait()
@@ -51,12 +48,7 @@ class DynamicBatcherTests(unittest.TestCase):
             (1, 0, " ", "worker_name"),
         ]:
             with self.assertRaisesRegex(ValueError, message):
-                DynamicBatcher(
-                    lambda input_values: input_values,
-                    batch_size,
-                    wait_milliseconds,
-                    worker_name,
-                )
+                DynamicBatcher(lambda input_values: input_values, batch_size, wait_milliseconds, worker_name)
 
 
 if __name__ == "__main__":

@@ -1,24 +1,23 @@
 import { useState } from 'react'
 import AlbumList from '../components/albums/AlbumList'
 import AlbumView from '../components/albums/AlbumView'
-import Lightbox from '../components/viewer/Lightbox'
+import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import type { Album, Media } from '../api/types'
+import { useLightbox } from '../hooks/useLightbox'
 
 export default function Albums() {
   const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null)
-  const [lightboxOpen, setLightboxOpen] = useState(false)
-  const [initialIndex, setInitialIndex] = useState(0)
-  const [mediaIds, setMediaIds] = useState<number[]>([])
+  const lightbox = useLightbox()
 
   const handleAlbumClick = (album: Album) => {
     setSelectedAlbumId(album.id)
   }
 
   const handlePhotoClick = (media: Media, allMedia: Media[]) => {
-    const index = allMedia.findIndex((m) => m.id === media.id)
-    setMediaIds(allMedia.map((item) => item.id))
-    setInitialIndex(index >= 0 ? index : 0)
-    setLightboxOpen(true)
+    lightbox.open(
+      media.id,
+      allMedia.map((item) => item.id)
+    )
   }
 
   return (
@@ -34,14 +33,7 @@ export default function Albums() {
           <AlbumList onAlbumClick={handleAlbumClick} />
         )}
       </div>
-      {lightboxOpen && (
-        <Lightbox
-          mediaIds={mediaIds}
-          currentIndex={initialIndex}
-          onClose={() => setLightboxOpen(false)}
-          onIndexChange={setInitialIndex}
-        />
-      )}
+      <ManagedLightbox controller={lightbox} />
     </div>
   )
 }

@@ -2,6 +2,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use base64::Engine;
+use momento_api::config::MediaProcessConfig;
 use momento_api::constants::paths;
 use momento_api::database::{create_pool_at, init_database, DbPool};
 use momento_api::error::AppError;
@@ -78,7 +79,8 @@ fn received_result_is_durable_before_momento_processing() {
     drop(connection);
 
     assert_eq!(
-        process_available_results(&pool, 1).expect("process durable result"),
+        process_available_results(&pool, MediaProcessConfig::default(), 1)
+            .expect("process durable result"),
         1
     );
     let connection = pool.get().expect("connection");
@@ -108,7 +110,8 @@ fn result_pipeline_persists_multiple_results_without_a_batch_barrier() {
         .expect("second durable result receipt");
 
     assert_eq!(
-        process_available_results(&pool, 2).expect("persist available results"),
+        process_available_results(&pool, MediaProcessConfig::default(), 2)
+            .expect("persist available results"),
         2
     );
 
@@ -137,7 +140,7 @@ fn result_pipeline_persists_multiple_results_without_a_batch_barrier() {
 fn result_worker_rejects_zero_concurrency() {
     let pool = create_test_db();
 
-    let error = process_available_results(&pool, 0)
+    let error = process_available_results(&pool, MediaProcessConfig::default(), 0)
         .expect_err("zero result processing concurrency must fail");
 
     assert!(matches!(error, AppError::Validation(_)));
@@ -169,7 +172,8 @@ fn database_contention_keeps_unpersisted_results_queued_for_retry() {
         .execute_batch("BEGIN IMMEDIATE")
         .expect("writer transaction");
 
-    let error = process_available_results(&pool, 2).expect_err("busy result must be deferred");
+    let error = process_available_results(&pool, MediaProcessConfig::default(), 2)
+        .expect_err("busy result must be deferred");
     assert!(matches!(error, AppError::DatabaseBusy), "{error}");
     let queued: i64 = pool
         .get()
@@ -180,7 +184,8 @@ fn database_contention_keeps_unpersisted_results_queued_for_retry() {
     writer.execute_batch("ROLLBACK").expect("writer rollback");
 
     assert_eq!(
-        process_available_results(&pool, 2).expect("retry queued results"),
+        process_available_results(&pool, MediaProcessConfig::default(), 2)
+            .expect("retry queued results"),
         2
     );
     let connection = pool.get().expect("connection");
@@ -204,7 +209,8 @@ fn invalid_received_result_fails_only_the_momento_job() {
 
     receive_result(&pool, result).expect("durable invalid result receipt");
     assert_eq!(
-        process_available_results(&pool, 1).expect("process invalid result"),
+        process_available_results(&pool, MediaProcessConfig::default(), 1)
+            .expect("process invalid result"),
         1
     );
 
@@ -355,6 +361,7 @@ fn classifier_results_persist_overlapping_aggregate_and_input_rows() {
         insert_job_input(&pool, job_id, 0, None);
         process_result(
             &pool,
+            &MediaProcessConfig::default(),
             classification_result(job_id, media_id, task, true, 0.91),
         )
         .expect("classification result");
@@ -408,7 +415,7 @@ fn classifier_results_reject_invalid_payloads_and_correlation() {
         1.1,
     );
     assert!(matches!(
-        process_result(&pool, invalid_confidence),
+        process_result(&pool, &MediaProcessConfig::default(), invalid_confidence),
         Err(AppError::BadRequest(_))
     ));
 
@@ -421,7 +428,7 @@ fn classifier_results_reject_invalid_payloads_and_correlation() {
     );
     mismatched_model.model_type = Some("document_detection".to_string());
     assert!(matches!(
-        process_result(&pool, mismatched_model),
+        process_result(&pool, &MediaProcessConfig::default(), mismatched_model),
         Err(AppError::BadRequest(_))
     ));
 
@@ -438,7 +445,7 @@ fn classifier_results_reject_invalid_payloads_and_correlation() {
         .expect("input results")[0]
         .sequence = 1;
     assert!(matches!(
-        process_result(&pool, mismatched_input),
+        process_result(&pool, &MediaProcessConfig::default(), mismatched_input),
         Err(AppError::BadRequest(_))
     ));
 
@@ -454,7 +461,7 @@ fn classifier_results_reject_invalid_payloads_and_correlation() {
         "confidence": 0.8
     }));
     assert!(matches!(
-        process_result(&pool, mismatched_aggregate),
+        process_result(&pool, &MediaProcessConfig::default(), mismatched_aggregate),
         Err(AppError::BadRequest(_))
     ));
     let persisted: i64 = pool
@@ -475,13 +482,18 @@ fn result_rejects_stale_attempts_and_non_terminal_statuses() {
     let media_id = create_test_media(&pool, "result-validation.jpg");
     insert_submitted_job(&pool, "stale-result", media_id, "ocr", 2);
 
-    let error = process_result(&pool, completed_result("stale-result", media_id, 1))
-        .expect_err("stale attempt must fail");
+    let error = process_result(
+        &pool,
+        &MediaProcessConfig::default(),
+        completed_result("stale-result", media_id, 1),
+    )
+    .expect_err("stale attempt must fail");
     assert!(matches!(error, AppError::Conflict(_)));
 
     let mut invalid = completed_result("stale-result", media_id, 2);
     invalid.status = "running".to_string();
-    let error = process_result(&pool, invalid).expect_err("non-terminal status must fail");
+    let error = process_result(&pool, &MediaProcessConfig::default(), invalid)
+        .expect_err("non-terminal status must fail");
     assert!(matches!(error, AppError::BadRequest(_)));
 }
 
@@ -492,8 +504,8 @@ fn terminal_result_is_idempotent() {
     insert_submitted_job(&pool, "result-idempotent", media_id, "ocr", 1);
     let result = completed_result("result-idempotent", media_id, 1);
 
-    process_result(&pool, result.clone()).expect("first result");
-    process_result(&pool, result).expect("duplicate result");
+    process_result(&pool, &MediaProcessConfig::default(), result.clone()).expect("first result");
+    process_result(&pool, &MediaProcessConfig::default(), result).expect("duplicate result");
 
     let text_count: i64 = pool
         .get()
@@ -523,6 +535,7 @@ fn different_task_results_complete_independently_in_arrival_order() {
 
     process_result(
         &pool,
+        &MediaProcessConfig::default(),
         completed_text_result(
             "result-tagging",
             tagging_media_id,
@@ -545,6 +558,7 @@ fn different_task_results_complete_independently_in_arrival_order() {
 
     process_result(
         &pool,
+        &MediaProcessConfig::default(),
         completed_text_result("result-ocr", ocr_media_id, "ocr", "receipt text"),
     )
     .expect("OCR result completes later");
@@ -588,7 +602,7 @@ fn result_persists_every_video_frame() {
         },
     ]);
 
-    process_result(&pool, result).expect("video frame result");
+    process_result(&pool, &MediaProcessConfig::default(), result).expect("video frame result");
 
     let connection = pool.get().expect("connection");
     let frame_count: i64 = connection
@@ -639,7 +653,7 @@ fn aesthetics_result_persists_aggregate_and_input_scores() {
         error: None,
     };
 
-    process_result(&pool, result).expect("aesthetics result");
+    process_result(&pool, &MediaProcessConfig::default(), result).expect("aesthetics result");
 
     let connection = pool.get().expect("connection");
     let aggregate: (f64, f64) = connection
@@ -695,7 +709,8 @@ fn aesthetics_result_rejects_missing_or_out_of_range_scores() {
         error: None,
     };
 
-    let error = process_result(&pool, result).expect_err("invalid score must fail");
+    let error = process_result(&pool, &MediaProcessConfig::default(), result)
+        .expect_err("invalid score must fail");
     assert!(matches!(error, AppError::BadRequest(_)));
 }
 
@@ -753,11 +768,12 @@ fn aesthetics_result_must_match_submitted_inputs_and_first_input_aggregate() {
         .as_mut()
         .expect("input results")[0]
         .sequence = 1;
-    let error =
-        process_result(&pool, wrong_correlation).expect_err("input correlation mismatch must fail");
+    let error = process_result(&pool, &MediaProcessConfig::default(), wrong_correlation)
+        .expect_err("input correlation mismatch must fail");
     assert!(matches!(error, AppError::BadRequest(_)));
 
-    let error = process_result(&pool, result).expect_err("aggregate mismatch must fail");
+    let error = process_result(&pool, &MediaProcessConfig::default(), result)
+        .expect_err("aggregate mismatch must fail");
     assert!(matches!(error, AppError::BadRequest(_)));
     let persisted: i64 = pool
         .get()
@@ -793,7 +809,12 @@ fn face_result_persists_crop_and_success_marker() {
         &input_bytes,
     );
 
-    process_result(&pool, face_result("result-face", media_id)).expect("face result");
+    process_result(
+        &pool,
+        &MediaProcessConfig::default(),
+        face_result("result-face", media_id),
+    )
+    .expect("face result");
 
     let connection = pool.get().expect("connection");
     let (crop_path, box_x, box_width, frontality): (String, f64, f64, f64) = connection
@@ -853,7 +874,12 @@ fn face_result_normalizes_a_heic_original_before_cropping() {
         &input_bytes,
     );
 
-    process_result(&pool, face_result("result-face-heic", media_id)).expect("HEIC face result");
+    process_result(
+        &pool,
+        &MediaProcessConfig::default(),
+        face_result("result-face-heic", media_id),
+    )
+    .expect("HEIC face result");
 
     let crop_path: String = pool
         .get()
@@ -891,7 +917,8 @@ fn face_normalization_failure_marks_the_momento_job_failed_after_receipt() {
     receive_result(&pool, face_result("result-face-invalid", media_id))
         .expect("durable face result receipt");
     assert_eq!(
-        process_available_results(&pool, 1).expect("process invalid face input"),
+        process_available_results(&pool, MediaProcessConfig::default(), 1)
+            .expect("process invalid face input"),
         1
     );
 
@@ -943,7 +970,7 @@ fn clustering_result_persists_integer_capture_timestamp() {
         error: None,
     };
 
-    process_result(&pool, result).expect("clustering result");
+    process_result(&pool, &MediaProcessConfig::default(), result).expect("clustering result");
 
     let capture_time_seconds: i64 = pool
         .get()
@@ -969,6 +996,7 @@ fn result_returns_internal_database_detail() {
 
     let error = process_result(
         &pool,
+        &MediaProcessConfig::default(),
         completed_result("result-database-error", media_id, 1),
     )
     .expect_err("missing result table must fail");
@@ -994,6 +1022,7 @@ fn result_waits_for_concurrent_writer() {
     let result = std::thread::spawn(move || {
         process_result(
             &result_pool,
+            &MediaProcessConfig::default(),
             completed_result("result-contention", media_id, 1),
         )
     });
@@ -1018,7 +1047,12 @@ fn cancelled_job_accepts_late_result_without_persisting() {
         )
         .expect("cancelled job");
 
-    process_result(&pool, completed_result("result-cancelled", media_id, 1)).expect("late result");
+    process_result(
+        &pool,
+        &MediaProcessConfig::default(),
+        completed_result("result-cancelled", media_id, 1),
+    )
+    .expect("late result");
 
     let text_count: i64 = pool
         .get()

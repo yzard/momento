@@ -8,7 +8,10 @@ interface MediaStreamURLState {
   retryStreamOnce: () => void
 }
 
-export function useMediaStreamURL(mediaId: number | null, shouldLoad: boolean): MediaStreamURLState {
+export function useMediaStreamURL(
+  mediaId: number | null,
+  shouldLoad: boolean
+): MediaStreamURLState {
   const [streamURL, setStreamURL] = useState<string | null>(null)
   const [isStreamLoading, setIsStreamLoading] = useState(false)
   const streamURLRef = useRef<string | null>(null)

@@ -1,20 +1,23 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use base64::Engine;
 use image::imageops::FilterType;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
-use crate::config::FaceGroupConfig;
+use crate::config::{FaceGroupConfig, MediaProcessConfig};
 use crate::constants::{paths, FACE_DETECTION_MODEL_TYPE};
 use crate::database::{queries, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::processor::ai::input::AiInputStorage;
 use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
 use crate::utils::path::resolve_storage_path;
+use crate::utils::process::{
+    image_magick_resource_arguments, process_limits, validate_image_dimensions_blocking,
+    ExternalProcess,
+};
 use momento_common::llm::JobInputResult;
 
 const EMBEDDING_DIMENSIONS: usize = 512;
@@ -94,6 +97,7 @@ pub fn prepare_result(
     model_type: &str,
     model_version: &str,
     input_results: Option<&[JobInputResult]>,
+    process_config: &MediaProcessConfig,
 ) -> AppResult<PreparedFaceDetectionResult> {
     if model_type != FACE_DETECTION_MODEL_TYPE {
         return Err(AppError::BadRequest(
@@ -156,7 +160,8 @@ pub fn prepare_result(
     };
     let mut persisted_faces = Vec::with_capacity(faces.len());
     for face in faces {
-        let (crop_path, absolute_path) = write_crop(connection, job_id, media_id, &face)?;
+        let (crop_path, absolute_path) =
+            write_crop(connection, job_id, media_id, &face, process_config)?;
         changes.new_paths.push(absolute_path);
         persisted_faces.push((face, crop_path));
     }
@@ -344,6 +349,7 @@ fn write_crop(
     job_id: &str,
     media_id: i64,
     face: &FaceResult,
+    process_config: &MediaProcessConfig,
 ) -> AppResult<(String, PathBuf)> {
     let (storage_root, input_path, expected_size, expected_hash): (String, String, i64, String) =
         connection.query_row(
@@ -364,7 +370,7 @@ fn write_crop(
         ));
     }
     drop(input_bytes);
-    let input = normalize_face_input(&input_path, job_id, media_id)?;
+    let input = normalize_face_input(&input_path, job_id, media_id, process_config)?;
     let width = input.width();
     let height = input.height();
     let (crop_x, crop_y, crop_width, crop_height) = portrait_crop_box(
@@ -395,13 +401,36 @@ fn normalize_face_input(
     input_path: &Path,
     job_id: &str,
     media_id: i64,
+    process_config: &MediaProcessConfig,
 ) -> AppResult<image::DynamicImage> {
+    validate_image_dimensions_blocking(input_path, process_config).map_err(|error| {
+        tracing::warn!(
+            job_id,
+            media_id,
+            input_path = %input_path.display(),
+            error = %error,
+            "Face input failed dimension validation"
+        );
+        AppError::BadRequest("prepared face input could not be normalized".to_string())
+    })?;
     let mut source = OsString::from(input_path.as_os_str());
     source.push("[0]");
-    let output = Command::new("magick")
-        .arg(source)
-        .args(["-auto-orient", "png:-"])
-        .output();
+    let mut arguments = image_magick_resource_arguments(process_config);
+    arguments.extend([
+        source,
+        OsString::from("-auto-orient"),
+        OsString::from("png:-"),
+    ]);
+    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
+    let output = ExternalProcess::new(
+        "magick",
+        arguments,
+        timeout,
+        termination_grace,
+        process_config.maximum_normalized_image_output_bytes,
+        maximum_stderr_bytes,
+    )
+    .run_blocking();
     let output = match output {
         Ok(output) => output,
         Err(error) => {
@@ -417,7 +446,7 @@ fn normalize_face_input(
             ));
         }
     };
-    if !output.status.success() || output.stdout.is_empty() {
+    if !output.status.success() || output.stdout.is_empty() || output.stdout_truncated {
         let detail = String::from_utf8_lossy(&output.stderr)
             .chars()
             .take(4096)

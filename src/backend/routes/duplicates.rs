@@ -5,9 +5,9 @@ use axum::{extract::State, routing::post, Json, Router};
 use crate::auth::{AppState, CurrentUser};
 use crate::database::{fetch_all, queries};
 use crate::error::{AppError, AppResult};
-use crate::models::{DeduplicateGroup, DeduplicateGroupsRequest, DeduplicateGroupsResponse};
-
-use super::media::map_media_row;
+use crate::models::{
+    map_media_response, DeduplicateGroup, DeduplicateGroupsRequest, DeduplicateGroupsResponse,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/duplicates/list", post(list))
@@ -64,7 +64,7 @@ async fn list(
             .collect::<Vec<_>>();
         parameters.push(&current_user.id);
         let rows = fetch_all(&connection, &query, &parameters, |row| {
-            Ok((row.get::<_, i64>(28)?, map_media_row(row)?))
+            Ok((row.get::<_, i64>(28)?, map_media_response(row)?))
         })?;
         for (cluster_id, media) in rows {
             items_by_cluster

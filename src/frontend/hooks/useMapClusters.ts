@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import Supercluster from 'supercluster'
 import { mapApi, type BoundingBox } from '../api/map'
+import { queryKeys } from '../lib/queryKeys'
 
 interface UseMapClustersProps {
   bounds: BoundingBox | null
@@ -19,7 +20,8 @@ export type ClusterProperties = {
   point_count_abbreviated?: number
 }
 
-export type MapCluster = Supercluster.ClusterFeature<ClusterProperties> | Supercluster.PointFeature<ClusterProperties>
+export type MapCluster =
+  Supercluster.ClusterFeature<ClusterProperties> | Supercluster.PointFeature<ClusterProperties>
 
 export function useMapClusters({ bounds, zoom, dataZoom }: UseMapClustersProps) {
   const [clusters, setClusters] = useState<MapCluster[]>([])
@@ -43,8 +45,12 @@ export function useMapClusters({ bounds, zoom, dataZoom }: UseMapClustersProps) 
   )
 
   // Fetch cluster data from backend
-  const { data: backendData, isLoading, error } = useQuery({
-    queryKey: ['map-clusters', bounds, dataZoom],
+  const {
+    data: backendData,
+    isLoading,
+    error,
+  } = useQuery({
+    queryKey: queryKeys.mapClusters.viewport(bounds, dataZoom),
     queryFn: () => {
       if (!bounds) return { clusters: [], totalCount: 0 }
       // Only fetch from backend if zoom is low enough to need server-side aggregation
@@ -59,19 +65,21 @@ export function useMapClusters({ bounds, zoom, dataZoom }: UseMapClustersProps) 
   useEffect(() => {
     if (!backendData?.clusters) return
 
-    const points: Supercluster.PointFeature<ClusterProperties>[] = backendData.clusters.map((c) => ({
-      type: 'Feature' as const,
-      properties: {
-        cluster: false,
-        count: c.count,
-        representativeId: c.representativeId,
-        cellId: c.id,
-      },
-      geometry: {
-        type: 'Point' as const,
-        coordinates: [c.lng, c.lat],
-      },
-    }))
+    const points: Supercluster.PointFeature<ClusterProperties>[] = backendData.clusters.map(
+      (cluster) => ({
+        type: 'Feature' as const,
+        properties: {
+          cluster: false,
+          count: cluster.count,
+          representativeId: cluster.representativeId,
+          cellId: cluster.id,
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [cluster.lng, cluster.lat],
+        },
+      })
+    )
 
     superclusterRef.current.load(points)
   }, [backendData])

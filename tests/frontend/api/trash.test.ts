@@ -12,11 +12,18 @@ describe('trashApi thumbnails', () => {
   })
 
   it('loads deleted thumbnails through the trash access contract', async () => {
-    post.mockResolvedValue({ data: { thumbnails: { '7': 'data:image/jpeg;base64,dGlueQ==', '8': null } } })
+    post.mockResolvedValue({
+      data: {
+        thumbnails: { '7': 'data:image/jpeg;base64,dGlueQ==', '8': null },
+      },
+    })
 
     const thumbnails = await trashApi.getThumbnailBatch([7, 8], 'tiny')
 
-    expect(post).toHaveBeenCalledWith('/trash/thumbnails/get', { mediaIds: [7, 8], size: 'tiny' })
+    expect(post).toHaveBeenCalledWith('/trash/thumbnails/get', {
+      mediaIds: [7, 8],
+      size: 'tiny',
+    })
     expect(thumbnails).toEqual(new Map([[7, 'data:image/jpeg;base64,dGlueQ==']]))
   })
 })

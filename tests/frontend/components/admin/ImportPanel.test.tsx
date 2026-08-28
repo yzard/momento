@@ -56,7 +56,9 @@ describe('ImportPanel', () => {
     })
     render(<ImportPanel />)
 
-    const importButton = await screen.findByRole('button', { name: 'Importing...' })
+    const importButton = await screen.findByRole('button', {
+      name: 'Importing...',
+    })
     expect((importButton as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('40')
     expect(screen.getByText('Imported').parentElement?.textContent).toContain('3')

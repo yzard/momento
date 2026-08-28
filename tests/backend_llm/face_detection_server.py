@@ -11,15 +11,8 @@ from pathlib import Path
 
 import numpy
 
-SOURCE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "backend_llm"
-    / "face_detection_server.py"
-)
-SPECIFICATION = importlib.util.spec_from_file_location(
-    "face_detection_server", SOURCE_PATH
-)
+SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "face_detection_server.py"
+SPECIFICATION = importlib.util.spec_from_file_location("face_detection_server", SOURCE_PATH)
 FACE_DETECTION_SERVER = importlib.util.module_from_spec(SPECIFICATION)
 SPECIFICATION.loader.exec_module(FACE_DETECTION_SERVER)
 
@@ -31,18 +24,12 @@ class FaceDetectionServerTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(encoded), struct.pack("<ff", 1.0, -0.5))
 
     def test_normalizes_and_clamps_face_bounding_box(self):
-        bounding_box = FACE_DETECTION_SERVER.normalized_bounding_box(
-            [-10.0, 10.0, 210.0, 110.0], 200, 100
-        )
+        bounding_box = FACE_DETECTION_SERVER.normalized_bounding_box([-10.0, 10.0, 210.0, 110.0], 200, 100)
 
-        self.assertEqual(
-            bounding_box, {"x": 0.0, "y": 0.1, "width": 1.0, "height": 0.9}
-        )
+        self.assertEqual(bounding_box, {"x": 0.0, "y": 0.1, "width": 1.0, "height": 0.9})
 
     def test_face_size_score_is_bounded(self):
-        score = FACE_DETECTION_SERVER.face_size_score(
-            {"x": 0.1, "y": 0.1, "width": 0.25, "height": 0.25}
-        )
+        score = FACE_DETECTION_SERVER.face_size_score({"x": 0.1, "y": 0.1, "width": 0.25, "height": 0.25})
 
         self.assertGreaterEqual(score, 0.0)
         self.assertLessEqual(score, 1.0)
@@ -52,61 +39,35 @@ class FaceDetectionServerTests(unittest.TestCase):
         occluded_mask = numpy.zeros((112, 112), dtype=numpy.uint8)
 
         self.assertEqual(FACE_DETECTION_SERVER.face_visibility_score(visible_mask), 1.0)
-        self.assertEqual(
-            FACE_DETECTION_SERVER.face_visibility_score(occluded_mask), 0.0
-        )
+        self.assertEqual(FACE_DETECTION_SERVER.face_visibility_score(occluded_mask), 0.0)
 
     def test_feature_clarity_score_prefers_sharp_facial_regions(self):
         parsing_mask = numpy.ones((112, 112), dtype=numpy.uint8)
         flat_face = numpy.full((112, 112, 3), 128, dtype=numpy.uint8)
-        checkerboard = ((numpy.indices((112, 112)).sum(axis=0) % 2) * 255).astype(
-            numpy.uint8
-        )
+        checkerboard = ((numpy.indices((112, 112)).sum(axis=0) % 2) * 255).astype(numpy.uint8)
         sharp_face = numpy.repeat(checkerboard[:, :, None], 3, axis=2)
 
-        flat_score = FACE_DETECTION_SERVER.facial_feature_clarity_score(
-            flat_face, parsing_mask
-        )
-        sharp_score = FACE_DETECTION_SERVER.facial_feature_clarity_score(
-            sharp_face, parsing_mask
-        )
+        flat_score = FACE_DETECTION_SERVER.facial_feature_clarity_score(flat_face, parsing_mask)
+        sharp_score = FACE_DETECTION_SERVER.facial_feature_clarity_score(sharp_face, parsing_mask)
 
         self.assertEqual(flat_score, 0.0)
         self.assertGreater(sharp_score, flat_score)
 
     def test_normalizes_eye_center_from_first_two_landmarks(self):
-        eye_center = FACE_DETECTION_SERVER.normalized_eye_center(
-            [[40.0, 20.0], [60.0, 24.0], [50.0, 35.0]], 100, 80
-        )
+        eye_center = FACE_DETECTION_SERVER.normalized_eye_center([[40.0, 20.0], [60.0, 24.0], [50.0, 35.0]], 100, 80)
 
         self.assertEqual(eye_center, {"x": 0.5, "y": 0.275})
 
     def test_face_thresholds_filter_low_likelihood_and_resolution(self):
         bounding_box = {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.25}
 
-        self.assertTrue(
-            FACE_DETECTION_SERVER.face_meets_thresholds(
-                0.9, bounding_box, 1000, 800, 0.8, 112
-            )
-        )
-        self.assertFalse(
-            FACE_DETECTION_SERVER.face_meets_thresholds(
-                0.79, bounding_box, 1000, 800, 0.8, 112
-            )
-        )
-        self.assertFalse(
-            FACE_DETECTION_SERVER.face_meets_thresholds(
-                0.9, bounding_box, 500, 400, 0.8, 112
-            )
-        )
+        self.assertTrue(FACE_DETECTION_SERVER.face_meets_thresholds(0.9, bounding_box, 1000, 800, 0.8, 112))
+        self.assertFalse(FACE_DETECTION_SERVER.face_meets_thresholds(0.79, bounding_box, 1000, 800, 0.8, 112))
+        self.assertFalse(FACE_DETECTION_SERVER.face_meets_thresholds(0.9, bounding_box, 500, 400, 0.8, 112))
 
     def test_frontality_score_prefers_centered_level_landmarks(self):
-        frontal = FACE_DETECTION_SERVER.face_frontality_score(
-            [[30, 30], [70, 30], [50, 50], [35, 70], [65, 70]]
-        )
-        turned = FACE_DETECTION_SERVER.face_frontality_score(
-            [[30, 30], [70, 36], [62, 50], [45, 70], [70, 70]]
-        )
+        frontal = FACE_DETECTION_SERVER.face_frontality_score([[30, 30], [70, 30], [50, 50], [35, 70], [65, 70]])
+        turned = FACE_DETECTION_SERVER.face_frontality_score([[30, 30], [70, 36], [62, 50], [45, 70], [70, 70]])
 
         self.assertEqual(frontal, 1.0)
         self.assertGreater(frontal, turned)
@@ -121,9 +82,7 @@ class FaceDetectionServerTests(unittest.TestCase):
             FACE_DETECTION_SERVER.select_providers(FakeOnnxRuntime())
 
     def test_runtime_loads_only_detection_and_recognition_models(self):
-        self.assertEqual(
-            FACE_DETECTION_SERVER.REQUIRED_MODULES, ["detection", "recognition"]
-        )
+        self.assertEqual(FACE_DETECTION_SERVER.REQUIRED_MODULES, ["detection", "recognition"])
         self.assertEqual(FACE_DETECTION_SERVER.MODEL_NAME, "buffalo_l")
         self.assertEqual(FACE_DETECTION_SERVER.RECOGNITION_INPUT_SIZE, 112)
         self.assertEqual(FACE_DETECTION_SERVER.FACE_PARSING_INPUT_SIZE, 512)
@@ -139,9 +98,7 @@ class FaceDetectionServerTests(unittest.TestCase):
 
         outputs = [FakeOutput("output16"), FakeOutput("output"), FakeOutput("output32")]
 
-        self.assertEqual(
-            FACE_DETECTION_SERVER.select_face_parsing_output_name(outputs), "output"
-        )
+        self.assertEqual(FACE_DETECTION_SERVER.select_face_parsing_output_name(outputs), "output")
 
     def test_uses_first_face_parsing_output_when_primary_name_is_unavailable(self):
         class FakeOutput:
@@ -150,18 +107,14 @@ class FaceDetectionServerTests(unittest.TestCase):
 
         outputs = [FakeOutput("primary"), FakeOutput("auxiliary")]
 
-        self.assertEqual(
-            FACE_DETECTION_SERVER.select_face_parsing_output_name(outputs), "primary"
-        )
+        self.assertEqual(FACE_DETECTION_SERVER.select_face_parsing_output_name(outputs), "primary")
 
     def test_rejects_face_parsing_model_without_outputs(self):
         with self.assertRaisesRegex(RuntimeError, "does not expose an output"):
             FACE_DETECTION_SERVER.select_face_parsing_output_name([])
 
     def test_detection_size_accepts_only_supported_square_sizes(self):
-        self.assertEqual(
-            FACE_DETECTION_SERVER.SUPPORTED_FACE_DETECTION_SIZES, {640, 960, 1280}
-        )
+        self.assertEqual(FACE_DETECTION_SERVER.SUPPORTED_FACE_DETECTION_SIZES, {640, 960, 1280})
 
     def test_filters_small_faces_before_alignment(self):
         aligned_keypoints = []
@@ -178,9 +131,7 @@ class FaceDetectionServerTests(unittest.TestCase):
             dtype=numpy.float32,
         )
         detected_faces = FACE_DETECTION_SERVER.prepare_detected_faces(
-            numpy.asarray(
-                [[0, 0, 50, 50, 0.99], [50, 50, 250, 250, 0.90]], dtype=numpy.float32
-            ),
+            numpy.asarray([[0, 0, 50, 50, 0.99], [50, 50, 250, 250, 0.90]], dtype=numpy.float32),
             keypoints,
             numpy.zeros((1000, 1000, 3), dtype=numpy.uint8),
             1000,
@@ -211,10 +162,7 @@ class FaceDetectionServerTests(unittest.TestCase):
                 FACE_DETECTION_SERVER.require_model_directory(directory, "buffalo_l")
             model_directory = Path(directory) / "models" / "buffalo_l"
             model_directory.mkdir(parents=True)
-            self.assertEqual(
-                FACE_DETECTION_SERVER.require_model_directory(directory, "buffalo_l"),
-                model_directory,
-            )
+            self.assertEqual(FACE_DETECTION_SERVER.require_model_directory(directory, "buffalo_l"), model_directory)
 
     def test_inference_endpoint_reads_the_queued_image_descriptor(self):
         class RecordingRuntime:
@@ -242,21 +190,12 @@ class FaceDetectionServerTests(unittest.TestCase):
             ).encode()
             FACE_DETECTION_SERVER.Handler.runtime = runtime
             FACE_DETECTION_SERVER.Handler.input_root = input_root
-            server = FACE_DETECTION_SERVER.ModelHTTPServer(
-                ("127.0.0.1", 0), FACE_DETECTION_SERVER.Handler
-            )
+            server = FACE_DETECTION_SERVER.ModelHTTPServer(("127.0.0.1", 0), FACE_DETECTION_SERVER.Handler)
             server_thread = threading.Thread(target=server.serve_forever)
             server_thread.start()
             try:
-                connection = http.client.HTTPConnection(
-                    "127.0.0.1", server.server_address[1]
-                )
-                connection.request(
-                    "POST",
-                    "/infer",
-                    body=descriptor,
-                    headers={"Content-Type": "application/json"},
-                )
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+                connection.request("POST", "/infer", body=descriptor, headers={"Content-Type": "application/json"})
                 response = connection.getresponse()
                 response.read()
                 connection.close()

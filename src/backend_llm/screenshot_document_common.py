@@ -1,23 +1,21 @@
 """Shared image analysis and HTTP runtime for screenshot and document detection."""
 
 import argparse
-import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 from dynamic_batching import DynamicBatcher
 from image_runtime import (
-    InvalidImageError,
     ModelHTTPServer,
     create_inference_slots,
     decode_image,
     register_image_decoders,
     serve_until_stopped,
 )
+from runtime_http import ImageRuntimeRequestHandler
 from runtime_input import read_runtime_input
 
 MINIMUM_TEXT_CONFIDENCE = 0.25
@@ -457,47 +455,10 @@ def run_detection_pipeline(handler: Any) -> dict[str, Any]:
             return runtime.classify(prepared_input, prepared_layout, recognition_predictions)
 
 
-class DetectionHandler(BaseHTTPRequestHandler):
-    runtime = None
-    input_root = None
-
-    def do_GET(self):
-        if self.path != "/ready":
-            self.send_error(404)
-            return
-        self.send_json(200, {"status": "ready"})
-
-    def do_POST(self):
-        if self.path != "/infer":
-            self.send_error(404)
-            return
-        self.handle_inference()
-
-    def handle_inference(self):
-        try:
-            # Bound decoded image memory before opening or reading the queued input.
-            response = run_detection_pipeline(self)
-        except InvalidImageError as error:
-            self.send_json(400, {"detail": str(error)})
-            return
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            self.send_json(400, {"detail": f"invalid request: {error}"})
-            return
-        except RuntimeError as error:
-            self.send_json(500, {"detail": str(error)})
-            return
-        self.send_json(200, response)
-
-    def log_message(self, message_format, *arguments):
-        return
-
-    def send_json(self, status, payload):
-        body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+class DetectionHandler(ImageRuntimeRequestHandler):
+    def run_inference(self):
+        # Bound decoded image memory before opening or reading the queued input.
+        return run_detection_pipeline(self)
 
 
 def serve_detection(

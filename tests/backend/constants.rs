@@ -1,4 +1,4 @@
-use momento_api::constants::paths;
+use momento_api::constants::{image_mime_type, paths, video_mime_type, IMAGE_EXTENSIONS};
 
 use crate::test_utils::init_test_paths;
 
@@ -55,4 +55,24 @@ fn test_media_directories_are_distinct() {
             assert_ne!(first, second);
         }
     }
+}
+
+#[test]
+fn supported_media_extensions_have_canonical_mime_types() {
+    for (filename, expected_mime_type) in [
+        ("animation.GIF", "image/gif"),
+        ("scan.TIFF", "image/tiff"),
+        ("photo.WEBP", "image/webp"),
+        ("lossless.QOI", "image/qoi"),
+    ] {
+        assert_eq!(
+            image_mime_type(std::path::Path::new(filename)),
+            Some(expected_mime_type)
+        );
+    }
+    assert!(IMAGE_EXTENSIONS.contains(".qoi"));
+    assert_eq!(
+        video_mime_type(std::path::Path::new("clip.MOV")),
+        Some("video/quicktime")
+    );
 }

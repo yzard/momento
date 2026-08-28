@@ -1,4 +1,5 @@
 use crate::auth::{
+    access_token_cookie,
     jwt::{decode_access_token, decode_media_access_ticket},
     AdminPasswordReset,
 };
@@ -31,6 +32,7 @@ pub struct AppState {
     pub llm_transport: crate::processor::ai::transport::TransportHandle,
     pub webdav_request_gate: crate::webdav::WebDAVRequestGate,
     pub admin_password_reset: AdminPasswordReset,
+    pub authentication_protection: crate::auth::AuthenticationProtection,
 }
 
 #[axum::async_trait]
@@ -47,9 +49,9 @@ where
             return Ok(current_user.clone());
         }
 
-        let token = bearer_token(parts)?;
+        let token = authentication_token(parts)?;
         let config = app_state.config.current();
-        let claims = decode_access_token(token, &config)
+        let claims = decode_access_token(&token, &config)
             .ok_or_else(|| AppError::Authentication("Invalid or expired token".to_string()))?;
 
         let user_id: i64 = claims
@@ -115,7 +117,7 @@ where
                 .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
             let current_user = load_current_user(&app_state, user_id)?;
             if current_user.must_change_password {
-                return Err(AppError::Forbidden("Password change required".to_string()));
+                return Err(AppError::PasswordChangeRequired);
             }
 
             return Ok(Self {
@@ -124,7 +126,7 @@ where
             });
         }
 
-        if parts.headers.contains_key(AUTHORIZATION) {
+        if has_user_authentication(parts) {
             let current_user = CurrentUser::from_request_parts(parts, state).await?;
             return Ok(Self {
                 user_id: current_user.id,
@@ -147,13 +149,23 @@ fn media_access_ticket(query: Option<&str>) -> Result<Option<String>, AppError> 
     Ok(ticket_query.ticket)
 }
 
-fn bearer_token(parts: &Parts) -> Result<&str, AppError> {
+fn authentication_token(parts: &Parts) -> Result<String, AppError> {
+    bearer_token(parts)
+        .map(str::to_string)
+        .or_else(|| access_token_cookie(&parts.headers))
+        .ok_or_else(|| AppError::Authentication("Not authenticated".to_string()))
+}
+
+fn bearer_token(parts: &Parts) -> Option<&str> {
     parts
         .headers
         .get(AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
         .and_then(|authorization| authorization.strip_prefix("Bearer "))
-        .ok_or_else(|| AppError::Authentication("Not authenticated".to_string()))
+}
+
+fn has_user_authentication(parts: &Parts) -> bool {
+    bearer_token(parts).is_some() || access_token_cookie(&parts.headers).is_some()
 }
 
 fn load_current_user(app_state: &AppState, user_id: i64) -> Result<CurrentUser, AppError> {
@@ -202,7 +214,7 @@ pub async fn password_change_guard(
     let (mut parts, body) = request.into_parts();
     if let Ok(current_user) = CurrentUser::from_request_parts(&mut parts, &state).await {
         if current_user.must_change_password {
-            return AppError::Forbidden("Password change required".to_string()).into_response();
+            return AppError::PasswordChangeRequired.into_response();
         }
         parts.extensions.insert(current_user);
     }
@@ -215,12 +227,18 @@ fn is_password_change_route(path: &str) -> bool {
         "/user/authenticate",
         "/user/refresh",
         "/user/logout",
+        "/user/session/create",
+        "/user/session/refresh",
+        "/user/session/delete",
         "/user/get",
         "/user/change-password",
         "/api/v1/healthcheck",
         "/api/v1/user/authenticate",
         "/api/v1/user/refresh",
         "/api/v1/user/logout",
+        "/api/v1/user/session/create",
+        "/api/v1/user/session/refresh",
+        "/api/v1/user/session/delete",
         "/api/v1/user/get",
         "/api/v1/user/change-password",
     ]
