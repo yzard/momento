@@ -6,7 +6,6 @@ import android.content.Intent
 import android.provider.Settings as AndroidSettings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Column
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Icon
@@ -103,9 +102,9 @@ internal fun AndroidUpdateSettingsSection(repository: AndroidUpdateRepository) {
 
     ListItem(
         headlineContent = { Text("Momento ${BuildConfig.VERSION_NAME}") },
-        supportingContent = {
-            Column {
-                Text(status)
+        supportingContent = { Text(status) },
+        trailingContent = {
+            SettingsTrailingActions {
                 TextButton(
                     onClick = {
                         if (pendingUpdatePath == null) {

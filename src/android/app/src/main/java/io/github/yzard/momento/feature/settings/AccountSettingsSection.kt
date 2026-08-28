@@ -2,10 +2,7 @@ package io.github.yzard.momento.feature.settings
 
 import android.view.autofill.AutofillManager
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AccountCircle
@@ -23,7 +20,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.AccountRepository
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.auth.PasswordChangeFields
@@ -32,7 +28,6 @@ import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.io.IOException
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun AccountSettingsSection(
     repository: AccountRepository,
@@ -47,15 +42,13 @@ internal fun AccountSettingsSection(
     Column {
         ListItem(
             headlineContent = { Text(user?.username ?: "Account") },
-            supportingContent = {
-                Column {
-                    Text(origin ?: "No server selected")
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { passwordDialog = true }) { Text("Change password") }
-                        TextButton(onClick = { logoutDialog = true }) {
-                            Icon(Icons.AutoMirrored.Filled.Logout, null)
-                            Text("Log out")
-                        }
+            supportingContent = { Text(origin ?: "No server selected") },
+            trailingContent = {
+                SettingsTrailingActions {
+                    TextButton(onClick = { passwordDialog = true }) { Text("Change password") }
+                    TextButton(onClick = { logoutDialog = true }) {
+                        Icon(Icons.AutoMirrored.Filled.Logout, null)
+                        Text("Log out")
                     }
                 }
             },

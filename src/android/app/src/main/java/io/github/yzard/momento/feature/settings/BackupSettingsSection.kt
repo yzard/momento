@@ -5,10 +5,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Backup
@@ -112,7 +109,6 @@ fun backupScheduleSummary(status: BackupScheduleStatus, nextScheduledAt: String?
     BackupScheduleStatus.WAITING -> nextScheduledAt?.let { "Next daily backup: $it" } ?: "Daily backup is scheduled"
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun BackupSettingsSection(
     settings: Settings,
@@ -219,35 +215,37 @@ internal fun BackupSettingsSection(
                         Text(backupScheduleSummary(scheduleStatus, nextScheduledAt))
                         latestBackupError?.let { Text("Recent issue: $it") }
                         Text("Metadata and AI processing run separately on the server schedule.")
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (canCancel) {
-                                TextButton(
-                                    enabled = !clearBusy,
-                                    onClick = {
-                                        scope.launch {
-                                            requestBackupCancellation(
-                                                context.applicationContext,
-                                                database.backupAssetDao(),
-                                                settings.mobileDataEnabled,
-                                            )
-                                        }
-                                    },
-                                ) { Text("Cancel") }
-                            }
+                    }
+                },
+                trailingContent = {
+                    SettingsTrailingActions {
+                        if (canCancel) {
                             TextButton(
                                 enabled = !clearBusy,
                                 onClick = {
-                                    mediaAccess = currentBackupMediaAccess(context)
-                                    locationAccess = currentBackupLocationMetadataAccess(context)
-                                    if (!backupCanReadOriginalMedia(mediaAccess, locationAccess)) {
-                                        permissionRequest.launch(backupPermissions(Build.VERSION.SDK_INT))
-                                    } else {
-                                        schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
-                                        scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
+                                    scope.launch {
+                                        requestBackupCancellation(
+                                            context.applicationContext,
+                                            database.backupAssetDao(),
+                                            settings.mobileDataEnabled,
+                                        )
                                     }
                                 },
-                            ) { Text("Back up now") }
+                            ) { Text("Cancel") }
                         }
+                        TextButton(
+                            enabled = !clearBusy,
+                            onClick = {
+                                mediaAccess = currentBackupMediaAccess(context)
+                                locationAccess = currentBackupLocationMetadataAccess(context)
+                                if (!backupCanReadOriginalMedia(mediaAccess, locationAccess)) {
+                                    permissionRequest.launch(backupPermissions(Build.VERSION.SDK_INT))
+                                } else {
+                                    schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
+                                    scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
+                                }
+                            },
+                        ) { Text("Back up now") }
                     }
                 },
                 leadingContent = { Icon(Icons.Default.Backup, null) },
@@ -258,6 +256,10 @@ internal fun BackupSettingsSection(
                     Column {
                         Text(historyDescription)
                         Text(backupIntegritySummary(backupIntegrity))
+                    }
+                },
+                trailingContent = {
+                    SettingsTrailingActions {
                         TextButton(
                             onClick = { repairDialog = true },
                             enabled = canRepair && !repairBusy && !clearBusy,
