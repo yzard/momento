@@ -70,17 +70,4 @@ class MomentoChromeInstrumentedTest {
         composeRule.runOnIdle { assertEquals(1, backClicks) }
     }
 
-    @Test
-    fun mediaPageTitleUsesReadableFloatingChrome() {
-        composeRule.setContent {
-            MomentoTheme(ThemePreference.LIGHT) {
-                MomentoMediaPageTitle(
-                    text = "Screenshots",
-                    modifier = Modifier,
-                )
-            }
-        }
-
-        composeRule.onNodeWithText("Screenshots").assertIsDisplayed()
-    }
 }

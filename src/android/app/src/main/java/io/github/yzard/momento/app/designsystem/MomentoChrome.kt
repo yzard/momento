@@ -55,30 +55,6 @@ fun MomentoPageTitle(text: String, modifier: Modifier) {
 }
 
 @Composable
-fun MomentoMediaPageTitle(text: String, modifier: Modifier) {
-    val colors = momentoFloatingControlColors(darkTheme = true)
-    Surface(
-        modifier = modifier
-            .padding(start = 12.dp, top = 10.dp),
-        shape = MaterialTheme.shapes.extraLarge,
-        color = colors.container,
-        contentColor = colors.content,
-        border = BorderStroke(1.dp, colors.outline),
-        shadowElevation = 0.dp,
-        tonalElevation = 0.dp,
-    ) {
-        Text(
-            text = text,
-            modifier = Modifier.heightIn(min = 48.dp).padding(horizontal = 16.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-@Composable
 fun MomentoPageHeader(
     title: String,
     subtitle: String?,
@@ -123,45 +99,17 @@ fun MomentoDetailPageHeader(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
-    val colors = momentoFloatingControlColors(darkTheme = true)
-    Surface(
-        modifier = modifier
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(start = 12.dp, top = 10.dp, end = 12.dp),
-        shape = MaterialTheme.shapes.extraLarge,
-        color = colors.container,
-        contentColor = colors.content,
-        border = BorderStroke(1.dp, colors.outline),
-        shadowElevation = 0.dp,
-        tonalElevation = 0.dp,
-    ) {
-        Row(
-            modifier = Modifier.heightIn(min = 56.dp).padding(end = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+    MomentoPageHeader(
+        title = title,
+        subtitle = subtitle,
+        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars),
+        leadingContent = {
             IconButton(onClick = onBack, enabled = enabled) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, backContentDescription)
             }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (subtitle != null) {
-                    Text(
-                        text = subtitle,
-                        color = colors.content.copy(alpha = 0.72f),
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-    }
+        },
+        trailingContent = null,
+    )
 }
 
 @Composable

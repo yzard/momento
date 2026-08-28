@@ -115,7 +115,6 @@ import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
 import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
 import io.github.yzard.momento.app.designsystem.MomentoPageHeader
-import io.github.yzard.momento.app.designsystem.MomentoMediaPageTitle
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.navigation.Destination
 import io.github.yzard.momento.app.navigation.MainShellState
@@ -828,12 +827,7 @@ private fun ShellOverlay(
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .imePadding(),
         ) {
-            if (destination.isTimelinePage()) {
-                MomentoMediaPageTitle(
-                    text = destination.label,
-                    modifier = Modifier.align(Alignment.TopStart),
-                )
-            } else if (destination.hasShellPageTitle()) {
+            if (destination.hasShellPageTitle()) {
                 MomentoPageHeader(
                     title = destination.label,
                     subtitle = null,

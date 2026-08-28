@@ -53,7 +53,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.designsystem.momentoMediaViewerContentPadding
@@ -402,7 +401,7 @@ private fun ContinuousTimelineGrid(
         }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val columns = adaptiveGridColumns(maxWidth.value.toInt())
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
@@ -487,7 +486,7 @@ private fun FloatingTimelineHeader(
     chooseDate: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors(darkTheme = true)
+    val floatingColors = momentoFloatingControlColors()
     Surface(
         modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
         color = floatingColors.container,
@@ -515,7 +514,7 @@ private fun TimelineSelectionControl(
     requestAddToAlbum: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors(darkTheme = true)
+    val floatingColors = momentoFloatingControlColors()
     Surface(
         modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
         color = floatingColors.container,

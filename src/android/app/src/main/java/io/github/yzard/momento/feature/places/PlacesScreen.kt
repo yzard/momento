@@ -40,7 +40,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -294,7 +293,7 @@ private fun PlaceDetailScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when {
             media == null && error != null -> ErrorState(error!!) { retryVersion += 1 }
             media == null -> LoadingState()

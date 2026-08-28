@@ -269,7 +269,7 @@ private fun AlbumDetailScreen(
     LaunchedEffect(albumId) { loadAlbum() }
     val album = detail
     if (album == null) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             Column(Modifier.align(Alignment.Center).padding(24.dp)) {
                 if (error == null) CircularProgressIndicator() else {
                     Text(error!!, color = MaterialTheme.colorScheme.error)
@@ -297,7 +297,7 @@ private fun AlbumDetailScreen(
         return succeeded
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         MediaGrid(
             media = album.media,
             repository = repository,
