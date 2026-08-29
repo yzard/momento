@@ -69,7 +69,6 @@ async fn test_local_import_uses_canonical_staged_file_import() {
         ImportSettings {
             user_id,
             pool: pool.clone(),
-            delete_after_import: true,
             concurrency: 1,
         },
         job_id,
@@ -107,6 +106,87 @@ async fn test_local_import_uses_canonical_staged_file_import() {
 
     std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
     std::fs::remove_dir_all(source_directory).expect("remove local import directory");
+}
+
+#[tokio::test]
+async fn test_local_import_absorbs_duplicates_and_removes_duplicate_sources() {
+    init_test_paths();
+    let pool = create_test_db();
+    let user_id = create_test_user(
+        &pool,
+        "local-duplicate-import",
+        "local-duplicate-import@example.com",
+    );
+    let source_directory = paths()
+        .imports
+        .join(format!("duplicate-tests/{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&source_directory).expect("local duplicate directory");
+    let first_source_path = source_directory.join("first.jpg");
+    let duplicate_source_path = source_directory.join("duplicate.jpg");
+    let duplicate_sidecar_path = source_directory.join("duplicate.jpg.supplemental-metadata.json");
+    std::fs::write(&first_source_path, b"identical local import bytes")
+        .expect("first local source");
+    std::fs::write(&duplicate_source_path, b"identical local import bytes")
+        .expect("duplicate local source");
+    std::fs::write(
+        &duplicate_sidecar_path,
+        b"{\"description\":\"absorbed duplicate\"}",
+    )
+    .expect("duplicate sidecar");
+    let job_id = create_import_job(&pool, ImportSource::Local).expect("local import job");
+
+    run_local_import(
+        ImportSettings {
+            user_id,
+            pool: pool.clone(),
+            concurrency: 2,
+        },
+        job_id,
+    )
+    .await;
+
+    assert!(!first_source_path.exists());
+    assert!(!duplicate_source_path.exists());
+    assert!(!duplicate_sidecar_path.exists());
+    let connection = pool.get().expect("database");
+    let (media_id, canonical_relative_path): (i64, String) = connection
+        .query_row(
+            "SELECT id, file_path FROM media WHERE content_hash IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("absorbed media");
+    let media_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM media", [], |row| row.get(0))
+        .expect("media count");
+    let job: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT processed_files, successful_imports, failed_imports FROM import_jobs WHERE id = ?",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("local import progress");
+    assert_eq!(media_count, 1);
+    assert_eq!(job, (2, 2, 0));
+    let canonical_path = paths().originals.join(&canonical_relative_path);
+    assert_eq!(
+        std::fs::read(format!(
+            "{}.supplemental-metadata.json",
+            canonical_path.display()
+        ))
+        .expect("absorbed canonical sidecar"),
+        b"{\"description\":\"absorbed duplicate\"}"
+    );
+
+    drop(connection);
+    std::fs::remove_file(&canonical_path).expect("remove canonical original");
+    std::fs::remove_file(format!(
+        "{}.supplemental-metadata.json",
+        canonical_path.display()
+    ))
+    .expect("remove canonical sidecar");
+    std::fs::remove_dir_all(source_directory).expect("remove local duplicate directory");
+    assert!(media_id > 0);
 }
 
 #[tokio::test]

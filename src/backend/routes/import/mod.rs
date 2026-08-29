@@ -24,7 +24,6 @@ async fn trigger_local_import(
     let settings = ImportSettings {
         user_id,
         pool,
-        delete_after_import: true,
         concurrency: config.regenerate.num_cpus,
     };
 

@@ -76,7 +76,6 @@ pub struct ImportJob {
 pub struct ImportSettings {
     pub user_id: i64,
     pub pool: DbPool,
-    pub delete_after_import: bool,
     pub concurrency: usize,
 }
 
@@ -172,23 +171,17 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
                     ImportSource::Local,
                     settings.user_id,
                     &settings.pool,
-                    settings.delete_after_import,
+                    true,
                 )
                 .await;
                 match import_result {
-                    Ok(_) if settings.delete_after_import => {
+                    Ok(_) => {
                         if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
                             if error.kind() != std::io::ErrorKind::NotFound {
                                 warn!(path = %source_path.display(), "local imported file cleanup failed: {error}");
                             }
                         }
                         let _ = remove_claim_directory(&claimed_path).await;
-                        update_import_progress(&settings.pool, job_id, true, None);
-                    }
-                    Ok(_) => {
-                        if let Err(error) = restore_claim(&claimed_path, &source_path).await {
-                            warn!(path = %source_path.display(), "local imported source restoration failed: {error}");
-                        }
                         update_import_progress(&settings.pool, job_id, true, None);
                     }
                     Err(error) => {
