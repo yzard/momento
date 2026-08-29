@@ -318,10 +318,68 @@ fn loads_google_photos_supplemental_metadata() {
 #[test]
 fn finds_numbered_supplemental_metadata_sidecar() {
     let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let media_path = directory.path().join("Snapseed.heic");
+    let media_path = directory.path().join("Snapseed(10).heic");
     let sidecar_path = directory
         .path()
         .join("Snapseed.heic.supplemental-metadata(10).json");
+    fs::write(&media_path, b"image").expect("Failed to write media fixture");
+    fs::write(&sidecar_path, "{}").expect("Failed to write metadata fixture");
+
+    assert_eq!(supplemental_metadata_path(&media_path), Some(sidecar_path));
+}
+
+#[test]
+fn unnumbered_media_does_not_claim_a_numbered_sidecar() {
+    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+    let media_path = directory.path().join("Snapseed.heic");
+    let numbered_sidecar_path = directory
+        .path()
+        .join("Snapseed.heic.supplemental-metadata(10).json");
+    fs::write(&media_path, b"image").expect("Failed to write media fixture");
+    fs::write(&numbered_sidecar_path, "{}").expect("Failed to write metadata fixture");
+
+    assert_eq!(supplemental_metadata_path(&media_path), None);
+}
+
+#[test]
+fn numbered_and_unnumbered_media_load_their_own_sidecars() {
+    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+    let media_path = directory.path().join("photo.jpg");
+    let numbered_media_path = directory.path().join("photo(2).jpg");
+    let sidecar_path = directory
+        .path()
+        .join("photo.jpg.supplemental-metadata.json");
+    let numbered_sidecar_path = directory
+        .path()
+        .join("photo.jpg.supplemental-metadata(2).json");
+    fs::write(&media_path, b"first image").expect("Failed to write media fixture");
+    fs::write(&numbered_media_path, b"second image").expect("Failed to write media fixture");
+    fs::write(&sidecar_path, r#"{"description":"first"}"#)
+        .expect("Failed to write metadata fixture");
+    fs::write(&numbered_sidecar_path, r#"{"description":"second"}"#)
+        .expect("Failed to write metadata fixture");
+
+    assert_eq!(
+        load_supplemental_metadata(&media_path)
+            .and_then(|value| value["description"].as_str().map(str::to_string)),
+        Some("first".to_string())
+    );
+    assert_eq!(
+        load_supplemental_metadata(&numbered_media_path)
+            .and_then(|value| value["description"].as_str().map(str::to_string)),
+        Some("second".to_string())
+    );
+}
+
+#[test]
+fn finds_takeout_truncated_numbered_sidecar() {
+    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+    let media_path = directory
+        .path()
+        .join("1234567890123456789012345678901234567890(2).jpg");
+    let sidecar_path = directory
+        .path()
+        .join("1234567890123456789012345678901234567890.jpg.s(2).json");
     fs::write(&media_path, b"image").expect("Failed to write media fixture");
     fs::write(&sidecar_path, "{}").expect("Failed to write metadata fixture");
 

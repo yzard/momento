@@ -349,7 +349,7 @@ async fn test_webdav_duplicate_reuses_existing_media() {
 
     let user_root = paths().webdav.join(&username);
     std::fs::create_dir_all(&user_root).expect("WebDAV user directory");
-    let duplicate_path = user_root.join("duplicate.jpg");
+    let duplicate_path = user_root.join("duplicate(2).jpg");
     std::fs::write(&duplicate_path, b"shared WebDAV bytes").expect("WebDAV duplicate");
     let duplicate_sidecar_path = user_root.join("duplicate.jpg.supplemental-metadata(2).json");
     std::fs::write(
@@ -357,7 +357,7 @@ async fn test_webdav_duplicate_reuses_existing_media() {
         b"{\"description\":\"WebDAV sidecar\"}",
     )
     .expect("WebDAV sidecar");
-    mark_webdav_file_ready(&pool, second_user_id, "duplicate.jpg");
+    mark_webdav_file_ready(&pool, second_user_id, "duplicate(2).jpg");
     mark_webdav_file_ready(
         &pool,
         second_user_id,

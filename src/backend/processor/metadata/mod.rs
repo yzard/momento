@@ -77,39 +77,108 @@ mod generation;
 pub mod reverse_geocoding;
 
 pub fn supplemental_metadata_path(file_path: &Path) -> Option<std::path::PathBuf> {
-    let file_name = file_path.file_name()?.to_str()?;
-    let parent = file_path.parent()?;
-    if let Some(path) = find_supplemental_metadata_in_directory(parent, file_name) {
-        return Some(path);
-    }
-    None
+    supplemental_metadata_candidates(file_path)
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
-fn find_supplemental_metadata_in_directory(
-    directory: &Path,
-    file_name: &str,
-) -> Option<std::path::PathBuf> {
-    let exact_name = format!("{}.supplemental-metadata.json", file_name);
-    let exact_path = directory.join(exact_name);
-    if exact_path.is_file() {
-        return Some(exact_path);
+pub(crate) fn supplemental_metadata_candidates(file_path: &Path) -> Vec<std::path::PathBuf> {
+    const SUPPLEMENTAL_METADATA_SUFFIX: &str = ".supplemental-metadata.json";
+
+    let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let Some(directory) = file_path.parent() else {
+        return Vec::new();
+    };
+
+    let exact_name = format!("{file_name}{SUPPLEMENTAL_METADATA_SUFFIX}");
+    let mut candidate_names = vec![exact_name.clone()];
+    push_unique_candidate_name(
+        &mut candidate_names,
+        takeout_truncated_sidecar_name(&exact_name),
+    );
+
+    if let Some((unnumbered_file_name, duplicate_index)) =
+        split_takeout_duplicate_filename(file_name)
+    {
+        // Takeout moves a collision index from the media stem to the end of its sidecar name:
+        // photo(2).jpg -> photo.jpg.supplemental-metadata(2).json.
+        let unnumbered_sidecar_name =
+            format!("{unnumbered_file_name}{SUPPLEMENTAL_METADATA_SUFFIX}");
+        push_unique_candidate_name(
+            &mut candidate_names,
+            format!(
+                "{}({duplicate_index}).json",
+                unnumbered_sidecar_name.trim_end_matches(".json")
+            ),
+        );
+        let truncated_unnumbered_sidecar_name =
+            takeout_truncated_sidecar_name(&unnumbered_sidecar_name);
+        push_unique_candidate_name(
+            &mut candidate_names,
+            format!(
+                "{}({duplicate_index}).json",
+                truncated_unnumbered_sidecar_name.trim_end_matches(".json")
+            ),
+        );
     }
 
-    let prefix = format!("{}.supplemental-metadata", file_name);
-    let mut candidates = fs::read_dir(directory)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".json"))
-        })
-        .collect::<Vec<_>>();
-    candidates.sort();
-    candidates.into_iter().next()
+    candidate_names
+        .into_iter()
+        .map(|candidate_name| directory.join(candidate_name))
+        .collect()
+}
+
+fn push_unique_candidate_name(candidate_names: &mut Vec<String>, candidate_name: String) {
+    if !candidate_names.contains(&candidate_name) {
+        candidate_names.push(candidate_name);
+    }
+}
+
+fn takeout_truncated_sidecar_name(sidecar_name: &str) -> String {
+    // Takeout preserves the .json suffix while truncating long supplemental filenames.
+    const TAKEOUT_SIDECAR_MAX_CHARACTERS: usize = 51;
+    const JSON_SUFFIX: &str = ".json";
+    const TAKEOUT_SIDECAR_PREFIX_CHARACTERS: usize =
+        TAKEOUT_SIDECAR_MAX_CHARACTERS - JSON_SUFFIX.len();
+
+    if sidecar_name.chars().count() <= TAKEOUT_SIDECAR_MAX_CHARACTERS {
+        return sidecar_name.to_string();
+    }
+
+    let Some(name_without_json) = sidecar_name.strip_suffix(JSON_SUFFIX) else {
+        return sidecar_name.to_string();
+    };
+    let truncated_name = name_without_json
+        .chars()
+        .take(TAKEOUT_SIDECAR_PREFIX_CHARACTERS)
+        .collect::<String>();
+    format!("{truncated_name}{JSON_SUFFIX}")
+}
+
+fn split_takeout_duplicate_filename(file_name: &str) -> Option<(String, &str)> {
+    let extension_index = file_name.rfind('.')?;
+    let stem = &file_name[..extension_index];
+    let stem_without_closing_parenthesis = stem.strip_suffix(')')?;
+    let opening_parenthesis_index = stem_without_closing_parenthesis.rfind('(')?;
+    let duplicate_index = &stem_without_closing_parenthesis[opening_parenthesis_index + 1..];
+    if duplicate_index.is_empty()
+        || !duplicate_index
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let unnumbered_stem = &stem[..opening_parenthesis_index];
+    if unnumbered_stem.is_empty() {
+        return None;
+    }
+    Some((
+        format!("{unnumbered_stem}{}", &file_name[extension_index..]),
+        duplicate_index,
+    ))
 }
 
 pub fn load_supplemental_metadata(file_path: &Path) -> Option<serde_json::Value> {

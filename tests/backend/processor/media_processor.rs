@@ -423,7 +423,7 @@ async fn import_flattens_originals_and_moves_supplemental_metadata() {
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "flat-import", "flat-import@example.com");
     let source_directory = tempfile::tempdir().expect("source directory");
-    let source_path = source_directory.path().join("camera.jpg");
+    let source_path = source_directory.path().join("camera(10).jpg");
     let source_sidecar_path = source_directory
         .path()
         .join("camera.jpg.supplemental-metadata(10).json");

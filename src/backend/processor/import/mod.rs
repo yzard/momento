@@ -1,6 +1,6 @@
 use futures::stream::{self, StreamExt};
 use rusqlite::OptionalExtension;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::Semaphore;
@@ -16,7 +16,9 @@ use crate::error::{AppError, AppResult};
 use crate::processor::media_processor::{
     apply_file_times, build_original_filename, capture_file_times,
 };
-use crate::processor::metadata::supplemental_metadata_path as find_supplemental_metadata_path;
+use crate::processor::metadata::{
+    supplemental_metadata_candidates, supplemental_metadata_path as find_supplemental_metadata_path,
+};
 use crate::utils::hash::calculate_file_hash;
 
 static CONTENT_HASH_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
@@ -991,30 +993,7 @@ fn collect_ready_webdav_files(
     stable_age_seconds: u64,
 ) -> Vec<WebDavImportCandidate> {
     let mut candidates = Vec::new();
-    let mut supplemental_metadata = HashMap::<String, (bool, String)>::new();
-    for ready_file_path in &ready_file_paths {
-        let relative_path = Path::new(ready_file_path);
-        if !safe_webdav_relative_path(relative_path) {
-            continue;
-        }
-        let Some(file_name) = relative_path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some((media_filename, is_exact)) = supplemental_media_filename(file_name) else {
-            continue;
-        };
-        let media_ready_file_path = relative_path
-            .with_file_name(media_filename)
-            .to_string_lossy()
-            .to_string();
-        let should_insert = supplemental_metadata
-            .get(&media_ready_file_path)
-            .is_none_or(|(existing_is_exact, _)| is_exact && !existing_is_exact);
-        if should_insert {
-            supplemental_metadata
-                .insert(media_ready_file_path, (is_exact, ready_file_path.clone()));
-        }
-    }
+    let ready_file_path_set = ready_file_paths.iter().cloned().collect::<HashSet<_>>();
     for ready_file_path in ready_file_paths {
         let relative_path = Path::new(&ready_file_path);
         if !safe_webdav_relative_path(relative_path)
@@ -1031,13 +1010,21 @@ fn collect_ready_webdav_files(
         if !is_stable_webdav_file(&path, stable_age_seconds) || media_type(&path).is_none() {
             continue;
         }
-        let supplemental_ready_file_path = supplemental_metadata
-            .get(&ready_file_path)
-            .map(|(_, path)| path.clone());
-        let supplemental_metadata_path = supplemental_ready_file_path
-            .as_deref()
-            .map(|path| user_directory.join(path))
-            .filter(|path| path.is_file());
+        let supplemental_metadata = supplemental_metadata_candidates(&path)
+            .into_iter()
+            .filter(|candidate_path| candidate_path.is_file())
+            .find_map(|candidate_path| {
+                let relative_candidate_path = candidate_path
+                    .strip_prefix(user_directory)
+                    .ok()?
+                    .to_str()?
+                    .to_string();
+                ready_file_path_set
+                    .contains(&relative_candidate_path)
+                    .then_some((candidate_path, relative_candidate_path))
+            });
+        let (supplemental_metadata_path, supplemental_ready_file_path) =
+            supplemental_metadata.unzip();
         candidates.push(WebDavImportCandidate {
             source_path: path,
             supplemental_metadata_path,
@@ -1192,21 +1179,6 @@ fn is_stable_webdav_file(path: &Path, stable_age_seconds: u64) -> bool {
         .ok()
         .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
         .is_some_and(|age| age >= minimum_age)
-}
-
-fn supplemental_media_filename(file_name: &str) -> Option<(String, bool)> {
-    const MARKER: &str = ".supplemental-metadata";
-
-    let marker_index = file_name.rfind(MARKER)?;
-    let suffix = &file_name[marker_index + MARKER.len()..];
-    if !suffix.ends_with(".json") {
-        return None;
-    }
-    let media_filename = &file_name[..marker_index];
-    if media_filename.is_empty() {
-        return None;
-    }
-    Some((media_filename.to_string(), suffix == ".json"))
 }
 
 fn media_type(source_path: &Path) -> Option<&'static str> {
