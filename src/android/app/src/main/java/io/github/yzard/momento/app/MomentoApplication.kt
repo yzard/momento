@@ -783,46 +783,46 @@ private fun MainNavigationDrawer(
                     }
                 }
                 item { DrawerDestinationItem(Destination.TRASH, destination, Icons.Default.Delete, 0.dp, select) }
-            }
-            HorizontalDivider()
-            DrawerDestinationItem(Destination.SETTINGS, destination, Icons.Default.Settings, 0.dp, select)
-            if (visibleAdminDestinations.isNotEmpty()) {
-                NavigationDrawerItem(
-                    label = { Text("Admin") },
-                    selected = !adminExpanded && destination.isAdminPage(),
-                    onClick = {
-                        if (destination.isAdminPage()) {
-                            adminExpanded = !adminExpanded
-                        } else {
-                            adminExpanded = true
-                            select(Destination.ADMIN_IMPORT)
-                        }
-                    },
-                    icon = { Icon(Icons.Default.AdminPanelSettings, null) },
-                    badge = {
-                        IconButton(onClick = { adminExpanded = !adminExpanded }) {
-                            Icon(
-                                if (adminExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                if (adminExpanded) "Collapse Admin" else "Expand Admin",
-                            )
-                        }
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
-                )
-                AnimatedVisibility(visible = adminExpanded) {
-                    Column(Modifier.padding(horizontal = 12.dp)) {
-                        visibleAdminDestinations.forEach { adminDestination ->
-                            DrawerDestinationItem(
-                                destination = adminDestination,
-                                selectedDestination = destination,
-                                icon = drawerIcon(adminDestination),
-                                indentation = 20.dp,
-                                select = select,
-                            )
+                if (visibleAdminDestinations.isNotEmpty()) item {
+                    NavigationDrawerItem(
+                        label = { Text("Admin") },
+                        selected = !adminExpanded && destination.isAdminPage(),
+                        onClick = {
+                            if (destination.isAdminPage()) {
+                                adminExpanded = !adminExpanded
+                            } else {
+                                adminExpanded = true
+                                select(Destination.ADMIN_IMPORT)
+                            }
+                        },
+                        icon = { Icon(Icons.Default.AdminPanelSettings, null) },
+                        badge = {
+                            IconButton(onClick = { adminExpanded = !adminExpanded }) {
+                                Icon(
+                                    if (adminExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    if (adminExpanded) "Collapse Admin" else "Expand Admin",
+                                )
+                            }
+                        },
+                        modifier = Modifier.padding(top = 2.dp, bottom = 2.dp),
+                    )
+                    AnimatedVisibility(visible = adminExpanded) {
+                        Column {
+                            visibleAdminDestinations.forEach { adminDestination ->
+                                DrawerDestinationItem(
+                                    destination = adminDestination,
+                                    selectedDestination = destination,
+                                    icon = drawerIcon(adminDestination),
+                                    indentation = 20.dp,
+                                    select = select,
+                                )
+                            }
                         }
                     }
                 }
             }
+            HorizontalDivider()
+            DrawerDestinationItem(Destination.SETTINGS, destination, Icons.Default.Settings, 0.dp, select)
             NavigationDrawerItem(
                 label = { Text("Logout") },
                 selected = false,

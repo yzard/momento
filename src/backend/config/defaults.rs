@@ -19,8 +19,6 @@ pub(crate) const PASSWORD_ATTEMPTS_PER_SOURCE: u32 = 30;
 pub(crate) const PASSWORD_LOCKOUT_SECONDS: u64 = 900;
 pub(crate) const PASSWORD_HASH_MAX_CONCURRENT: usize = 4;
 pub(crate) const REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS: u64 = 3600;
-pub(crate) const MEDIA_PROCESS_TIMEOUT_SECONDS: u64 = 60;
-pub(crate) const MEDIA_PROCESS_TERMINATION_GRACE_SECONDS: u64 = 2;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_STDERR_BYTES: usize = 1024 * 1024;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
@@ -176,14 +174,6 @@ pub(crate) fn trusted_proxy_ip_addresses() -> Vec<IpAddr> {
 
 pub(crate) fn refresh_token_cleanup_interval_seconds() -> u64 {
     REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS
-}
-
-pub(crate) fn media_process_timeout_seconds() -> u64 {
-    MEDIA_PROCESS_TIMEOUT_SECONDS
-}
-
-pub(crate) fn media_process_termination_grace_seconds() -> u64 {
-    MEDIA_PROCESS_TERMINATION_GRACE_SECONDS
 }
 
 pub(crate) fn media_process_maximum_stderr_bytes() -> usize {
@@ -448,14 +438,6 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}",
             REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS.to_string(),
-        ),
-        (
-            "{{MEDIA_PROCESS_TIMEOUT_SECONDS}}",
-            MEDIA_PROCESS_TIMEOUT_SECONDS.to_string(),
-        ),
-        (
-            "{{MEDIA_PROCESS_TERMINATION_GRACE_SECONDS}}",
-            MEDIA_PROCESS_TERMINATION_GRACE_SECONDS.to_string(),
         ),
         (
             "{{MEDIA_PROCESS_MAXIMUM_STDERR_BYTES}}",

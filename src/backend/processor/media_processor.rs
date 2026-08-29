@@ -59,11 +59,11 @@ pub async fn generate_complete_metadata(
     source_path: &Path,
     media_type: &str,
     process_config: &MediaProcessConfig,
-) -> CompleteMediaMetadata {
+) -> Result<CompleteMediaMetadata, String> {
     let mut extracted = if media_type == "image" {
-        extract_image_metadata(source_path, process_config).await
+        extract_image_metadata(source_path, process_config).await?
     } else {
-        extract_video_metadata(source_path, process_config).await
+        extract_video_metadata(source_path, process_config).await?
     };
 
     if let Some(supplemental_metadata) = load_supplemental_metadata(source_path) {
@@ -91,17 +91,17 @@ pub async fn generate_complete_metadata(
         && metadata.location_state.is_some()
         && metadata.location_country.is_some()
     {
-        return CompleteMediaMetadata {
+        return Ok(CompleteMediaMetadata {
             metadata: extracted.metadata,
             sources: extracted.sources,
-        };
+        });
     }
 
     let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude) else {
-        return CompleteMediaMetadata {
+        return Ok(CompleteMediaMetadata {
             metadata: extracted.metadata,
             sources: extracted.sources,
-        };
+        });
     };
     if let Ok(Some(location)) = reverse_geocode(latitude, longitude) {
         if metadata.location_city.is_none() {
@@ -115,10 +115,10 @@ pub async fn generate_complete_metadata(
         }
     }
 
-    CompleteMediaMetadata {
+    Ok(CompleteMediaMetadata {
         metadata: extracted.metadata,
         sources: extracted.sources,
-    }
+    })
 }
 
 pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option<&str>) {

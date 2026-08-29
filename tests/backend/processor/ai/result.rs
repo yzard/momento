@@ -874,9 +874,10 @@ fn face_result_normalizes_a_heic_original_before_cropping() {
         &input_bytes,
     );
 
+    let process_config = MediaProcessConfig::default();
     process_result(
         &pool,
-        &MediaProcessConfig::default(),
+        &process_config,
         face_result("result-face-heic", media_id),
     )
     .expect("HEIC face result");
@@ -932,7 +933,9 @@ fn face_normalization_failure_marks_the_momento_job_failed_after_receipt() {
         )
         .expect("failed face job state");
     assert_eq!(state.0, "failed");
-    assert!(state.1.contains("could not be normalized"));
+    assert!(state.1.contains("identify"), "{}", state.1);
+    assert!(state.1.contains("result-face-invalid"), "{}", state.1);
+    assert!(state.1.contains("exit status"), "{}", state.1);
     assert_eq!(state.2, 0);
     assert_eq!(state.3, 0);
 }

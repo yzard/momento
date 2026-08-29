@@ -28,7 +28,9 @@ async fn complete_metadata_uses_local_reverse_geocoding() {
     )
     .expect("Failed to save supplemental metadata fixture");
     let complete_metadata =
-        generate_complete_metadata(&media_path, "image", &MediaProcessConfig::default()).await;
+        generate_complete_metadata(&media_path, "image", &MediaProcessConfig::default())
+            .await
+            .expect("complete metadata");
     let metadata = complete_metadata.metadata;
 
     assert_eq!(metadata.gps_latitude, Some(40.759));
@@ -414,6 +416,12 @@ fn interrupted_import_recovery_restores_completed_media_and_queues_metadata() {
     assert_eq!(
         import_job.1.as_deref(),
         Some("import interrupted by service restart")
+    );
+    drop(connection);
+    let import_status = get_import_status(&pool, ImportSource::Local).expect("import status");
+    assert_eq!(
+        import_status.errors,
+        vec!["import interrupted by service restart"]
     );
 }
 

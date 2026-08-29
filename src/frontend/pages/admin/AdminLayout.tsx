@@ -35,17 +35,7 @@ export function AdminImportPage() {
   const webDAVURL = new URL('/webdav/', window.location.origin).toString()
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
-      <AdminPanel
-        icon={Database}
-        title="Local Import"
-        description="Import media staged in the server import directory."
-      >
-        <p className="mb-5 text-sm text-muted-foreground">
-          Place media in <code className="font-mono text-xs text-foreground">/data/imports/</code>.
-        </p>
-        <ImportPanel />
-      </AdminPanel>
+    <div className="space-y-6">
       <AdminPanel
         icon={Cloud}
         title="WebDAV"
@@ -63,6 +53,16 @@ export function AdminImportPage() {
             </dd>
           </div>
         </dl>
+      </AdminPanel>
+      <AdminPanel
+        icon={Database}
+        title="Local Import"
+        description="Import media staged in the server import directory."
+      >
+        <p className="mb-5 text-sm text-muted-foreground">
+          Place media in <code className="font-mono text-xs text-foreground">/data/imports/</code>.
+        </p>
+        <ImportPanel />
       </AdminPanel>
     </div>
   )

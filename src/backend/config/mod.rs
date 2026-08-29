@@ -305,10 +305,6 @@ impl Default for MetadataConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaProcessConfig {
-    #[serde(default = "defaults::media_process_timeout_seconds")]
-    pub timeout_seconds: u64,
-    #[serde(default = "defaults::media_process_termination_grace_seconds")]
-    pub termination_grace_seconds: u64,
     #[serde(default = "defaults::media_process_maximum_stderr_bytes")]
     pub maximum_stderr_bytes: usize,
     #[serde(default = "defaults::media_process_maximum_metadata_output_bytes")]
@@ -330,8 +326,6 @@ pub struct MediaProcessConfig {
 impl Default for MediaProcessConfig {
     fn default() -> Self {
         Self {
-            timeout_seconds: defaults::MEDIA_PROCESS_TIMEOUT_SECONDS,
-            termination_grace_seconds: defaults::MEDIA_PROCESS_TERMINATION_GRACE_SECONDS,
             maximum_stderr_bytes: defaults::MEDIA_PROCESS_MAXIMUM_STDERR_BYTES,
             maximum_metadata_output_bytes: defaults::MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES,
             maximum_normalized_image_output_bytes:
@@ -347,9 +341,7 @@ impl Default for MediaProcessConfig {
 
 impl MediaProcessConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.timeout_seconds == 0
-            || self.termination_grace_seconds == 0
-            || self.maximum_stderr_bytes == 0
+        if self.maximum_stderr_bytes == 0
             || self.maximum_metadata_output_bytes == 0
             || self.maximum_normalized_image_output_bytes == 0
             || self.maximum_decoded_image_pixels == 0

@@ -15,7 +15,7 @@ use crate::processor::ai::input::AiInputStorage;
 use crate::utils::embedding::{blob_to_embedding, cosine_similarity};
 use crate::utils::path::resolve_storage_path;
 use crate::utils::process::{
-    image_magick_resource_arguments, process_limits, validate_image_dimensions_blocking,
+    bounded_error_detail, image_magick_resource_arguments, validate_image_dimensions_blocking,
     ExternalProcess,
 };
 use momento_common::llm::JobInputResult;
@@ -404,6 +404,10 @@ fn normalize_face_input(
     process_config: &MediaProcessConfig,
 ) -> AppResult<image::DynamicImage> {
     validate_image_dimensions_blocking(input_path, process_config).map_err(|error| {
+        let detail = format!(
+            "identify could not validate face input {}: {error}",
+            input_path.display()
+        );
         tracing::warn!(
             job_id,
             media_id,
@@ -411,7 +415,7 @@ fn normalize_face_input(
             error = %error,
             "Face input failed dimension validation"
         );
-        AppError::BadRequest("prepared face input could not be normalized".to_string())
+        AppError::BadRequest(bounded_error_detail(&detail))
     })?;
     let mut source = OsString::from(input_path.as_os_str());
     source.push("[0]");
@@ -421,19 +425,20 @@ fn normalize_face_input(
         OsString::from("-auto-orient"),
         OsString::from("png:-"),
     ]);
-    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
     let output = ExternalProcess::new(
         "magick",
         arguments,
-        timeout,
-        termination_grace,
         process_config.maximum_normalized_image_output_bytes,
-        maximum_stderr_bytes,
+        process_config.maximum_stderr_bytes,
     )
     .run_blocking();
     let output = match output {
         Ok(output) => output,
         Err(error) => {
+            let detail = format!(
+                "failed to execute magick while normalizing face input {}: {error}",
+                input_path.display()
+            );
             tracing::error!(
                 job_id,
                 media_id,
@@ -441,29 +446,46 @@ fn normalize_face_input(
                 error = %error,
                 "ImageMagick failed to start while normalizing a face input"
             );
-            return Err(AppError::BadRequest(
-                "prepared face input could not be normalized".to_string(),
-            ));
+            return Err(AppError::BadRequest(bounded_error_detail(&detail)));
         }
     };
     if !output.status.success() || output.stdout.is_empty() || output.stdout_truncated {
-        let detail = String::from_utf8_lossy(&output.stderr)
-            .chars()
-            .take(4096)
-            .collect::<String>();
+        let stderr = output.stderr_text();
+        let detail = if !output.status.success() {
+            format!(
+                "magick could not normalize face input {}: {}",
+                input_path.display(),
+                output.failure_detail("magick")
+            )
+        } else if output.stdout_truncated {
+            format!(
+                "magick normalized face input {} to more than {} bytes",
+                input_path.display(),
+                process_config.maximum_normalized_image_output_bytes
+            )
+        } else {
+            format!(
+                "magick reported success but returned an empty normalized face input for {}",
+                input_path.display()
+            )
+        };
         tracing::error!(
             job_id,
             media_id,
             input_path = %input_path.display(),
             status = %output.status,
-            error = %detail,
+            stderr = %stderr,
+            stderr_truncated = output.stderr_truncated,
+            stdout_truncated = output.stdout_truncated,
             "ImageMagick failed to normalize a face input"
         );
-        return Err(AppError::BadRequest(
-            "prepared face input could not be normalized".to_string(),
-        ));
+        return Err(AppError::BadRequest(bounded_error_detail(&detail)));
     }
     image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png).map_err(|error| {
+        let detail = format!(
+            "Rust image decoder could not decode magick PNG output for face input {}: {error}",
+            input_path.display()
+        );
         tracing::error!(
             job_id,
             media_id,
@@ -471,7 +493,7 @@ fn normalize_face_input(
             error = %error,
             "Rust failed to decode the normalized face input"
         );
-        AppError::BadRequest("normalized face input could not be decoded".to_string())
+        AppError::BadRequest(bounded_error_detail(&detail))
     })
 }
 

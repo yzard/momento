@@ -93,11 +93,13 @@ function PrimaryNavLink({
     <NavLink
       to={`${item.to}${search}`}
       onClick={onNavigate}
+      aria-label={isCollapsed ? item.label : undefined}
+      title={isCollapsed ? item.label : undefined}
       className={({ isActive }) =>
         cn(
           'group flex flex-1 rounded-lg border border-transparent font-medium transition-all duration-200',
           isCollapsed
-            ? 'flex-col items-center justify-center gap-1 px-1 py-3 text-[10px]'
+            ? 'items-center justify-center px-1 py-3'
             : 'flex-row items-center gap-4 px-4 py-3.5 text-sm',
           isActive
             ? 'border-border/50 bg-muted/50 text-foreground shadow-sm'
@@ -108,6 +110,7 @@ function PrimaryNavLink({
       {({ isActive }) => (
         <>
           <item.icon
+            aria-hidden="true"
             className={cn(
               'transition-colors duration-200',
               isCollapsed ? 'h-6 w-6' : 'h-5 w-5',
@@ -115,14 +118,7 @@ function PrimaryNavLink({
             )}
             strokeWidth={2}
           />
-          <span
-            className={cn(
-              'whitespace-nowrap tracking-wide',
-              isCollapsed && 'text-[10px] font-semibold'
-            )}
-          >
-            {item.label}
-          </span>
+          {!isCollapsed && <span className="whitespace-nowrap tracking-wide">{item.label}</span>}
         </>
       )}
     </NavLink>
@@ -295,9 +291,6 @@ function SidebarAccountControls({
         )}
         <SidebarCollapseButton isCollapsed={isCollapsed} onClick={toggleCollapse} />
       </div>
-      {user?.role === 'admin' && (
-        <NavSection item={adminNavItem} isCollapsed={isCollapsed} onNavigate={onNavigate} />
-      )}
     </div>
   )
 }
@@ -330,6 +323,8 @@ export default function Sidebar({
   toggleCollapse,
   onNavigate,
 }: SidebarProps) {
+  const { user } = useAuth()
+
   return (
     <aside
       className={cn(
@@ -360,6 +355,9 @@ export default function Sidebar({
               onNavigate={onNavigate}
             />
           ))}
+          {user?.role === 'admin' && (
+            <NavSection item={adminNavItem} isCollapsed={isCollapsed} onNavigate={onNavigate} />
+          )}
         </div>
       </nav>
 

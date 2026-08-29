@@ -15,7 +15,7 @@ use crate::processor::thumbnails::{
 };
 use crate::utils::hash::calculate_file_hash;
 use crate::utils::path::resolve_existing_storage_path;
-use crate::utils::process::{process_limits, ExternalProcess};
+use crate::utils::process::{bounded_error_detail, ExternalProcess};
 
 pub async fn generate_media_metadata(
     pool: &DbPool,
@@ -56,7 +56,7 @@ pub async fn generate_media_metadata(
             .map_err(|error| error.to_string())?,
     };
     let complete_metadata =
-        generate_complete_metadata(&original_path, &media_type, &config.media_process).await;
+        generate_complete_metadata(&original_path, &media_type, &config.media_process).await?;
     let metadata = &complete_metadata.metadata;
     let thumbnail_relative = PathBuf::from(media_id.to_string()).join("thumbnail.jpg");
     let thumbnail_path = paths().thumbnails.join(&thumbnail_relative);
@@ -74,29 +74,25 @@ pub async fn generate_media_metadata(
     std::fs::create_dir_all(thumbnail_parent).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(tiny_thumbnail_parent).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(place_thumbnail_parent).map_err(|error| error.to_string())?;
-    let thumbnail_generated = generate_thumbnail(
+    generate_thumbnail(
         &media_type,
         &original_path,
         &thumbnail_path,
         config.metadata.thumbnails_max_size,
         config,
     )
-    .await;
-    if !thumbnail_generated {
-        return Err("thumbnail generation failed".to_string());
-    }
-    let tiny_thumbnail_generated = generate_thumbnail(
+    .await
+    .map_err(|error| format!("thumbnail generation failed: {error}"))?;
+    generate_thumbnail(
         &media_type,
         &original_path,
         &tiny_thumbnail_path,
         config.metadata.thumbnails_tiny_size,
         config,
     )
-    .await;
-    if !tiny_thumbnail_generated {
-        return Err("tiny thumbnail generation failed".to_string());
-    }
-    let place_thumbnail_generated = if media_type == "image" {
+    .await
+    .map_err(|error| format!("tiny thumbnail generation failed: {error}"))?;
+    let place_thumbnail_result = if media_type == "image" {
         generate_image_preview(
             &original_path,
             &place_thumbnail_path,
@@ -116,9 +112,8 @@ pub async fn generate_media_metadata(
         )
         .await
     };
-    if !place_thumbnail_generated {
-        return Err("place thumbnail generation failed".to_string());
-    }
+    place_thumbnail_result
+        .map_err(|error| format!("place thumbnail generation failed: {error}"))?;
     let geohash = metadata
         .gps_latitude
         .zip(metadata.gps_longitude)
@@ -231,7 +226,7 @@ async fn generate_thumbnail(
     output_path: &std::path::Path,
     maximum_size: u32,
     config: &Config,
-) -> bool {
+) -> Result<(), String> {
     if media_type == "image" {
         return generate_image_thumbnail(
             original_path,
@@ -386,7 +381,6 @@ async fn extract_first_video_frame(
         .ok_or_else(|| "video frame path has no parent".to_string())?;
     std::fs::create_dir_all(frames_directory).map_err(|error| error.to_string())?;
     let temporary_path = frames_directory.join(format!(".frame-{}.png", uuid::Uuid::new_v4()));
-    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
     let output = ExternalProcess::new(
         "ffmpeg",
         vec![
@@ -404,24 +398,50 @@ async fn extract_first_video_frame(
             OsString::from("png"),
             temporary_path.as_os_str().to_os_string(),
         ],
-        timeout,
-        termination_grace,
         0,
-        maximum_stderr_bytes,
+        process_config.maximum_stderr_bytes,
     )
     .run()
     .await
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        format!(
+            "failed to execute ffmpeg while extracting a representative frame from {}: {error}",
+            original_path.display()
+        )
+    })?;
     if !output.status.success() || !temporary_path.is_file() {
         let _ = std::fs::remove_file(&temporary_path);
-        return Err(format!(
-            "FFmpeg frame extraction failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        let detail = if output.status.success() {
+            format!(
+                "ffmpeg reported success but did not create {} from {}",
+                temporary_path.display(),
+                original_path.display()
+            )
+        } else {
+            format!(
+                "ffmpeg could not extract a representative frame from {} to {}: {}",
+                original_path.display(),
+                temporary_path.display(),
+                output.failure_detail("ffmpeg")
+            )
+        };
+        tracing::error!(
+            input_path = %original_path.display(),
+            output_path = %temporary_path.display(),
+            status = %output.status,
+            stderr = %output.stderr_text(),
+            stderr_truncated = output.stderr_truncated,
+            "FFmpeg representative-frame extraction failed"
+        );
+        return Err(bounded_error_detail(&detail));
     }
     if let Err(error) = std::fs::rename(&temporary_path, output_path) {
         let _ = std::fs::remove_file(&temporary_path);
-        return Err(error.to_string());
+        return Err(format!(
+            "failed to publish representative frame {} as {}: {error}",
+            temporary_path.display(),
+            output_path.display()
+        ));
     }
     Ok(())
 }

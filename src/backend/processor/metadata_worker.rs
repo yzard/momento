@@ -128,6 +128,9 @@ async fn process_cycle(config: &Config, pool: &DbPool) -> Result<(), rusqlite::E
         let outcome = crate::processor::metadata::generate_media_metadata(pool, media_id, config)
             .await
             .and_then(|()| verify_ai_inputs(pool, media_id, config));
+        if let Err(error) = &outcome {
+            warn!(media_id, error, "metadata processing failed");
+        }
         if let Err(error) = finish_job(pool, media_id, outcome, config.metadata_worker.max_attempts)
         {
             warn!("failed to persist metadata job {media_id} outcome: {error}");

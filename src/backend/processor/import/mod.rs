@@ -20,6 +20,7 @@ use crate::processor::metadata::{
     supplemental_metadata_candidates, supplemental_metadata_path as find_supplemental_metadata_path,
 };
 use crate::utils::hash::calculate_file_hash;
+use crate::utils::process::bounded_error_detail;
 
 static CONTENT_HASH_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
@@ -96,34 +97,48 @@ pub fn create_import_job(pool: &DbPool, source: ImportSource) -> AppResult<i64> 
 
 pub fn get_import_status(pool: &DbPool, source: ImportSource) -> AppResult<ImportJob> {
     let connection = pool.get().map_err(AppError::Pool)?;
-    let job = connection
+    let job_row = connection
         .query_row(
             queries::import::SELECT_LATEST_JOB_FOR_SOURCE,
             [source.as_str()],
             |row| {
-                Ok(ImportJob {
-                    status: row.get(0)?,
-                    total_files: row.get(1)?,
-                    processed_files: row.get(2)?,
-                    successful_imports: row.get(3)?,
-                    failed_imports: row.get(4)?,
-                    started_at: row.get(5)?,
-                    completed_at: row.get(6)?,
-                    errors: row.get::<_, Option<String>>(7)?.into_iter().collect(),
-                })
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    ImportJob {
+                        status: row.get(1)?,
+                        total_files: row.get(2)?,
+                        processed_files: row.get(3)?,
+                        successful_imports: row.get(4)?,
+                        failed_imports: row.get(5)?,
+                        started_at: row.get(6)?,
+                        completed_at: row.get(7)?,
+                        errors: Vec::new(),
+                    },
+                    row.get::<_, Option<String>>(8)?,
+                ))
             },
         )
         .optional()?;
-    Ok(job.unwrap_or(ImportJob {
-        status: "idle".to_string(),
-        total_files: 0,
-        processed_files: 0,
-        successful_imports: 0,
-        failed_imports: 0,
-        started_at: None,
-        completed_at: None,
-        errors: Vec::new(),
-    }))
+    let Some((job_id, mut job, last_error)) = job_row else {
+        return Ok(ImportJob {
+            status: "idle".to_string(),
+            total_files: 0,
+            processed_files: 0,
+            successful_imports: 0,
+            failed_imports: 0,
+            started_at: None,
+            completed_at: None,
+            errors: Vec::new(),
+        });
+    };
+    job.errors = connection
+        .prepare(queries::import::SELECT_JOB_ERRORS)?
+        .query_map([job_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if job.errors.is_empty() {
+        job.errors.extend(last_error);
+    }
+    Ok(job)
 }
 
 pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
@@ -150,7 +165,12 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
             async move {
                 let permit = semaphore.acquire().await;
                 if permit.is_err() {
-                    update_import_progress(&settings.pool, job_id, false, Some("local import worker stopped".to_string()));
+                    let detail = format!(
+                        "local import worker stopped before processing {}",
+                        source_path.display()
+                    );
+                    warn!(path = %source_path.display(), error = %detail, "Local import failed");
+                    update_import_progress(&settings.pool, job_id, false, Some(detail));
                     return;
                 }
                 let source_supplemental_metadata_path =
@@ -164,7 +184,12 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
                     Ok(claimed_path) => claimed_path,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
                     Err(error) => {
-                        update_import_progress(&settings.pool, job_id, false, Some(error.to_string()));
+                        let detail = format!(
+                            "failed to claim local import source {}: {error}",
+                            source_path.display()
+                        );
+                        warn!(path = %source_path.display(), error = %error, "Local import failed");
+                        update_import_progress(&settings.pool, job_id, false, Some(detail));
                         return;
                     }
                 };
@@ -187,8 +212,19 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
                         update_import_progress(&settings.pool, job_id, true, None);
                     }
                     Err(error) => {
-                        let _ = restore_claim(&claimed_path, &source_path).await;
-                        update_import_progress(&settings.pool, job_id, false, Some(error.to_string()));
+                        let restore_error = restore_claim(&claimed_path, &source_path).await.err();
+                        let mut detail = format!(
+                            "local import failed for {}: {error}",
+                            source_path.display()
+                        );
+                        if let Some(restore_error) = restore_error {
+                            detail.push_str(&format!(
+                                "; failed to restore the claimed source for retry: {restore_error}"
+                            ));
+                        }
+                        let detail = bounded_error_detail(&detail);
+                        warn!(path = %source_path.display(), error = %detail, "Local import failed");
+                        update_import_progress(&settings.pool, job_id, false, Some(detail));
                     }
                 }
             }
@@ -208,12 +244,32 @@ fn update_import_progress(
     success: bool,
     error_message: Option<String>,
 ) {
-    let error_message = error_message.unwrap_or_default();
-    if let Ok(connection) = pool.get() {
-        let _ = connection.execute(
-            queries::import::UPDATE_JOB_PROGRESS,
-            rusqlite::params![success, success, error_message, error_message, job_id],
+    let error_message = error_message
+        .map(|error| bounded_error_detail(&error))
+        .unwrap_or_default();
+    let Ok(connection) = pool.get() else {
+        warn!(
+            job_id,
+            "failed to acquire a database connection for import progress"
         );
+        return;
+    };
+    let result = (|| -> rusqlite::Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            queries::import::UPDATE_JOB_PROGRESS,
+            rusqlite::params![success, success, &error_message, &error_message, job_id],
+        )?;
+        if updated == 1 && !success && !error_message.is_empty() {
+            transaction.execute(
+                queries::import::INSERT_JOB_ERROR,
+                rusqlite::params![job_id, &error_message],
+            )?;
+        }
+        transaction.commit()
+    })();
+    if let Err(error) = result {
+        warn!(job_id, error = %error, "failed to persist import progress");
     }
 }
 
@@ -225,7 +281,12 @@ pub async fn import_staged_file(
     pool: &DbPool,
     delete_source: bool,
 ) -> AppResult<i64> {
-    let source_metadata = tokio::fs::metadata(source_path).await?;
+    let source_metadata = tokio::fs::metadata(source_path).await.map_err(|error| {
+        import_io_error(
+            &format!("read source metadata from {}", source_path.display()),
+            error,
+        )
+    })?;
     if !source_metadata.is_file() {
         return Err(AppError::BadRequest(format!(
             "import source is not a file: {}",
@@ -254,7 +315,12 @@ pub async fn import_staged_file(
         .ok()
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64);
-    let content_hash = calculate_file_hash(source_path).await?;
+    let content_hash = calculate_file_hash(source_path).await.map_err(|error| {
+        import_io_error(
+            &format!("calculate SHA-256 for {}", source_path.display()),
+            error,
+        )
+    })?;
     let content_hash_lock = content_hash_lock(&content_hash);
     let _content_hash_guard = content_hash_lock.lock().await;
 
@@ -336,26 +402,89 @@ pub async fn import_staged_file(
     let final_path = paths().originals.join(&final_relative_path);
     let source_supplemental_metadata_path = find_supplemental_metadata_path(source_path);
     let final_supplemental_metadata_path = canonical_supplemental_metadata_path(&final_path);
-    let source_file_times = capture_file_times(source_path)?;
+    let source_file_times = capture_file_times(source_path).map_err(|error| {
+        import_io_error(
+            &format!("read source timestamps from {}", source_path.display()),
+            error,
+        )
+    })?;
 
     let result = async {
         let temporary_parent = temporary_path.parent().ok_or_else(|| {
             AppError::Internal("temporary original path has no parent".to_string())
         })?;
-        tokio::fs::create_dir_all(temporary_parent).await?;
+        tokio::fs::create_dir_all(temporary_parent)
+            .await
+            .map_err(|error| {
+                import_io_error(
+                    &format!(
+                        "create temporary import directory {}",
+                        temporary_parent.display()
+                    ),
+                    error,
+                )
+            })?;
         if let Some(source_supplemental_metadata_path) = &source_supplemental_metadata_path {
             tokio::fs::copy(
                 source_supplemental_metadata_path,
                 &final_supplemental_metadata_path,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                import_io_error(
+                    &format!(
+                        "copy supplemental metadata {} to {}",
+                        source_supplemental_metadata_path.display(),
+                        final_supplemental_metadata_path.display()
+                    ),
+                    error,
+                )
+            })?;
         }
         if delete_source {
-            tokio::fs::rename(source_path, &final_path).await?;
+            tokio::fs::rename(source_path, &final_path)
+                .await
+                .map_err(|error| {
+                    import_io_error(
+                        &format!(
+                            "move imported source {} to {}",
+                            source_path.display(),
+                            final_path.display()
+                        ),
+                        error,
+                    )
+                })?;
         } else {
-            tokio::fs::copy(source_path, &temporary_path).await?;
-            apply_file_times(&temporary_path, source_file_times)?;
-            tokio::fs::rename(&temporary_path, &final_path).await?;
+            tokio::fs::copy(source_path, &temporary_path)
+                .await
+                .map_err(|error| {
+                    import_io_error(
+                        &format!(
+                            "copy imported source {} to {}",
+                            source_path.display(),
+                            temporary_path.display()
+                        ),
+                        error,
+                    )
+                })?;
+            apply_file_times(&temporary_path, source_file_times).map_err(|error| {
+                import_io_error(
+                    &format!("apply source timestamps to {}", temporary_path.display()),
+                    error,
+                )
+            })?;
+            tokio::fs::rename(&temporary_path, &final_path)
+                .await
+                .map_err(|error| {
+                    import_io_error(
+                        &format!(
+                            "publish imported original {} as {}",
+                            temporary_path.display(),
+                            final_path.display()
+                        ),
+                        error,
+                    )
+                })?;
         }
 
         let connection = pool.get()?;
@@ -409,6 +538,10 @@ pub async fn import_staged_file(
         }
     }
     Ok(media_id)
+}
+
+fn import_io_error(operation: &str, error: std::io::Error) -> AppError {
+    AppError::Internal(format!("failed to {operation}: {error}"))
 }
 
 fn content_hash_lock(content_hash: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -555,7 +688,10 @@ fn canonical_supplemental_metadata_path(media_path: &Path) -> PathBuf {
 
 pub fn recover_interrupted_imports(pool: &DbPool) -> AppResult<()> {
     let connection = pool.get()?;
-    connection.execute(queries::import::FAIL_INTERRUPTED_JOBS, [])?;
+    let recovery_transaction = connection.unchecked_transaction()?;
+    recovery_transaction.execute(queries::import::RECORD_INTERRUPTED_JOB_ERRORS, [])?;
+    recovery_transaction.execute(queries::import::FAIL_INTERRUPTED_JOBS, [])?;
+    recovery_transaction.commit()?;
     let interrupted_imports = connection
         .prepare(queries::import::SELECT_INTERRUPTED)?
         .query_map([], |row| {
@@ -779,7 +915,10 @@ pub async fn run_webdav_import_cycle(
                 candidate.supplemental_ready_file_path,
             )),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => claim_errors.push(error.to_string()),
+            Err(error) => claim_errors.push(format!(
+                "failed to claim WebDAV import source {}: {error}",
+                source_path.display()
+            )),
         }
     }
     drop(upload_barrier);
@@ -812,7 +951,11 @@ pub async fn run_webdav_import_cycle(
                     return;
                 };
                 if let Err(error) = import_staged_file(&claimed_path, ImportSource::Webdav, user_id, &pool, true).await {
-                    warn!(path = %source_path.display(), "WebDAV import failed: {error}");
+                    let detail = bounded_error_detail(&format!(
+                        "WebDAV import failed for {}: {error}",
+                        source_path.display()
+                    ));
+                    warn!(path = %source_path.display(), error = %detail, "WebDAV import failed");
                     if let Ok(recovered_path) = expose_claim_for_retry(&claimed_path).await {
                         if !update_recovered_ready_paths(
                             &pool,
@@ -834,7 +977,7 @@ pub async fn run_webdav_import_cycle(
                             }
                         }
                     }
-                    update_import_progress(&pool, job_id, false, Some(error.to_string()));
+                    update_import_progress(&pool, job_id, false, Some(detail));
                 } else {
                     if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
                         if error.kind() != std::io::ErrorKind::NotFound {

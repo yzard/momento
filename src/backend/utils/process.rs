@@ -2,20 +2,17 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::config::MediaProcessConfig;
 
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAXIMUM_PERSISTED_PROCESS_DIAGNOSTIC_CHARACTERS: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct ExternalProcess {
     executable: OsString,
     arguments: Vec<OsString>,
-    timeout: Duration,
-    termination_grace: Duration,
     maximum_stdout_bytes: usize,
     maximum_stderr_bytes: usize,
 }
@@ -24,16 +21,12 @@ impl ExternalProcess {
     pub fn new(
         executable: impl Into<OsString>,
         arguments: Vec<OsString>,
-        timeout: Duration,
-        termination_grace: Duration,
         maximum_stdout_bytes: usize,
         maximum_stderr_bytes: usize,
     ) -> Self {
         Self {
             executable: executable.into(),
             arguments,
-            timeout,
-            termination_grace,
             maximum_stdout_bytes,
             maximum_stderr_bytes,
         }
@@ -72,29 +65,16 @@ impl ExternalProcess {
         let stdout_thread = capture_output(stdout_reader, self.maximum_stdout_bytes);
         let stderr_thread = capture_output(stderr_reader, self.maximum_stderr_bytes);
 
-        let status = match wait_until(&mut child, Instant::now() + self.timeout) {
+        let status = match child.wait() {
             Ok(status) => status,
             Err(error) => {
                 kill_process_group(&mut child, process_id);
                 let _ = child.wait();
-                return Err(error);
+                return Err(ExternalProcessError::Wait(error));
             }
-        };
-        let timed_out = status.is_none();
-        let status = match status {
-            Some(status) => status,
-            None => terminate_timed_out_process(&mut child, process_id, self.termination_grace)?,
         };
         let stdout = join_output(stdout_thread, "stdout")?;
         let stderr = join_output(stderr_thread, "stderr")?;
-
-        if timed_out {
-            return Err(ExternalProcessError::Timeout {
-                executable: self.executable.to_string_lossy().into_owned(),
-                timeout_seconds: self.timeout.as_secs(),
-                stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
-            });
-        }
 
         Ok(ExternalProcessOutput {
             status,
@@ -119,6 +99,47 @@ impl ExternalProcessOutput {
     pub fn stderr_text(&self) -> String {
         String::from_utf8_lossy(&self.stderr).into_owned()
     }
+
+    pub fn failure_detail(&self, executable: &str) -> String {
+        let stderr = self.stderr_text();
+        let (stream_name, diagnostic) = if !stderr.trim().is_empty() {
+            ("stderr", bounded_error_detail(stderr.trim()))
+        } else {
+            let stdout = String::from_utf8_lossy(&self.stdout);
+            if stdout.trim().is_empty() {
+                ("stderr", "<empty>".to_string())
+            } else {
+                ("stdout", bounded_error_detail(stdout.trim()))
+            }
+        };
+        let capture_truncated = if stream_name == "stderr" {
+            self.stderr_truncated
+        } else {
+            self.stdout_truncated
+        };
+        let capture_suffix = if capture_truncated {
+            format!(" ({stream_name} capture truncated)")
+        } else {
+            String::new()
+        };
+        format!(
+            "{executable} exited with {}; {stream_name}: {diagnostic}{capture_suffix}",
+            self.status
+        )
+    }
+}
+
+pub fn bounded_error_detail(detail: &str) -> String {
+    let mut characters = detail.chars();
+    let bounded = characters
+        .by_ref()
+        .take(MAXIMUM_PERSISTED_PROCESS_DIAGNOSTIC_CHARACTERS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        format!("{bounded} (diagnostic truncated)")
+    } else {
+        bounded
+    }
 }
 
 #[derive(Debug, Error)]
@@ -131,12 +152,6 @@ pub enum ExternalProcessError {
     },
     #[error("failed while waiting for external process: {0}")]
     Wait(#[source] io::Error),
-    #[error("external process {executable} timed out after {timeout_seconds} seconds: {stderr}")]
-    Timeout {
-        executable: String,
-        timeout_seconds: u64,
-        stderr: String,
-    },
     #[error("external process did not expose its {0} pipe")]
     MissingOutputPipe(&'static str),
     #[error("failed to read external process {stream}: {source}")]
@@ -170,16 +185,8 @@ pub enum ImageDimensionError {
     },
 }
 
-pub fn process_limits(config: &MediaProcessConfig) -> (Duration, Duration, usize) {
-    (
-        Duration::from_secs(config.timeout_seconds),
-        Duration::from_secs(config.termination_grace_seconds),
-        config.maximum_stderr_bytes,
-    )
-}
-
 pub fn image_magick_resource_arguments(config: &MediaProcessConfig) -> Vec<OsString> {
-    [
+    vec![
         "-limit".into(),
         "memory".into(),
         format!("{}MiB", config.imagemagick_memory_limit_mebibytes).into(),
@@ -195,12 +202,7 @@ pub fn image_magick_resource_arguments(config: &MediaProcessConfig) -> Vec<OsStr
         "-limit".into(),
         "thread".into(),
         config.imagemagick_maximum_threads.to_string().into(),
-        "-limit".into(),
-        "time".into(),
-        config.timeout_seconds.to_string().into(),
     ]
-    .into_iter()
-    .collect()
 }
 
 pub async fn validate_image_dimensions(
@@ -216,16 +218,9 @@ pub async fn validate_image_dimensions(
         image_path,
     ]);
     validate_dimension_output(
-        ExternalProcess::new(
-            "identify",
-            arguments,
-            Duration::from_secs(config.timeout_seconds),
-            Duration::from_secs(config.termination_grace_seconds),
-            128,
-            config.maximum_stderr_bytes,
-        )
-        .run()
-        .await?,
+        ExternalProcess::new("identify", arguments, 128, config.maximum_stderr_bytes)
+            .run()
+            .await?,
         config.maximum_decoded_image_pixels,
     )
 }
@@ -243,15 +238,8 @@ pub fn validate_image_dimensions_blocking(
         image_path,
     ]);
     validate_dimension_output(
-        ExternalProcess::new(
-            "identify",
-            arguments,
-            Duration::from_secs(config.timeout_seconds),
-            Duration::from_secs(config.termination_grace_seconds),
-            128,
-            config.maximum_stderr_bytes,
-        )
-        .run_blocking()?,
+        ExternalProcess::new("identify", arguments, 128, config.maximum_stderr_bytes)
+            .run_blocking()?,
         config.maximum_decoded_image_pixels,
     )
 }
@@ -261,7 +249,9 @@ fn validate_dimension_output(
     maximum_pixels: u64,
 ) -> Result<(), ImageDimensionError> {
     if !output.status.success() {
-        return Err(ImageDimensionError::Inspection(output.stderr_text()));
+        return Err(ImageDimensionError::Inspection(
+            output.failure_detail("identify"),
+        ));
     }
     if output.stdout_truncated {
         return Err(ImageDimensionError::OutputTooLarge);
@@ -341,40 +331,6 @@ fn join_output(
         .map_err(|source| ExternalProcessError::Read { stream, source })
 }
 
-fn wait_until(
-    child: &mut Child,
-    deadline: Instant,
-) -> Result<Option<ExitStatus>, ExternalProcessError> {
-    loop {
-        if let Some(status) = child.try_wait().map_err(ExternalProcessError::Wait)? {
-            return Ok(Some(status));
-        }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        std::thread::sleep(PROCESS_POLL_INTERVAL);
-    }
-}
-
-fn terminate_timed_out_process(
-    child: &mut Child,
-    process_id: u32,
-    termination_grace: Duration,
-) -> Result<ExitStatus, ExternalProcessError> {
-    terminate_process_group(child, process_id);
-    match wait_until(child, Instant::now() + termination_grace) {
-        Ok(Some(status)) => return Ok(status),
-        Ok(None) => {}
-        Err(error) => {
-            kill_process_group(child, process_id);
-            let _ = child.wait();
-            return Err(error);
-        }
-    }
-    kill_process_group(child, process_id);
-    child.wait().map_err(ExternalProcessError::Wait)
-}
-
 #[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -383,16 +339,6 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_process_group(_child: &mut Child, process_id: u32) {
-    signal_process_group(process_id, libc::SIGTERM);
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group(child: &mut Child, _process_id: u32) {
-    let _ = child.kill();
-}
 
 #[cfg(unix)]
 fn kill_process_group(_child: &mut Child, process_id: u32) {

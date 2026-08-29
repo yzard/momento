@@ -152,8 +152,18 @@ pub mod import {
          , last_error = 'import interrupted by service restart'
      WHERE status = 'running'
     "#;
+    pub const RECORD_INTERRUPTED_JOB_ERRORS: &str = r#"
+    INSERT INTO import_job_errors (import_job_id, error)
+    SELECT id, 'import interrupted by service restart'
+      FROM import_jobs
+     WHERE status = 'running'
+    "#;
     pub const INSERT_JOB: &str = "INSERT INTO import_jobs (source, status) VALUES (?, 'running')";
-    pub const SELECT_LATEST_JOB_FOR_SOURCE: &str = "SELECT status, total_files, processed_files, successful_imports, failed_imports, started_at, completed_at, last_error FROM import_jobs WHERE source = ? ORDER BY id DESC LIMIT 1";
+    pub const SELECT_LATEST_JOB_FOR_SOURCE: &str = "SELECT id, status, total_files, processed_files, successful_imports, failed_imports, started_at, completed_at, last_error FROM import_jobs WHERE source = ? ORDER BY id DESC LIMIT 1";
+    pub const SELECT_JOB_ERRORS: &str =
+        "SELECT error FROM import_job_errors WHERE import_job_id = ? ORDER BY id DESC LIMIT 100";
+    pub const INSERT_JOB_ERROR: &str =
+        "INSERT INTO import_job_errors (import_job_id, error) VALUES (?, ?)";
     pub const SET_JOB_TOTAL: &str =
         "UPDATE import_jobs SET total_files = ? WHERE id = ? AND status = 'running'";
     pub const SET_WEBDAV_JOB_TOTAL: &str = "UPDATE import_jobs SET total_files = ? WHERE id = ?";

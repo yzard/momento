@@ -36,6 +36,13 @@ async fn local_import_status_reports_distinct_imported_media_separately_from_sou
             [],
         )
         .expect("local import job");
+    let import_job_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO import_job_errors (import_job_id, error) VALUES (?, 'failed to calculate SHA-256 for /data/imports/broken.jpg: permission denied'), (?, 'failed to move /data/imports/full.mov to /data/originals/full.mov: no space left')",
+            rusqlite::params![import_job_id, import_job_id],
+        )
+        .expect("import errors");
     drop(connection);
 
     let access_token = create_access_token(
@@ -58,4 +65,11 @@ async fn local_import_status_reports_distinct_imported_media_separately_from_sou
     assert_eq!(status["totalMedia"], 2);
     assert_eq!(status["successfulImports"], 3);
     assert_eq!(status["failedImports"], 1);
+    assert_eq!(
+        status["errors"],
+        serde_json::json!([
+            "failed to move /data/imports/full.mov to /data/originals/full.mov: no space left",
+            "failed to calculate SHA-256 for /data/imports/broken.jpg: permission denied"
+        ])
+    );
 }

@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::config::{Config, MediaProcessConfig};
 use crate::constants::{image_mime_type, video_mime_type};
 use crate::database::DbPool;
-use crate::utils::process::{process_limits, ExternalProcess};
+use crate::utils::process::{bounded_error_detail, ExternalProcess, ExternalProcessOutput};
 
 #[derive(Debug, Default, Clone)]
 pub struct MediaMetadata {
@@ -297,8 +297,8 @@ pub fn normalize_gps_coordinates(metadata: &mut MediaMetadata) {
 pub async fn extract_image_metadata(
     file_path: &Path,
     process_config: &MediaProcessConfig,
-) -> ExtractedMediaMetadata {
-    let mut extracted = extract_exif_metadata(file_path, process_config).await;
+) -> Result<ExtractedMediaMetadata, String> {
+    let mut extracted = extract_exif_metadata(file_path, process_config).await?;
 
     if extracted.metadata.mime_type.is_none() {
         extracted.metadata.mime_type = Some(
@@ -309,17 +309,16 @@ pub async fn extract_image_metadata(
     }
 
     log_extracted_metadata(file_path, &extracted.metadata);
-    extracted
+    Ok(extracted)
 }
 
 async fn extract_exif_metadata(
     file_path: &Path,
     process_config: &MediaProcessConfig,
-) -> ExtractedMediaMetadata {
+) -> Result<ExtractedMediaMetadata, String> {
     let mut metadata = MediaMetadata::default();
     let mut sources = Vec::new();
 
-    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
     let output = ExternalProcess::new(
         "exiftool",
         vec![
@@ -327,60 +326,73 @@ async fn extract_exif_metadata(
             OsString::from("-n"),
             file_path.as_os_str().to_os_string(),
         ],
-        timeout,
-        termination_grace,
         process_config.maximum_metadata_output_bytes,
-        maximum_stderr_bytes,
+        process_config.maximum_stderr_bytes,
     )
     .run()
-    .await;
-
-    match output {
-        Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
-            Ok(json_str) => match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-                Ok(exif_data) => {
-                    if let Some(data) = exif_data.first() {
-                        apply_exif_data(&mut metadata, data);
-                        normalize_gps_coordinates(&mut metadata);
-                        sources.push(MetadataSource {
-                            source_type: MetadataSourceType::ExifTool,
-                            payload: data.clone(),
-                        });
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse exiftool JSON for {:?}: {}",
-                        file_path.file_name().unwrap_or_default(),
-                        e
-                    );
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to read exiftool output for {:?}: {}",
-                    file_path.file_name().unwrap_or_default(),
-                    e
-                );
-            }
-        },
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                "exiftool failed for {:?}: {}",
-                file_path.file_name().unwrap_or_default(),
-                stderr
-            );
-        }
-        Err(e) => {
-            warn!(
-                "Failed to run exiftool for {:?}: {}",
-                file_path.file_name().unwrap_or_default(),
-                e
-            );
-        }
+    .await
+    .map_err(|error| {
+        let detail = format!(
+            "failed to execute exiftool for {}: {error}",
+            file_path.display()
+        );
+        tracing::error!(
+            executable = "exiftool",
+            input_path = %file_path.display(),
+            error = %error,
+            "Metadata command could not be executed"
+        );
+        detail
+    })?;
+    if output.stdout_truncated {
+        return Err(format!(
+            "exiftool metadata output for {} exceeded {} bytes",
+            file_path.display(),
+            process_config.maximum_metadata_output_bytes
+        ));
     }
-    ExtractedMediaMetadata { metadata, sources }
+    let command_failure_detail = if output.status.success() {
+        None
+    } else {
+        log_metadata_command_failure("exiftool", file_path, &output);
+        Some(output.failure_detail("exiftool"))
+    };
+    let command_failure_context = command_failure_detail
+        .as_deref()
+        .map(|detail| format!("; {detail}"))
+        .unwrap_or_default();
+    let json_str = String::from_utf8(output.stdout).map_err(|error| {
+        format!(
+            "exiftool returned non-UTF-8 JSON for {}: {error}{command_failure_context}",
+            file_path.display(),
+        )
+    })?;
+    let exif_data = serde_json::from_str::<Vec<serde_json::Value>>(&json_str).map_err(|error| {
+        format!(
+            "exiftool returned invalid JSON for {}: {error}{command_failure_context}",
+            file_path.display(),
+        )
+    })?;
+    let data = exif_data.first().ok_or_else(|| {
+        format!(
+            "exiftool returned no metadata record for {}{command_failure_context}",
+            file_path.display(),
+        )
+    })?;
+    if let Some(detail) = command_failure_detail {
+        warn!(
+            input_path = %file_path.display(),
+            detail,
+            "ExifTool returned usable metadata with a non-success exit status"
+        );
+    }
+    apply_exif_data(&mut metadata, data);
+    normalize_gps_coordinates(&mut metadata);
+    sources.push(MetadataSource {
+        source_type: MetadataSourceType::ExifTool,
+        payload: data.clone(),
+    });
+    Ok(ExtractedMediaMetadata { metadata, sources })
 }
 
 fn apply_exif_data(metadata: &mut MediaMetadata, data: &serde_json::Value) {
@@ -500,59 +512,77 @@ fn parse_exif_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
 pub async fn extract_video_metadata(
     file_path: &Path,
     process_config: &MediaProcessConfig,
-) -> ExtractedMediaMetadata {
-    let mut extracted = extract_exif_metadata(file_path, process_config).await;
+) -> Result<ExtractedMediaMetadata, String> {
+    let mut extracted = extract_exif_metadata(file_path, process_config).await?;
 
     // Run ffprobe
-    let (timeout, termination_grace, maximum_stderr_bytes) = process_limits(process_config);
     let output = ExternalProcess::new(
         "ffprobe",
         vec![
             OsString::from("-v"),
-            OsString::from("quiet"),
+            OsString::from("error"),
             OsString::from("-print_format"),
             OsString::from("json"),
             OsString::from("-show_format"),
             OsString::from("-show_streams"),
             file_path.as_os_str().to_os_string(),
         ],
-        timeout,
-        termination_grace,
         process_config.maximum_metadata_output_bytes,
-        maximum_stderr_bytes,
+        process_config.maximum_stderr_bytes,
     )
     .run()
-    .await;
+    .await
+    .map_err(|error| {
+        let detail = format!(
+            "failed to execute ffprobe for {}: {error}",
+            file_path.display()
+        );
+        tracing::error!(
+            executable = "ffprobe",
+            input_path = %file_path.display(),
+            error = %error,
+            "Metadata command could not be executed"
+        );
+        detail
+    })?;
+    if !output.status.success() {
+        log_metadata_command_failure("ffprobe", file_path, &output);
+        return Err(bounded_error_detail(&format!(
+            "ffprobe could not read metadata from {}: {}",
+            file_path.display(),
+            output.failure_detail("ffprobe")
+        )));
+    }
+    if output.stdout_truncated {
+        return Err(format!(
+            "ffprobe metadata output for {} exceeded {} bytes",
+            file_path.display(),
+            process_config.maximum_metadata_output_bytes
+        ));
+    }
+    let json_str = String::from_utf8(output.stdout).map_err(|error| {
+        format!(
+            "ffprobe returned non-UTF-8 JSON for {}: {error}",
+            file_path.display()
+        )
+    })?;
 
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => {
-            extracted.metadata.duration_seconds = Some(0.0);
-            return extracted;
-        }
-    };
-
-    let json_str = match String::from_utf8(output.stdout) {
-        Ok(s) => s,
-        Err(_) => {
-            return extracted;
-        }
-    };
-
-    let ffprobe_payload: serde_json::Value = match serde_json::from_str(&json_str) {
-        Ok(payload) => payload,
-        Err(_) => {
-            return extracted;
-        }
-    };
+    let ffprobe_payload: serde_json::Value = serde_json::from_str(&json_str).map_err(|error| {
+        format!(
+            "ffprobe returned invalid JSON for {}: {error}",
+            file_path.display()
+        )
+    })?;
     extracted.sources.push(MetadataSource {
         source_type: MetadataSourceType::Ffprobe,
         payload: ffprobe_payload.clone(),
     });
-    let ffprobe_data: FfprobeOutput = match serde_json::from_value(ffprobe_payload) {
-        Ok(parsed_output) => parsed_output,
-        Err(_) => return extracted,
-    };
+    let ffprobe_data: FfprobeOutput = serde_json::from_value(ffprobe_payload).map_err(|error| {
+        format!(
+            "ffprobe returned an unsupported metadata structure for {}: {error}",
+            file_path.display()
+        )
+    })?;
     let metadata = &mut extracted.metadata;
 
     // Extract video stream info
@@ -610,7 +640,23 @@ pub async fn extract_video_metadata(
     );
 
     log_extracted_metadata(file_path, metadata);
-    extracted
+    Ok(extracted)
+}
+
+fn log_metadata_command_failure(
+    executable: &str,
+    input_path: &Path,
+    output: &ExternalProcessOutput,
+) {
+    tracing::error!(
+        executable,
+        input_path = %input_path.display(),
+        status = %output.status,
+        detail = %output.failure_detail(executable),
+        stderr = %output.stderr_text(),
+        stderr_truncated = output.stderr_truncated,
+        "Metadata command failed"
+    );
 }
 
 #[derive(Debug, Deserialize)]

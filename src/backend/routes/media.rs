@@ -990,7 +990,14 @@ async fn resolve_preview_path(
             .parent()
             .ok_or_else(|| AppError::Internal("Preview path has no parent".to_string()))?;
         tokio::fs::create_dir_all(parent).await?;
-        generate_image_preview(&original_path, &preview_path, 2048, 90, process_config).await;
+        generate_image_preview(&original_path, &preview_path, 2048, 90, process_config)
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "failed to generate preview for {}: {error}",
+                    original_path.display()
+                ))
+            })?;
     }
     if !preview_path.is_file() {
         return Err(AppError::NotFound("Preview not found".to_string()));

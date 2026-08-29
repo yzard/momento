@@ -54,7 +54,7 @@ describe('Sidebar', () => {
     expect(screen.queryByRole('link', { name: 'Admin' })).toBeNull()
   })
 
-  it('shows logout only while expanded', async () => {
+  it('shows only accessible navigation icons and no labels while collapsed', async () => {
     const user = userEvent.setup()
     const { rerender } = render(
       <MemoryRouter>
@@ -74,9 +74,13 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'Open account settings' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Logout' })).toBeNull()
     expect(screen.getByRole('link', { name: 'Download Android app' })).toBeTruthy()
+    for (const label of ['Timeline', 'Albums', 'Map', 'Places', 'Faces', 'Utility', 'Trash']) {
+      expect(screen.getByRole('link', { name: label })).toBeTruthy()
+      expect(screen.queryByText(label)).toBeNull()
+    }
   })
 
-  it('shows the expandable Admin menu below the avatar only for administrators', async () => {
+  it('shows the expandable Admin menu below Trash only for administrators', async () => {
     mocks.user.role = 'admin'
     render(
       <MemoryRouter initialEntries={['/settings']}>
@@ -84,10 +88,15 @@ describe('Sidebar', () => {
       </MemoryRouter>
     )
 
-    const accountLink = screen.getByRole('link', { name: 'Open account settings' })
+    const trashLink = screen.getByRole('link', { name: 'Trash' })
     const adminLink = screen.getByRole('link', { name: 'Admin' })
     expect(
-      accountLink.compareDocumentPosition(adminLink) & Node.DOCUMENT_POSITION_FOLLOWING
+      trashLink.compareDocumentPosition(adminLink) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      adminLink.compareDocumentPosition(
+        screen.getByRole('link', { name: 'Open account settings' })
+      ) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: 'Expand Admin' }))
     expect(screen.getByRole('link', { name: 'Import' }).getAttribute('href')).toBe('/admin/import')

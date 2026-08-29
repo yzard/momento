@@ -72,13 +72,31 @@ fn security_password_and_cleanup_limits_must_be_positive() {
 fn media_process_limits_must_be_positive_and_ordered() {
     let directory = TempDir::new().expect("temporary config directory");
     for invalid_config in [
-        "timeout_seconds = 0",
+        "maximum_stderr_bytes = 0",
         "maximum_decoded_image_pixels = 0",
         "imagemagick_memory_limit_mebibytes = 2048\nimagemagick_map_limit_mebibytes = 1024",
     ] {
         let path = write_config(&directory, &format!("[media_process]\n{invalid_config}\n"));
         let error = load_config(&path).expect_err("invalid media process limit must fail");
         assert!(error.to_string().contains("media_process"));
+    }
+}
+
+#[test]
+fn removed_media_process_timeout_settings_are_rejected() {
+    for (setting, value) in [
+        ("timeout_seconds", "60"),
+        ("termination_grace_seconds", "5"),
+    ] {
+        let directory = TempDir::new().expect("temporary config directory");
+        let path = write_config(
+            &directory,
+            &format!("[media_process]\n{setting} = {value}\n"),
+        );
+
+        let error = load_config(&path).expect_err("removed process timeout must fail");
+
+        assert!(error.to_string().contains(setting), "{error}");
     }
 }
 

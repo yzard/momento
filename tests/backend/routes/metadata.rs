@@ -20,6 +20,51 @@ async fn metadata_generate_requires_administrator() {
         .assert_status_forbidden();
 }
 
+#[tokio::test]
+async fn metadata_status_returns_complete_failure_diagnostics() {
+    let (application, pool) = create_test_app();
+    let administrator_id = create_test_user(
+        &pool,
+        "metadata-status-admin",
+        "metadata-status-admin@example.com",
+    );
+    let media_id = create_test_media(&pool, "broken-metadata.heic");
+    let diagnostic = "exiftool could not read metadata from /data/originals/broken-metadata.heic: exiftool exited with exit status: 1; stderr: File format error";
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute(
+            "UPDATE users SET role = 'admin' WHERE id = ?",
+            [administrator_id],
+        )
+        .expect("administrator role");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, last_error) VALUES (?, 'failed', ?)",
+            rusqlite::params![media_id, diagnostic],
+        )
+        .expect("failed metadata job");
+    drop(connection);
+    let token = create_access_token(
+        administrator_id,
+        "metadata-status-admin",
+        "admin",
+        &Config::default(),
+        None,
+    )
+    .expect("token");
+    let server = TestServer::new(application).expect("server");
+
+    let response = server
+        .post("/api/v1/metadata/status")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+
+    response.assert_status_ok();
+    let status = response.json::<serde_json::Value>();
+    assert_eq!(status["errors"], serde_json::json!([diagnostic]));
+}
+
 #[test]
 fn metadata_reset_clears_durable_ai_input_records() {
     let (_application, pool) = create_test_app();

@@ -37,9 +37,7 @@ trusted_proxy_ip_addresses = []
 refresh_token_cleanup_interval_seconds = {{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}
 
 [media_process]
-# Every media parser/converter runs in an isolated process group with bounded time and output.
-timeout_seconds = {{MEDIA_PROCESS_TIMEOUT_SECONDS}}
-termination_grace_seconds = {{MEDIA_PROCESS_TERMINATION_GRACE_SECONDS}}
+# Media parsers/converters may run for as long as required; resource and output limits remain bounded.
 maximum_stderr_bytes = {{MEDIA_PROCESS_MAXIMUM_STDERR_BYTES}}
 maximum_metadata_output_bytes = {{MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES}}
 maximum_normalized_image_output_bytes = {{MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES}}

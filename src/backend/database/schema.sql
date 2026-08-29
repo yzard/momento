@@ -331,6 +331,17 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     last_error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS import_job_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_job_id INTEGER NOT NULL,
+    error TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (import_job_id) REFERENCES import_jobs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_job_errors_job_id
+ON import_job_errors(import_job_id, id DESC);
+
 CREATE TABLE IF NOT EXISTS webdav_ready_files (
     user_id INTEGER NOT NULL,
     file_path TEXT NOT NULL,

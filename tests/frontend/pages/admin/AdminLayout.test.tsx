@@ -40,12 +40,17 @@ function renderAdmin(path: string) {
 describe('AdminLayout', () => {
   afterEach(cleanup)
 
-  it('separates Local Import and WebDAV into peer panels', () => {
+  it('stacks WebDAV above Local Import as peer panels', () => {
     renderAdmin('/admin/import')
 
     const localImport = screen.getByRole('heading', { name: 'Local Import' }).closest('section')
     const webDAV = screen.getByRole('heading', { name: 'WebDAV' }).closest('section')
     expect(localImport).not.toBe(webDAV)
+    expect(webDAV?.parentElement?.classList.contains('space-y-6')).toBe(true)
+    expect(webDAV?.parentElement).toBe(localImport?.parentElement)
+    expect(
+      webDAV?.compareDocumentPosition(localImport as Node) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(screen.getByText('Local import controls')).toBeTruthy()
     expect(screen.getByText(new URL('/webdav/', window.location.origin).toString())).toBeTruthy()
   })

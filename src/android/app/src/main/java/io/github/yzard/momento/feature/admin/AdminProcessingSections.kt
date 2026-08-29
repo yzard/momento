@@ -76,6 +76,20 @@ internal fun ImportAdministration(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
+            AdminPanel(
+                "WebDAV",
+                "Upload media through a WebDAV client using your Momento credentials.",
+            ) {
+                Text("WebDAV URL", style = MaterialTheme.typography.labelLarge)
+                SelectionText(webDAVURL)
+                Text(
+                    "Use the same username and password used to sign in to Momento.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        item {
             AdminPanel("Local Import", "Import media staged in the server import directory.") {
                 Text("Import directory", style = MaterialTheme.typography.labelLarge)
                 Text("/data/imports/", style = MaterialTheme.typography.bodyMedium)
@@ -130,20 +144,6 @@ internal fun ImportAdministration(
                 error?.let { AdminError(it) }
                 actionError?.let { AdminError(it) }
                 AdminFailureLog("Import failure log", status?.errors.orEmpty())
-            }
-        }
-        item {
-            AdminPanel(
-                "WebDAV",
-                "Upload media through a WebDAV client using your Momento credentials.",
-            ) {
-                Text("WebDAV URL", style = MaterialTheme.typography.labelLarge)
-                SelectionText(webDAVURL)
-                Text(
-                    "Use the same username and password used to sign in to Momento.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
     }

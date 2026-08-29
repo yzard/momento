@@ -1,34 +1,14 @@
 use std::ffi::OsString;
-use std::time::{Duration, Instant};
 
 use momento_api::{
     config::MediaProcessConfig,
     utils::process::{
-        validate_image_dimensions, ExternalProcess, ExternalProcessError, ImageDimensionError,
+        image_magick_resource_arguments, validate_image_dimensions, ExternalProcess,
+        ImageDimensionError,
     },
 };
 
 use crate::test_utils::QOI_FIXTURE;
-
-#[test]
-fn external_process_enforces_timeout() {
-    let process = ExternalProcess::new(
-        "sh",
-        vec!["-c".into(), "sleep 30".into()],
-        Duration::from_millis(100),
-        Duration::from_millis(100),
-        1024,
-        1024,
-    );
-    let started_at = Instant::now();
-
-    let error = process
-        .run_blocking()
-        .expect_err("sleeping process must time out");
-
-    assert!(matches!(error, ExternalProcessError::Timeout { .. }));
-    assert!(started_at.elapsed() < Duration::from_secs(2));
-}
 
 #[test]
 fn external_process_truncates_output_without_blocking_the_child() {
@@ -38,8 +18,6 @@ fn external_process_truncates_output_without_blocking_the_child() {
             OsString::from("-c"),
             OsString::from("printf '123456789'; printf 'abcdefghi' >&2"),
         ],
-        Duration::from_secs(2),
-        Duration::from_millis(100),
         4,
         5,
     );
@@ -51,6 +29,10 @@ fn external_process_truncates_output_without_blocking_the_child() {
     assert_eq!(output.stderr, b"abcde");
     assert!(output.stdout_truncated);
     assert!(output.stderr_truncated);
+    let detail = output.failure_detail("fixture");
+    assert!(detail.contains("fixture exited with"), "{detail}");
+    assert!(detail.contains("stderr: abcde"), "{detail}");
+    assert!(detail.contains("stderr capture truncated"), "{detail}");
 }
 
 #[tokio::test]
@@ -73,4 +55,33 @@ async fn image_dimension_validation_enforces_the_total_pixel_limit() {
             maximum_pixels: 5
         }
     ));
+}
+
+#[test]
+fn external_process_waits_until_the_command_completes() {
+    let process = ExternalProcess::new(
+        "sh",
+        vec!["-c".into(), "sleep 0.1; printf complete".into()],
+        1024,
+        1024,
+    );
+
+    let output = process.run_blocking().expect("process must complete");
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"complete");
+}
+
+#[test]
+fn image_magick_arguments_omit_the_time_limit() {
+    let config = MediaProcessConfig::default();
+    let arguments = image_magick_resource_arguments(&config);
+    let arguments = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy())
+        .collect::<Vec<_>>();
+
+    assert!(!arguments.iter().any(|argument| argument == "time"));
+    assert!(arguments.iter().any(|argument| argument == "memory"));
+    assert!(arguments.iter().any(|argument| argument == "disk"));
 }
