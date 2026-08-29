@@ -1,19 +1,5 @@
-import {
-  AlertTriangle,
-  Database,
-  FileText,
-  Monitor,
-  Moon,
-  Palette,
-  ShieldCheck,
-  Sun,
-  Users,
-} from 'lucide-react'
+import { AlertTriangle, Monitor, Moon, Palette, ShieldCheck, Sun } from 'lucide-react'
 
-import AiPanel from '../components/admin/AiPanel'
-import ImportPanel from '../components/admin/ImportPanel'
-import MetadataPanel from '../components/admin/MetadataPanel'
-import UserManagement from '../components/admin/UserManagement'
 import PasswordChangeForm from '../components/auth/PasswordChangeForm'
 import AndroidAppDownloadLink from '../components/layout/AndroidAppDownloadLink'
 import { useAuth } from '../hooks/useAuth'
@@ -114,79 +100,6 @@ function SecuritySettings({ mustChangePassword }: { mustChangePassword: boolean 
   )
 }
 
-function AdminSettings() {
-  const webdavUrl = new URL('/webdav/', window.location.origin).toString()
-  return (
-    <section className="mt-16 border-t border-border pt-12" aria-labelledby="admin-settings-title">
-      <div className="mb-12 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2
-            id="admin-settings-title"
-            className="font-display text-3xl font-bold tracking-tight text-foreground"
-          >
-            Admin
-          </h2>
-          <p className="mt-1 font-medium text-muted-foreground">
-            System configuration and data management.
-          </p>
-        </div>
-        <div className="flex w-fit items-center gap-2 rounded-md border border-primary/20 bg-primary/10 px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-primary">
-          <ShieldCheck className="h-4 w-4" />
-          System Access
-        </div>
-      </div>
-      <div className="space-y-12">
-        <div className="grid gap-6 md:grid-cols-[minmax(15rem,0.72fr)_minmax(0,1.5fr)] md:items-start">
-          <AdminPanel icon={<Database className="h-5 w-5" />} title="Local Import">
-            <div className="mb-5 space-y-2 text-sm text-muted-foreground">
-              <p>
-                Place media in{' '}
-                <code className="font-mono text-xs text-foreground">/data/imports/</code>.
-              </p>
-              <p>
-                For WebDAV uploads, connect to{' '}
-                <code className="break-all font-mono text-xs text-foreground">{webdavUrl}</code>{' '}
-                with your Momento username and password.
-              </p>
-            </div>
-            <ImportPanel />
-          </AdminPanel>
-          <AdminPanel icon={<FileText className="h-5 w-5" />} title="Metadata">
-            <p className="mb-5 text-sm text-muted-foreground">Generate metadata.</p>
-            <MetadataPanel />
-          </AdminPanel>
-        </div>
-        <AiPanel />
-        <AdminPanel icon={<Users className="h-5 w-5" />} title="User Management">
-          <UserManagement />
-        </AdminPanel>
-      </div>
-    </section>
-  )
-}
-
-function AdminPanel({
-  icon,
-  title,
-  children,
-}: {
-  icon: React.ReactNode
-  title: string
-  children: React.ReactNode
-}) {
-  return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-      <div className="flex items-center gap-3 border-b border-border bg-muted/30 px-6 py-5">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-card text-primary shadow-sm">
-          {icon}
-        </div>
-        <h3 className="font-display text-lg font-semibold text-foreground">{title}</h3>
-      </div>
-      <div className="p-6">{children}</div>
-    </section>
-  )
-}
-
 function LocationAttribution() {
   return (
     <p className="mt-6 text-center text-xs text-muted-foreground">
@@ -249,7 +162,6 @@ export default function Settings() {
             </div>
           </section>
           <SecuritySettings mustChangePassword={Boolean(user?.mustChangePassword)} />
-          {user?.role === 'admin' && <AdminSettings />}
           <LocationAttribution />
         </div>
       </div>

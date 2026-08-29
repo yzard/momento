@@ -34,6 +34,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
@@ -49,6 +51,8 @@ import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Screenshot
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -115,6 +119,8 @@ import io.github.yzard.momento.app.navigation.CapabilityState
 import io.github.yzard.momento.app.navigation.MainShellState
 import io.github.yzard.momento.app.navigation.MainRoute
 import io.github.yzard.momento.app.navigation.backupAvailable
+import io.github.yzard.momento.app.navigation.adminDrawerDestinationsForRole
+import io.github.yzard.momento.app.navigation.isAdminPage
 import io.github.yzard.momento.app.navigation.isTimelinePage
 import io.github.yzard.momento.app.navigation.isAvailable
 import io.github.yzard.momento.app.navigation.timelineSubpageDestinations
@@ -132,6 +138,7 @@ import io.github.yzard.momento.core.data.userMessage
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.core.model.User
 import io.github.yzard.momento.feature.admin.AdminScreen
+import io.github.yzard.momento.feature.admin.AdminSection
 import io.github.yzard.momento.feature.albums.AlbumsScreen
 import io.github.yzard.momento.feature.albums.AlbumDetailScreen
 import io.github.yzard.momento.feature.auth.LoginRequirement
@@ -561,6 +568,11 @@ private fun MainShell(
     LaunchedEffect(capabilityState, shellState.destination) {
         if (!shellState.destination.isAvailable(capabilityState)) shellState.navigate(Destination.TIMELINE)
     }
+    LaunchedEffect(user?.role, shellState.destination) {
+        if (user != null && user?.role != "admin" && shellState.destination.isAdminPage()) {
+            shellState.navigate(Destination.SETTINGS)
+        }
+    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ModalNavigationDrawer(
             drawerState = drawerState,
@@ -570,6 +582,7 @@ private fun MainShell(
                 MainNavigationDrawer(
                     destination = shellState.destination,
                     capabilityState = capabilityState,
+                    user = user,
                     select = { selectedDestination ->
                         scope.launch {
                             drawerState.close()
@@ -595,7 +608,6 @@ private fun MainShell(
                     user = user,
                     capabilityState = capabilityState,
                     libraryChange = shellState.libraryChange,
-                    openDestination = shellState::navigate,
                     openAlbum = shellState::openAlbum,
                     openPlace = shellState::openPlace,
                     openFace = shellState::openFace,
@@ -664,13 +676,16 @@ private fun CapabilityErrorBanner(message: String, retry: () -> Unit, modifier: 
 private fun MainNavigationDrawer(
     destination: Destination,
     capabilityState: CapabilityState,
+    user: User?,
     select: (Destination) -> Unit,
     logout: () -> Unit,
 ) {
     var timelineExpanded by rememberSaveable { mutableStateOf(true) }
     var utilityExpanded by rememberSaveable { mutableStateOf(false) }
+    var adminExpanded by rememberSaveable { mutableStateOf(false) }
     val visibleTimelineDestinations = timelineSubpageDestinations.filter { it.isAvailable(capabilityState) }
     val visibleUtilityDestinations = utilityDrawerDestinations.filter { it.isAvailable(capabilityState) }
+    val visibleAdminDestinations = adminDrawerDestinationsForRole(user?.role)
     val collectionDestinations = webDrawerDestinations.filter { drawerDestination ->
         drawerDestination != Destination.TIMELINE &&
             drawerDestination !in timelineSubpageDestinations &&
@@ -771,6 +786,43 @@ private fun MainNavigationDrawer(
             }
             HorizontalDivider()
             DrawerDestinationItem(Destination.SETTINGS, destination, Icons.Default.Settings, 0.dp, select)
+            if (visibleAdminDestinations.isNotEmpty()) {
+                NavigationDrawerItem(
+                    label = { Text("Admin") },
+                    selected = !adminExpanded && destination.isAdminPage(),
+                    onClick = {
+                        if (destination.isAdminPage()) {
+                            adminExpanded = !adminExpanded
+                        } else {
+                            adminExpanded = true
+                            select(Destination.ADMIN_IMPORT)
+                        }
+                    },
+                    icon = { Icon(Icons.Default.AdminPanelSettings, null) },
+                    badge = {
+                        IconButton(onClick = { adminExpanded = !adminExpanded }) {
+                            Icon(
+                                if (adminExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                if (adminExpanded) "Collapse Admin" else "Expand Admin",
+                            )
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                )
+                AnimatedVisibility(visible = adminExpanded) {
+                    Column(Modifier.padding(horizontal = 12.dp)) {
+                        visibleAdminDestinations.forEach { adminDestination ->
+                            DrawerDestinationItem(
+                                destination = adminDestination,
+                                selectedDestination = destination,
+                                icon = drawerIcon(adminDestination),
+                                indentation = 20.dp,
+                                select = select,
+                            )
+                        }
+                    }
+                }
+            }
             NavigationDrawerItem(
                 label = { Text("Logout") },
                 selected = false,
@@ -1011,6 +1063,10 @@ private fun drawerIcon(destination: Destination) = when (destination) {
     Destination.FACES -> Icons.Default.Face
     Destination.DEDUPLICATE -> Icons.Default.ContentCopy
     Destination.TRASH -> Icons.Default.Delete
+    Destination.ADMIN_IMPORT -> Icons.Default.CloudUpload
+    Destination.ADMIN_METADATA -> Icons.Default.Description
+    Destination.ADMIN_AI -> Icons.Default.SmartToy
+    Destination.ADMIN_USERS -> Icons.Default.People
     else -> Icons.Default.Folder
 }
 
@@ -1024,7 +1080,6 @@ private fun ShellDestination(
     user: User?,
     capabilityState: CapabilityState,
     libraryChange: io.github.yzard.momento.app.navigation.LibraryChange?,
-    openDestination: (Destination) -> Unit,
     openAlbum: (Long) -> Unit,
     openPlace: (io.github.yzard.momento.core.model.Place) -> Unit,
     openFace: (io.github.yzard.momento.core.model.FaceGroup) -> Unit,
@@ -1045,6 +1100,7 @@ private fun ShellDestination(
         return
     }
     require(route is MainRoute.Collection) { "Viewer routes are rendered by the shell overlay" }
+    if (route.destination.isAdminPage() && user?.role != "admin") return
     when (route.destination) {
         Destination.TIMELINE,
         Destination.PHOTOS,
@@ -1063,7 +1119,6 @@ private fun ShellDestination(
             settingsStore = settingsStore,
             user = user,
             backupAvailable = capabilityState.backupAvailable(),
-            openAdmin = { openDestination(Destination.ADMIN) },
             logout = logout,
         )
         Destination.ALBUMS -> AlbumsScreen(repository, libraryChange, openAlbum)
@@ -1072,7 +1127,10 @@ private fun ShellDestination(
         Destination.FACES -> FacesScreen(repository, user?.role == "admin", libraryChange, openFace)
         Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin", libraryChange, openMedia)
         Destination.TRASH -> TrashScreen(repository)
-        Destination.ADMIN -> AdminScreen(repository, settingsStore)
+        Destination.ADMIN_IMPORT -> AdminScreen(repository, settingsStore, AdminSection.IMPORT, user?.id)
+        Destination.ADMIN_METADATA -> AdminScreen(repository, settingsStore, AdminSection.METADATA, user?.id)
+        Destination.ADMIN_AI -> AdminScreen(repository, settingsStore, AdminSection.AI, user?.id)
+        Destination.ADMIN_USERS -> AdminScreen(repository, settingsStore, AdminSection.USERS, user?.id)
     }
 }
 

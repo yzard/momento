@@ -186,6 +186,26 @@ describe('AiPanel', () => {
     expect(within(table).queryByText('All AI Jobs')).toBeNull()
   })
 
+  it('places every durable AI failure in a selectable log below the control table', async () => {
+    const fixture = statusFixture()
+    fixture.tasks[0].errors = ['OCR image could not be decoded']
+    fixture.tasks[1].errors = ['Tagging runtime unavailable']
+    fixture.deduplicate.error = 'Deduplication run failed'
+    mocks.status.mockResolvedValue(fixture)
+    renderPanel()
+
+    const controlTable = await screen.findByRole('table', { name: 'AI feature controls' })
+    const failureLog = screen.getByLabelText('AI failure log') as HTMLTextAreaElement
+    expect(
+      controlTable.compareDocumentPosition(failureLog) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    await waitFor(() => {
+      expect(failureLog.value).toContain('[OCR] OCR image could not be decoded')
+      expect(failureLog.value).toContain('[Image Tagging] Tagging runtime unavailable')
+      expect(failureLog.value).toContain('[Deduplicate] Deduplication run failed')
+    })
+  })
+
   it('starts global and exact named feature controls independently', async () => {
     renderPanel()
     await screen.findByRole('cell', { name: '12' })

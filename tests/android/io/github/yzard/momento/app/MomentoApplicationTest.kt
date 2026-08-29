@@ -41,6 +41,7 @@ class MomentoApplicationTest {
         username = "user",
         email = "user@example.com",
         role = "user",
+        isReserved = false,
         mustChangePassword = mustChangePassword,
         isActive = true,
         createdAt = "2026-01-01T00:00:00Z",

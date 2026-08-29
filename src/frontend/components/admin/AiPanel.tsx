@@ -15,6 +15,7 @@ import {
 import { cn } from '../../lib/utils'
 import { queryKeys } from '../../lib/queryKeys'
 import { joinCronFields, splitCronExpression, validCronFields, type CronFields } from './cron'
+import { AdminFailureLog } from './AdminComponents'
 
 const FEATURES: ReadonlyArray<{ feature: AiFeature; label: string }> = [
   { feature: 'ocr', label: 'OCR' },
@@ -276,6 +277,7 @@ function AiControlTable({ status }: { status: AiStatusResponse | undefined }) {
           </tbody>
         </table>
       </div>
+      <AdminFailureLog title="AI failure log" entries={aiFailureLogEntries(status)} />
       {cleanRequest && (
         <ConfirmationDialog
           title={`Clean ${cleanRequest.label} data?`}
@@ -293,6 +295,20 @@ function AiControlTable({ status }: { status: AiStatusResponse | undefined }) {
       )}
     </div>
   )
+}
+
+function aiFailureLogEntries(status: AiStatusResponse | undefined): string[] {
+  if (!status) return []
+
+  const taskEntries = FEATURES.flatMap(({ feature, label }) => {
+    if (feature === 'deduplicate') return []
+    const task = status.tasks.find((entry) => entry.task === feature)
+    return task?.errors.map((error) => `[${label}] ${error}`) ?? []
+  })
+  const deduplicateEntries = status.deduplicate.error
+    ? [`[Deduplicate] ${status.deduplicate.error}`]
+    : []
+  return [...taskEntries, ...deduplicateEntries]
 }
 
 function useAiActionMutation() {

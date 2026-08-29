@@ -7,7 +7,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class LogoutRequest(val refreshToken: String)
 @Serializable data class ChangePasswordRequest(val currentPassword: String, val newPassword: String)
 @Serializable data class MessageResponse(val message: String, val status: String? = null)
-@Serializable data class User(val id: Long, val username: String, val email: String, val role: String, val mustChangePassword: Boolean, val isActive: Boolean, val createdAt: String)
+@Serializable data class User(val id: Long, val username: String, val email: String, val role: String, val isReserved: Boolean, val mustChangePassword: Boolean, val isActive: Boolean, val createdAt: String)
 @Serializable data class UsersResponse(val users: List<User>)
 
 @Serializable data class Media(

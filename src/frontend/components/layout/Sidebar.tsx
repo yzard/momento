@@ -2,8 +2,11 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { useState } from 'react'
 import {
   Camera,
+  Bot,
   ChevronLeft,
   ChevronRight,
+  Database,
+  FileText,
   Folder,
   LogOut,
   UsersRound,
@@ -13,6 +16,7 @@ import {
   ScanText,
   ScanSearch,
   Trash2,
+  UserCog,
   Video,
   Wrench,
   type LucideIcon,
@@ -53,6 +57,18 @@ const navItems: NavItem[] = [
   },
   { to: '/trash', label: 'Trash', icon: Trash2 },
 ]
+
+const adminNavItem: NavItem = {
+  to: '/admin',
+  label: 'Admin',
+  icon: UserCog,
+  children: [
+    { to: '/admin/import', label: 'Import', icon: Database },
+    { to: '/admin/metadata', label: 'Metadata', icon: FileText },
+    { to: '/admin/ai', label: 'AI', icon: Bot },
+    { to: '/admin/users', label: 'User Management', icon: UsersRound },
+  ],
+}
 
 interface SidebarProps {
   isCollapsed: boolean
@@ -249,34 +265,39 @@ function SidebarAccountControls({
   const { user, logout } = useAuth()
 
   return (
-    <div className={cn('flex items-center', isCollapsed ? 'flex-col gap-3' : 'gap-2')}>
-      <NavLink
-        to="/settings"
-        onClick={onNavigate}
-        aria-label="Open account settings"
-        title={user?.username ?? 'Account'}
-        className={cn(
-          'flex items-center rounded-lg text-foreground transition-colors hover:bg-muted/50',
-          isCollapsed ? 'justify-center p-1' : 'min-w-0 flex-1 gap-3 p-1.5'
-        )}
-      >
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
-          {user?.username?.[0]?.toUpperCase()}
-        </span>
-        {!isCollapsed && <span className="truncate text-sm font-medium">{user?.username}</span>}
-      </NavLink>
-      {!isCollapsed && (
-        <button
-          type="button"
-          onClick={logout}
-          aria-label="Logout"
-          title="Logout"
-          className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+    <div className="space-y-2">
+      <div className={cn('flex items-center', isCollapsed ? 'flex-col gap-3' : 'gap-2')}>
+        <NavLink
+          to="/settings"
+          onClick={onNavigate}
+          aria-label="Open account settings"
+          title={user?.username ?? 'Account'}
+          className={cn(
+            'flex items-center rounded-lg text-foreground transition-colors duration-200 hover:bg-muted/50',
+            isCollapsed ? 'justify-center p-1' : 'min-w-0 flex-1 gap-3 p-1.5'
+          )}
         >
-          <LogOut className="h-5 w-5" strokeWidth={2} />
-        </button>
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
+            {user?.username?.[0]?.toUpperCase()}
+          </span>
+          {!isCollapsed && <span className="truncate text-sm font-medium">{user?.username}</span>}
+        </NavLink>
+        {!isCollapsed && (
+          <button
+            type="button"
+            onClick={logout}
+            aria-label="Logout"
+            title="Logout"
+            className="cursor-pointer rounded-lg p-2 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
+          >
+            <LogOut className="h-5 w-5" strokeWidth={2} />
+          </button>
+        )}
+        <SidebarCollapseButton isCollapsed={isCollapsed} onClick={toggleCollapse} />
+      </div>
+      {user?.role === 'admin' && (
+        <NavSection item={adminNavItem} isCollapsed={isCollapsed} onNavigate={onNavigate} />
       )}
-      <SidebarCollapseButton isCollapsed={isCollapsed} onClick={toggleCollapse} />
     </div>
   )
 }
@@ -289,7 +310,7 @@ function SidebarFooter({
   return (
     <div
       className={cn(
-        'border-t border-border/50',
+        'max-h-[60vh] overflow-y-auto border-t border-border/50',
         isCollapsed ? 'flex flex-col items-center gap-3 p-3' : 'space-y-3 p-6'
       )}
     >

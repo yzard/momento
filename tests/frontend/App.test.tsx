@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react'
-import { MemoryRouter } from '../../src/frontend/node_modules/react-router-dom'
+import { MemoryRouter, Outlet } from '../../src/frontend/node_modules/react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const storedValues = new Map<string, string>()
@@ -13,13 +13,29 @@ const testLocalStorage = {
 vi.mock('../../src/frontend/context/AuthContext', () => ({
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }))
+const authentication = vi.hoisted(() => ({
+  user: { id: 1, username: 'user', role: 'user' as 'admin' | 'user' },
+}))
+
 vi.mock('../../src/frontend/hooks/useAuth', () => ({
   useAuth: () => ({
-    user: { id: 1, username: 'user', role: 'user' },
+    user: authentication.user,
     isAuthenticated: true,
     isLoading: false,
     logout: vi.fn(),
   }),
+}))
+vi.mock('../../src/frontend/pages/admin/AdminLayout', () => ({
+  default: () => (
+    <div>
+      <h1>Admin route</h1>
+      <Outlet />
+    </div>
+  ),
+  AdminImportPage: () => <div>Import admin page</div>,
+  AdminMetadataPage: () => <div>Metadata admin page</div>,
+  AdminAIPage: () => <div>AI admin page</div>,
+  AdminUsersPage: () => <div>User Management admin page</div>,
 }))
 vi.mock('../../src/frontend/pages/Places', () => ({
   default: () => <div>Places route</div>,
@@ -46,6 +62,7 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', testLocalStorage)
   localStorage.clear()
   document.documentElement.classList.remove('dark')
+  authentication.user.role = 'user'
 })
 
 afterEach(() => {
@@ -82,9 +99,20 @@ describe('App timeline routes', () => {
     expect(timeline.getAttribute('data-classification')).toBe(classification)
   })
 
-  it('redirects the retired admin route to account settings', async () => {
+  it('redirects an administrator from the Admin root to Import', async () => {
+    authentication.user.role = 'admin'
     render(
       <MemoryRouter initialEntries={['/admin']}>
+        <App />
+      </MemoryRouter>
+    )
+
+    expect(await screen.findByText('Import admin page')).toBeTruthy()
+  })
+
+  it('redirects a regular user away from a direct Admin URL', async () => {
+    render(
+      <MemoryRouter initialEntries={['/admin/ai']}>
         <App />
       </MemoryRouter>
     )

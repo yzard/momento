@@ -85,6 +85,7 @@ beforeEach(() => {
     username: 'admin',
     email: 'admin@example.com',
     role: 'admin',
+    isReserved: true,
     mustChangePassword: false,
   })
   mocks.logout.mockResolvedValue(undefined)
@@ -174,6 +175,7 @@ describe('AuthProvider', () => {
         username: 'stale',
         email: 'stale@example.com',
         role: 'user',
+        isReserved: false,
         mustChangePassword: false,
       })
     )

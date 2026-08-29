@@ -1632,8 +1632,8 @@ pub mod users {
      ORDER BY created_at DESC
     "#;
 
-    pub const CHECK_EXISTS: &str = r#"
-    SELECT id
+    pub const SELECT_USERNAME_BY_ID: &str = r#"
+    SELECT username
       FROM users
      WHERE id = ?
     "#;

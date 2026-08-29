@@ -9,7 +9,22 @@ sealed interface CapabilityState {
 }
 
 enum class Destination(val label: String) {
-    TIMELINE("Timeline"), PHOTOS("Photos"), VIDEOS("Videos"), SCREENSHOTS("Screenshots"), DOCUMENTS("Documents"), SETTINGS("Settings"), ALBUMS("Albums"), MAP("Map"), PLACES("Places"), FACES("Faces"), DEDUPLICATE("Deduplicate"), TRASH("Trash"), ADMIN("Admin")
+    TIMELINE("Timeline"),
+    PHOTOS("Photos"),
+    VIDEOS("Videos"),
+    SCREENSHOTS("Screenshots"),
+    DOCUMENTS("Documents"),
+    SETTINGS("Settings"),
+    ALBUMS("Albums"),
+    MAP("Map"),
+    PLACES("Places"),
+    FACES("Faces"),
+    DEDUPLICATE("Deduplicate"),
+    TRASH("Trash"),
+    ADMIN_IMPORT("Import"),
+    ADMIN_METADATA("Metadata"),
+    ADMIN_AI("AI"),
+    ADMIN_USERS("User Management"),
 }
 
 val timelineSubpageDestinations = listOf(
@@ -20,6 +35,16 @@ val timelineSubpageDestinations = listOf(
 )
 
 val utilityDrawerDestinations = listOf(Destination.DEDUPLICATE)
+
+val adminDrawerDestinations = listOf(
+    Destination.ADMIN_IMPORT,
+    Destination.ADMIN_METADATA,
+    Destination.ADMIN_AI,
+    Destination.ADMIN_USERS,
+)
+
+fun adminDrawerDestinationsForRole(role: String?): List<Destination> =
+    if (role == "admin") adminDrawerDestinations else emptyList()
 
 val webDrawerDestinations = listOf(
     Destination.TIMELINE,
@@ -37,6 +62,8 @@ fun Destination.isTimelinePage(): Boolean = when (this) {
     in timelineSubpageDestinations -> true
     else -> false
 }
+
+fun Destination.isAdminPage(): Boolean = this in adminDrawerDestinations
 
 fun Destination.isAvailable(capabilityState: CapabilityState): Boolean {
     val capabilities = (capabilityState as? CapabilityState.Available)?.capabilities

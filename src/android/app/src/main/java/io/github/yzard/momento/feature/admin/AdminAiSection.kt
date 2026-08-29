@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -24,8 +23,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
@@ -49,7 +46,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.AdministrationRepository
-import io.github.yzard.momento.core.model.AiFeatureSchedule
 import io.github.yzard.momento.core.model.AiJobCounts
 import io.github.yzard.momento.core.model.AiStatusResponse
 import kotlinx.coroutines.launch
@@ -58,15 +54,33 @@ import retrofit2.HttpException
 import java.io.IOException
 
 @Composable
+internal fun AiAdministrationScreen(repository: AdministrationRepository) {
+    val pollingState = rememberAdminPollingState(
+        repositoryKey = repository,
+        failureMessage = "Could not load AI status",
+        load = repository::aiStatus,
+    )
+    AdminPageScaffold(
+        section = AdminSection.AI,
+        refreshing = pollingState.refreshing,
+        refresh = pollingState.refresh,
+    ) {
+        AiAdministration(
+            repository = repository,
+            status = pollingState.value,
+            error = pollingState.error,
+            refresh = pollingState.refresh,
+        )
+    }
+}
+
+@Composable
 internal fun AiAdministration(
     repository: AdministrationRepository,
     status: AiStatusResponse?,
     error: String?,
     refresh: () -> Unit,
-    useControlTable: Boolean,
 ) {
-    val controls = listOf<Pair<AdminAiFeature?, String>>(null to "All AI jobs") +
-        AdminAiFeature.entries.map { it to it.label }
     var busyControls by remember { mutableStateOf<Set<String>>(emptySet()) }
     var actionError by remember { mutableStateOf<String?>(null) }
     var pendingAction by remember { mutableStateOf<PendingAdminAction?>(null) }
@@ -163,90 +177,43 @@ internal fun AiAdministration(
         }
         item {
             AdminPanel("AI work status", "Queued, submitting, submitted, failed, and completed jobs by feature.") {
-                AiStatusTable(status = status, forceTable = useControlTable)
+                AiStatusTable(status = status)
             }
         }
-        if (useControlTable) {
-            item {
-                val allState = taskState(null)
-                AdminPanel(
-                    title = "AI job controls",
-                    description = "Cron schedules use five fields and the server's system timezone.",
-                ) {
-                    AiGlobalControls(
-                        state = allState,
-                        busyControls = busyControls,
-                        primary = {
-                            requestPrimaryAction(null, "All AI jobs", isActiveAiState(allState))
-                        },
-                        clean = {
-                            requestCleanAction(null, "All AI jobs")
-                        },
-                    )
-                    AiControlTable(
-                        status = status,
-                        busyControls = busyControls,
-                        primary = { feature, label, running ->
-                            requestPrimaryAction(feature, label, running)
-                        },
-                        clean = { feature, label ->
-                            requestCleanAction(feature, label)
-                        },
-                        save = { feature, label, cronExpression ->
-                            val controlKey = "${feature.identifier}-schedule"
-                            runAction(controlKey, "Save $label schedule") {
-                                repository.updateAiSchedule(feature.identifier, cronExpression)
-                                Unit
-                            }
-                        },
-                    )
-                }
-            }
-        } else {
-            items(controls, key = { it.second }) { (feature, label) ->
-                val state = taskState(feature)
-                val running = isActiveAiState(state)
-                val controlKey = feature?.identifier ?: "all"
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-                    Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                        Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(state ?: "Not loaded", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (feature != null && feature != AdminAiFeature.DEDUPLICATE) {
-                            status?.tasks?.firstOrNull { it.task == feature.identifier }?.let { task ->
-                                Text(aiStatusSummary(task), style = MaterialTheme.typography.bodySmall)
-                                task.errors.forEach { AdminError(it) }
-                            }
+        item {
+            val allState = taskState(null)
+            AdminPanel(
+                title = "AI job controls",
+                description = "Cron schedules use five fields and the server's system timezone.",
+            ) {
+                AiGlobalControls(
+                    state = allState,
+                    busyControls = busyControls,
+                    primary = {
+                        requestPrimaryAction(null, "All AI jobs", isActiveAiState(allState))
+                    },
+                    clean = {
+                        requestCleanAction(null, "All AI jobs")
+                    },
+                )
+                AiControlTable(
+                    status = status,
+                    busyControls = busyControls,
+                    primary = { feature, label, running ->
+                        requestPrimaryAction(feature, label, running)
+                    },
+                    clean = { feature, label ->
+                        requestCleanAction(feature, label)
+                    },
+                    save = { feature, label, cronExpression ->
+                        val controlKey = "${feature.identifier}-schedule"
+                        runAction(controlKey, "Save $label schedule") {
+                            repository.updateAiSchedule(feature.identifier, cronExpression)
+                            Unit
                         }
-                        AiActionButtons(
-                            label = label,
-                            running = running,
-                            primaryBusy = "$controlKey-primary" in busyControls,
-                            cleanBusy = "$controlKey-clean" in busyControls,
-                            primary = {
-                                requestPrimaryAction(feature, label, running)
-                            },
-                            clean = {
-                                requestCleanAction(feature, label)
-                            },
-                            modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                        )
-                        if (feature != null) {
-                            status?.schedules?.firstOrNull { it.feature == feature.identifier }?.let { schedule ->
-                                AiScheduleEditor(
-                                    label = label,
-                                    schedule = schedule,
-                                    busy = "${controlKey}-schedule" in busyControls,
-                                    save = { cronExpression ->
-                                        runAction("${controlKey}-schedule", "Save $label schedule") {
-                                            repository.updateAiSchedule(feature.identifier, cronExpression)
-                                            Unit
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
+                    },
+                )
+                AdminFailureLog("AI failure log", aiFailureLogEntries(status))
             }
         }
     }
@@ -469,9 +436,6 @@ private fun AiControlTableRow(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            task?.errors?.forEach { error ->
-                Text(error, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
-            }
         }
         cronFieldLabels.indices.forEach { index ->
             Box(Modifier.width(92.dp).padding(horizontal = 5.dp, vertical = 8.dp)) {
@@ -526,54 +490,43 @@ private fun AiControlTableRow(
 }
 
 @Composable
-private fun AiStatusTable(status: AiStatusResponse?, forceTable: Boolean) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        if (!forceTable && maxWidth < 720.dp) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                AdminAiFeature.entries.forEach { feature ->
-                    val jobs = aiJobCounts(status, feature)
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))
-                            .padding(12.dp),
-                    ) {
-                        Text(feature.label, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${jobs?.queued ?: 0} queued · ${jobs?.submitting ?: 0} submitting · ${jobs?.submitted ?: 0} submitted",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Text(
-                            "${jobs?.failed ?: 0} failed · ${jobs?.completed ?: 0} completed",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        } else {
-            Column(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).width(720.dp),
-            ) {
-                AiStatusRow("Feature", listOf("Queued", "Submitting", "Submitted", "Failed", "Completed"), true)
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                AdminAiFeature.entries.forEach { feature ->
-                    val jobs = aiJobCounts(status, feature)
-                    AiStatusRow(
-                        feature.label,
-                        listOf(
-                            jobs?.queued?.toString() ?: "0",
-                            jobs?.submitting?.toString() ?: "0",
-                            jobs?.submitted?.toString() ?: "0",
-                            jobs?.failed?.toString() ?: "0",
-                            jobs?.completed?.toString() ?: "0",
-                        ),
-                        false,
-                    )
-                }
-            }
+private fun AiStatusTable(status: AiStatusResponse?) {
+    Column(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).width(720.dp),
+    ) {
+        AiStatusRow("Feature", listOf("Queued", "Submitting", "Submitted", "Failed", "Completed"), true)
+        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+        AdminAiFeature.entries.forEach { feature ->
+            val jobs = aiJobCounts(status, feature)
+            AiStatusRow(
+                feature.label,
+                listOf(
+                    jobs?.queued?.toString() ?: "0",
+                    jobs?.submitting?.toString() ?: "0",
+                    jobs?.submitted?.toString() ?: "0",
+                    jobs?.failed?.toString() ?: "0",
+                    jobs?.completed?.toString() ?: "0",
+                ),
+                false,
+            )
         }
     }
+}
+
+internal fun aiFailureLogEntries(status: AiStatusResponse?): List<String> {
+    if (status == null) return emptyList()
+    val taskEntries = AdminAiFeature.entries.flatMap { feature ->
+        if (feature == AdminAiFeature.DEDUPLICATE) return@flatMap emptyList()
+        status.tasks
+            .firstOrNull { task -> task.task == feature.identifier }
+            ?.errors
+            ?.map { error -> "[${feature.label}] $error" }
+            .orEmpty()
+    }
+    val deduplicateEntries = status.deduplicate.error
+        ?.let { error -> listOf("[Deduplication] $error") }
+        .orEmpty()
+    return taskEntries + deduplicateEntries
 }
 
 @Composable
@@ -592,77 +545,6 @@ private fun AiStatusRow(label: String, values: List<String>, header: Boolean) {
                 textAlign = TextAlign.End,
                 fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
                 style = MaterialTheme.typography.bodySmall,
-            )
-        }
-    }
-}
-
-@Composable
-private fun AiScheduleEditor(
-    label: String,
-    schedule: AiFeatureSchedule,
-    busy: Boolean,
-    save: (String) -> Unit,
-) {
-    var cronFields by remember(schedule.cronExpression) {
-        mutableStateOf(splitCronExpression(schedule.cronExpression))
-    }
-    val cronExpression = joinCronFields(cronFields)
-    val fieldsValid = validCronFields(cronFields)
-    val storedExpression = joinCronFields(splitCronExpression(schedule.cronExpression))
-    Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
-        Text("Schedule · five-field cron · system timezone", style = MaterialTheme.typography.labelSmall)
-        BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-            val fieldsPerRow = cronFieldsPerRow(maxWidth.value.toInt())
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                cronFieldLabels.indices.chunked(fieldsPerRow).forEach { rowIndices ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        rowIndices.forEach { index ->
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    cronFieldLabels[index],
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                )
-                                OutlinedTextField(
-                                    value = cronFields[index],
-                                    onValueChange = { fieldValue ->
-                                        cronFields = cronFields.toMutableList().also { fields ->
-                                            fields[index] = fieldValue
-                                        }
-                                    },
-                                    singleLine = true,
-                                    isError = cronFields[index].trim().isEmpty() ||
-                                        cronFields[index].trim().contains(Regex("\\s")),
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
-                        repeat(fieldsPerRow - rowIndices.size) { Box(Modifier.weight(1f)) }
-                    }
-                }
-                OutlinedButton(
-                    onClick = { save(cronExpression) },
-                    enabled = !busy && fieldsValid && cronExpression != storedExpression,
-                    modifier = Modifier.align(Alignment.End).semantics {
-                        contentDescription = "Save $label cron schedule"
-                    },
-                ) {
-                    Icon(Icons.Default.Save, contentDescription = null)
-                    Text("Save schedule", Modifier.padding(start = 8.dp))
-                }
-            }
-        }
-        if (!fieldsValid) {
-            Text(
-                "Every cron field must contain one value without spaces.",
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 6.dp),
             )
         }
     }

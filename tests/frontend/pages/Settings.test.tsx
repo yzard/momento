@@ -7,7 +7,7 @@ import Settings from '../../../src/frontend/pages/Settings'
 
 const mocks = vi.hoisted(() => ({
   changePassword: vi.fn(),
-  user: { username: 'alice', role: 'user', mustChangePassword: false },
+  user: { username: 'alice', role: 'user', isReserved: false, mustChangePassword: false },
 }))
 const storedValues = new Map<string, string>()
 const testLocalStorage = {
@@ -20,19 +20,6 @@ const testLocalStorage = {
 vi.mock('../../../src/frontend/hooks/useAuth', () => ({
   useAuth: () => ({ user: mocks.user, changePassword: mocks.changePassword }),
 }))
-vi.mock('../../../src/frontend/components/admin/ImportPanel', () => ({
-  default: () => <div data-testid="import-panel" />,
-}))
-vi.mock('../../../src/frontend/components/admin/MetadataPanel', () => ({
-  default: () => <div data-testid="metadata-panel" />,
-}))
-vi.mock('../../../src/frontend/components/admin/AiPanel', () => ({
-  default: () => <div data-testid="ai-panel" />,
-}))
-vi.mock('../../../src/frontend/components/admin/UserManagement', () => ({
-  default: () => <div data-testid="user-panel" />,
-}))
-
 beforeEach(() => {
   vi.stubGlobal('localStorage', testLocalStorage)
   localStorage.clear()
@@ -91,24 +78,16 @@ describe('Settings', () => {
     })
   })
 
-  it('keeps administrator controls out of regular user settings', () => {
+  it('keeps administrator controls out of user settings for every role', () => {
     renderSettings()
 
     expect(screen.queryByRole('heading', { name: 'Admin' })).toBeNull()
-    expect(screen.queryByTestId('import-panel')).toBeNull()
-  })
-
-  it('places all administrator controls after the Admin separator', () => {
+    cleanup()
     mocks.user.role = 'admin'
     renderSettings()
 
-    const adminHeading = screen.getByRole('heading', { name: 'Admin' })
-    expect(adminHeading.closest('section')?.className).toContain('border-t')
-    expect(screen.getByTestId('import-panel')).toBeTruthy()
-    expect(screen.getByTestId('metadata-panel')).toBeTruthy()
-    expect(screen.getByTestId('ai-panel')).toBeTruthy()
-    expect(screen.getByTestId('user-panel')).toBeTruthy()
-    expect(screen.getByText('/data/imports/')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Admin' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Account Settings' })).toBeTruthy()
   })
 
   it('selects and persists the appearance preference', async () => {

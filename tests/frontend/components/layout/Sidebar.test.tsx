@@ -1,13 +1,16 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from '../../../../src/frontend/node_modules/react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ logout: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  logout: vi.fn(),
+  user: { username: 'alice', role: 'user' as 'admin' | 'user' },
+}))
 
 vi.mock('../../../../src/frontend/hooks/useAuth', () => ({
   useAuth: () => ({
-    user: { username: 'alice', role: 'user' },
+    user: mocks.user,
     logout: mocks.logout,
   }),
 }))
@@ -18,6 +21,10 @@ describe('Sidebar', () => {
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()
+  })
+
+  beforeEach(() => {
+    mocks.user.role = 'user'
   })
 
   it('places Places between Map and Faces', () => {
@@ -67,6 +74,30 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'Open account settings' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Logout' })).toBeNull()
     expect(screen.getByRole('link', { name: 'Download Android app' })).toBeTruthy()
+  })
+
+  it('shows the expandable Admin menu below the avatar only for administrators', async () => {
+    mocks.user.role = 'admin'
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <Sidebar isCollapsed={false} isMobileOpen toggleCollapse={vi.fn()} onNavigate={vi.fn()} />
+      </MemoryRouter>
+    )
+
+    const accountLink = screen.getByRole('link', { name: 'Open account settings' })
+    const adminLink = screen.getByRole('link', { name: 'Admin' })
+    expect(
+      accountLink.compareDocumentPosition(adminLink) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: 'Expand Admin' }))
+    expect(screen.getByRole('link', { name: 'Import' }).getAttribute('href')).toBe('/admin/import')
+    expect(screen.getByRole('link', { name: 'Metadata' }).getAttribute('href')).toBe(
+      '/admin/metadata'
+    )
+    expect(screen.getByRole('link', { name: 'AI' }).getAttribute('href')).toBe('/admin/ai')
+    expect(screen.getByRole('link', { name: 'User Management' }).getAttribute('href')).toBe(
+      '/admin/users'
+    )
   })
 
   it('shows screenshot and document timeline children', () => {

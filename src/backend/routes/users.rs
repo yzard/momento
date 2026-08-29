@@ -1,6 +1,6 @@
 use axum::{extract::State, routing::post, Json, Router};
 
-use crate::auth::{AppState, CurrentUser, RequireAdmin};
+use crate::auth::{AppState, CurrentUser, RequireAdmin, RESERVED_ADMIN_USERNAME};
 use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -25,11 +25,13 @@ fn row_to_user_response(
     is_active: i32,
     created_at: String,
 ) -> UserResponse {
+    let is_reserved = username == RESERVED_ADMIN_USERNAME;
     UserResponse {
         id,
         username,
         email,
         role,
+        is_reserved,
         must_change_password: must_change_password != 0,
         is_active: is_active != 0,
         created_at,
@@ -145,25 +147,28 @@ async fn update_user(
     let conn = state.pool.get().map_err(AppError::Pool)?;
     let user_id = request.user_id;
 
-    // Check user exists
-    let exists = fetch_one(&conn, queries::users::CHECK_EXISTS, &[&user_id], |row| {
-        row.get::<_, i64>(0)
-    })?;
-
-    if exists.is_none() {
-        return Err(AppError::NotFound("User not found".to_string()));
-    }
+    let target_username = fetch_one(
+        &conn,
+        queries::users::SELECT_USERNAME_BY_ID,
+        &[&user_id],
+        |row| row.get::<_, String>(0),
+    )?
+    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     if user_id == admin.id && request.role.as_deref() == Some("user") {
         return Err(AppError::BadRequest("Cannot demote yourself".to_string()));
     }
 
-    if let Some(is_active) = request.is_active {
-        if user_id == admin.id && !is_active {
-            return Err(AppError::BadRequest(
-                "Cannot deactivate yourself".to_string(),
-            ));
-        }
+    if request.is_active == Some(false) && target_username == RESERVED_ADMIN_USERNAME {
+        return Err(AppError::Conflict(
+            "The reserved admin account cannot be deactivated".to_string(),
+        ));
+    }
+
+    if request.is_active == Some(false) && user_id == admin.id {
+        return Err(AppError::BadRequest(
+            "Cannot deactivate yourself".to_string(),
+        ));
     }
     match (&request.role, request.is_active) {
         (Some(role), Some(is_active)) => {
@@ -213,15 +218,18 @@ async fn delete_user(
 
     let conn = state.pool.get().map_err(AppError::Pool)?;
 
-    let exists = fetch_one(
+    let target_username = fetch_one(
         &conn,
-        queries::users::CHECK_EXISTS,
+        queries::users::SELECT_USERNAME_BY_ID,
         &[&request.user_id],
-        |row| row.get::<_, i64>(0),
-    )?;
+        |row| row.get::<_, String>(0),
+    )?
+    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    if exists.is_none() {
-        return Err(AppError::NotFound("User not found".to_string()));
+    if target_username == RESERVED_ADMIN_USERNAME {
+        return Err(AppError::Conflict(
+            "The reserved admin account cannot be deleted".to_string(),
+        ));
     }
 
     execute_query(&conn, queries::users::DELETE, &[&request.user_id])?;

@@ -5,8 +5,6 @@ import io.github.yzard.momento.core.model.AiTaskStatus
 import io.github.yzard.momento.core.model.AiFeatureSchedule
 import io.github.yzard.momento.core.model.AiStatusResponse
 import io.github.yzard.momento.core.model.DeduplicateStatusResponse
-import io.github.yzard.momento.core.model.ImportStatus
-import io.github.yzard.momento.core.model.JobStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -18,29 +16,6 @@ class AdminScreenTest {
     fun togglesBetweenAdministratorAndUserRoles() {
         assertEquals("user", toggledRole("admin"))
         assertEquals("admin", toggledRole("user"))
-    }
-
-    @Test
-    fun formatsProcessingCounts() {
-        val status = JobStatus("running", 3, 2, 9, 1, emptyList())
-
-        assertEquals("running: 3 queued, 2 processing, 9 completed, 1 failed", statusSummary(status))
-    }
-
-    @Test
-    fun formatsUnloadedStatus() {
-        assertEquals("Not loaded", statusSummary(null))
-    }
-
-    @Test
-    fun formatsLocalImportCountsIncludingTotalMedia() {
-        val status = ImportStatus("completed", 5324, 5324, 5103, 5324, 0, null, null, emptyList())
-
-        assertEquals(
-            "completed: 5324/5324 processed, 5324 imported, 0 failed, 5103 total media",
-            importStatusSummary(status),
-        )
-        assertEquals("Not loaded", importStatusSummary(null))
     }
 
     @Test
@@ -60,10 +35,7 @@ class AdminScreenTest {
             errors = emptyList(),
         )
 
-        assertEquals(
-            "submitting: 3 queued, 2 submitting, 1 submitted, 9 completed, 1 failed",
-            aiStatusSummary(status),
-        )
+        assertTrue(isActiveAiState(status.state))
     }
 
     @Test
@@ -97,29 +69,11 @@ class AdminScreenTest {
         assertEquals(List(5) { "" }, splitCronExpression("15 1 * *"))
     }
 
-    @Test fun cronFieldsWrapWithoutHorizontalScrolling() {
-        assertEquals(2, cronFieldsPerRow(360))
-        assertEquals(3, cronFieldsPerRow(600))
-        assertEquals(5, cronFieldsPerRow(720))
-    }
-
-    @Test fun adminLayoutUsesTheAiTableOnlyForExpandedLandscapeWindows() {
-        assertEquals(AdminLayoutMode.COMPACT, adminLayoutMode(widthDp = 360, heightDp = 800))
-        assertEquals(AdminLayoutMode.COMPACT, adminLayoutMode(widthDp = 719, heightDp = 360))
-        assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 720, heightDp = 360))
-        assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 900, heightDp = 412))
-        assertEquals(AdminLayoutMode.EXPANDED, adminLayoutMode(widthDp = 840, heightDp = 1_000))
-        assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 690, heightDp = 650))
-        assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 720, heightDp = 600))
-        assertEquals(AdminLayoutMode.EXPANDED_LANDSCAPE, adminLayoutMode(widthDp = 840, heightDp = 700))
-        assertTrue(AdminLayoutMode.EXPANDED_LANDSCAPE.usesNavigationRail)
-        assertTrue(AdminLayoutMode.EXPANDED_LANDSCAPE.usesAiControlTable)
-        assertFalse(AdminLayoutMode.EXPANDED.usesAiControlTable)
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun rejectsInvalidAdminWindowDimensions() {
-        adminLayoutMode(widthDp = -1, heightDp = 600)
+    @Test fun adminSectionsMatchTheSharedClientOrder() {
+        assertEquals(
+            listOf("Import", "Metadata", "AI", "User Management"),
+            AdminSection.entries.map { it.label },
+        )
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -142,6 +96,31 @@ class AdminScreenTest {
 
         assertEquals(taskJobs, aiJobCounts(status, AdminAiFeature.OCR))
         assertEquals(deduplicateJobs, aiJobCounts(status, AdminAiFeature.DEDUPLICATE))
+    }
+
+    @Test
+    fun collectsTaskAndDeduplicationFailuresInStableOrder() {
+        val emptyJobs = AiJobCounts(0, 0, 0, 0, 0, 0)
+        val status = AiStatusResponse(
+            tasks = listOf(
+                AiTaskStatus("image_tagging", true, "failed", emptyJobs, listOf("tagging failed")),
+                AiTaskStatus("ocr", true, "failed", emptyJobs, listOf("OCR failed")),
+            ),
+            deduplicate = DeduplicateStatusResponse(
+                "failed", null, null, null, null, null, 0, 0, 0, 0, "deduplication failed", emptyJobs,
+            ),
+            faceGroups = 0,
+            schedules = emptyList(),
+        )
+
+        assertEquals(
+            listOf(
+                "[OCR] OCR failed",
+                "[Image tagging] tagging failed",
+                "[Deduplication] deduplication failed",
+            ),
+            aiFailureLogEntries(status),
+        )
     }
 
     @Test

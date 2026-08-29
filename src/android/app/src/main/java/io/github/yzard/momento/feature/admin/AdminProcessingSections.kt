@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -30,9 +31,34 @@ import retrofit2.HttpException
 import java.io.IOException
 
 @Composable
+internal fun ImportAdministrationScreen(
+    repository: AdministrationRepository,
+    webDAVURL: String,
+) {
+    val pollingState = rememberAdminPollingState(
+        repositoryKey = repository,
+        failureMessage = "Could not load import status",
+        load = repository::importStatus,
+    )
+    AdminPageScaffold(
+        section = AdminSection.IMPORT,
+        refreshing = pollingState.refreshing,
+        refresh = pollingState.refresh,
+    ) {
+        ImportAdministration(
+            repository = repository,
+            webDAVURL = webDAVURL,
+            status = pollingState.value,
+            error = pollingState.error,
+            refresh = pollingState.refresh,
+        )
+    }
+}
+
+@Composable
 internal fun ImportAdministration(
     repository: AdministrationRepository,
-    webDavUrl: String,
+    webDAVURL: String,
     status: ImportStatus?,
     error: String?,
     refresh: () -> Unit,
@@ -40,20 +66,43 @@ internal fun ImportAdministration(
     var working by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val progress = status?.takeIf { it.totalFiles > 0 }?.let {
+        it.processedFiles.toFloat() / it.totalFiles.toFloat()
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 104.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            AdminPanel("Local import", "Import media staged on the server or uploaded through WebDAV.") {
+            AdminPanel("Local Import", "Import media staged in the server import directory.") {
                 Text("Import directory", style = MaterialTheme.typography.labelLarge)
                 Text("/data/imports/", style = MaterialTheme.typography.bodyMedium)
-                Text("WebDAV URL", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
-                Text(webDavUrl, style = MaterialTheme.typography.bodyMedium)
-                Text(importStatusSummary(status), modifier = Modifier.padding(top = 16.dp))
-                status?.errors?.forEach { AdminError(it) }
-                error?.let { AdminError(it) }
-                actionError?.let { AdminError(it) }
+                AdminStatusMetrics(
+                    listOf(
+                        AdminMetric("Status", status?.status ?: "—", false),
+                        AdminMetric("Imported", status?.successfulImports?.toString() ?: "—", false),
+                        AdminMetric(
+                            "Failed",
+                            status?.failedImports?.toString() ?: "—",
+                            (status?.failedImports ?: 0) > 0,
+                        ),
+                        AdminMetric("Total Media", status?.totalMedia?.toString() ?: "—", false),
+                    ),
+                )
+                if (status?.status == "running" && progress != null) {
+                    Text(
+                        "${status.processedFiles} / ${status.totalFiles} files",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    LinearProgressIndicator(
+                        progress = { progress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Button(
                     onClick = {
                         if (working) return@Button
@@ -64,22 +113,67 @@ internal fun ImportAdministration(
                                 actionError = null
                                 refresh()
                             } catch (_: IOException) {
-                                actionError = "Could not start local import"
+                                actionError = "Could not start import"
                             } catch (_: HttpException) {
-                                actionError = "Could not start local import"
+                                actionError = "Could not start import"
                             } finally {
                                 working = false
                             }
                         }
                     },
-                    enabled = !working,
-                    modifier = Modifier.padding(top = 16.dp),
+                    enabled = !working && status?.status != "running",
+                    modifier = Modifier.padding(top = 8.dp),
                 ) {
                     Icon(Icons.Default.PlayArrow, null)
-                    Text(if (working) "Starting" else "Start local import")
+                    Text(if (working) "Starting" else "Start import")
                 }
+                error?.let { AdminError(it) }
+                actionError?.let { AdminError(it) }
+                AdminFailureLog("Import failure log", status?.errors.orEmpty())
             }
         }
+        item {
+            AdminPanel(
+                "WebDAV",
+                "Upload media through a WebDAV client using your Momento credentials.",
+            ) {
+                Text("WebDAV URL", style = MaterialTheme.typography.labelLarge)
+                SelectionText(webDAVURL)
+                Text(
+                    "Use the same username and password used to sign in to Momento.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectionText(value: String) {
+    androidx.compose.foundation.text.selection.SelectionContainer {
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+internal fun MetadataAdministrationScreen(repository: AdministrationRepository) {
+    val pollingState = rememberAdminPollingState(
+        repositoryKey = repository,
+        failureMessage = "Could not load metadata status",
+        load = repository::metadataStatus,
+    )
+    AdminPageScaffold(
+        section = AdminSection.METADATA,
+        refreshing = pollingState.refreshing,
+        refresh = pollingState.refresh,
+    ) {
+        MetadataAdministration(
+            repository = repository,
+            status = pollingState.value,
+            error = pollingState.error,
+            refresh = pollingState.refresh,
+        )
     }
 }
 
@@ -119,12 +213,20 @@ internal fun MetadataAdministration(
     ) {
         item {
             AdminPanel("Metadata", "Generate thumbnails and technical metadata before AI processing.") {
-                Text(statusSummary(status))
-                status?.errors?.forEach { AdminError(it) }
-                error?.let { AdminError(it) }
-                actionError?.let { AdminError(it) }
+                AdminStatusMetrics(
+                    listOf(
+                        AdminMetric("Queued", status?.queuedJobs?.toString() ?: "—", false),
+                        AdminMetric("Processing", status?.processingJobs?.toString() ?: "—", false),
+                        AdminMetric("Completed", status?.completedJobs?.toString() ?: "—", false),
+                        AdminMetric(
+                            "Failed",
+                            status?.failedJobs?.toString() ?: "—",
+                            (status?.failedJobs ?: 0) > 0,
+                        ),
+                    ),
+                )
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Button(
@@ -135,16 +237,19 @@ internal fun MetadataAdministration(
                     OutlinedButton(
                         onClick = {
                             pendingAction = PendingAdminAction(
-                                title = "Reset metadata?",
-                                description = "Prepared metadata and related processing work will be reset and regenerated.",
-                                confirmLabel = "Reset",
+                                title = "Reset metadata and AI data?",
+                                description = "This removes generated metadata and related AI data, then queues metadata generation again. Existing original media is preserved.",
+                                confirmLabel = "Reset & regenerate",
                                 execute = { runAction("reset") { repository.resetMetadata() } },
                             )
                         },
                         enabled = busyAction == null,
                         modifier = Modifier.weight(1f),
-                    ) { Text("Reset") }
+                    ) { Text("Reset & regenerate") }
                 }
+                error?.let { AdminError(it) }
+                actionError?.let { AdminError(it) }
+                AdminFailureLog("Metadata failure log", status?.errors.orEmpty())
             }
         }
     }
@@ -159,4 +264,3 @@ internal fun MetadataAdministration(
         )
     }
 }
-

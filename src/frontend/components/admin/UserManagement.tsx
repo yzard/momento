@@ -4,6 +4,7 @@ import { AlertCircle } from 'lucide-react'
 
 import { adminApi } from '../../api/admin'
 import type { User } from '../../api/auth'
+import { useAuth } from '../../hooks/useAuth'
 import ConfirmationDialog from '../common/ConfirmationDialog'
 
 interface NewUser {
@@ -24,10 +25,10 @@ function validateNewUser(user: NewUser): Record<string, string> {
   return errors
 }
 
-function useManagedUsers() {
+function useManagedUsers(currentUserId: number | undefined) {
   const [users, setUsers] = useState<User[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [isDeleting, setIsDeleting] = useState(false)
+  const [busyUserIds, setBusyUserIds] = useState<Set<number>>(new Set())
   const [actionError, setActionError] = useState<string | null>(null)
   const loadUsers = useCallback(async () => {
     try {
@@ -43,40 +44,79 @@ function useManagedUsers() {
     void loadUsers()
   }, [loadUsers])
 
-  const toggleActive = async (user: User) => {
+  const updateUser = async (user: User, update: { role?: User['role']; isActive?: boolean }) => {
+    if (busyUserIds.has(user.id)) return
+    setBusyUserIds((current) => new Set(current).add(user.id))
     try {
-      await adminApi.updateUser({ userId: user.id, isActive: !user.isActive })
+      await adminApi.updateUser({ userId: user.id, ...update })
       await loadUsers()
     } catch {
       setActionError('Could not update the user.')
+    } finally {
+      setBusyUserIds((current) => {
+        const next = new Set(current)
+        next.delete(user.id)
+        return next
+      })
     }
   }
-  const deleteUser = async (userId: number) => {
-    setIsDeleting(true)
+
+  const toggleActive = async (user: User) => {
+    if (user.isReserved || user.id === currentUserId) return
+    await updateUser(user, { isActive: !user.isActive })
+  }
+
+  const changeRole = async (user: User, role: User['role']) => {
+    if (user.id === currentUserId && role === 'user') return
+    await updateUser(user, { role })
+  }
+
+  const deleteUser = async (user: User) => {
+    if (user.isReserved || user.id === currentUserId || busyUserIds.has(user.id)) return
+    setBusyUserIds((current) => new Set(current).add(user.id))
     try {
-      await adminApi.deleteUser(userId)
+      await adminApi.deleteUser(user.id)
       await loadUsers()
     } catch {
       setActionError('Could not delete the user.')
     } finally {
-      setIsDeleting(false)
+      setBusyUserIds((current) => {
+        const next = new Set(current)
+        next.delete(user.id)
+        return next
+      })
     }
   }
-  return { users, isLoading, isDeleting, actionError, loadUsers, toggleActive, deleteUser }
+  return {
+    users,
+    isLoading,
+    busyUserIds,
+    actionError,
+    loadUsers,
+    toggleActive,
+    changeRole,
+    deleteUser,
+  }
 }
 
 function UsersTable({
   users,
+  currentUserId,
+  busyUserIds,
   onToggleActive,
+  onChangeRole,
   onDelete,
 }: {
   users: User[]
+  currentUserId: number | undefined
+  busyUserIds: ReadonlySet<number>
   onToggleActive: (user: User) => void
-  onDelete: (userId: number) => void
+  onChangeRole: (user: User, role: User['role']) => void
+  onDelete: (user: User) => void
 }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/30 backdrop-blur-sm">
-      <table className="w-full text-sm">
+    <div className="overflow-x-auto rounded-xl border border-border/50 bg-card/30">
+      <table aria-label="Managed users" className="w-full min-w-[780px] text-sm">
         <thead className="bg-muted/30">
           <tr>
             {['Username', 'Email', 'Role', 'Status', 'Actions'].map((label) => (
@@ -90,42 +130,70 @@ function UsersTable({
           </tr>
         </thead>
         <tbody className="divide-y divide-border/50">
-          {users.map((user) => (
-            <tr key={user.id} className="transition-colors hover:bg-muted/20">
-              <td className="px-4 py-3 font-medium text-foreground">{user.username}</td>
-              <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
-              <td className="px-4 py-3">
-                <span
-                  className={`rounded border px-2 py-1 text-xs font-bold uppercase tracking-wide ${user.role === 'admin' ? 'border-secondary/20 bg-secondary/10 text-secondary' : 'border-border bg-muted text-muted-foreground'}`}
-                >
-                  {user.role}
-                </span>
-              </td>
-              <td className="px-4 py-3">
-                <span
-                  className={`rounded border px-2 py-1 text-xs font-bold uppercase tracking-wide ${user.isActive ? 'border-primary/20 bg-primary/10 text-primary' : 'border-destructive/20 bg-destructive/10 text-destructive'}`}
-                >
-                  {user.isActive ? 'Active' : 'Inactive'}
-                </span>
-              </td>
-              <td className="px-4 py-3">
-                <button
-                  type="button"
-                  onClick={() => onToggleActive(user)}
-                  className="mr-3 font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                >
-                  {user.isActive ? 'Deactivate' : 'Activate'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDelete(user.id)}
-                  className="font-medium text-destructive hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive"
-                >
-                  Delete
-                </button>
-              </td>
-            </tr>
-          ))}
+          {users.map((user) => {
+            const protectedUser = user.isReserved || user.id === currentUserId
+            const busy = busyUserIds.has(user.id)
+            const protectedTitle = user.isReserved
+              ? 'The reserved admin account cannot be deactivated or deleted'
+              : 'The current account cannot be deactivated or deleted'
+
+            return (
+              <tr key={user.id} className="transition-colors duration-200 hover:bg-muted/20">
+                <td className="px-4 py-3 font-medium text-foreground">
+                  <span>{user.username}</span>
+                  {user.isReserved && (
+                    <span className="ml-2 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-primary">
+                      Reserved
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
+                <td className="px-4 py-3">
+                  <label htmlFor={`role-${user.id}`} className="sr-only">
+                    Role for {user.username}
+                  </label>
+                  <select
+                    id={`role-${user.id}`}
+                    aria-label={`Role for ${user.username}`}
+                    value={user.role}
+                    onChange={(event) => onChangeRole(user, event.target.value as User['role'])}
+                    disabled={busy || user.id === currentUserId}
+                    className="min-h-11 cursor-pointer rounded-lg border border-input bg-background px-3 text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </td>
+                <td className="px-4 py-3">
+                  <span
+                    className={`rounded border px-2 py-1 text-xs font-bold uppercase tracking-wide ${user.isActive ? 'border-primary/20 bg-primary/10 text-primary' : 'border-destructive/20 bg-destructive/10 text-destructive'}`}
+                  >
+                    {user.isActive ? 'Active' : 'Inactive'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <button
+                    type="button"
+                    onClick={() => onToggleActive(user)}
+                    disabled={protectedUser || busy}
+                    title={protectedUser ? protectedTitle : undefined}
+                    className="mr-3 min-h-11 cursor-pointer font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                  >
+                    {user.isActive ? 'Deactivate' : 'Activate'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(user)}
+                    disabled={protectedUser || busy}
+                    title={protectedUser ? protectedTitle : undefined}
+                    className="min-h-11 cursor-pointer font-medium text-destructive hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -342,9 +410,10 @@ function CreateUserModal({
 }
 
 export default function UserManagement() {
-  const managedUsers = useManagedUsers()
+  const { user: currentUser } = useAuth()
+  const managedUsers = useManagedUsers(currentUser?.id)
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [pendingDeleteUserId, setPendingDeleteUserId] = useState<number | null>(null)
+  const [pendingDeleteUser, setPendingDeleteUser] = useState<User | null>(null)
   if (managedUsers.isLoading) return <div className="text-muted-foreground">Loading users...</div>
   return (
     <div>
@@ -353,7 +422,7 @@ export default function UserManagement() {
         <button
           type="button"
           onClick={() => setShowCreateModal(true)}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90"
+          className="min-h-11 cursor-pointer rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition-colors duration-200 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         >
           Add User
         </button>
@@ -365,8 +434,11 @@ export default function UserManagement() {
       )}
       <UsersTable
         users={managedUsers.users}
+        currentUserId={currentUser?.id}
+        busyUserIds={managedUsers.busyUserIds}
         onToggleActive={(user) => void managedUsers.toggleActive(user)}
-        onDelete={setPendingDeleteUserId}
+        onChangeRole={(user, role) => void managedUsers.changeRole(user, role)}
+        onDelete={setPendingDeleteUser}
       />
       {showCreateModal && (
         <CreateUserModal
@@ -374,19 +446,19 @@ export default function UserManagement() {
           onCreated={managedUsers.loadUsers}
         />
       )}
-      {pendingDeleteUserId !== null && (
+      {pendingDeleteUser && (
         <ConfirmationDialog
-          title="Delete this user?"
+          title={`Delete ${pendingDeleteUser.username}?`}
           description="This permanently removes the user account and cannot be undone."
           confirmLabel="Delete user"
-          isProcessing={managedUsers.isDeleting}
+          isProcessing={managedUsers.busyUserIds.has(pendingDeleteUser.id)}
           destructive
           onConfirm={() => {
             void managedUsers
-              .deleteUser(pendingDeleteUserId)
-              .finally(() => setPendingDeleteUserId(null))
+              .deleteUser(pendingDeleteUser)
+              .finally(() => setPendingDeleteUser(null))
           }}
-          onCancel={() => setPendingDeleteUserId(null)}
+          onCancel={() => setPendingDeleteUser(null)}
         />
       )}
     </div>

@@ -539,6 +539,21 @@ BEGIN
      WHERE media_id = OLD.id;
 END;
 
+CREATE TRIGGER IF NOT EXISTS prevent_reserved_admin_deactivation
+    BEFORE UPDATE OF is_active ON users
+    WHEN OLD.username = 'admin'
+     AND NEW.is_active = 0
+BEGIN
+    SELECT RAISE(ABORT, 'the reserved admin account cannot be deactivated');
+END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_reserved_admin_deletion
+    BEFORE DELETE ON users
+    WHEN OLD.username = 'admin'
+BEGIN
+    SELECT RAISE(ABORT, 'the reserved admin account cannot be deleted');
+END;
+
 CREATE TRIGGER IF NOT EXISTS mark_similarity_dirty_after_media_insert
     AFTER INSERT ON media
 BEGIN

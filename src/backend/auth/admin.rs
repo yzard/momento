@@ -7,7 +7,8 @@ use crate::auth::hash_password;
 use crate::database::{execute_query, fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
 
-pub const TEMPORARY_ADMIN_USERNAME: &str = "admin";
+pub const RESERVED_ADMIN_USERNAME: &str = "admin";
+pub const TEMPORARY_ADMIN_USERNAME: &str = RESERVED_ADMIN_USERNAME;
 pub const TEMPORARY_ADMIN_PASSWORD: &str = "admin";
 
 #[derive(Clone, Default)]

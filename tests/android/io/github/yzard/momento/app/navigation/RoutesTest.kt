@@ -44,6 +44,23 @@ class RoutesTest {
         assertEquals(listOf(Destination.DEDUPLICATE), utilityDrawerDestinations)
     }
 
+    @Test fun adminSectionContainsFourRealSubpagesInDisplayOrder() {
+        assertEquals(
+            listOf(
+                Destination.ADMIN_IMPORT,
+                Destination.ADMIN_METADATA,
+                Destination.ADMIN_AI,
+                Destination.ADMIN_USERS,
+            ),
+            adminDrawerDestinations,
+        )
+        assertTrue(adminDrawerDestinations.all { it.isAdminPage() })
+        assertTrue(!Destination.SETTINGS.isAdminPage())
+        assertEquals(adminDrawerDestinations, adminDrawerDestinationsForRole("admin"))
+        assertTrue(adminDrawerDestinationsForRole("user").isEmpty())
+        assertTrue(adminDrawerDestinationsForRole(null).isEmpty())
+    }
+
     @Test fun serverCapabilitiesHideUnavailableGeneratedCollections() {
         val capabilities = Capabilities(
             appVersion = "1.0.0",

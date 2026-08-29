@@ -7,6 +7,7 @@ pub struct UserResponse {
     pub username: String,
     pub email: String,
     pub role: String,
+    pub is_reserved: bool,
     pub must_change_password: bool,
     pub is_active: bool,
     pub created_at: String,

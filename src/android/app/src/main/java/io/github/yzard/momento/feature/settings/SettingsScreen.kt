@@ -26,7 +26,6 @@ fun SettingsScreen(
     settingsStore: SettingsStore,
     user: User?,
     backupAvailable: Boolean,
-    openAdmin: () -> Unit,
     logout: () -> Unit,
 ) {
     val settings by settingsStore.settings.collectAsState(
@@ -57,7 +56,6 @@ fun SettingsScreen(
                     repository = repository,
                     user = user,
                     origin = settings.origin,
-                    openAdmin = openAdmin,
                     logout = logout,
                 )
             }

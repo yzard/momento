@@ -14,6 +14,19 @@ const Trash = lazy(() => import('./pages/Trash'))
 const Deduplicate = lazy(() => import('./pages/Deduplicate'))
 const Faces = lazy(() => import('./pages/Faces'))
 const Places = lazy(() => import('./pages/Places'))
+const AdminLayout = lazy(() => import('./pages/admin/AdminLayout'))
+const AdminImportPage = lazy(() =>
+  import('./pages/admin/AdminLayout').then((module) => ({ default: module.AdminImportPage }))
+)
+const AdminMetadataPage = lazy(() =>
+  import('./pages/admin/AdminLayout').then((module) => ({ default: module.AdminMetadataPage }))
+)
+const AdminAIPage = lazy(() =>
+  import('./pages/admin/AdminLayout').then((module) => ({ default: module.AdminAIPage }))
+)
+const AdminUsersPage = lazy(() =>
+  import('./pages/admin/AdminLayout').then((module) => ({ default: module.AdminUsersPage }))
+)
 
 function LoadingScreen() {
   return <div className="flex items-center justify-center h-screen">Loading...</div>
@@ -30,6 +43,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <Navigate to="/login" replace />
   }
 
+  return <>{children}</>
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth()
+  if (user?.role !== 'admin') return <Navigate to="/settings" replace />
   return <>{children}</>
 }
 
@@ -60,7 +79,20 @@ function AppRoutes() {
         <Route path="utility" element={<Navigate to="/utility/deduplicate" replace />} />
         <Route path="utility/deduplicate" element={<Deduplicate />} />
         <Route path="settings" element={<Settings />} />
-        <Route path="admin" element={<Navigate to="/settings" replace />} />
+        <Route
+          path="admin"
+          element={
+            <AdminRoute>
+              <AdminLayout />
+            </AdminRoute>
+          }
+        >
+          <Route index element={<Navigate to="/admin/import" replace />} />
+          <Route path="import" element={<AdminImportPage />} />
+          <Route path="metadata" element={<AdminMetadataPage />} />
+          <Route path="ai" element={<AdminAIPage />} />
+          <Route path="users" element={<AdminUsersPage />} />
+        </Route>
         <Route path="trash" element={<Trash />} />
       </Route>
     </Routes>

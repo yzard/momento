@@ -33,13 +33,19 @@ describe('ImportPanel', () => {
 
   afterEach(cleanup)
 
-  it('starts a local import with one compact action', async () => {
+  it('always shows local import metrics and starts one import action', async () => {
     render(<ImportPanel />)
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Import Media' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Start import' }))
 
     await waitFor(() => expect(mocks.triggerLocal).toHaveBeenCalledOnce())
-    expect(screen.queryByText('Import Photos')).toBeNull()
+    expect(screen.getByText('Status').parentElement?.textContent).toContain('idle')
+    expect(screen.getByText('Imported').parentElement?.textContent).toContain('0')
+    expect(screen.getByText('Failed').parentElement?.textContent).toContain('0')
+    expect(screen.getByText('Total Media').parentElement?.textContent).toContain('5103')
+    expect((screen.getByLabelText('Import failure log') as HTMLTextAreaElement).value).toBe(
+      'No failures.'
+    )
   })
 
   it('shows concise progress while an import is running', async () => {
@@ -64,5 +70,24 @@ describe('ImportPanel', () => {
     expect(screen.getByText('Imported').parentElement?.textContent).toContain('3')
     expect(screen.getByText('Failed').parentElement?.textContent).toContain('1')
     expect(screen.getByText('Total Media').parentElement?.textContent).toContain('5103')
+  })
+
+  it('keeps complete import failures selectable instead of truncating them', async () => {
+    mocks.getStatus.mockResolvedValue({
+      status: 'failed',
+      totalFiles: 1,
+      processedFiles: 1,
+      totalMedia: 5103,
+      successfulImports: 0,
+      failedImports: 1,
+      startedAt: null,
+      completedAt: null,
+      errors: ['first complete failure', 'second complete failure'],
+    })
+    render(<ImportPanel />)
+
+    expect(
+      ((await screen.findByLabelText('Import failure log')) as HTMLTextAreaElement).value
+    ).toBe('first complete failure\nsecond complete failure')
   })
 })

@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../../../../src/frontend/api/admin', () => ({ adminApi: mocks }))
+vi.mock('../../../../src/frontend/hooks/useAuth', () => ({
+  useAuth: () => ({ user: { id: 1, username: 'manager', role: 'admin' } }),
+}))
 
 import UserManagement from '../../../../src/frontend/components/admin/UserManagement'
 
@@ -47,6 +50,7 @@ describe('UserManagement', () => {
         username: 'member',
         email: 'member@example.com',
         role: 'user',
+        isReserved: false,
         mustChangePassword: false,
         isActive: true,
         createdAt: '2024-01-01T00:00:00Z',
@@ -70,6 +74,7 @@ describe('UserManagement', () => {
         username: 'member',
         email: 'member@example.com',
         role: 'user',
+        isReserved: false,
         mustChangePassword: false,
         isActive: true,
         createdAt: '2024-01-01T00:00:00Z',
@@ -83,5 +88,61 @@ describe('UserManagement', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Delete user' }))
 
     expect(mocks.deleteUser).toHaveBeenCalledWith(7)
+  })
+
+  it('renders one table row per user and protects the reserved admin actions', async () => {
+    mocks.listUsers.mockResolvedValue([
+      {
+        id: 2,
+        username: 'admin',
+        email: 'admin@example.com',
+        role: 'admin',
+        isReserved: true,
+        mustChangePassword: false,
+        isActive: true,
+        createdAt: '2024-01-01T00:00:00Z',
+      },
+      {
+        id: 7,
+        username: 'member',
+        email: 'member@example.com',
+        role: 'user',
+        isReserved: false,
+        mustChangePassword: false,
+        isActive: true,
+        createdAt: '2024-01-01T00:00:00Z',
+      },
+    ])
+    render(<UserManagement />)
+
+    const table = await screen.findByRole('table', { name: 'Managed users' })
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(2)
+    expect(screen.getByText('Reserved')).toBeTruthy()
+    const deactivateButtons = screen.getAllByRole('button', { name: 'Deactivate' })
+    const deleteButtons = screen.getAllByRole('button', { name: 'Delete' })
+    expect((deactivateButtons[0] as HTMLButtonElement).disabled).toBe(true)
+    expect((deleteButtons[0] as HTMLButtonElement).disabled).toBe(true)
+    expect((deactivateButtons[1] as HTMLButtonElement).disabled).toBe(false)
+    expect((deleteButtons[1] as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('updates an existing user role from the same table', async () => {
+    mocks.listUsers.mockResolvedValue([
+      {
+        id: 7,
+        username: 'member',
+        email: 'member@example.com',
+        role: 'user',
+        isReserved: false,
+        mustChangePassword: false,
+        isActive: true,
+        createdAt: '2024-01-01T00:00:00Z',
+      },
+    ])
+    mocks.updateUser.mockResolvedValue(undefined)
+    render(<UserManagement />)
+
+    await userEvent.selectOptions(await screen.findByLabelText('Role for member'), 'admin')
+    expect(mocks.updateUser).toHaveBeenCalledWith({ userId: 7, role: 'admin' })
   })
 })

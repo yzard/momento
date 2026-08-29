@@ -1,12 +1,10 @@
 package io.github.yzard.momento.feature.settings
 
 import android.view.autofill.AutofillManager
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
@@ -33,7 +31,6 @@ internal fun AccountSettingsSection(
     repository: AccountRepository,
     user: User?,
     origin: String?,
-    openAdmin: () -> Unit,
     logout: () -> Unit,
 ) {
     var passwordDialog by remember { mutableStateOf(false) }
@@ -54,13 +51,6 @@ internal fun AccountSettingsSection(
             },
             leadingContent = { Icon(Icons.Default.AccountCircle, null) },
         )
-        if (user?.role == "admin") {
-            ListItem(
-                headlineContent = { Text("Admin") },
-                leadingContent = { Icon(Icons.Default.AdminPanelSettings, null) },
-                modifier = Modifier.clickable(onClick = openAdmin),
-            )
-        }
     }
 
     if (passwordDialog) PasswordDialog(repository) { passwordDialog = false }

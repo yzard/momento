@@ -5,6 +5,7 @@ export interface User {
   username: string
   email: string
   role: 'admin' | 'user'
+  isReserved: boolean
   mustChangePassword: boolean
   isActive: boolean
   createdAt: string

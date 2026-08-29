@@ -1,59 +1,31 @@
 package io.github.yzard.momento.feature.admin
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.People
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.ScrollableTabRow
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -61,17 +33,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
 import io.github.yzard.momento.core.data.AdministrationRepository
@@ -81,25 +46,17 @@ import io.github.yzard.momento.core.data.SettingsStore
 import io.github.yzard.momento.core.data.ThemePreference
 import io.github.yzard.momento.core.data.runRequest
 import io.github.yzard.momento.core.data.userMessage
-import io.github.yzard.momento.core.model.AiStatusResponse
-import io.github.yzard.momento.core.model.AiFeatureSchedule
 import io.github.yzard.momento.core.model.AiJobCounts
-import io.github.yzard.momento.core.model.AiTaskStatus
-import io.github.yzard.momento.core.model.ImportStatus
-import io.github.yzard.momento.core.model.JobStatus
-import io.github.yzard.momento.core.model.User
+import io.github.yzard.momento.core.model.AiStatusResponse
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.serialization.SerializationException
-import retrofit2.HttpException
-import java.io.IOException
 
-enum class AdminSection(val label: String, val icon: ImageVector) {
-    USERS("Users", Icons.Default.People),
-    IMPORT("Import", Icons.Default.Folder),
-    METADATA("Metadata", Icons.Default.Description),
-    AI("AI Processing", Icons.Default.Storage),
+enum class AdminSection(val label: String) {
+    IMPORT("Import"),
+    METADATA("Metadata"),
+    AI("AI"),
+    USERS("User Management"),
 }
 
 enum class AdminAiFeature(val identifier: String, val label: String) {
@@ -110,15 +67,6 @@ enum class AdminAiFeature(val identifier: String, val label: String) {
     IMAGE_AESTHETICS("image_aesthetics", "Image aesthetics"),
     DEDUPLICATE("deduplicate", "Deduplication"),
     FACE_DETECTION("face_detection", "Face detection"),
-}
-
-enum class AdminLayoutMode(
-    val usesNavigationRail: Boolean,
-    val usesAiControlTable: Boolean,
-) {
-    COMPACT(usesNavigationRail = false, usesAiControlTable = false),
-    EXPANDED(usesNavigationRail = true, usesAiControlTable = false),
-    EXPANDED_LANDSCAPE(usesNavigationRail = true, usesAiControlTable = true),
 }
 
 internal val cronFieldLabels = listOf("Minute", "Hour", "Day", "Month", "Weekday")
@@ -139,38 +87,10 @@ fun validCronFields(cronFields: List<String>): Boolean {
     return cronFields.all { field -> field.trim().isNotEmpty() && !field.trim().contains(Regex("\\s")) }
 }
 
-fun cronFieldsPerRow(widthDp: Int): Int = when {
-    widthDp < 420 -> 2
-    widthDp < 720 -> 3
-    else -> 5
-}
-
-fun adminLayoutMode(widthDp: Int, heightDp: Int): AdminLayoutMode {
-    require(widthDp >= 0) { "Admin window width must not be negative" }
-    require(heightDp >= 0) { "Admin window height must not be negative" }
-    return when {
-        widthDp >= 600 && heightDp >= 600 && widthDp > heightDp -> AdminLayoutMode.EXPANDED_LANDSCAPE
-        widthDp < 720 -> AdminLayoutMode.COMPACT
-        else -> AdminLayoutMode.EXPANDED
-    }
-}
-
 fun toggledRole(role: String): String = if (role == "admin") "user" else "admin"
 
-fun statusSummary(status: JobStatus?): String {
-    if (status == null) return "Not loaded"
-    return "${status.status}: ${status.queuedJobs} queued, ${status.processingJobs} processing, ${status.completedJobs} completed, ${status.failedJobs} failed"
-}
-
-fun importStatusSummary(status: ImportStatus?): String {
-    if (status == null) return "Not loaded"
-    return "${status.status}: ${status.processedFiles}/${status.totalFiles} processed, ${status.successfulImports} imported, ${status.failedImports} failed, ${status.totalMedia} total media"
-}
-
-fun aiStatusSummary(status: AiTaskStatus): String =
-    "${status.state}: ${status.jobs.queued} queued, ${status.jobs.submitting} submitting, ${status.jobs.submitted} submitted, ${status.jobs.completed} completed, ${status.jobs.failed} failed"
-
-fun isActiveAiState(state: String?): Boolean = state in setOf("queued", "submitting", "submitted", "running", "cancelling")
+fun isActiveAiState(state: String?): Boolean =
+    state in setOf("queued", "submitting", "submitted", "running", "cancelling")
 
 internal fun aiJobCounts(status: AiStatusResponse?, feature: AdminAiFeature): AiJobCounts? =
     if (feature == AdminAiFeature.DEDUPLICATE) {
@@ -195,96 +115,95 @@ internal data class PendingAdminAction(
     val execute: suspend () -> Unit,
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+internal data class AdminMetric(
+    val label: String,
+    val value: String,
+    val emphasized: Boolean,
+)
+
+internal data class AdminPollingState<T>(
+    val value: T?,
+    val error: String?,
+    val refreshing: Boolean,
+    val refresh: () -> Unit,
+)
+
 @Composable
-fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsStore) {
-    val settings by settingsStore.settings.collectAsState(
-        initial = Settings(null, false, true, ThemePreference.SYSTEM),
-    )
-    var selectedSection by rememberSaveable { mutableStateOf(AdminSection.USERS) }
-    var importStatus by remember { mutableStateOf<ImportStatus?>(null) }
-    var metadataStatus by remember { mutableStateOf<JobStatus?>(null) }
-    var aiStatus by remember { mutableStateOf<AiStatusResponse?>(null) }
-    var importError by remember { mutableStateOf<String?>(null) }
-    var metadataError by remember { mutableStateOf<String?>(null) }
-    var aiError by remember { mutableStateOf<String?>(null) }
-    var refreshing by remember { mutableStateOf(false) }
-    var userRefreshVersion by remember { mutableStateOf(0) }
+internal fun <T> rememberAdminPollingState(
+    repositoryKey: Any,
+    failureMessage: String,
+    load: suspend () -> T,
+): AdminPollingState<T> {
+    var value by remember(repositoryKey) { mutableStateOf<T?>(null) }
+    var error by remember(repositoryKey) { mutableStateOf<String?>(null) }
+    var refreshing by remember(repositoryKey) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    suspend fun refreshImport() {
-        when (val result = runRequest { repository.importStatus() }) {
-            is RequestResult.Success -> {
-                importStatus = result.response
-                importError = null
-            }
-            is RequestResult.Failure -> {
-                importError = result.error.userMessage("Could not load import status")
-            }
-        }
-    }
-
-    suspend fun refreshMetadata() {
-        when (val result = runRequest { repository.metadataStatus() }) {
-            is RequestResult.Success -> {
-                metadataStatus = result.response
-                metadataError = null
-            }
-            is RequestResult.Failure -> {
-                metadataError = result.error.userMessage("Could not load metadata status")
-            }
-        }
-    }
-
-    suspend fun refreshAi() {
-        when (val result = runRequest { repository.aiStatus() }) {
-            is RequestResult.Success -> {
-                aiStatus = result.response
-                aiError = null
-            }
-            is RequestResult.Failure -> {
-                aiError = result.error.userMessage("Could not load AI status")
-            }
-        }
-    }
-
-    suspend fun refreshSelected(section: AdminSection) {
+    suspend fun refreshValue() {
         if (refreshing) return
         refreshing = true
-        when (section) {
-            AdminSection.USERS -> userRefreshVersion += 1
-            AdminSection.IMPORT -> refreshImport()
-            AdminSection.METADATA -> refreshMetadata()
-            AdminSection.AI -> refreshAi()
+        when (val result = runRequest { load() }) {
+            is RequestResult.Success -> {
+                value = result.response
+                error = null
+            }
+            is RequestResult.Failure -> error = result.error.userMessage(failureMessage)
         }
         refreshing = false
     }
 
-    fun refreshFromUser() {
-        scope.launch { refreshSelected(selectedSection) }
-    }
-
-    LaunchedEffect(repository, selectedSection) {
+    LaunchedEffect(repositoryKey) {
         while (isActive) {
-            refreshSelected(selectedSection)
+            refreshValue()
             delay(3_000)
         }
     }
 
+    return AdminPollingState(
+        value = value,
+        error = error,
+        refreshing = refreshing,
+        refresh = { scope.launch { refreshValue() } },
+    )
+}
+
+@Composable
+fun AdminScreen(
+    repository: AdministrationRepository,
+    settingsStore: SettingsStore,
+    section: AdminSection,
+    currentUserId: Long?,
+) {
+    val settings by settingsStore.settings.collectAsState(
+        initial = Settings(null, false, true, ThemePreference.SYSTEM),
+    )
+
+    when (section) {
+        AdminSection.IMPORT -> ImportAdministrationScreen(repository, webDavUrl(settings.origin))
+        AdminSection.METADATA -> MetadataAdministrationScreen(repository)
+        AdminSection.AI -> AiAdministrationScreen(repository)
+        AdminSection.USERS -> UserAdministrationScreen(repository, currentUserId)
+    }
+}
+
+@Composable
+internal fun AdminPageScaffold(
+    section: AdminSection,
+    refreshing: Boolean,
+    refresh: () -> Unit,
+    content: @Composable () -> Unit,
+) {
     MomentoPageScaffold(
-        title = "Admin",
-        subtitle = "System access and processing",
+        title = section.label,
+        subtitle = "Admin",
         backContentDescription = null,
         onBack = null,
         trailingContent = {
-            IconButton(
-                onClick = ::refreshFromUser,
-                enabled = !refreshing,
-            ) {
+            IconButton(onClick = refresh, enabled = !refreshing) {
                 if (refreshing) {
                     CircularProgressIndicator(Modifier.padding(12.dp))
                 } else {
-                    Icon(Icons.Default.Refresh, "Refresh ${selectedSection.label}")
+                    Icon(Icons.Default.Refresh, "Refresh ${section.label}")
                 }
             }
         },
@@ -293,143 +212,7 @@ fun AdminScreen(repository: AdministrationRepository, settingsStore: SettingsSto
         bottomContent = null,
         modifier = Modifier,
     ) { contentPadding ->
-        AdminResponsiveLayout(
-            selectedSection = selectedSection,
-            selectSection = { selectedSection = it },
-            contentPadding = contentPadding,
-            modifier = Modifier.fillMaxSize(),
-        ) { layoutMode ->
-            AdminSectionContent(
-                selectedSection = selectedSection,
-                layoutMode = layoutMode,
-                repository = repository,
-                webDavUrl = webDavUrl(settings.origin),
-                importStatus = importStatus,
-                metadataStatus = metadataStatus,
-                aiStatus = aiStatus,
-                importError = importError,
-                metadataError = metadataError,
-                aiError = aiError,
-                userRefreshVersion = userRefreshVersion,
-                refreshImport = { scope.launch { refreshImport() } },
-                refreshMetadata = { scope.launch { refreshMetadata() } },
-                refreshAi = { scope.launch { refreshAi() } },
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-    }
-}
-
-@Composable
-internal fun AdminResponsiveLayout(
-    selectedSection: AdminSection,
-    selectSection: (AdminSection) -> Unit,
-    contentPadding: PaddingValues,
-    modifier: Modifier,
-    content: @Composable (AdminLayoutMode) -> Unit,
-) {
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val layoutMode = adminLayoutMode(
-            widthDp = maxWidth.value.toInt(),
-            heightDp = maxHeight.value.toInt(),
-        )
-        Box(Modifier.fillMaxSize().padding(contentPadding)) {
-            AdminSectionLayout(
-                selectedSection = selectedSection,
-                selectSection = selectSection,
-                useNavigationRail = layoutMode.usesNavigationRail,
-            ) { content(layoutMode) }
-        }
-    }
-}
-
-@Composable
-internal fun AdminSectionLayout(
-    selectedSection: AdminSection,
-    selectSection: (AdminSection) -> Unit,
-    useNavigationRail: Boolean,
-    content: @Composable () -> Unit,
-) {
-    if (useNavigationRail) {
-        Row(Modifier.fillMaxSize()) {
-            AdminSectionRail(selectedSection, selectSection)
-            VerticalDivider(Modifier.fillMaxHeight().width(1.dp))
-            Box(Modifier.weight(1f).fillMaxHeight()) { content() }
-        }
-        return
-    }
-
-    Column(Modifier.fillMaxSize()) {
-        AdminSectionTabs(selectedSection, selectSection)
-        Box(Modifier.weight(1f).fillMaxWidth()) { content() }
-    }
-}
-
-@Composable
-private fun AdminSectionRail(
-    selectedSection: AdminSection,
-    selectSection: (AdminSection) -> Unit,
-) {
-    NavigationRail(Modifier.fillMaxHeight().width(104.dp)) {
-        AdminSection.entries.forEach { section ->
-            NavigationRailItem(
-                selected = selectedSection == section,
-                onClick = { selectSection(section) },
-                icon = { Icon(section.icon, null) },
-                label = { Text(section.label) },
-            )
-        }
-    }
-}
-
-@Composable
-internal fun AdminSectionTabs(
-    selectedSection: AdminSection,
-    selectSection: (AdminSection) -> Unit,
-) {
-    ScrollableTabRow(selectedTabIndex = selectedSection.ordinal) {
-        AdminSection.entries.forEach { section ->
-            Tab(
-                selected = selectedSection == section,
-                onClick = { selectSection(section) },
-                icon = { Icon(section.icon, null) },
-                text = { Text(section.label) },
-            )
-        }
-    }
-}
-
-@Composable
-private fun AdminSectionContent(
-    selectedSection: AdminSection,
-    layoutMode: AdminLayoutMode,
-    repository: AdministrationRepository,
-    webDavUrl: String,
-    importStatus: ImportStatus?,
-    metadataStatus: JobStatus?,
-    aiStatus: AiStatusResponse?,
-    importError: String?,
-    metadataError: String?,
-    aiError: String?,
-    userRefreshVersion: Int,
-    refreshImport: () -> Unit,
-    refreshMetadata: () -> Unit,
-    refreshAi: () -> Unit,
-    modifier: Modifier,
-) {
-    Box(modifier.fillMaxSize()) {
-        when (selectedSection) {
-            AdminSection.USERS -> UserAdministration(repository, userRefreshVersion)
-            AdminSection.IMPORT -> ImportAdministration(repository, webDavUrl, importStatus, importError, refreshImport)
-            AdminSection.METADATA -> MetadataAdministration(repository, metadataStatus, metadataError, refreshMetadata)
-            AdminSection.AI -> AiAdministration(
-                repository = repository,
-                status = aiStatus,
-                error = aiError,
-                refresh = refreshAi,
-                useControlTable = layoutMode.usesAiControlTable,
-            )
-        }
+        Box(Modifier.fillMaxSize().padding(contentPadding)) { content() }
     }
 }
 
@@ -466,6 +249,79 @@ internal fun AdminPanel(
             Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
             Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant)
             content()
+        }
+    }
+}
+
+@Composable
+internal fun AdminStatusMetrics(metrics: List<AdminMetric>) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        metrics.chunked(2).forEach { rowMetrics ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                rowMetrics.forEach { metric ->
+                    Surface(
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                metric.label.uppercase(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                metric.value,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = if (metric.emphasized) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                        }
+                    }
+                }
+                if (rowMetrics.size == 1) Box(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+internal fun AdminFailureLog(title: String, entries: List<String>) {
+    val logText = if (entries.isEmpty()) "No failures." else entries.joinToString("\n")
+    Column(Modifier.fillMaxWidth().padding(top = 16.dp)) {
+        Text(
+            title.uppercase(),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            SelectionContainer {
+                Text(
+                    text = logText,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 112.dp, max = 240.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(14.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
         }
     }
 }
