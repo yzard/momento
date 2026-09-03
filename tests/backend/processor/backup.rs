@@ -1,14 +1,21 @@
+use momento_api::io::file::StorageRootId;
 use momento_api::{
-    constants::paths,
     database::queries,
     processor::{
         backup::{recover, run_cycle},
-        import::{import_staged_file, ImportSource},
+        import::{import_staged_file, ImportSource, StagedImportFile},
     },
-    utils::hash::calculate_file_hash,
+};
+use sha2::{Digest, Sha256};
+
+use crate::test_utils::{
+    create_test_db, create_test_user, test_executor_handles_with_data_directory,
 };
 
-use crate::test_utils::{create_test_db, create_test_user, init_test_paths};
+fn test_file_hash(path: &std::path::Path) -> String {
+    let bytes = std::fs::read(path).expect("read test file for hashing");
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 fn insert_lossless_manifest(connection: &rusqlite::Connection, asset_id: i64, content_hash: &str) {
     connection
@@ -26,11 +33,12 @@ fn insert_lossless_manifest(connection: &rusqlite::Connection, asset_id: i64, co
 
 #[tokio::test]
 async fn recovery_truncates_writing_file_to_durable_offset() {
-    init_test_paths();
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "backup-recovery", "backup-recovery@example.com");
     let staged_path = format!("processor-tests/{}/recovery.part", uuid::Uuid::new_v4());
-    let file_path = paths().backups.join(&staged_path);
+    let (executors, executor_data_directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let file_path = executor_data_directory.join("backups").join(&staged_path);
     std::fs::create_dir_all(file_path.parent().expect("parent")).expect("staging parent");
     std::fs::write(&file_path, b"123456789").expect("staged bytes");
 
@@ -71,7 +79,7 @@ async fn recovery_truncates_writing_file_to_durable_offset() {
         .expect("session");
     connection.execute("UPDATE backup_upload_sessions SET status = 'writing', uploaded_size = 4 WHERE upload_id = 'recovery_upload'", []).expect("writing session");
 
-    recover(&pool).await.expect("recover backup uploads");
+    recover(&executors).await.expect("recover backup uploads");
 
     assert_eq!(
         std::fs::metadata(&file_path)
@@ -92,16 +100,15 @@ async fn recovery_truncates_writing_file_to_durable_offset() {
 
 #[tokio::test]
 async fn recovery_completes_backup_after_import_commits_before_asset_completion() {
-    init_test_paths();
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "backup-crash", "backup-crash@example.com");
+    let (executors, data_directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
     let staged_path = format!("processor-tests/{}/crash.jpg", uuid::Uuid::new_v4());
-    let source_path = paths().backups.join(&staged_path);
+    let source_path = data_directory.join("backups").join(&staged_path);
     std::fs::create_dir_all(source_path.parent().expect("parent")).expect("staging parent");
     std::fs::write(&source_path, b"crash boundary image").expect("staged bytes");
-    let content_hash = calculate_file_hash(&source_path)
-        .await
-        .expect("content hash");
+    let content_hash = test_file_hash(&source_path);
 
     let connection = pool.get().expect("database connection");
     connection
@@ -147,19 +154,49 @@ async fn recovery_completes_backup_after_import_commits_before_asset_completion(
         )
         .expect("processing session");
 
+    let admission = executors
+        .scheduler
+        .acquire_durable(
+            momento_api::runtime::DurableSourceId::BackupImport,
+            momento_api::runtime::SchedulerAdmissionKind::ExistingClaimCompletion,
+        )
+        .await
+        .expect("backup import admission");
+
     import_staged_file(
-        &source_path,
+        StagedImportFile {
+            storage_root: StorageRootId::Backups,
+            path: momento_api::io::file::NormalizedStoragePath::parse(&staged_path)
+                .expect("staged source"),
+        },
         ImportSource::MobileBackup,
         user_id,
-        &pool,
-        false,
+        &executors,
+        momento_api::processor::import::StagedImportCleanup {
+            source: false,
+            supplemental_metadata: false,
+        },
+        &admission,
     )
     .await
-    .expect("durably finalize import");
+    .expect("durably finalize import")
+    .completed_media_id()
+    .expect("backup import was not deferred");
 
-    recover(&pool).await.expect("reconcile interrupted backup");
+    let (executors, executor_data_directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let recovery_path = executor_data_directory.join("backups").join(&staged_path);
+    std::fs::create_dir_all(recovery_path.parent().expect("recovery parent"))
+        .expect("recovery directory");
+    std::fs::write(&recovery_path, b"crash boundary image").expect("recovery staged bytes");
+    recover(&executors)
+        .await
+        .expect("reconcile interrupted backup");
+    momento_api::io::recovery::recover_generic_file_operations(&executors)
+        .await
+        .expect("cleanup recovered backup staging");
     assert!(
-        !source_path.exists(),
+        !recovery_path.exists(),
         "reconciliation must remove the staged copy"
     );
 
@@ -193,21 +230,25 @@ async fn recovery_completes_backup_after_import_commits_before_asset_completion(
             |row| row.get(0),
         )
         .expect("media access");
-    assert!(!source_path.exists());
     assert_eq!(import_state, "imported");
     assert_eq!(import_source, "mobile_backup");
     assert_eq!(metadata_status, "queued");
     assert_eq!(access_count, 1);
-    std::fs::remove_file(paths().originals.join(media_path)).expect("remove imported original");
+    if source_path.exists() {
+        std::fs::remove_file(&source_path).expect("remove test staging source");
+    }
+    std::fs::remove_file(executor_data_directory.join("originals").join(media_path))
+        .expect("remove imported original");
 }
 
 #[tokio::test]
 async fn cancelled_queued_backup_is_never_claimed_for_finalization() {
-    init_test_paths();
     let pool = create_test_db();
+    let (executors, executor_data_directory) =
+        test_executor_handles_with_data_directory(pool.clone());
     let user_id = create_test_user(&pool, "backup-cancelled", "backup-cancelled@example.com");
     let staged_path = format!("processor-tests/{}/cancelled.jpg", uuid::Uuid::new_v4());
-    let source_path = paths().backups.join(&staged_path);
+    let source_path = executor_data_directory.join("backups").join(&staged_path);
     std::fs::create_dir_all(source_path.parent().expect("parent")).expect("staging parent");
     std::fs::write(&source_path, b"cancelled bytes").expect("staged bytes");
     let connection = pool.get().expect("database connection");
@@ -271,7 +312,7 @@ async fn cancelled_queued_backup_is_never_claimed_for_finalization() {
         .expect("cancel asset");
     transaction.commit().expect("commit cancellation");
 
-    run_cycle(&pool, 1).await.expect("worker cycle");
+    run_cycle(&executors).await.expect("worker cycle");
 
     let media_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM media", [], |row| row.get(0))
@@ -290,7 +331,6 @@ async fn cancelled_queued_backup_is_never_claimed_for_finalization() {
 
 #[tokio::test]
 async fn recovery_fails_missing_nonzero_staging_file_without_resuming() {
-    init_test_paths();
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "backup-missing", "backup-missing@example.com");
     let connection = pool.get().expect("database connection");
@@ -335,7 +375,8 @@ async fn recovery_fails_missing_nonzero_staging_file_without_resuming() {
         )
         .expect("durable offset");
 
-    recover(&pool).await.expect("recover backup uploads");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    recover(&executors).await.expect("recover backup uploads");
 
     let statuses: (String, String) = connection
         .query_row(
@@ -349,14 +390,15 @@ async fn recovery_fails_missing_nonzero_staging_file_without_resuming() {
 
 #[tokio::test]
 async fn worker_finalizes_queued_backup_and_records_media() {
-    init_test_paths();
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "backup-worker", "backup-worker@example.com");
     let staged_path = format!("processor-tests/{}/queued.jpg", uuid::Uuid::new_v4());
-    let file_path = paths().backups.join(&staged_path);
+    let (executors, executor_data_directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let file_path = executor_data_directory.join("backups").join(&staged_path);
     std::fs::create_dir_all(file_path.parent().expect("parent")).expect("staging parent");
     std::fs::write(&file_path, b"backup image bytes").expect("staged bytes");
-    let expected_content_hash = calculate_file_hash(&file_path).await.expect("content hash");
+    let expected_content_hash = test_file_hash(&file_path);
 
     let connection = pool.get().expect("database connection");
     connection
@@ -402,7 +444,21 @@ async fn worker_finalizes_queued_backup_and_records_media() {
         )
         .expect("queued session");
 
-    run_cycle(&pool, 1).await.expect("worker cycle");
+    std::fs::write(
+        file_path.with_file_name(format!(
+            "{}.supplemental-metadata.json",
+            file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("staged filename")
+        )),
+        r#"{"momentoBackup":{"schemaVersion":2,"source":"androidMediaStore"}}"#,
+    )
+    .expect("mirrored test sidecar");
+    run_cycle(&executors).await.expect("worker cycle");
+    momento_api::io::recovery::recover_generic_file_operations(&executors)
+        .await
+        .expect("backup staging cleanup");
 
     let (status, media_id): (String, Option<i64>) = connection
         .query_row(
@@ -441,7 +497,7 @@ async fn worker_finalizes_queued_backup_and_records_media() {
     assert_eq!(created_at, "2020-01-02 03:04:05");
     assert_eq!(metadata_status, "queued");
     assert_eq!(access_count, 1);
-    let imported_path = paths().originals.join(media_path);
+    let imported_path = executor_data_directory.join("originals").join(media_path);
     let imported_filename = imported_path
         .file_name()
         .and_then(|name| name.to_str())

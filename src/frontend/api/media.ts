@@ -59,120 +59,20 @@ export type {
   TimelineMarkersResponse,
 }
 
-export function thumbnailResponseMap(
-  thumbnails: Record<string, string | null>
-): Map<number, string> {
-  const decoded = new Map<number, string>()
-  Object.entries(thumbnails).forEach(([id, thumbnail]) => {
-    const mediaId = Number(id)
-    if (!Number.isNaN(mediaId) && thumbnail) decoded.set(mediaId, thumbnail)
-  })
-  return decoded
-}
-
-const assetURLCache = new Map<string, string>()
-const pendingThumbnailBatches = new Map<string, Promise<Map<number, string>>>()
-const pendingPreviewBatches = new Map<string, Promise<Map<number, string>>>()
-let assetCacheGeneration = 0
-
-interface AssetBatchOptions {
-  mediaIds: number[]
-  cacheKey: (mediaId: number) => string
-  batchKey: (missingIds: number[]) => string
-  pendingBatches: Map<string, Promise<Map<number, string>>>
-  fetchMissing: (missingIds: number[]) => Promise<Map<number, string>>
-  supersededMessage: string
-}
-
-async function loadAssetBatch({
-  mediaIds,
-  cacheKey,
-  batchKey,
-  pendingBatches,
-  fetchMissing,
-  supersededMessage,
-}: AssetBatchOptions): Promise<Map<number, string>> {
-  const uniqueIds = Array.from(new Set(mediaIds)).filter((mediaId) => mediaId > 0)
-  if (uniqueIds.length === 0) return new Map()
-
-  const cached = new Map<number, string>()
-  const missingIds: number[] = []
-  uniqueIds.forEach((mediaId) => {
-    const cachedURL = assetURLCache.get(cacheKey(mediaId))
-    if (cachedURL) {
-      cached.set(mediaId, cachedURL)
-    } else {
-      missingIds.push(mediaId)
-    }
-  })
-  if (missingIds.length === 0) return cached
-
-  const requestKey = batchKey(missingIds)
-  const pendingRequest = pendingBatches.get(requestKey)
-  if (pendingRequest) {
-    const pendingResult = await pendingRequest
-    pendingResult.forEach((value, mediaId) => cached.set(mediaId, value))
-    return cached
+function mediaAssetURL(mediaId: number, assetPath: string): string {
+  if (!Number.isSafeInteger(mediaId) || mediaId <= 0) {
+    throw new Error('mediaId must be a positive safe integer')
   }
-
-  const requestGeneration = assetCacheGeneration
-  const fetchPromise = fetchMissing(missingIds).then((result) => {
-    if (requestGeneration !== assetCacheGeneration) throw new Error(supersededMessage)
-    result.forEach((value, mediaId) => assetURLCache.set(cacheKey(mediaId), value))
-    return result
-  })
-  pendingBatches.set(requestKey, fetchPromise)
-
-  try {
-    const result = await fetchPromise
-    result.forEach((value, mediaId) => cached.set(mediaId, value))
-    return cached
-  } finally {
-    if (pendingBatches.get(requestKey) === fetchPromise) pendingBatches.delete(requestKey)
-  }
+  return `/api/v1/media/${mediaId}/${assetPath}`
 }
 
 export const mediaApi = {
-  getCachedThumbnailURL: (mediaId: number, size: ThumbnailSize): string | undefined => {
-    return assetURLCache.get(`thumbnail-${size}-${mediaId}`)
+  getThumbnailURL: (mediaId: number, size: ThumbnailSize): string => {
+    const assetPath = size === 'tiny' ? 'thumbnail/tiny' : 'thumbnail'
+    return mediaAssetURL(mediaId, assetPath)
   },
 
-  getThumbnailBatch: async (
-    mediaIds: number[],
-    size: ThumbnailSize
-  ): Promise<Map<number, string>> => {
-    return loadAssetBatch({
-      mediaIds,
-      cacheKey: (mediaId) => `thumbnail-${size}-${mediaId}`,
-      batchKey: (missingIds) => `${size}:${missingIds.join(',')}`,
-      pendingBatches: pendingThumbnailBatches,
-      fetchMissing: async (missingIds) => {
-        const response = await apiClient.post<{ thumbnails: Record<string, string | null> }>(
-          '/thumbnail/get',
-          { mediaIds: missingIds, size }
-        )
-        return thumbnailResponseMap(response.data.thumbnails)
-      },
-      supersededMessage: 'Thumbnail request was superseded',
-    })
-  },
-
-  getPreviewBatch: async (mediaIds: number[]): Promise<Map<number, string>> => {
-    return loadAssetBatch({
-      mediaIds,
-      cacheKey: (mediaId) => `preview-${mediaId}`,
-      batchKey: (missingIds) => missingIds.join(','),
-      pendingBatches: pendingPreviewBatches,
-      fetchMissing: async (missingIds) => {
-        const response = await apiClient.post<{ previews: Record<string, string | null> }>(
-          '/preview/get',
-          { ids: missingIds }
-        )
-        return thumbnailResponseMap(response.data.previews)
-      },
-      supersededMessage: 'Preview request was superseded',
-    })
-  },
+  getPreviewURL: (mediaId: number): string => mediaAssetURL(mediaId, 'preview'),
 
   listTimeline: async (params: TimelineListRequest): Promise<TimelineListResponse> => {
     const response = await apiClient.post<TimelineListResponse>('/timeline/list', params)
@@ -210,15 +110,5 @@ export const mediaApi = {
       resource: 'original',
     })
     return response.data.url
-  },
-
-  clearCache: () => {
-    assetCacheGeneration += 1
-    assetURLCache.forEach((url) => {
-      if (url.startsWith('blob:')) URL.revokeObjectURL(url)
-    })
-    assetURLCache.clear()
-    pendingThumbnailBatches.clear()
-    pendingPreviewBatches.clear()
   },
 }

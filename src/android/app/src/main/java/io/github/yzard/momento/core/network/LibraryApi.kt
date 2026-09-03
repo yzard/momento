@@ -3,6 +3,8 @@ package io.github.yzard.momento.core.network
 import io.github.yzard.momento.core.model.*
 import okhttp3.ResponseBody
 import retrofit2.http.Body
+import retrofit2.http.GET
+import retrofit2.http.Path
 import retrofit2.http.POST
 
 interface LibraryApi {
@@ -17,11 +19,11 @@ interface LibraryApi {
     @POST("api/v1/album/reorder") suspend fun reorderAlbumMedia(@Body request: AlbumMediaRequest): MessageResponse
     @POST("api/v1/places/list") suspend fun places(@Body request: PageRequest): PlacesResponse
     @POST("api/v1/places/get") suspend fun place(@Body request: PlaceRequest): PlaceResponse
-    @POST("api/v1/places/thumbnail") suspend fun placeThumbnail(@Body request: PlaceThumbnailRequest): PlaceThumbnailResponse
+    @GET("api/v1/places/{placeId}/thumbnail") suspend fun placeThumbnail(@Path("placeId") placeId: String): ResponseBody
     @POST("api/v1/faces/groups/list") suspend fun faces(@Body request: PageRequest): FacesResponse
     @POST("api/v1/faces/groups/get") suspend fun face(@Body request: FaceGroupRequest): FaceGroupMediaResponse
     @POST("api/v1/faces/groups/merge") suspend fun mergeFaces(@Body request: FaceMergeRequest): FaceMergeResponse
-    @POST("api/v1/faces/thumbnails/get") suspend fun faceThumbnail(@Body request: FaceGroupRequest): ResponseBody
+    @GET("api/v1/faces/groups/{faceGroupId}/thumbnail") suspend fun faceThumbnail(@Path("faceGroupId") faceGroupId: Long): ResponseBody
     @POST("api/v1/duplicates/list") suspend fun duplicates(@Body request: PageRequest): DeduplicateGroupsResponse
     @POST("api/v1/media/delete") suspend fun moveToTrash(@Body request: MediaIdsRequest): MessageResponse
     @POST("api/v1/trash/list") suspend fun trash(): TrashResponse

@@ -1,7 +1,4 @@
-use std::path::PathBuf;
-
-use crate::constants::paths;
-use crate::utils::path::{resolve_existing_storage_path, resolve_existing_storage_path_sync};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiInputStorage {
@@ -25,21 +22,14 @@ impl AiInputStorage {
         }
     }
 
-    pub async fn resolve_existing(self, stored_path: &str) -> Result<PathBuf, String> {
-        resolve_existing_storage_path(self.root(), stored_path)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn resolve_existing_sync(self, stored_path: &str) -> Result<PathBuf, String> {
-        resolve_existing_storage_path_sync(self.root(), stored_path)
-            .map_err(|error| error.to_string())
-    }
-
-    fn root(self) -> &'static std::path::Path {
+    pub const fn storage_root_id(self) -> StorageRootId {
         match self {
-            Self::Originals => &paths().originals,
-            Self::Previews => &paths().previews,
+            Self::Originals => StorageRootId::Originals,
+            Self::Previews => StorageRootId::Previews,
         }
+    }
+
+    pub fn normalized_path(self, stored_path: &str) -> Result<NormalizedStoragePath, String> {
+        NormalizedStoragePath::parse(stored_path).map_err(|error| error.to_string())
     }
 }

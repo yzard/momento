@@ -1,23 +1,47 @@
-use crate::test_utils::{create_test_db, create_test_media, init_test_paths, QOI_FIXTURE};
+use crate::test_utils::{
+    create_test_db, create_test_media, test_executor_handles_with_data_directory, QOI_FIXTURE,
+};
 use chrono::{TimeZone, Utc};
 use momento_api::config::Config;
-use momento_api::constants::paths;
+use momento_api::executor::ParsedSupplementalMetadata;
+use momento_api::io::file::{NormalizedStoragePath, StorageRootId};
 use momento_api::processor::metadata::{
-    apply_supplemental_metadata, load_supplemental_metadata, supplemental_metadata_path,
-    MediaMetadata,
+    apply_supplemental_metadata, load_supplemental_metadata_storage, MediaMetadata,
 };
 use std::fs;
 
 mod reset;
 mod reverse_geocoding;
 
+async fn claim_metadata_job(
+    pool: &momento_api::database::DbPool,
+    executors: &momento_api::runtime::ExecutorHandles,
+    media_id: i64,
+) -> String {
+    pool.get()
+        .expect("database connection")
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+            [media_id],
+        )
+        .expect("metadata job");
+    let claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("metadata claim")
+        .expect("claimed metadata job");
+    assert_eq!(claim.media_id, media_id);
+    claim.claim_token
+}
+
 #[tokio::test]
 async fn qoi_original_is_preserved_for_every_photo_inference_task() {
-    init_test_paths();
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "inference-source.qoi");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
     let relative_path = format!("inference-source-{media_id}.qoi");
-    let original_path = paths().originals.join(&relative_path);
+    let original_path = data_directory.join("originals").join(&relative_path);
     fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
     fs::write(&original_path, QOI_FIXTURE).expect("QOI original");
     pool.get()
@@ -27,10 +51,16 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
             rusqlite::params![relative_path, media_id],
         )
         .expect("QOI media");
-
-    momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
-        .await
-        .expect("QOI metadata generation");
+    let claim_token = claim_metadata_job(&pool, &executors, media_id).await;
+    let config = Config::default();
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors,
+        media_id,
+        &claim_token,
+        &config,
+    )
+    .await
+    .expect("QOI metadata generation");
 
     let connection = pool.get().expect("database connection");
     let inputs = connection
@@ -52,15 +82,75 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
         assert_eq!(input_path, relative_path);
         assert_eq!(mime_type, "image/qoi");
     }
+    let (thumbnail_path, preview_path, artifact_version): (String, String, i64) = connection
+        .query_row(
+            "SELECT thumbnail_path, preview_path, artifact_version FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("metadata artifact generation");
+    assert_eq!(artifact_version, 1);
+    assert!(thumbnail_path.contains(&format!("v1-{claim_token}")));
+    assert!(preview_path.contains(&format!("v1-{claim_token}")));
+    for (root, path) in [
+        ("thumbnails", thumbnail_path.as_str()),
+        ("thumbnails_tiny", thumbnail_path.as_str()),
+        ("thumbnails_places", thumbnail_path.as_str()),
+        ("previews", preview_path.as_str()),
+    ] {
+        assert!(
+            data_directory.join(root).join(path).is_file(),
+            "published metadata artifact {root}/{path}"
+        );
+    }
+    let product_group: (String, Option<String>, i64) = connection
+        .query_row(
+            "SELECT state, product_target, entry_count FROM file_operation_groups WHERE kind = 'metadata_artifacts'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("metadata product group");
+    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 4));
+    let reserved_artifact_bytes: i64 = connection
+        .query_row(
+            "SELECT r.reserved_peak_additional_bytes FROM data_dir_space_reservations AS r JOIN file_operation_groups AS g ON g.id = r.journal_group_id WHERE g.kind = 'metadata_artifacts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("metadata artifact reservation");
+    let thumbnail_size = i64::from(config.metadata.thumbnails_max_size);
+    let tiny_thumbnail_size = i64::from(config.metadata.thumbnails_tiny_size);
+    let thumbnail_bound = thumbnail_size * thumbnail_size * 8 + 1_048_576;
+    let tiny_thumbnail_bound = tiny_thumbnail_size * tiny_thumbnail_size * 8 + 1_048_576;
+    let web_preview_bound = 2_048_i64 * 2_048 * 8 + 1_048_576;
+    assert_eq!(
+        reserved_artifact_bytes,
+        thumbnail_bound * 2 + tiny_thumbnail_bound + web_preview_bound
+    );
+    assert!(reserved_artifact_bytes < 512 * 1024 * 1024);
+    drop(connection);
+    momento_api::io::recovery::recover_generic_file_operations(&executors)
+        .await
+        .expect("metadata product cleanup");
+    let terminal_state: String = pool
+        .get()
+        .expect("database after cleanup")
+        .query_row(
+            "SELECT state FROM file_operation_groups WHERE kind = 'metadata_artifacts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("terminal metadata product");
+    assert_eq!(terminal_state, "cleaned");
 }
 
 #[tokio::test]
 async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
-    init_test_paths();
     let pool = create_test_db();
     let photo_id = create_test_media(&pool, "classifier-preparation.jpg");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
     let relative_path = format!("classifier-preparation-{photo_id}.jpg");
-    let original_path = paths().originals.join(&relative_path);
+    let original_path = data_directory.join("originals").join(&relative_path);
     fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
     image::RgbImage::from_pixel(3000, 1000, image::Rgb([20, 40, 60]))
         .save(&original_path)
@@ -80,9 +170,15 @@ async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
             rusqlite::params![relative_path, photo_id],
         )
         .expect("photo path");
-    momento_api::processor::metadata::generate_media_metadata(&pool, photo_id, &Config::default())
-        .await
-        .expect("metadata generation");
+    let claim_token = claim_metadata_job(&pool, &executors, photo_id).await;
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors,
+        photo_id,
+        &claim_token,
+        &Config::default(),
+    )
+    .await
+    .expect("metadata generation");
 
     let connection = pool.get().expect("database connection");
     let metadata_sources = connection
@@ -131,15 +227,18 @@ async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
 
 #[tokio::test]
 async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
-    init_test_paths();
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "full-resolution-frame.mp4");
-    let ai_directory = paths().previews.join("ai").join(media_id.to_string());
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
+    let ai_directory = data_directory
+        .join("previews")
+        .join("ai")
+        .join(media_id.to_string());
     if ai_directory.exists() {
         fs::remove_dir_all(&ai_directory).expect("remove stale AI fixture directory");
     }
     let relative_path = format!("full-resolution-frame-{media_id}.mp4");
-    let original_path = paths().originals.join(&relative_path);
+    let original_path = data_directory.join("originals").join(&relative_path);
     fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
     let ffmpeg = std::process::Command::new("ffmpeg")
         .args([
@@ -166,10 +265,15 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
             rusqlite::params![relative_path, media_id],
         )
         .expect("video media");
-
-    momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
-        .await
-        .expect("video metadata generation");
+    let claim_token = claim_metadata_job(&pool, &executors, media_id).await;
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors,
+        media_id,
+        &claim_token,
+        &Config::default(),
+    )
+    .await
+    .expect("video metadata generation");
     let canonical_original_hash: String = pool
         .get()
         .expect("database connection")
@@ -190,9 +294,14 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
         .expect("video metadata dimensions");
     assert_eq!(video_dimensions, (64, 32));
 
-    momento_api::processor::metadata::generate_media_metadata(&pool, media_id, &Config::default())
-        .await
-        .expect("repeated video metadata generation");
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors,
+        media_id,
+        &claim_token,
+        &Config::default(),
+    )
+    .await
+    .expect("repeated video metadata generation");
 
     let connection = pool.get().expect("database connection");
     let ffprobe_source_count: i64 = connection
@@ -234,7 +343,8 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
         assert_eq!(input_kind, "video_frame");
         assert_eq!(timestamp, Some(0));
     }
-    let frame = image::open(paths().previews.join(expected_relative_path)).expect("video frame");
+    let frame = image::open(data_directory.join("previews").join(expected_relative_path))
+        .expect("video frame");
     assert_eq!((frame.width(), frame.height()), (64, 32));
     let frame_count = fs::read_dir(ai_directory.join("frames"))
         .expect("video frame directory")
@@ -246,11 +356,11 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
 
 #[tokio::test]
 async fn metadata_rejects_an_original_without_an_image_mime_type() {
-    init_test_paths();
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "unsupported-original.jpg");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
     let relative_path = format!("unsupported-original-{media_id}.jpg");
-    let original_path = paths().originals.join(&relative_path);
+    let original_path = data_directory.join("originals").join(&relative_path);
     fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
     image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]))
         .save(&original_path)
@@ -262,16 +372,17 @@ async fn metadata_rejects_an_original_without_an_image_mime_type() {
             rusqlite::params![relative_path, media_id],
         )
         .expect("unsupported media MIME");
-
+    let claim_token = claim_metadata_job(&pool, &executors, media_id).await;
     let error = momento_api::processor::metadata::generate_media_metadata(
-        &pool,
+        &executors,
         media_id,
+        &claim_token,
         &Config::default(),
     )
     .await
     .expect_err("unsupported original should fail");
 
-    assert!(error.contains("supported image MIME type"));
+    assert!(error.contains("supported image MIME type"), "{error}");
     let input_count: i64 = pool
         .get()
         .expect("database connection")
@@ -282,27 +393,65 @@ async fn metadata_rejects_an_original_without_an_image_mime_type() {
         )
         .expect("AI input count");
     assert_eq!(input_count, 0);
+    let persisted_metadata: (Option<i32>, Option<String>) = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT width, thumbnail_path FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("persisted metadata");
+    let source_count: i64 = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT COUNT(*) FROM media_metadata_sources WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("metadata source count");
+    assert_eq!(persisted_metadata, (Some(1920), None));
+    assert_eq!(source_count, 0, "sources must not commit without AI inputs");
 }
 
-#[test]
-fn loads_google_photos_supplemental_metadata() {
-    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let media_path = directory.path().join("IMG_2373.HEIC");
-    let sidecar_path = directory
-        .path()
-        .join("IMG_2373.HEIC.supplemental-metadata.json");
-    fs::write(&media_path, b"image").expect("Failed to write media fixture");
-    fs::write(
-        &sidecar_path,
-        r#"{
+async fn load_supplemental_fixture(
+    media_path: &str,
+    sidecars: &[(&str, &str)],
+) -> Option<ParsedSupplementalMetadata> {
+    let pool = create_test_db();
+    momento_api::database::init_database(&pool.get().expect("schema connection")).expect("schema");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool);
+    for (path, contents) in sidecars {
+        let absolute = data_directory.join("originals").join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).expect("sidecar parent");
+        }
+        fs::write(absolute, contents).expect("sidecar fixture");
+    }
+    load_supplemental_metadata_storage(
+        &executors,
+        StorageRootId::Originals,
+        &NormalizedStoragePath::parse(media_path).expect("media path"),
+    )
+    .await
+    .expect("load supplemental metadata")
+}
+
+#[tokio::test]
+async fn loads_google_photos_supplemental_metadata() {
+    let data = load_supplemental_fixture(
+        "IMG_2373.HEIC",
+        &[(
+            "IMG_2373.HEIC.supplemental-metadata.json",
+            r#"{
             "photoTakenTime": {"timestamp": "1530569813"},
             "geoData": {"latitude": 40.759, "longitude": -73.9859, "altitude": 303.0}
         }"#,
+        )],
     )
-    .expect("Failed to write metadata fixture");
-
-    assert_eq!(supplemental_metadata_path(&media_path), Some(sidecar_path));
-    let data = load_supplemental_metadata(&media_path).expect("Sidecar should load");
+    .await
+    .expect("Sidecar should load");
     let mut metadata = MediaMetadata::default();
     apply_supplemental_metadata(&mut metadata, &data);
 
@@ -315,99 +464,84 @@ fn loads_google_photos_supplemental_metadata() {
     assert_eq!(metadata.gps_altitude, Some(303.0));
 }
 
-#[test]
-fn finds_numbered_supplemental_metadata_sidecar() {
-    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let media_path = directory.path().join("Snapseed(10).heic");
-    let sidecar_path = directory
-        .path()
-        .join("Snapseed.heic.supplemental-metadata(10).json");
-    fs::write(&media_path, b"image").expect("Failed to write media fixture");
-    fs::write(&sidecar_path, "{}").expect("Failed to write metadata fixture");
-
-    assert_eq!(supplemental_metadata_path(&media_path), Some(sidecar_path));
+#[tokio::test]
+async fn finds_numbered_supplemental_metadata_sidecar() {
+    assert!(load_supplemental_fixture(
+        "Snapseed(10).heic",
+        &[("Snapseed.heic.supplemental-metadata(10).json", "{}")],
+    )
+    .await
+    .is_some());
 }
 
-#[test]
-fn unnumbered_media_does_not_claim_a_numbered_sidecar() {
-    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let media_path = directory.path().join("Snapseed.heic");
-    let numbered_sidecar_path = directory
-        .path()
-        .join("Snapseed.heic.supplemental-metadata(10).json");
-    fs::write(&media_path, b"image").expect("Failed to write media fixture");
-    fs::write(&numbered_sidecar_path, "{}").expect("Failed to write metadata fixture");
-
-    assert_eq!(supplemental_metadata_path(&media_path), None);
+#[tokio::test]
+async fn unnumbered_media_does_not_claim_a_numbered_sidecar() {
+    assert!(load_supplemental_fixture(
+        "Snapseed.heic",
+        &[("Snapseed.heic.supplemental-metadata(10).json", "{}")],
+    )
+    .await
+    .is_none());
 }
 
-#[test]
-fn numbered_and_unnumbered_media_load_their_own_sidecars() {
-    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let media_path = directory.path().join("photo.jpg");
-    let numbered_media_path = directory.path().join("photo(2).jpg");
-    let sidecar_path = directory
-        .path()
-        .join("photo.jpg.supplemental-metadata.json");
-    let numbered_sidecar_path = directory
-        .path()
-        .join("photo.jpg.supplemental-metadata(2).json");
-    fs::write(&media_path, b"first image").expect("Failed to write media fixture");
-    fs::write(&numbered_media_path, b"second image").expect("Failed to write media fixture");
-    fs::write(&sidecar_path, r#"{"description":"first"}"#)
-        .expect("Failed to write metadata fixture");
-    fs::write(&numbered_sidecar_path, r#"{"description":"second"}"#)
-        .expect("Failed to write metadata fixture");
-
+#[tokio::test]
+async fn numbered_and_unnumbered_media_load_their_own_sidecars() {
+    let sidecars = [
+        (
+            "photo.jpg.supplemental-metadata.json",
+            r#"{"description":"first"}"#,
+        ),
+        (
+            "photo.jpg.supplemental-metadata(2).json",
+            r#"{"description":"second"}"#,
+        ),
+    ];
     assert_eq!(
-        load_supplemental_metadata(&media_path)
-            .and_then(|value| value["description"].as_str().map(str::to_string)),
+        load_supplemental_fixture("photo.jpg", &sidecars)
+            .await
+            .and_then(|value| value.description),
         Some("first".to_string())
     );
     assert_eq!(
-        load_supplemental_metadata(&numbered_media_path)
-            .and_then(|value| value["description"].as_str().map(str::to_string)),
+        load_supplemental_fixture("photo(2).jpg", &sidecars)
+            .await
+            .and_then(|value| value.description),
         Some("second".to_string())
     );
 }
 
-#[test]
-fn finds_takeout_truncated_numbered_sidecar() {
-    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let media_path = directory
-        .path()
-        .join("1234567890123456789012345678901234567890(2).jpg");
-    let sidecar_path = directory
-        .path()
-        .join("1234567890123456789012345678901234567890.jpg.s(2).json");
-    fs::write(&media_path, b"image").expect("Failed to write media fixture");
-    fs::write(&sidecar_path, "{}").expect("Failed to write metadata fixture");
-
-    assert_eq!(supplemental_metadata_path(&media_path), Some(sidecar_path));
+#[tokio::test]
+async fn finds_takeout_truncated_numbered_sidecar() {
+    assert!(load_supplemental_fixture(
+        "1234567890123456789012345678901234567890(2).jpg",
+        &[(
+            "1234567890123456789012345678901234567890.jpg.s(2).json",
+            "{}",
+        )],
+    )
+    .await
+    .is_some());
 }
 
-#[test]
-fn does_not_find_sidecar_outside_media_directory() {
-    let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-    let processing_directory = directory.path().join(".processing");
-    fs::create_dir(&processing_directory).expect("Failed to create processing directory");
-    let media_path = processing_directory.join("IMG_2373.HEIC");
-    let sidecar_path = directory
-        .path()
-        .join("IMG_2373.HEIC.supplemental-metadata.json");
-    fs::write(&media_path, b"image").expect("Failed to write media fixture");
-    fs::write(&sidecar_path, "{}").expect("Failed to write metadata fixture");
-
-    assert_eq!(supplemental_metadata_path(&media_path), None);
+#[tokio::test]
+async fn does_not_find_sidecar_outside_media_directory() {
+    assert!(load_supplemental_fixture(
+        ".processing/IMG_2373.HEIC",
+        &[("IMG_2373.HEIC.supplemental-metadata.json", "{}")],
+    )
+    .await
+    .is_none());
 }
 
 #[test]
 fn supplemental_metadata_overrides_present_embedded_values() {
-    let data = serde_json::json!({
-        "photoTakenTime": {"timestamp": "1530569813"},
-        "geoData": {"latitude": 40.759, "longitude": -73.9859, "altitude": 303.0},
-        "description": "updated keywords"
-    });
+    let data = supplemental_metadata(
+        Utc.timestamp_opt(1530569813, 0).single(),
+        Some(40.759),
+        Some(-73.9859),
+        Some(303.0),
+        Some("updated keywords"),
+    );
     let mut metadata = MediaMetadata {
         date_taken: Utc.timestamp_opt(1, 0).single(),
         gps_latitude: Some(1.0),
@@ -437,10 +571,7 @@ fn supplemental_metadata_overrides_present_embedded_values() {
 
 #[test]
 fn supplemental_metadata_uses_geo_data_when_exif_coordinates_are_zero() {
-    let data = serde_json::json!({
-        "geoDataExif": {"latitude": 0.0, "longitude": 0.0},
-        "geoData": {"latitude": 40.759, "longitude": -73.9859}
-    });
+    let data = supplemental_metadata(None, Some(40.759), Some(-73.9859), None, None);
     let mut metadata = MediaMetadata::default();
 
     apply_supplemental_metadata(&mut metadata, &data);
@@ -451,9 +582,7 @@ fn supplemental_metadata_uses_geo_data_when_exif_coordinates_are_zero() {
 
 #[test]
 fn supplemental_metadata_replaces_zero_embedded_coordinates() {
-    let data = serde_json::json!({
-        "geoData": {"latitude": 40.759, "longitude": -73.9859}
-    });
+    let data = supplemental_metadata(None, Some(40.759), Some(-73.9859), None, None);
     let mut metadata = MediaMetadata {
         gps_latitude: Some(0.0),
         gps_longitude: Some(0.0),
@@ -482,9 +611,7 @@ fn zero_gps_coordinates_are_normalized_to_missing() {
 
 #[test]
 fn supplemental_metadata_ignores_zero_coordinate_components() {
-    let data = serde_json::json!({
-        "geoData": {"latitude": 41.031669, "longitude": 0.0}
-    });
+    let data = supplemental_metadata(None, None, None, None, None);
     let mut metadata = MediaMetadata::default();
 
     apply_supplemental_metadata(&mut metadata, &data);
@@ -493,8 +620,25 @@ fn supplemental_metadata_ignores_zero_coordinate_components() {
     assert_eq!(metadata.gps_longitude, None);
 }
 
-#[test]
-fn metadata_claims_are_exclusive_and_expired_leases_are_recovered() {
+fn supplemental_metadata(
+    date_taken: Option<chrono::DateTime<Utc>>,
+    gps_latitude: Option<f64>,
+    gps_longitude: Option<f64>,
+    gps_altitude: Option<f64>,
+    description: Option<&str>,
+) -> ParsedSupplementalMetadata {
+    ParsedSupplementalMetadata {
+        payload_json: "{}".to_string(),
+        date_taken,
+        gps_latitude,
+        gps_longitude,
+        gps_altitude,
+        description: description.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn metadata_claims_are_exclusive_without_live_time_based_reclaim() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "claim.jpg");
     let connection = pool.get().expect("connection");
@@ -505,35 +649,109 @@ fn metadata_claims_are_exclusive_and_expired_leases_are_recovered() {
         )
         .expect("job");
     drop(connection);
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
     assert_eq!(
-        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("first claim"),
+        executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .expect("first claim")
+            .map(|claim| claim.media_id),
         Some(media_id)
     );
     assert_eq!(
-        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("second claim"),
+        executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .expect("second claim"),
         None
     );
-    let connection = pool.get().expect("connection");
-    connection.execute("UPDATE media_metadata_jobs SET claimed_at = datetime('now', '-10 minutes') WHERE media_id = ?", [media_id]).expect("expire lease");
-    drop(connection);
-    momento_api::processor::metadata_worker::reclaim_expired_leases(&pool, 30).expect("reclaim");
     assert_eq!(
-        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("reclaimed claim"),
-        Some(media_id)
+        executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .expect("still claimed"),
+        None
     );
 }
 
-#[test]
-fn metadata_rerun_requested_during_processing_runs_after_current_attempt() {
+#[tokio::test]
+async fn stale_metadata_claim_cannot_finish_a_new_owner() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "stale-claim.jpg");
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+            [media_id],
+        )
+        .expect("job");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    let first_claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("first claim")
+        .expect("claimed job");
+    assert_eq!(
+        executors
+            .sqlite
+            .recover_metadata_claims_durable()
+            .await
+            .expect("recover claim"),
+        1
+    );
+    let second_claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("second claim")
+        .expect("reclaimed job");
+
+    let stale = executors
+        .sqlite
+        .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            media_id,
+            claim_token: first_claim.claim_token,
+            error: None,
+        })
+        .await;
+
+    assert!(stale.is_err());
+    let active_token: String = pool
+        .get()
+        .expect("connection")
+        .query_row(
+            "SELECT claim_token FROM media_metadata_jobs WHERE media_id = ? AND status = 'processing'",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("active token");
+    assert_eq!(active_token, second_claim.claim_token);
+}
+
+#[tokio::test]
+async fn metadata_rerun_requested_during_processing_runs_after_current_attempt() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "rerun-request.jpg");
     let connection = pool.get().expect("connection");
     connection
         .execute(
-            "INSERT INTO media_metadata_jobs (media_id, status, attempts, claimed_at) VALUES (?, 'processing', 1, datetime('now'))",
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
             [media_id],
         )
-        .expect("processing job");
+        .expect("queued job");
+    drop(connection);
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    let claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("claim")
+        .expect("claimed job");
+    let connection = pool.get().expect("connection");
     connection
         .execute(
             momento_api::database::queries::metadata_jobs::REQUEST_RERUN,
@@ -550,7 +768,14 @@ fn metadata_rerun_requested_during_processing_runs_after_current_attempt() {
     assert_eq!(processing_state, ("processing".to_string(), 1));
     drop(connection);
 
-    momento_api::processor::metadata_worker::finish_job(&pool, media_id, Ok(()), 3)
+    executors
+        .sqlite
+        .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            media_id,
+            claim_token: claim.claim_token,
+            error: None,
+        })
+        .await
         .expect("finish current attempt");
     let queued_state: (String, i64, i64) = pool
         .get()
@@ -564,8 +789,8 @@ fn metadata_rerun_requested_during_processing_runs_after_current_attempt() {
     assert_eq!(queued_state, ("queued".to_string(), 0, 0));
 }
 
-#[test]
-fn metadata_claims_drain_the_entire_eligible_queue() {
+#[tokio::test]
+async fn metadata_claims_drain_the_entire_eligible_queue() {
     let pool = create_test_db();
     let media_ids = (0..65)
         .map(|index| create_test_media(&pool, &format!("queued-{index}.jpg")))
@@ -580,31 +805,49 @@ fn metadata_claims_drain_the_entire_eligible_queue() {
             .expect("job");
     }
     drop(connection);
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
 
     let mut claimed_ids = Vec::new();
-    while let Some(media_id) =
-        momento_api::processor::metadata_worker::claim_next_job(&pool).expect("claim")
+    while let Some(media_id) = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("claim")
     {
-        claimed_ids.push(media_id);
+        claimed_ids.push(media_id.media_id);
     }
 
     assert_eq!(claimed_ids, media_ids);
 }
 
-#[test]
-fn metadata_failures_back_off_then_become_terminal() {
+#[tokio::test]
+async fn transient_metadata_failures_retry_without_attempt_limit() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "retry.jpg");
     let connection = pool.get().expect("connection");
-    connection.execute("INSERT INTO media_metadata_jobs (media_id, status, attempts) VALUES (?, 'processing', 1)", [media_id]).expect("job");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+            [media_id],
+        )
+        .expect("job");
     drop(connection);
-    momento_api::processor::metadata_worker::finish_job(
-        &pool,
-        media_id,
-        Err("temporary failure".to_string()),
-        2,
-    )
-    .expect("retry");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    let first_claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("claim")
+        .expect("claimed job");
+    executors
+        .sqlite
+        .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            media_id,
+            claim_token: first_claim.claim_token,
+            error: Some("temporary failure".to_string()),
+        })
+        .await
+        .expect("retry");
     let connection = pool.get().expect("connection");
     let first_status: String = connection
         .query_row(
@@ -614,20 +857,36 @@ fn metadata_failures_back_off_then_become_terminal() {
         )
         .expect("status");
     assert_eq!(first_status, "queued");
+    let retry_delay = executors
+        .sqlite
+        .load_next_metadata_job_delay_durable()
+        .await
+        .expect("metadata retry deadline")
+        .expect("future metadata retry");
+    assert!(retry_delay <= std::time::Duration::from_secs(30));
+    assert!(retry_delay >= std::time::Duration::from_secs(1));
     connection
         .execute(
-            "UPDATE media_metadata_jobs SET status = 'processing', attempts = 2 WHERE media_id = ?",
+            "UPDATE media_metadata_jobs SET available_at = datetime('now') WHERE media_id = ?",
             [media_id],
         )
-        .expect("retry claim");
+        .expect("make retry available");
     drop(connection);
-    momento_api::processor::metadata_worker::finish_job(
-        &pool,
-        media_id,
-        Err("terminal failure".to_string()),
-        2,
-    )
-    .expect("terminal");
+    let second_claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("claim")
+        .expect("claimed retry");
+    executors
+        .sqlite
+        .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            media_id,
+            claim_token: second_claim.claim_token,
+            error: Some("another temporary failure".to_string()),
+        })
+        .await
+        .expect("terminal");
     let connection = pool.get().expect("connection");
     let final_status: String = connection
         .query_row(
@@ -636,5 +895,5 @@ fn metadata_failures_back_off_then_become_terminal() {
             |row| row.get(0),
         )
         .expect("status");
-    assert_eq!(final_status, "failed");
+    assert_eq!(final_status, "queued");
 }

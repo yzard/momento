@@ -12,6 +12,17 @@ Momento is a self-hosted photo management application with:
 
 Monorepo managed with pnpm workspaces and Turborepo.
 
+Momento API has one dedicated scheduler thread, a fixed two-thread network runtime, and three closed
+executor domains configured only by `[thread_pool].cpu_workers`, `[thread_pool].io_workers`, and
+`[thread_pool].sqlite_workers`. Client requests and every background business operation acquire
+source-owned capacity from the scheduler, then submit typed bounded operations to the CPU, File I/O,
+or SQLite FIFO; no business operation blocks a network thread with CPU, disk, or SQL work. Business
+modules do not create their own threads, Tokio tasks, blocking pools, Rayon pools, or semaphore-based
+concurrency windows. r2d2 is the deliberate additional connection pool: it owns SQLite connections
+and its connection-maintenance thread, while each SQL operation executes only on the configured SQLite
+executor worker that checks out that connection. File workers exclusively perform filesystem and log
+sink I/O; CPU workers own parsing, encoding, hashing, image work, and supervised child processes.
+
 ---
 
 ## Conventions
@@ -176,7 +187,16 @@ verified handle. Missing or changed bytes fail the Momento job and are never sub
 manifest contains no storage root or path: llm-service receives only descriptors and raw bytes,
 persists those bytes below its own data root, and can run on another server with unrelated storage.
 Input and job admission allow up to 32 GiB so large streamed media is not rejected by the previous
-50 MiB cap; deployments still must monitor durable queue space.
+50 MiB cap. llm-service responds to admission with the exact input sequences it does not already
+hold, and Momento streams only those sequences. Received source bytes live in a content-addressed
+store below the llm-service queue and are hard-linked into job directories, so concurrent task types
+share one durable copy without sharing storage with Momento. Supported camera RAW inputs are decoded
+at full resolution by `dcraw_emu`/LibRaw inside llm-service; one TIFF normalization is cached per
+source content hash and hard-linked into each active job. All source, normalized, and temporary RAW
+files remain below the llm-service mounted data root. When Momento durably acknowledges a result,
+llm-service deletes the job and removes content whose final job link is gone. Deployments still must
+monitor durable queue space and configure `[scheduler].max_queue_bytes` plus
+`working_space_reserve_bytes` for the llm-service filesystem.
 
 Multi-input jobs preserve every descriptor's `sequence` and optional `frameTimestampMs` through
 the queue, provider response, result message, and input-level persistence. Concurrency is across jobs;
@@ -240,9 +260,10 @@ submission failures. An acknowledgement means only that llm-service has durably 
 not that inference has completed. The result must return the same `jobId`, `mediaId`, `task`, and
 exact submitted `attempt`.
 
-The Momento submission worker keeps a global `max_async_submission_tasks` rolling window. It claims and streams
-a replacement job as soon as any submission completes, and sleeps only when no eligible queued job
-remains. This transport window is independent from every model runtime's inference concurrency.
+The Momento submission worker uses scheduler durable admission plus the shared typed SQLite, File I/O,
+CPU, and network domains. It claims and streams a replacement job as soon as any submission completes, and sleeps only
+when no eligible queued job remains. There is no submission-specific concurrency setting; this
+application scheduling is independent from every model runtime's inference concurrency.
 
 All AI task types share global `[llm].enabled` gating but retain independent job eligibility and
 trigger/run paths. The submission worker sends existing queued jobs; it does not create task jobs.
@@ -265,17 +286,22 @@ scope is acknowledged. This keeps reset replacements from racing ahead of their 
 
 ### Durable llm-service queue
 
-Admission streams files into `.tmp/<job-id>/`, validates all descriptors and bytes, syncs the
-staged data, and atomically renames the directory into `queuing/<job-id>/`. llm-service stores
-the submitted bytes unchanged. Each manifest records the authenticated client ID. Duplicate job
+Admission links already-cached content and streams only missing files into `.tmp/<job-id>/`, validates
+all descriptors and received bytes, syncs the staged data, publishes missing bytes unchanged into
+`content/<sha256>/source`, and atomically renames the directory into `queuing/<job-id>/`. Job input
+files are hard links to that content store. Each manifest records the authenticated client ID. Duplicate job
 IDs owned by that client are acknowledged idempotently and are not enqueued twice; cross-client
 collisions are rejected.
 
 Admission computes byte counts and SHA-256 incrementally while writing and rejects a field before
 writing beyond its declared size. It never rereads a complete input into memory. Abandoned staging
-directories are removed when admission fails. Queue job count has no configured limit, but each
-manifest and input is bounded; deployments must monitor free space because an unbounded disk queue
-is not protection against an exhausted filesystem.
+directories are removed when admission fails. Admission atomically reserves the uncached unique
+source bytes against `[scheduler].max_queue_bytes` and the filesystem space remaining after
+`working_space_reserve_bytes`. A full queue returns `submissionDeferred` before requesting input
+bytes; Momento requeues the existing job after the returned delay without consuming a submission
+attempt. A single job whose uncached inputs exceed `max_queue_bytes` is rejected permanently.
+Cached content is counted once regardless of how many job directories hard-link it. Active
+reservations prevent concurrent submissions of the same missing content from double-uploading it.
 
 Cancellation markers are stored as client-scoped zero-byte files in `cancelled/`. They contain no
 media or model result data and remain durable so delayed or retried submissions from that client
@@ -288,15 +314,20 @@ cannot recreate cancelled work.
                   processing -> failed for terminal local queue/processing failure
 ```
 
-Each job directory contains `manifest.json` and `input-N` files. Inference adds `result.json`;
-callback retry state adds `callback.json`; terminal queue failures add `failure.json`. There is
-no `completed/` directory and no configurable queue-size limit. A matching WebSocket durable
-result-receipt acknowledgement permits deletion of all llm-service job data. It does not report
-whether Momento's later result persistence and downstream processing succeeded.
+Each job directory contains `manifest.json` and `input-N` files. Inference atomically publishes
+`result-records.bin` and `result-manifest.json` through their synced `.tmp` files; callback retry state
+adds `callback.json`; terminal queue failures add `failure.json`. There is
+no `completed/` directory. A matching WebSocket durable result-receipt acknowledgement permits
+deletion of all llm-service job data and immediately releases any unique source bytes no longer
+referenced by another job. It does not report whether Momento's later result persistence and
+downstream processing succeeded. Startup rebuilds capacity usage from the durable content store;
+temporary admission reservations exist only in memory and incomplete `.tmp` directories are
+discarded during recovery.
 
-Startup recovery removes incomplete `.tmp` admissions, moves interrupted `processing` jobs back
-to `queuing`, keeps `callback_pending` jobs that already have `result.json`, and requeues callback
-jobs that do not have a durable result. Therefore interrupted inference may run again, while a
+Startup recovery removes incomplete `.tmp` admissions, promotes interrupted `processing` jobs that
+have a complete validated result manifest/record pair to `callback_pending`, moves other interrupted
+processing jobs back to `queuing`, keeps callback jobs with a complete pair, and requeues callback jobs
+that do not have a durable result. Therefore interrupted inference may run again, while a
 completed inference awaiting acknowledgement is delivered again without rerunning the model.
 
 ### Multiple-request scheduling
@@ -340,30 +371,39 @@ One failed job does not prevent other in-flight jobs from finishing. Provider or
 errors become durable failed result payloads. Loss of the local runtime transport is retried from
 the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Result
 delivery uses its acknowledgement timeout, fixed retry delay, and maximum-attempt policy. A durable
-receipt acknowledgement deletes the queue directory; receipt rejection, timeout, or disconnect keeps it in
-`callback_pending`, and retry exhaustion moves it to `failed`.
+receipt acknowledgement deletes the queue directory. A deferred receipt updates its next delivery time
+without consuming an attempt. A permanent receipt rejection writes durable failure evidence and moves
+the job to `failed`; timeout or disconnect keeps it in `callback_pending`, and retry exhaustion moves it
+to `failed`.
 
 ### Result contract
 
-llm-service sends `result.json` on the active WebSocket matching the manifest's client ID. A
-completed payload contains matching correlation fields,
-`status = completed`, model type/version, a top-level result derived from the first input, and
-ordered `inputResults` carrying each original sequence and frame timestamp. A failed payload
-contains `status = failed` and an error.
+llm-service sends a validated manifest first on the active WebSocket matching the manifest's client ID.
+After `resultReady`, it reads its durable record file in at most 64 KiB frames and waits for the exact
+cumulative-offset `resultChunkReady` credit after every frame before sending `resultFinished`.
+Momento incrementally verifies size, SHA-256, CRC32C, task-specific record order, and input correlation.
+Receipt preparation snapshots the job's monotonic `state_version`; every later permanent disposition
+must compare that version, so cancellation or another terminal transition always wins a result race.
+The current Momento implementation then converts that validated typed stream into its bounded `JobResult`
+DTO for the existing SQLite JSON inbox; the approved `plan.md` still requires replacing that final
+conversion with the Journal-owned record inbox and direct typed persistence.
 
 Momento first stores an incoming result in its durable `llm_job_results` inbox and then sends
 `resultReceived`. That receipt is the llm-service success boundary and permits llm-service to delete
-all local task data. `resultReceiptRejected` is reserved for failure to durably receive the payload;
-it is never used for later validation, crop generation, database persistence, or downstream work.
-Momento's independent `ai-result-writer` OS thread is the only AI-result SQLite writer. A rolling,
-bounded CPU worker window continuously prepares durable inbox results, including expensive face-image
-normalization and cropping. Each completed preparation is persisted immediately in its own short
-SQLite transaction, its worker slot is refilled without waiting for other preparations, and a slow
-image never forms a batch barrier. A permanently invalid payload fails only its Momento job. A
-transient database, pool, I/O, or internal failure leaves that inbox row available for unbounded
-retry; transient failures never exhaust an attempt limit, delete the inbox payload, or mark the
-Momento job failed. Matching duplicate deliveries are received idempotently, and late results for
-terminal or removed jobs are acknowledged without recreating work.
+all local task data. `resultReceiptRejected` is reserved for permanent manifest, framing, hash, or
+record-contract failures and is sent only after Momento atomically marks the matching active job
+failed. A stale or terminal delivery is acknowledged; failure to commit a terminal rejection returns
+`resultReceiptDeferred`. A temporary scheduler, SQLite, I/O, or reservation failure returns
+`resultReceiptDeferred` so llm-service retains the durable result without consuming an attempt.
+Momento uses available workers from its global application pool to prepare durable inbox results,
+including expensive face-image normalization and cropping. One logical writer persists each
+completed preparation immediately in its own short SQLite transaction; there is no dedicated
+AI-result OS thread or separate CPU pool. A slow image never forms a batch barrier. A permanently
+invalid payload fails only its Momento job. A transient database, pool, I/O, or internal failure
+leaves that inbox row available for unbounded retry; transient failures never exhaust an attempt
+limit, delete the inbox payload, or mark the Momento job failed. Matching duplicate deliveries are
+received idempotently, and late results for terminal or removed jobs are acknowledged without
+recreating work.
 
 Persistence is deliberately type-specific. OCR and tagging store present text results in
 input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
@@ -421,6 +461,23 @@ type-specific queue/scheduler.
 9. Add mirrored tests for preparation and eligibility, WebSocket admission and raw-byte
    preservation, runtime reuse/switching, configured concurrency, result validation, result
    retries/idempotency, persistence, cancellation, and recovery.
+10. Extend the shared failed-job lifecycle matrix in
+   `tests/backend/routes/ai.rs::failed_jobs_can_be_cleaned_and_restarted_for_every_ai_feature`.
+   The new case must create a terminal `failed` job together with representative persisted result
+   data, call the feature's `clean` endpoint, prove that every task-owned job and result row was
+   removed, call `start`, and prove that a fresh eligible job was queued. A feature that owns runs,
+   generations, finalization state, groups, members, or generated files must include those artifacts
+   in the fixture and prove they are removed in foreign-key-safe order. A new AI feature is not
+   complete if a historical failed job can block clean or prevent the clean-to-start sequence.
+11. Extend both failed-job retry matrices:
+   `tests/backend/routes/ai.rs::manual_start_queues_a_new_attempt_after_failure_for_every_ai_feature`
+   and
+   `tests/backend/cronjob.rs::scheduled_occurrences_queue_a_new_attempt_after_failure_for_every_ai_feature`.
+   With prepared inputs still present and no successfully persisted result, both the administrator
+   `start` endpoint and the scheduled cron entry must preserve the terminal failed job as history
+   and queue a new job without requiring clean first. Run-based features must create a new run and
+   associate the replacement job with it. These matrices must remain exhaustive with `AiFeature::ALL`;
+   adding an AI feature without adding both cases is a test failure and an incomplete implementation.
 
 Metadata generation lives in `processor/metadata/`; `processor/regenerator.rs` does not exist.
 
@@ -506,11 +563,11 @@ result-delivery fields prefixed by `result_delivery_`. The Compose deployment mo
 data root into both containers; llm-service only uses its config, `logs/`, and `llm/` subtree and
 does not read Momento originals, previews, or thumbnails.
 
-Momento's `[llm_submission_worker].max_async_submission_tasks` controls only the outbound WebSocket
-submission window. `[llm_result_worker].concurrency` independently controls the result pipeline's
-rolling CPU preparation concurrency; `poll_interval_seconds` controls the single AI-result writer
-thread's inbox poll interval. It has no batch size and never creates concurrent AI-result database
-writers.
+Metadata, LLM submission, and LLM result workers are event-driven. Each starts by draining its
+durable queue, then waits on a versioned no-lost-wakeup signal. New work wakes each
+worker immediately. Submission and result preparation both use the global Momento application
+worker pool; neither section has a concurrency field. AI-result persistence remains a single
+logical writer and never creates concurrent database writers.
 
 ### Face detection and grouping
 

@@ -5,6 +5,7 @@ import TimelineView from '../components/timeline/TimelineView'
 import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import AddToAlbumModal from '../components/albums/AddToAlbumModal'
 import ConfirmationDialog from '../components/common/ConfirmationDialog'
+import { PageFrame, PageHeader } from '../components/layout/PageLayout'
 import MediaSelectionToolbar, { MediaSelectButton } from '../components/media/MediaSelectionToolbar'
 import {
   mediaApi,
@@ -79,64 +80,66 @@ function TimelineHeader(props: TimelineHeaderProps) {
     groupByOptions.find((option) => option.value === props.groupBy)?.label ?? 'Day'
 
   return (
-    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex items-center justify-between gap-3 sm:justify-start">
-        <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">
-          {props.title}
-        </h1>
-        {!props.selectionMode && <MediaSelectButton onClick={props.onStartSelection} />}
-      </div>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <label className="relative block sm:w-72 lg:w-96">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <span className="sr-only">Search media</span>
-          <input
-            type="search"
-            value={props.searchInput}
-            onChange={(event) => props.onSearchInputChange(event.target.value)}
-            placeholder={props.searchPlaceholder}
-            aria-label="Search media"
-            className="w-full rounded-lg border border-border bg-background py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/20"
-          />
-        </label>
-        <div className="relative self-end sm:self-auto">
-          <button
-            type="button"
-            onClick={() => setShowGroupByMenu((visible) => !visible)}
-            className="flex items-center gap-2 rounded-lg bg-muted px-4 py-2 text-sm font-medium transition-colors hover:bg-muted/80"
-          >
-            <Calendar className="h-4 w-4" />
-            {currentGroupByLabel}
-            <ChevronDown className="h-4 w-4" />
-          </button>
-          {showGroupByMenu && (
-            <>
+    <PageHeader
+      title={props.title}
+      description={null}
+      actions={
+        <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+          <label className="relative block w-full sm:w-72 lg:w-80 xl:w-96">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <span className="sr-only">Search media</span>
+            <input
+              type="search"
+              value={props.searchInput}
+              onChange={(event) => props.onSearchInputChange(event.target.value)}
+              placeholder={props.searchPlaceholder}
+              aria-label="Search media"
+              className="w-full rounded-lg border border-border bg-background py-2 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/20"
+            />
+          </label>
+          <div className="flex items-center justify-end gap-3">
+            <div className="relative">
               <button
                 type="button"
-                aria-label="Close grouping menu"
-                className="fixed inset-0 z-40"
-                onClick={() => setShowGroupByMenu(false)}
-              />
-              <div className="absolute right-0 top-full z-50 mt-2 min-w-[120px] rounded-lg border border-border bg-background py-1 shadow-lg">
-                {groupByOptions.map((option) => (
+                aria-label={`Group timeline by period: ${currentGroupByLabel}`}
+                onClick={() => setShowGroupByMenu((visible) => !visible)}
+                className="flex min-h-11 items-center gap-2 rounded-lg bg-muted px-4 py-2 text-sm font-medium transition-colors hover:bg-muted/80"
+              >
+                <Calendar className="h-4 w-4" />
+                {currentGroupByLabel}
+                <ChevronDown className="h-4 w-4" />
+              </button>
+              {showGroupByMenu && (
+                <>
                   <button
-                    key={option.value}
                     type="button"
-                    onClick={() => {
-                      props.onGroupByChange(option.value)
-                      setShowGroupByMenu(false)
-                    }}
-                    className={`w-full px-4 py-2 text-left text-sm transition-colors hover:bg-muted ${props.groupBy === option.value ? 'font-medium text-primary' : ''}`}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+                    aria-label="Close grouping menu"
+                    className="fixed inset-0 z-40"
+                    onClick={() => setShowGroupByMenu(false)}
+                  />
+                  <div className="absolute right-0 top-full z-50 mt-2 min-w-[120px] rounded-lg border border-border bg-background py-1 shadow-lg">
+                    {groupByOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => {
+                          props.onGroupByChange(option.value)
+                          setShowGroupByMenu(false)
+                        }}
+                        className={`w-full px-4 py-2 text-left text-sm transition-colors hover:bg-muted ${props.groupBy === option.value ? 'font-medium text-primary' : ''}`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+            {!props.selectionMode && <MediaSelectButton onClick={props.onStartSelection} />}
+          </div>
         </div>
-      </div>
-    </div>
+      }
+    />
   )
 }
 
@@ -199,8 +202,8 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
   const { title, searchPlaceholder } = timelinePresentation(mediaType, classification)
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      <div className="container max-w-[1800px] mx-auto px-6 md:px-10 pt-6 md:pt-10">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <PageFrame className="pb-0">
         <TimelineHeader
           title={title}
           searchPlaceholder={searchPlaceholder}
@@ -232,8 +235,8 @@ export default function Timeline({ mediaType, classification }: TimelineProps) {
             {selectionError}
           </p>
         )}
-      </div>
-      <div className="flex-1 min-h-0">
+      </PageFrame>
+      <div className="min-h-0 flex-1 px-4 sm:px-6 md:px-8 xl:px-10">
         <TimelineView
           onPhotoClick={handlePhotoClick}
           selection={selectionMode ? { selectedMediaIds, toggleSelection } : null}

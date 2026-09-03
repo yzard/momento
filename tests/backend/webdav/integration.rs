@@ -1,32 +1,27 @@
-use std::sync::Arc;
-
 use axum::{
     body::Body,
     http::{header, Method, Request, StatusCode},
 };
 use axum_test::{TestServer, TestServerConfig};
 use base64::Engine;
-use momento_api::{app::create_app, auth::hash_password, config::Config, constants::paths};
+use momento_api::{app::create_app, auth::hash_password, config::Config};
 use tower::ServiceExt;
 
 use crate::test_utils::{
-    create_test_config_manager, create_test_db, create_test_user, init_test_paths, lock_webdav_test,
+    create_test_config_manager, create_test_db, create_test_user, lock_webdav_test,
+    test_executor_handles_with_data_directory,
 };
 
 #[tokio::test]
 async fn webdav_password_authentication_is_rate_limited() {
     let _webdav_test_guard = lock_webdav_test().await;
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.security.password_attempts_per_identity = 1;
     config.security.password_attempts_per_source = 10;
     let app = create_app(
         create_test_config_manager(config),
-        pool,
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool, None),
     );
     let server =
         TestServer::new_with_config(app, TestServerConfig::builder().http_transport().build())
@@ -49,7 +44,6 @@ async fn webdav_password_authentication_is_rate_limited() {
 #[tokio::test]
 async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload() {
     let _webdav_test_guard = lock_webdav_test().await;
-    init_test_paths();
     let pool = create_test_db();
     let username = format!("webdav-{}", uuid::Uuid::new_v4());
     let user_id = create_test_user(&pool, &username, "webdav@example.com");
@@ -63,22 +57,18 @@ async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload()
         )
         .expect("update password");
 
-    let user_root = paths().webdav.join(&username);
-    let _ = std::fs::remove_dir_all(&user_root);
+    let (_, data_directory) = test_executor_handles_with_data_directory(pool.clone());
+    let user_root = data_directory.join("webdav").join(&username);
 
     let mut config = Config::default();
     config.server.api_request_body_max_bytes = 1;
     config.webdav.mount_path = "/photos".to_string();
     config.webdav.max_upload_bytes = 11;
-    config.webdav.max_concurrent_requests = 1;
     let config_manager = create_test_config_manager(config);
     let readiness_pool = pool.clone();
     let app = create_app(
         config_manager,
-        pool,
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(1)),
-        None,
+        crate::test_utils::test_app_dependencies(pool, None),
     );
     let direct_app = app.clone();
     let server =
@@ -177,6 +167,4 @@ async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload()
         )
         .expect("oversized readiness");
     assert_eq!(oversized_ready_count, 0);
-
-    std::fs::remove_dir_all(user_root).expect("remove WebDAV test directory");
 }

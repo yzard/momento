@@ -79,10 +79,10 @@ class MomentoRepository(
     suspend fun reorderAlbumMedia(id: Long, mediaIds: List<Long>): MessageResponse = api().reorderAlbumMedia(AlbumMediaRequest(id, mediaIds))
     suspend fun places(cursor: String?): PlacesResponse = api().places(pagedListRequest(cursor))
     suspend fun place(placeId: String, cursor: String?): PlaceResponse = api().place(PlaceRequest(placeId, cursor, 100))
-    suspend fun placeThumbnail(placeId: String): String? = api().placeThumbnail(PlaceThumbnailRequest(placeId)).thumbnail
+    suspend fun placeThumbnail(placeId: String): ByteArray = api().placeThumbnail(placeId).bytes()
     suspend fun faces(cursor: String?): FacesResponse = api().faces(pagedListRequest(cursor))
     suspend fun faceGroup(id: Long): FaceGroupMediaResponse = api().face(FaceGroupRequest(id))
-    suspend fun faceThumbnail(id: Long): ByteArray = api().faceThumbnail(FaceGroupRequest(id)).bytes()
+    suspend fun faceThumbnail(id: Long): ByteArray = api().faceThumbnail(id).bytes()
     suspend fun mergeFaces(ids: List<Long>): FaceMergeResponse = api().mergeFaces(FaceMergeRequest(ids))
     suspend fun trash(): List<TrashMedia> = api().trash().items
     suspend fun restore(ids: List<Long>): MessageResponse = api().restore(MediaIdsRequest(ids))

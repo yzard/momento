@@ -3,8 +3,9 @@ use std::path::PathBuf;
 pub(crate) const SERVER_HOST: &str = "0.0.0.0";
 pub(crate) const SERVER_PORT: u16 = 8100;
 pub(crate) const SERVER_DATA_DIR: &str = "/data";
-pub(crate) const SCHEDULER_POLL_INTERVAL_SECONDS: u64 = 5;
 pub(crate) const SCHEDULER_IDLE_SHUTDOWN_SECONDS: u64 = 60;
+pub(crate) const SCHEDULER_MAX_QUEUE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+pub(crate) const SCHEDULER_WORKING_SPACE_RESERVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub(crate) const SCHEDULER_MAX_IN_FLIGHT_JOBS: usize = 128;
 pub(crate) const SCHEDULER_RUNTIME_MAX_ATTEMPTS: usize = 3;
 pub(crate) const RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS: u64 = 30;
@@ -75,10 +76,6 @@ pub(crate) fn server_api_key() -> String {
     fallback::SERVER_API_KEY.to_string()
 }
 
-pub(crate) fn scheduler_poll_interval_seconds() -> u64 {
-    SCHEDULER_POLL_INTERVAL_SECONDS
-}
-
 pub(crate) fn scheduler_idle_shutdown_seconds() -> u64 {
     SCHEDULER_IDLE_SHUTDOWN_SECONDS
 }
@@ -130,12 +127,16 @@ pub(crate) fn render_template(source: &str) -> String {
         ("{{SERVER_API_KEY}}", template::SERVER_API_KEY.to_string()),
         ("{{SERVER_DATA_DIR}}", SERVER_DATA_DIR.to_string()),
         (
-            "{{SCHEDULER_POLL_INTERVAL_SECONDS}}",
-            SCHEDULER_POLL_INTERVAL_SECONDS.to_string(),
-        ),
-        (
             "{{SCHEDULER_IDLE_SHUTDOWN_SECONDS}}",
             SCHEDULER_IDLE_SHUTDOWN_SECONDS.to_string(),
+        ),
+        (
+            "{{SCHEDULER_MAX_QUEUE_BYTES}}",
+            SCHEDULER_MAX_QUEUE_BYTES.to_string(),
+        ),
+        (
+            "{{SCHEDULER_WORKING_SPACE_RESERVE_BYTES}}",
+            SCHEDULER_WORKING_SPACE_RESERVE_BYTES.to_string(),
         ),
         (
             "{{SCHEDULER_MAX_IN_FLIGHT_JOBS}}",

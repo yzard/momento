@@ -11,20 +11,21 @@ use axum::{
     Router,
 };
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::RwLock;
 
 use crate::auth::AppState;
-use crate::constants::paths;
+use crate::database::operations::{InvalidateWebdavReadiness, MarkWebdavReady};
+use crate::runtime::HttpRequestAdmission;
 
 pub use auth::WebDAVUser;
 use auth::{basic_auth_middleware, path_guard_middleware};
 use handler::{
     completed_upload_path, contains_reserved_destination, contains_reserved_path,
-    create_dav_handler, guard_response_body, handle_webdav_request, invalidated_upload_paths,
-    request_mutates_staging, validate_upload_size,
+    guard_response_body, handle_webdav_request, invalidated_upload_paths, request_mutates_staging,
+    validate_upload_size,
 };
 
-pub type WebDAVRequestGate = Arc<Semaphore>;
+pub type WebDAVRequestGate = Arc<RwLock<()>>;
 
 async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -> Response {
     let config = state.config.current();
@@ -46,12 +47,18 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
         return status.into_response();
     }
 
+    let admission = match request.extensions().get::<HttpRequestAdmission>() {
+        Some(admission) => admission.clone(),
+        None => return stream_admission_unavailable(),
+    };
+    if (request_mutates_staging(request.method()) || request.method().as_str() == "PROPFIND")
+        && admission.convert_to_stream().is_err()
+    {
+        return stream_admission_unavailable();
+    }
+
     let request_permit = if request_mutates_staging(request.method()) {
-        let Ok(request_permit) = Arc::clone(&state.webdav_request_gate).acquire_owned().await
-        else {
-            return (StatusCode::SERVICE_UNAVAILABLE, "WebDAV is unavailable").into_response();
-        };
-        Some(request_permit)
+        Some(Arc::clone(&state.webdav_request_gate).read_owned().await)
     } else {
         None
     };
@@ -68,68 +75,49 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
         &request_path,
         &config.webdav.mount_path,
     );
-    if !invalidated_paths.is_empty() {
-        let Ok(connection) = state.pool.get() else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WebDAV readiness is unavailable",
-            )
-                .into_response();
-        };
-        let Ok(transaction) = connection.unchecked_transaction() else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WebDAV readiness is unavailable",
-            )
-                .into_response();
-        };
-        for path in invalidated_paths {
-            if transaction
-                .execute(
-                    crate::database::queries::webdav_ready::DELETE,
-                    rusqlite::params![user.id, path],
-                )
-                .is_err()
-            {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "WebDAV readiness is unavailable",
-                )
-                    .into_response();
-            }
-        }
-        if transaction.commit().is_err() {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WebDAV readiness is unavailable",
-            )
-                .into_response();
-        }
+    if !invalidated_paths.is_empty()
+        && state
+            .executors
+            .sqlite
+            .invalidate_webdav_readiness_request(InvalidateWebdavReadiness {
+                user_id: user.id,
+                paths: invalidated_paths,
+            })
+            .await
+            .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebDAV readiness is unavailable",
+        )
+            .into_response();
     }
 
-    let user_root = paths().webdav.join(&user.username);
-    let dav_handler = create_dav_handler(&user_root, &config.webdav.mount_path);
     let mut response = handle_webdav_request(
-        dav_handler,
+        &state.executors,
+        &user.username,
+        &admission,
         request,
-        &user_root,
         &config.webdav.mount_path,
         config.webdav.max_upload_bytes,
     )
     .await;
     if response.status().is_success() {
         if let Some(completed_path) = completed_path {
-            let readiness_saved = state.pool.get().ok().is_some_and(|connection| {
-                connection
-                    .execute(
-                        crate::database::queries::webdav_ready::UPSERT,
-                        rusqlite::params![user.id, completed_path],
-                    )
-                    .is_ok()
-            });
+            let readiness_saved = state
+                .executors
+                .sqlite
+                .mark_webdav_ready_request(MarkWebdavReady {
+                    user_id: user.id,
+                    path: completed_path,
+                })
+                .await
+                .is_ok();
             if !readiness_saved {
                 tracing::error!(path = %request_path, "Could not persist completed WebDAV upload readiness");
                 *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            } else {
+                state.scheduler.wake_webdav_import();
             }
         }
     }
@@ -140,14 +128,26 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
     }
 }
 
+fn stream_admission_unavailable() -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "WebDAV stream capacity is unavailable",
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONNECTION,
+        axum::http::HeaderValue::from_static("close"),
+    );
+    response
+}
+
 pub fn webdav_router(app_state: AppState) -> Router<AppState> {
     let mount_path = app_state.config.current().webdav.mount_path.clone();
     let mount_path_with_slash = format!("{mount_path}/");
     let mount_path_with_wildcard = format!("{mount_path}/*path");
     tracing::info!(
-        "WebDAV server listening at {}, root: {}/<username>",
-        mount_path,
-        paths().webdav.display()
+        "WebDAV server listening at {}, using the typed WebDAV storage root",
+        mount_path
     );
 
     Router::new()

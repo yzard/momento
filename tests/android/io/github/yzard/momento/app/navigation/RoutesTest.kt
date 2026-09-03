@@ -75,7 +75,7 @@ class RoutesTest {
                 screenshotDetection = false,
                 documentDetection = true,
             ),
-            backup = BackupCapabilities(true, 2, 1, 1, 1, 1),
+            backup = BackupCapabilities(true, 2, 1, 1, 1),
         )
 
         val available = CapabilityState.Available(capabilities)

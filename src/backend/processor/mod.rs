@@ -1,9 +1,9 @@
 pub mod ai;
+pub(crate) mod artifact;
 pub mod backup;
 pub mod deduplicator;
 pub mod face_detection;
 pub mod import;
-pub mod media_deletion;
 pub mod media_processor;
 pub mod metadata;
 pub mod metadata_worker;

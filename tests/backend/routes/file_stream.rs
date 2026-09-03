@@ -1,4 +1,6 @@
-use crate::test_utils::{create_test_app, create_test_media, create_test_user};
+use crate::test_utils::{
+    create_test_app, create_test_media, create_test_user, test_data_directory,
+};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use axum::http::StatusCode;
 use axum_test::TestServer;
@@ -9,8 +11,8 @@ async fn public_share_media_uses_the_shared_bounded_range_stream() {
     let owner_id = create_test_user(&pool, "range-owner", "range-owner@example.com");
     let media_id = create_test_media(&pool, "range-video.mp4");
     let relative_path = format!("route-tests/public-{media_id}.mp4");
-    let original_path = momento_api::constants::paths()
-        .originals
+    let original_path = test_data_directory(&pool)
+        .join("originals")
         .join(&relative_path);
     std::fs::create_dir_all(original_path.parent().expect("original parent"))
         .expect("original directory");

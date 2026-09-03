@@ -15,10 +15,18 @@ path = "main.rs"
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["macros", "ws"] }
-tower-http = { version = "0.5", features = ["trace", "fs"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "server", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -27,50 +35,50 @@ toml = "0.8"
 toml_edit = "0.22"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.24"
+scheduled-thread-pool = "0.2"
 
 # Auth
 jsonwebtoken = "9"
 argon2 = "0.5"
 
-# ImageMagick normalizes source formats; Rust decodes PNG and writes JPEG crops.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "rayon"] }
-
 # Utils
-num_cpus = "1.16"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 cron = "0.15"
 indexmap = "2"
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1"
 thiserror = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
 libc = "0.2"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-glob = "0.3"
-filetime = "0.2"
 serde_urlencoded = "0.7"
 futures = "0.3"
+crossbeam-channel = "0.5"
 percent-encoding = "2"
+mime_guess = "2"
+httpdate = "1"
 csv = "1"
 flate2 = "1"
-rstar = "0.12"
 momento-common = { path = "../common" }
 
 # Geospatial
 geohash = "0.13"
 
 # WebDAV server
-dav-server = "0.11"
 http-body-util = "0.1"
 
 [dev-dependencies]
 axum-test = "15"
+filetime = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+r2d2_sqlite = "0.24"
 tempfile = "3"
 
 [[test]]

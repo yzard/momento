@@ -46,6 +46,8 @@ describe('Settings', () => {
   it('offers the server-bundled Android release', () => {
     renderSettings()
 
+    const heading = screen.getByRole('heading', { name: 'Account Settings' })
+    expect(heading.closest('[data-page-frame="true"]')?.className).toContain('w-full')
     const downloadLink = screen.getByRole('link', {
       name: 'Download Android app',
     })

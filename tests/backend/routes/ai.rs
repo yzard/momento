@@ -1,14 +1,14 @@
 use crate::test_utils::{
-    create_test_app, create_test_config_manager, create_test_db, create_test_media,
-    create_test_user, init_test_paths,
+    assert_failed_ai_job_restarted, create_test_app, create_test_config_manager, create_test_db,
+    create_test_media, create_test_user, prepare_failed_ai_job,
 };
 use axum::http::{header::AUTHORIZATION, StatusCode};
 use axum_test::TestServer;
 use momento_api::app::create_app;
 use momento_api::auth::create_access_token;
 use momento_api::config::{Config, ConfigManager};
+use momento_api::processor::ai::operation::AiFeature;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use tempfile::TempDir;
 
 fn admin_token(user_id: i64) -> String {
@@ -68,7 +68,6 @@ async fn aggregate_status_requires_an_administrator() {
 
 #[tokio::test]
 async fn administrator_updates_a_live_ai_schedule_and_persists_config() {
-    init_test_paths();
     let directory = TempDir::new().expect("temporary config directory");
     let config_path = directory.path().join("config.toml");
     let config = Config::default();
@@ -80,14 +79,14 @@ async fn administrator_updates_a_live_ai_schedule_and_persists_config() {
         ),
     )
     .expect("write config");
-    let config_manager = ConfigManager::new(config_path.clone(), config);
     let pool = create_test_db();
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    let loaded =
+        momento_api::config::load_config_with_identity(&config_path).expect("load config identity");
+    let config_manager = ConfigManager::new(loaded, &executors);
     let app = create_app(
         config_manager.clone(),
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "schedule-admin", "schedule-admin@example.com");
     pool.get()
@@ -273,17 +272,13 @@ async fn face_cancel_reports_an_active_downstream_grouping_run() {
 
 #[tokio::test]
 async fn start_succeeds_when_deduplicate_is_already_running() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "trigger-admin", "trigger-admin@example.com");
     let connection = pool.get().expect("Failed to get connection");
@@ -370,6 +365,173 @@ async fn clean_ocr_removes_ocr_results_and_jobs() {
 }
 
 #[tokio::test]
+async fn failed_jobs_can_be_cleaned_and_restarted_for_every_ai_feature() {
+    for (case_index, (feature, task)) in [
+        ("ocr", "ocr"),
+        ("image_tagging", "image_tagging"),
+        ("image_aesthetics", "image_aesthetics"),
+        ("screenshot_detection", "screenshot_detection"),
+        ("document_detection", "document_detection"),
+        ("face_detection", "face_detection"),
+        ("deduplicate", "image_clustering"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pool = create_test_db();
+        let mut config = Config::default();
+        config.llm.enabled = true;
+        let app = create_app(
+            create_test_config_manager(config),
+            crate::test_utils::test_app_dependencies(pool.clone(), None),
+        );
+        let user_id = create_test_user(
+            &pool,
+            &format!("failed-clean-{case_index}"),
+            &format!("failed-clean-{case_index}@example.com"),
+        );
+        let media_id = create_test_media(&pool, &format!("failed-clean-{case_index}.jpg"));
+        prepare_failed_ai_job(&pool, media_id, task, &format!("{case_index:032x}"));
+        let connection = pool.get().expect("database connection");
+        connection
+            .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+            .expect("administrator");
+        match feature {
+            "face_detection" => {
+                connection
+                    .execute(
+                        "INSERT INTO media_face_detection_results (media_id, model_type, model_version) VALUES (?, 'face_detection', 'test')",
+                        [media_id],
+                    )
+                    .expect("face detection result");
+            }
+            "deduplicate" => {
+                connection
+                    .execute(
+                        "INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, processing_status) VALUES (?, 'hash', 'test', 'test', X'00000000', 1, 1)",
+                        [media_id],
+                    )
+                    .expect("similarity result");
+                connection
+                    .execute(
+                        "INSERT INTO media_similarity_hash_bands (media_id, band_index, band_value) VALUES (?, 0, 1)",
+                        [media_id],
+                    )
+                    .expect("similarity hash band");
+            }
+            "ocr" | "image_tagging" => {
+                connection
+                    .execute(
+                        "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, 'test', 'result')",
+                        rusqlite::params![media_id, task],
+                    )
+                    .expect("text result");
+                connection
+                    .execute(
+                        "INSERT INTO media_text_inputs (media_id, model_type, sequence, model_version, string) VALUES (?, ?, 0, 'test', 'result')",
+                        rusqlite::params![media_id, task],
+                    )
+                    .expect("text input result");
+            }
+            "image_aesthetics" => {
+                connection.execute("INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', 'test', 0.5, 0.5, 0.5, 0.5, 0.5)", [media_id]).expect("aesthetic result");
+                connection.execute("INSERT INTO media_aesthetic_inputs (media_id, sequence, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 0, 'image_aesthetics', 'test', 0.5, 0.5, 0.5, 0.5, 0.5)", [media_id]).expect("aesthetic input result");
+            }
+            "screenshot_detection" => {
+                connection.execute("INSERT INTO media_screenshot_classifications (media_id, model_type, model_version, is_screenshot, confidence) VALUES (?, 'screenshot_detection', 'test', 1, 0.9)", [media_id]).expect("screenshot result");
+                connection.execute("INSERT INTO media_screenshot_classification_inputs (media_id, sequence, model_type, model_version, is_screenshot, confidence) VALUES (?, 0, 'screenshot_detection', 'test', 1, 0.9)", [media_id]).expect("screenshot input result");
+            }
+            "document_detection" => {
+                connection.execute("INSERT INTO media_document_classifications (media_id, model_type, model_version, is_document, confidence) VALUES (?, 'document_detection', 'test', 1, 0.8)", [media_id]).expect("document result");
+                connection.execute("INSERT INTO media_document_classification_inputs (media_id, sequence, model_type, model_version, is_document, confidence) VALUES (?, 0, 'document_detection', 'test', 1, 0.8)", [media_id]).expect("document input result");
+            }
+            _ => {
+                unreachable!("all failed-job cleanup feature fixtures must be explicit")
+            }
+        }
+        drop(connection);
+
+        let server = TestServer::new(app).expect("server");
+        let authorization = format!("Bearer {}", admin_token(user_id));
+        let clean = server
+            .post(&format!("/api/v1/ai/{feature}/clean"))
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await;
+        clean.assert_status_ok();
+        assert_eq!(action_affected_jobs(&clean.json::<Value>(), feature), 1);
+
+        let remaining_jobs: i64 = pool
+            .get()
+            .expect("database connection")
+            .query_row(
+                "SELECT COUNT(*) FROM llm_jobs WHERE task = ?",
+                [task],
+                |row| row.get(0),
+            )
+            .expect("remaining failed job count");
+        assert_eq!(remaining_jobs, 0, "{feature} failed job should be cleaned");
+
+        let start = server
+            .post(&format!("/api/v1/ai/{feature}/start"))
+            .add_header(AUTHORIZATION, authorization)
+            .json(&json!({}))
+            .await;
+        start.assert_status_ok();
+        assert_eq!(action_affected_jobs(&start.json::<Value>(), feature), 1);
+    }
+}
+
+#[tokio::test]
+async fn manual_start_queues_a_new_attempt_after_failure_for_every_ai_feature() {
+    let cases = [
+        ("ocr", "ocr"),
+        ("image_tagging", "image_tagging"),
+        ("image_aesthetics", "image_aesthetics"),
+        ("screenshot_detection", "screenshot_detection"),
+        ("document_detection", "document_detection"),
+        ("face_detection", "face_detection"),
+        ("deduplicate", "image_clustering"),
+    ];
+    assert_eq!(
+        cases,
+        AiFeature::ALL.map(|feature| (feature.name(), feature.inference_task()))
+    );
+
+    for (case_index, (feature, task)) in cases.into_iter().enumerate() {
+        let pool = create_test_db();
+        let mut config = Config::default();
+        config.llm.enabled = true;
+        let app = create_app(
+            create_test_config_manager(config),
+            crate::test_utils::test_app_dependencies(pool.clone(), None),
+        );
+        let user_id = create_test_user(
+            &pool,
+            &format!("failed-retry-{case_index}"),
+            &format!("failed-retry-{case_index}@example.com"),
+        );
+        pool.get()
+            .expect("database connection")
+            .execute("UPDATE users SET role = 'admin' WHERE id = ?", [user_id])
+            .expect("administrator");
+        let media_id = create_test_media(&pool, &format!("failed-retry-{case_index}.jpg"));
+        prepare_failed_ai_job(&pool, media_id, task, &format!("{:032x}", case_index + 100));
+        let server = TestServer::new(app).expect("server");
+
+        let start = server
+            .post(&format!("/api/v1/ai/{feature}/start"))
+            .add_header(AUTHORIZATION, format!("Bearer {}", admin_token(user_id)))
+            .json(&json!({}))
+            .await;
+
+        start.assert_status_ok();
+        assert_eq!(action_affected_jobs(&start.json::<Value>(), feature), 1);
+        assert_failed_ai_job_restarted(&pool, task);
+    }
+}
+
+#[tokio::test]
 async fn clean_rejects_an_active_feature() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "active-clean-admin", "active-clean@example.com");
@@ -396,17 +558,13 @@ async fn clean_rejects_an_active_feature() {
 
 #[tokio::test]
 async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "aesthetics-admin", "aesthetics-admin@example.com");
     let media_id = create_test_media(&pool, "aesthetics.jpg");
@@ -528,17 +686,13 @@ async fn removed_image_aesthetics_reset_returns_not_found() {
 
 #[tokio::test]
 async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "classifier-admin", "classifier-admin@example.com");
     let media_id = create_test_media(&pool, "classifier-admin.jpg");
@@ -631,17 +785,13 @@ async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
 
 #[tokio::test]
 async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "face-ai-admin", "face-ai-admin@example.com");
     let media_id = create_test_media(&pool, "face-ai.jpg");
@@ -707,9 +857,10 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
         .await
         .assert_status_ok();
     momento_api::processor::face_detection::finalize_ready_runs(
-        &pool,
+        &crate::test_utils::test_executor_handles(pool.clone()),
         &Config::default().face_group,
     )
+    .await
     .expect("finalize cancel");
     let connection = pool.get().expect("connection");
     connection
@@ -718,10 +869,54 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     connection
         .execute("DELETE FROM llm_cancellation_scopes", [])
         .expect("acknowledge cancellation scope");
+    connection
+        .execute(
+            "INSERT INTO face_grouping_runs (status, completed_at) VALUES ('completed', datetime('now'))",
+            [],
+        )
+        .expect("completed face grouping run");
+    let completed_run_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO face_group_generations (run_id, status, published_at) VALUES (?, 'active', datetime('now'))",
+            [completed_run_id],
+        )
+        .expect("active face generation");
+    let active_generation_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO face_group_generation_state (id, active_generation_id) VALUES (1, ?)",
+            [active_generation_id],
+        )
+        .expect("active face generation state");
+    connection
+        .execute(
+            "UPDATE face_groups SET automatic_generation_id = ? WHERE id = ?",
+            [active_generation_id, face_group_id],
+        )
+        .expect("published automatic face group");
+    connection
+        .execute(
+            "UPDATE face_group_members SET automatic_generation_id = ? WHERE face_group_id = ?",
+            [active_generation_id, face_group_id],
+        )
+        .expect("published automatic face group member");
+    connection
+        .execute(
+            "INSERT INTO face_group_representatives (generation_id, face_group_id, face_id) VALUES (?, ?, ?)",
+            [active_generation_id, face_group_id, face_id],
+        )
+        .expect("published face group representative");
+    connection
+        .execute(
+            "INSERT INTO face_group_manual_state (id, revision) VALUES (1, 0)",
+            [],
+        )
+        .expect("face manual state");
     drop(connection);
     server
         .post("/api/v1/ai/face_detection/clean")
-        .add_header(AUTHORIZATION, authorization)
+        .add_header(AUTHORIZATION, authorization.clone())
         .json(&json!({}))
         .await
         .assert_status_ok();
@@ -729,6 +924,11 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     let connection = pool.get().expect("connection");
     for table in [
         "face_grouping_runs",
+        "face_group_generations",
+        "face_group_generation_state",
+        "face_group_manual_state",
+        "face_group_representatives",
+        "face_group_members",
         "media_face_detection_results",
         "media_faces",
         "face_groups",
@@ -740,21 +940,76 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
             .expect("table count");
         assert_eq!(count, 0, "{table} should be empty");
     }
+    let transaction = connection
+        .unchecked_transaction()
+        .expect("face cleanup inspection transaction");
+    let cleanup: (String, String, i64) = transaction
+        .query_row(
+            "SELECT state, kind, COUNT(*) OVER () FROM file_operation_groups WHERE kind = 'face_detection_clean'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("face cleanup journal");
+    assert!(
+        matches!(
+            cleanup.0.as_str(),
+            "prepared" | "publishing" | "files_committed" | "cleanup_pending" | "cleaned"
+        ),
+        "face cleanup should remain on the successful journal path: {cleanup:?}"
+    );
+    assert_eq!(cleanup.1, "face_detection_clean");
+    assert_eq!(cleanup.2, 1);
+    if cleanup.0 == "cleaned" {
+        let claims = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM file_operation_path_claims WHERE role = 'face_crop_tree'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("released face cleanup claim count");
+        assert_eq!(claims, 0);
+    } else {
+        let claim: (String, String, String, String) = transaction
+            .query_row(
+                "SELECT storage_root, relative_path, mode, scope FROM file_operation_path_claims WHERE role = 'face_crop_tree'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("face cleanup path claim");
+        assert_eq!(
+            claim,
+            (
+                "previews".to_string(),
+                "faces".to_string(),
+                "write".to_string(),
+                "subtree".to_string()
+            )
+        );
+    }
+    transaction.commit().expect("face cleanup inspection");
+    drop(connection);
+
+    let regenerate = server
+        .post("/api/v1/ai/face_detection/start")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({}))
+        .await;
+    regenerate.assert_status_ok();
+    assert_eq!(
+        action_affected_jobs(&regenerate.json::<Value>(), "face_detection"),
+        1
+    );
 }
 
 #[tokio::test]
 async fn different_ai_features_start_independently() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "independent-admin", "independent@example.com");
     let media_id = create_test_media(&pool, "independent.jpg");
@@ -868,17 +1123,13 @@ async fn removed_trigger_and_image_clustering_routes_return_not_found() {
 
 #[tokio::test]
 async fn aggregate_status_reports_exact_independent_job_states_without_a_body() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "status-admin", "status-admin@example.com");
     let media_id = create_test_media(&pool, "status.jpg");
@@ -931,17 +1182,13 @@ async fn aggregate_status_reports_exact_independent_job_states_without_a_body() 
 
 #[tokio::test]
 async fn aggregate_status_reports_only_each_media_tasks_latest_job() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "latest-status-admin", "latest-status@example.com");
     let recovered_media_id = create_test_media(&pool, "recovered-face.jpg");
@@ -996,17 +1243,13 @@ async fn aggregate_status_reports_only_each_media_tasks_latest_job() {
 
 #[tokio::test]
 async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool.clone(),
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
     );
     let user_id = create_test_user(&pool, "dedup-admin", "dedup-admin@example.com");
     let media_id = create_test_media(&pool, "dedup.jpg");
@@ -1044,7 +1287,9 @@ async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
         action_affected_jobs(&cancel.json::<Value>(), "deduplicate"),
         1
     );
-    momento_api::processor::deduplicator::finalize_ready_runs(&pool)
+    let finalization_executors = crate::test_utils::test_executor_handles(pool.clone());
+    momento_api::processor::deduplicator::finalize_ready_runs(&finalization_executors)
+        .await
         .expect("finalize cancellation");
     let connection = pool.get().expect("database connection");
     connection
@@ -1053,19 +1298,104 @@ async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
     connection
         .execute("DELETE FROM llm_cancellation_scopes", [])
         .expect("acknowledge cancellation scope");
+    let cancelled_run_id: i64 = connection
+        .query_row("SELECT id FROM media_similarity_runs", [], |row| row.get(0))
+        .expect("cancelled deduplicate run");
+    connection
+        .execute(
+            "UPDATE llm_jobs SET status = 'failed', last_error = 'inference failed' WHERE task = 'image_clustering'",
+            [],
+        )
+        .expect("failed clustering job");
+    connection
+        .execute(
+            "INSERT INTO media_similarity_generations (run_id, status, published_at) VALUES (?, 'active', datetime('now'))",
+            [cancelled_run_id],
+        )
+        .expect("active similarity generation");
+    let generation_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO media_similarity_generation_state (singleton, active_generation_id) VALUES (1, ?)",
+            [generation_id],
+        )
+        .expect("active similarity generation state");
+    connection
+        .execute(
+            "INSERT INTO media_similarity_finalizations (run_id, generation_id, phase) VALUES (?, ?, 'cleanup')",
+            [cancelled_run_id, generation_id],
+        )
+        .expect("similarity finalization");
+    connection
+        .execute(
+            "INSERT INTO media_similarity_finalization_dirty (run_id, media_id, marked_at) VALUES (?, ?, datetime('now'))",
+            [cancelled_run_id, media_id],
+        )
+        .expect("similarity finalization dirty row");
+    connection
+        .execute(
+            "INSERT INTO media_similarity_labels (run_id, kind, media_id, component_label) VALUES (?, 'near_duplicate', ?, ?)",
+            [cancelled_run_id, media_id, media_id],
+        )
+        .expect("similarity label");
+    connection
+        .execute(
+            "INSERT INTO media_similarity_clusters (generation_id, kind, representative_media_id) VALUES (?, 'near_duplicate', ?)",
+            [generation_id, media_id],
+        )
+        .expect("similarity cluster");
+    let cluster_id = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO media_similarity_cluster_members (cluster_id, media_id, cosine_similarity, perceptual_hash_distance) VALUES (?, ?, 1.0, 0)",
+            [cluster_id, media_id],
+        )
+        .expect("similarity cluster member");
     drop(connection);
 
-    server
+    let clean = server
         .post("/api/v1/ai/deduplicate/clean")
-        .add_header(AUTHORIZATION, authorization)
-        .await
-        .assert_status_ok();
-    let run_count: i64 = pool
-        .get()
-        .expect("database connection")
-        .query_row("SELECT COUNT(*) FROM media_similarity_runs", [], |row| {
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await;
+    clean.assert_status_ok();
+    assert_eq!(
+        action_affected_jobs(&clean.json::<Value>(), "deduplicate"),
+        1
+    );
+    let connection = pool.get().expect("database connection");
+    for table in [
+        "llm_jobs",
+        "media_similarity_cluster_members",
+        "media_similarity_clusters",
+        "media_similarity_finalization_dirty",
+        "media_similarity_labels",
+        "media_similarity_finalizations",
+        "media_similarity_generation_state",
+        "media_similarity_generations",
+        "media_similarity_runs",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("deduplicate table count");
+        assert_eq!(count, 0, "{table} should be empty");
+    }
+    let dirty_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM media_similarity_dirty", [], |row| {
             row.get(0)
         })
-        .expect("run count");
-    assert_eq!(run_count, 0);
+        .expect("dirty media count");
+    assert_eq!(dirty_count, 1);
+    drop(connection);
+
+    let restart = server
+        .post("/api/v1/ai/deduplicate/start")
+        .add_header(AUTHORIZATION, authorization)
+        .await;
+    restart.assert_status_ok();
+    assert_eq!(
+        action_affected_jobs(&restart.json::<Value>(), "deduplicate"),
+        1
+    );
 }

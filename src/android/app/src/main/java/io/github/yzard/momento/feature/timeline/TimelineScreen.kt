@@ -103,24 +103,47 @@ data class TimelineScrollPosition(val index: Int, val offset: Int)
 
 private val timelineScrollPositions = mutableMapOf<String, TimelineScrollPosition>()
 
+private const val TIMELINE_PREFETCH_VIEWPORTS = 3
+private const val MINIMUM_TIMELINE_PREFETCH_ITEMS = 24
+
 fun normalizedTimelineSearchQuery(value: String): String = value.trim()
 
 fun timelineScrollKey(page: TimelinePage, period: TimelinePeriod, search: String): String =
     "${page.name}:${period.name}:$search"
 
+fun timelinePrefetchDistance(visibleItemsCount: Int): Int {
+    if (visibleItemsCount <= 0) return 0
+    return maxOf(
+        visibleItemsCount.saturatingMultiply(TIMELINE_PREFETCH_VIEWPORTS),
+        MINIMUM_TIMELINE_PREFETCH_ITEMS,
+    )
+}
+
+private fun Int.saturatingMultiply(other: Int): Int =
+    toLong().times(other).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
 fun shouldAppendTimeline(
     lastVisibleItemIndex: Int,
     totalItemsCount: Int,
+    visibleItemsCount: Int,
     hasOlder: Boolean,
-    appending: Boolean,
-): Boolean = hasOlder && !appending && totalItemsCount > 0 && lastVisibleItemIndex >= totalItemsCount - 3
+    loading: Boolean,
+): Boolean {
+    if (!hasOlder || loading || lastVisibleItemIndex < 0 || totalItemsCount <= 0) return false
+    val prefetchDistance = timelinePrefetchDistance(visibleItemsCount)
+    return prefetchDistance > 0 && totalItemsCount - lastVisibleItemIndex - 1 <= prefetchDistance
+}
 
 fun shouldPrependTimeline(
     firstVisibleItemIndex: Int,
+    visibleItemsCount: Int,
     hasNewer: Boolean,
-    prepending: Boolean,
-    scrollingTowardStart: Boolean,
-): Boolean = hasNewer && !prepending && scrollingTowardStart && firstVisibleItemIndex <= 2
+    loading: Boolean,
+): Boolean {
+    if (!hasNewer || loading || firstVisibleItemIndex < 0) return false
+    val prefetchDistance = timelinePrefetchDistance(visibleItemsCount)
+    return prefetchDistance > 0 && firstVisibleItemIndex <= prefetchDistance
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -190,17 +213,6 @@ private fun TimelinePageContent(
         }
     }
 
-    suspend fun loadNewer() {
-        val firstIndex = gridState.firstVisibleItemIndex
-        val firstOffset = gridState.firstVisibleItemScrollOffset
-        val existingGroups = (pagingState.page as? PageState.Ready)?.content.orEmpty()
-        val existingIds = flattenTimelineGroups(existingGroups).mapTo(mutableSetOf()) { it.media.id }
-        load(reset = false, direction = TimelineDirection.NEWER)
-        val updatedGroups = (pagingState.page as? PageState.Ready)?.content.orEmpty()
-        val addedCount = flattenTimelineGroups(updatedGroups).count { it.media.id !in existingIds }
-        if (addedCount > 0) gridState.scrollToItem(firstIndex + addedCount, firstOffset)
-    }
-
     suspend fun moveSelectedToTrash() {
         if (selectedIds.isEmpty()) return
         confirmTrash = false
@@ -237,21 +249,23 @@ private fun TimelinePageContent(
             shouldAppendTimeline(
                 lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
                 totalItemsCount = layout.totalItemsCount,
+                visibleItemsCount = layout.visibleItemsInfo.size,
                 hasOlder = pagingState.hasOlder && pagingState.message == null,
-                appending = pagingState.loadingDirection != null,
+                loading = pagingState.loadingDirection != null,
             )
         }.filter { it }.collect { load(reset = false, direction = TimelineDirection.OLDER) }
     }
 
     LaunchedEffect(gridState, pagingState.newerCursor, pagingState.hasNewer) {
         snapshotFlow {
+            val layout = gridState.layoutInfo
             shouldPrependTimeline(
-                firstVisibleItemIndex = gridState.firstVisibleItemIndex,
+                firstVisibleItemIndex = layout.visibleItemsInfo.firstOrNull()?.index ?: -1,
+                visibleItemsCount = layout.visibleItemsInfo.size,
                 hasNewer = pagingState.hasNewer && pagingState.message == null,
-                prepending = pagingState.loadingDirection != null,
-                scrollingTowardStart = gridState.isScrollInProgress && gridState.lastScrolledBackward,
+                loading = pagingState.loadingDirection != null,
             )
-        }.filter { it }.collect { loadNewer() }
+        }.filter { it }.collect { load(reset = false, direction = TimelineDirection.NEWER) }
     }
 
     DisposableEffect(scrollKey, gridState) {
@@ -306,7 +320,7 @@ private fun TimelinePageContent(
                 requestTrash = { confirmTrash = true },
                 requestAddToAlbum = { addingToAlbum = true },
                 retryOlder = { scope.launch { load(reset = false, direction = TimelineDirection.OLDER) } },
-                retryNewer = { scope.launch { loadNewer() } },
+                retryNewer = { scope.launch { load(reset = false, direction = TimelineDirection.NEWER) } },
                 choosePeriod = { visiblePeriod ->
                     pickerInitialDate = timelinePeriodInitialDate(
                         period = period,

@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Timelike, Utc};
-use momento_common::logging::{format_log_prefix, init_logging};
+use momento_common::logging::{format_log_prefix, validate_log_filename_prefix};
 use tracing::Level;
 
 #[test]
@@ -19,39 +19,9 @@ fn formats_one_space_between_timestamp_and_level() {
 
 #[test]
 fn rejects_log_filename_prefixes_with_whitespace() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let error = match init_logging(directory.path(), "llm service", "info") {
-        Ok(_) => panic!("invalid application name must fail"),
-        Err(error) => error,
-    };
-
+    let error = validate_log_filename_prefix("llm service")
+        .expect_err("invalid application name must fail");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-}
-
-#[test]
-fn writes_level_before_event_fields_without_application_or_process_id() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let guard =
-        init_logging(directory.path(), "momento-api", "info").expect("logging initialization");
-
-    tracing::warn!(job_id = "abc123", "POST /api/v1/map/clusters 401 00.93ms");
-    drop(guard);
-
-    let log_path = std::fs::read_dir(directory.path().join("logs"))
-        .expect("log directory")
-        .map(|entry| entry.expect("log entry").path())
-        .find(|path| {
-            path.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                name.starts_with("momento-api.") && name.ends_with(".log")
-            })
-        })
-        .expect("daily log file");
-    let output = std::fs::read_to_string(log_path).expect("log output");
-    assert!(output.contains(" WARN POST /api/v1/map/clusters 401 00.93ms"));
-    assert!(!output.contains("momento-api["));
-    assert!(!output.contains("  WARN"));
-    assert!(!output.contains('\u{1b}'));
 }
 
 #[test]

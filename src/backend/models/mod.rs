@@ -1,3 +1,4 @@
+mod admin;
 mod ai;
 mod album;
 mod auth;
@@ -12,6 +13,7 @@ mod share;
 mod trash;
 mod user;
 
+pub use admin::*;
 pub use ai::*;
 pub use album::*;
 pub use auth::*;

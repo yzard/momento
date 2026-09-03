@@ -34,7 +34,7 @@ fn authentication_rate_limits_return_retry_after_without_internal_details() {
 
 #[tokio::test]
 async fn password_change_errors_have_a_stable_machine_readable_code() {
-    let response = AppError::PasswordChangeRequired.into_response();
+    let response = render_error(AppError::PasswordChangeRequired).await;
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -46,7 +46,7 @@ async fn password_change_errors_have_a_stable_machine_readable_code() {
 }
 
 async fn assert_generic_internal_error(error: AppError) {
-    let response = error.into_response();
+    let response = render_error(error).await;
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let response_body = to_bytes(response.into_body(), usize::MAX)
@@ -55,6 +55,12 @@ async fn assert_generic_internal_error(error: AppError) {
     let response_body: serde_json::Value =
         serde_json::from_slice(&response_body).expect("JSON body");
     assert_eq!(response_body["detail"], "Internal server error");
+}
+
+async fn render_error(error: AppError) -> axum::response::Response {
+    let pool = crate::test_utils::create_test_db();
+    let executors = crate::test_utils::test_executor_handles(pool);
+    momento_api::error::render_pending_error_response(&executors.cpu, error.into_response()).await
 }
 
 #[tokio::test]

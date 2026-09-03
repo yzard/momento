@@ -12,6 +12,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import retrofit2.http.GET
 import retrofit2.http.POST
 
 class MomentoApiContractTest {
@@ -66,5 +67,27 @@ class MomentoApiContractTest {
 
         assertEquals("api/v1/metadata/status", requireNotNull(metadata.getAnnotation(POST::class.java)).value)
         assertEquals("{}", Json.encodeToString(EmptyRequest()))
+    }
+
+    @Test fun collectionThumbnailsUseBinaryGetRoutes() {
+        val placeThumbnail = LibraryApi::class.java.getMethod(
+            "placeThumbnail",
+            String::class.java,
+            kotlin.coroutines.Continuation::class.java,
+        )
+        val faceThumbnail = LibraryApi::class.java.getMethod(
+            "faceThumbnail",
+            java.lang.Long.TYPE,
+            kotlin.coroutines.Continuation::class.java,
+        )
+
+        assertEquals(
+            "api/v1/places/{placeId}/thumbnail",
+            requireNotNull(placeThumbnail.getAnnotation(GET::class.java)).value,
+        )
+        assertEquals(
+            "api/v1/faces/groups/{faceGroupId}/thumbnail",
+            requireNotNull(faceThumbnail.getAnnotation(GET::class.java)).value,
+        )
     }
 }

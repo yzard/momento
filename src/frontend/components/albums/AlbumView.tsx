@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAlbum, useRemoveAlbumMedia, useReorderAlbum } from '../../hooks/useAlbums'
-import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { cn } from '../../lib/utils'
-import { batchLoader } from '../../utils/batcher'
+import { thumbnailUrlLoader } from '../../utils/assetUrlLoader'
 import { useMediaSelection } from '../../hooks/useMediaSelection'
 import ConfirmationDialog from '../common/ConfirmationDialog'
 import MediaSelectionToolbar, { MediaSelectButton } from '../media/MediaSelectionToolbar'
@@ -110,9 +109,9 @@ function AlbumHeader(props: AlbumHeaderProps) {
       </button>
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="font-display text-4xl font-bold tracking-tight text-foreground">
+          <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">
             {props.name}
-          </h2>
+          </h1>
           {!props.selectionMode && <MediaSelectButton onClick={props.onStartSelection} />}
         </div>
         <div className="flex items-center gap-4 text-sm text-muted-foreground">
@@ -334,8 +333,8 @@ function AlbumMediaItem({
 }: AlbumMediaItemProps) {
   const { targetRef: containerRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
     resourceId: item.id,
-    loader: batchLoader,
-    getCachedUrl: (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal'),
+    loader: thumbnailUrlLoader,
+    getCachedUrl: null,
     rootMargin: '400px',
   })
 

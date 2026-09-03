@@ -11,7 +11,7 @@ services:
       RESET_ADMIN_PASSWORD: "${RESET_ADMIN_PASSWORD:-false}"
       SECRET_KEY: "${SECRET_KEY:-playground-only-change-this-secret-before-exposing-the-server}"
       LLM_SERVICE_API_KEY: "${LLM_SERVICE_API_KEY:-change-me-llm-service-key}"
-      LLM_SERVICE_ADDRESS: "momento-llm-service-debug:8100"
+      LLM_SERVICE_ADDRESS: "momento-llm-debug:8100"
     ports:
       - "8000:8000"
     volumes:
@@ -19,11 +19,11 @@ services:
     networks:
       - momento
     depends_on:
-      momento-llm-service-debug:
+      momento-llm-debug:
         condition: service_started
 
-  momento-llm-service-debug:
-    container_name: momento-llm-service-debug
+  momento-llm-debug:
+    container_name: momento-llm-debug
     image: zhuoyin/momento-llm-service:latest
     restart: unless-stopped
     environment:

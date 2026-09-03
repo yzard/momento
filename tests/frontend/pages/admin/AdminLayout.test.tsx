@@ -45,6 +45,8 @@ describe('AdminLayout', () => {
 
     const localImport = screen.getByRole('heading', { name: 'Local Import' }).closest('section')
     const webDAV = screen.getByRole('heading', { name: 'WebDAV' }).closest('section')
+    const adminHeading = screen.getByRole('heading', { name: 'Admin' })
+    expect(adminHeading.closest('[data-page-frame="true"]')?.className).toContain('w-full')
     expect(localImport).not.toBe(webDAV)
     expect(webDAV?.parentElement?.classList.contains('space-y-6')).toBe(true)
     expect(webDAV?.parentElement).toBe(localImport?.parentElement)

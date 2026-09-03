@@ -12,7 +12,7 @@ import org.junit.Test
 
 class BackupTest {
     @Test fun serverCapabilityPreventsAnExistingWorkerFromUploading() {
-        val enabled = BackupCapabilities(true, 2, 100, 100, 1, 24)
+        val enabled = BackupCapabilities(true, 2, 100, 100, 24)
         val disabled = enabled.copy(enabled = false)
         assertTrue(backupCanRun(enabled))
         assertFalse(backupCanRun(disabled))

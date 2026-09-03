@@ -70,6 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gosu \
+    libraw-bin \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
@@ -345,7 +346,10 @@ LABEL org.opencontainers.image.source="${SOURCE_REPOSITORY}" \
 
 ENV NO_ALBUMENTATIONS_UPDATE=1 \
     TRITON_CACHE_DIR=/data/llm/cache/triton \
-    XDG_CACHE_HOME=/data/llm/cache
+    XDG_CACHE_HOME=/data/llm/cache \
+    TMPDIR=/data/llm/tmp \
+    TEMP=/data/llm/tmp \
+    TMP=/data/llm/tmp
 
 # Keep every copied artifact in an independently reusable, GHCR-safe layer.
 COPY --from=ocr-builder /opt/python /opt/python
@@ -369,14 +373,16 @@ COPY --from=image-aesthetics-model /opt/models/aesthetic /opt/models/aesthetic
 
 RUN set -eux; \
     ! command -v cc; \
+    command -v dcraw_emu; \
     test -n "$(find /opt/triton-cache -name 'cuda_utils*.so' -print -quit)"; \
-    export XDG_CACHE_HOME=/tmp/verification-cache; \
+    mkdir -p /data/llm/tmp/verification-cache; \
+    export XDG_CACHE_HOME=/data/llm/tmp/verification-cache; \
     /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()"; \
     /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
     /opt/venvs/dinov2/bin/python -c "import clip, torch, transformers; from pathlib import Path; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-base', local_files_only=True).hidden_size == 768; assert 'ViT-B/32' in clip.available_models(); state = torch.load('/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth', map_location='cpu', weights_only=True); assert state['weight'].shape == (1, 512); assert state['bias'].shape == (1,); assert Path('/opt/models/clip/ViT-B-32.pt').is_file()"; \
     /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx')); assert Path('/opt/models/face-parsing/resnet18.onnx').is_file()"; \
     /opt/venvs/paddleocr/bin/python -c "from importlib.metadata import version; from pathlib import Path; assert version('paddlepaddle-gpu') == '${PADDLEPADDLE_VERSION}'; assert version('paddleocr') == '${PADDLEOCR_VERSION}'; model_root = Path('/opt/models/paddleocr'); assert all((model_root / model / filename).is_file() for model in ('PP-OCRv6_small_det', 'PP-OCRv6_small_rec') for filename in ('inference.json', 'inference.pdiparams', 'inference.yml'))"; \
-    rm -rf /tmp/verification-cache
+    rm -rf /data/llm/tmp/verification-cache
 
 WORKDIR /app
 
@@ -389,7 +395,7 @@ RUN set -e; \
         PYTHONPATH=/app/runtimes "$python" -c "import io; from PIL import Image; import pillow_heif; from image_runtime import decode_image, register_image_decoders; register_image_decoders(); sources = {'QOI': io.BytesIO(bytes.fromhex('716f696600000003000000020301fe0a141ec40000000000000001'))}; [(lambda output, image_format: (Image.new('RGB', (3, 2), color=(10, 20, 30)).save(output, format=image_format), output.seek(0), sources.__setitem__(image_format, output)))(io.BytesIO(), image_format) for image_format in ('GIF', 'TIFF', 'WEBP')]; heif = io.BytesIO(); pillow_heif.from_pillow(Image.new('RGB', (3, 2), color=(10, 20, 30))).save(heif); heif.seek(0); sources['HEIF'] = heif; assert all(decode_image(source).size == (3, 2) for source in sources.values())"; \
     done \
     && chmod +x /entrypoint_llm.sh \
-    && mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
+    && mkdir -p /data/llm/cache/triton /data/llm/queue /data/llm/tmp /data/logs
 
 EXPOSE 8100
 

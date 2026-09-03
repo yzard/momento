@@ -3,14 +3,19 @@ use momento_api::auth::{
     TEMPORARY_ADMIN_USERNAME,
 };
 
-use crate::test_utils::{create_test_db, create_test_user};
+use crate::test_utils::{create_test_db, create_test_user, test_executor_handles};
 
-#[test]
-fn ensure_default_admin_creates_one_for_an_empty_database() {
+#[tokio::test]
+async fn ensure_default_admin_creates_one_for_an_empty_database() {
     let pool = create_test_db();
+    let executors = test_executor_handles(pool.clone());
 
-    let admin_id = ensure_default_admin(&pool).expect("create default admin");
-    let repeated_id = ensure_default_admin(&pool).expect("reuse default admin");
+    let admin_id = ensure_default_admin(&executors)
+        .await
+        .expect("create default admin");
+    let repeated_id = ensure_default_admin(&executors)
+        .await
+        .expect("reuse default admin");
 
     assert_eq!(repeated_id, admin_id);
     let connection = pool.get().expect("database");
@@ -28,9 +33,10 @@ fn ensure_default_admin_creates_one_for_an_empty_database() {
     assert!(verify_password(TEMPORARY_ADMIN_PASSWORD, &password_hash));
 }
 
-#[test]
-fn prepare_admin_password_reset_preserves_account_and_deletes_refresh_tokens() {
+#[tokio::test]
+async fn prepare_admin_password_reset_preserves_account_and_deletes_refresh_tokens() {
     let pool = create_test_db();
+    let executors = test_executor_handles(pool.clone());
     let admin_id = create_test_user(&pool, "existing-admin", "admin@example.com");
     let connection = pool.get().expect("database");
     connection
@@ -54,7 +60,9 @@ fn prepare_admin_password_reset_preserves_account_and_deletes_refresh_tokens() {
         .expect("refresh token");
     drop(connection);
 
-    prepare_admin_password_reset(&pool, admin_id).expect("prepare reset");
+    prepare_admin_password_reset(&executors, admin_id)
+        .await
+        .expect("prepare reset");
 
     let connection = pool.get().expect("database");
     let (saved_hash, must_change_password): (String, i32) = connection

@@ -29,4 +29,4 @@ trap cleanup EXIT INT TERM
 
 docker compose -f "$COMPOSE_FILE" down --remove-orphans
 "$ROOT_DIR/build_docker.sh" "$KEYSTORE_DIR"
-docker compose -f "$COMPOSE_FILE" up --remove-orphans --abort-on-container-exit
+docker compose -f "$COMPOSE_FILE" up --remove-orphans

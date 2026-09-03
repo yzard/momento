@@ -2,10 +2,11 @@ use axum::http::header::AUTHORIZATION;
 use axum_test::TestServer;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
-use momento_api::constants::paths;
 use serde_json::{json, Value};
 
-use crate::test_utils::{create_test_app, create_test_media, create_test_user, grant_media_access};
+use crate::test_utils::{
+    create_test_app, create_test_media, create_test_user, grant_media_access, test_data_directory,
+};
 
 fn token(user_id: i64) -> String {
     create_access_token(user_id, "places", "user", &Config::default(), None).expect("token")
@@ -46,7 +47,9 @@ fn set_place_thumbnail(pool: &momento_api::database::DbPool, media_id: i64, byte
             rusqlite::params![relative_path, media_id],
         )
         .expect("thumbnail path");
-    let thumbnail_path = paths().thumbnails_places.join(&relative_path);
+    let thumbnail_path = test_data_directory(pool)
+        .join("thumbnails_places")
+        .join(&relative_path);
     std::fs::create_dir_all(thumbnail_path.parent().expect("thumbnail parent"))
         .expect("thumbnail directory");
     std::fs::write(thumbnail_path, bytes).expect("place thumbnail");
@@ -158,15 +161,11 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
     let place_id = list["places"][0]["placeId"].as_str().expect("place ID");
 
     let initial_thumbnail = server
-        .post("/api/v1/places/thumbnail")
+        .get(&format!("/api/v1/places/{place_id}/thumbnail"))
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({"placeId": place_id}))
         .await;
     initial_thumbnail.assert_status_ok();
-    assert_eq!(
-        initial_thumbnail.json::<Value>()["thumbnail"],
-        "data:image/jpeg;base64,AQID"
-    );
+    assert_eq!(initial_thumbnail.as_bytes().as_ref(), &[1, 2, 3]);
 
     let new_best_media = create_test_media(&pool, "new-best.jpg");
     set_place(&pool, new_best_media, "Paris", None, "France");
@@ -174,15 +173,11 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
     insert_aesthetics(&pool, new_best_media, 1.0);
     set_place_thumbnail(&pool, new_best_media, &[7, 8, 9]);
     let updated_thumbnail = server
-        .post("/api/v1/places/thumbnail")
+        .get(&format!("/api/v1/places/{place_id}/thumbnail"))
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({"placeId": place_id}))
         .await;
     updated_thumbnail.assert_status_ok();
-    assert_eq!(
-        updated_thumbnail.json::<Value>()["thumbnail"],
-        "data:image/jpeg;base64,BwgJ"
-    );
+    assert_eq!(updated_thumbnail.as_bytes().as_ref(), &[7, 8, 9]);
 
     pool.get()
         .expect("connection")
@@ -192,15 +187,11 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
         )
         .expect("remove access");
     let thumbnail_after_delete = server
-        .post("/api/v1/places/thumbnail")
+        .get(&format!("/api/v1/places/{place_id}/thumbnail"))
         .add_header(AUTHORIZATION, authorization.clone())
-        .json(&json!({"placeId": place_id}))
         .await;
     thumbnail_after_delete.assert_status_ok();
-    assert_eq!(
-        thumbnail_after_delete.json::<Value>()["thumbnail"],
-        "data:image/jpeg;base64,AQID"
-    );
+    assert_eq!(thumbnail_after_delete.as_bytes().as_ref(), &[1, 2, 3]);
 
     let first_page = server
         .post("/api/v1/places/get")
@@ -246,4 +237,55 @@ async fn invalid_place_identifiers_and_limits_are_rejected() {
         .json(&json!({"placeId": "not-valid", "cursor": null, "limit": 10}))
         .await
         .assert_status_bad_request();
+}
+
+#[tokio::test]
+async fn place_thumbnail_requires_a_persisted_thumbnail_reference() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(
+        &pool,
+        "place-no-thumbnail",
+        "place-no-thumbnail@example.com",
+    );
+    let media_id = create_test_media(&pool, "legacy-place.jpg");
+    set_place(
+        &pool,
+        media_id,
+        "Boston",
+        Some("Massachusetts"),
+        "United States",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    pool.get()
+        .expect("connection")
+        .execute(
+            "UPDATE media SET file_path = 'legacy/legacy-place.jpg' WHERE id = ?",
+            [media_id],
+        )
+        .expect("legacy media path");
+    let guessed_thumbnail = test_data_directory(&pool)
+        .join("thumbnails_places")
+        .join("legacy/legacy-place.jpg");
+    std::fs::create_dir_all(guessed_thumbnail.parent().expect("thumbnail parent"))
+        .expect("thumbnail directory");
+    std::fs::write(guessed_thumbnail, b"must-not-be-served").expect("legacy thumbnail");
+
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", token(user_id));
+    let list = server
+        .post("/api/v1/places/list")
+        .add_header(AUTHORIZATION, authorization.clone())
+        .json(&json!({"cursor": null, "limit": 10}))
+        .await;
+    list.assert_status_ok();
+    let place_id = list.json::<Value>()["places"][0]["placeId"]
+        .as_str()
+        .expect("place ID")
+        .to_string();
+
+    let response = server
+        .get(&format!("/api/v1/places/{place_id}/thumbnail"))
+        .add_header(AUTHORIZATION, authorization)
+        .await;
+    response.assert_status_not_found();
 }

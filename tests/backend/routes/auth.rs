@@ -7,11 +7,8 @@ use momento_api::{
     config::Config,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
 
-use crate::test_utils::{
-    create_test_config_manager, create_test_db, create_test_user, init_test_paths,
-};
+use crate::test_utils::{create_test_config_manager, create_test_db, create_test_user};
 
 fn basic_credentials(username: &str, password: &str) -> String {
     let encoded =
@@ -42,14 +39,10 @@ fn create_server_with_config(
     reset_user_id: Option<i64>,
     config: Config,
 ) -> TestServer {
-    init_test_paths();
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool,
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        reset_user_id,
+        crate::test_utils::test_app_dependencies(pool, reset_user_id),
     );
     TestServer::new(app).expect("server")
 }
@@ -84,18 +77,13 @@ async fn token_and_browser_password_logins_share_the_same_rate_limit() {
 
 #[tokio::test]
 async fn buffered_json_routes_enforce_the_configured_body_limit() {
-    init_test_paths();
     let pool = create_test_db();
     let mut config = Config::default();
     config.server.api_request_body_max_bytes = 16;
-    config.server.request_log_body_max_bytes = 8;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
         config_manager,
-        pool,
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool, None),
     );
     let server = TestServer::new(app).expect("server");
 
@@ -109,7 +97,10 @@ async fn buffered_json_routes_enforce_the_configured_body_limit() {
 #[tokio::test]
 async fn temporary_admin_credentials_apply_only_to_the_reset_process() {
     let (pool, admin_id) = create_admin_fixture();
-    prepare_admin_password_reset(&pool, admin_id).expect("prepare reset");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    prepare_admin_password_reset(&executors, admin_id)
+        .await
+        .expect("prepare reset");
     let reset_server = create_server(pool.clone(), Some(admin_id));
 
     let reset_login = reset_server
@@ -186,7 +177,10 @@ async fn temporary_admin_credentials_apply_only_to_the_reset_process() {
 #[tokio::test]
 async fn temporary_admin_password_can_be_replaced_without_the_stored_password() {
     let (pool, admin_id) = create_admin_fixture();
-    prepare_admin_password_reset(&pool, admin_id).expect("prepare reset");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    prepare_admin_password_reset(&executors, admin_id)
+        .await
+        .expect("prepare reset");
     let server = create_server(pool.clone(), Some(admin_id));
     let login = server
         .post("/api/v1/user/authenticate")

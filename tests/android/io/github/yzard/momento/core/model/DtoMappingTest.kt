@@ -34,7 +34,7 @@ class DtoMappingTest {
     }
 
     @Test fun decodesCapabilitiesContract() {
-        val capabilities = Json.decodeFromString<Capabilities>("{\"appVersion\":\"1.0\",\"apiVersion\":1,\"supportedMediaExtensions\":[\".jpg\"],\"features\":{\"llm\":false,\"imageTagging\":false,\"deduplicate\":true,\"faceDetection\":false,\"imageAesthetics\":false,\"screenshotDetection\":false,\"documentDetection\":false},\"backup\":{\"enabled\":true,\"protocolVersion\":2,\"maxUploadBytes\":100,\"maxChunkBytes\":10,\"maxActiveUploadsPerUser\":2,\"sessionExpiryHours\":24}}")
+        val capabilities = Json.decodeFromString<Capabilities>("{\"appVersion\":\"1.0\",\"apiVersion\":1,\"supportedMediaExtensions\":[\".jpg\"],\"features\":{\"llm\":false,\"imageTagging\":false,\"deduplicate\":true,\"faceDetection\":false,\"imageAesthetics\":false,\"screenshotDetection\":false,\"documentDetection\":false},\"backup\":{\"enabled\":true,\"protocolVersion\":2,\"maxUploadBytes\":100,\"maxChunkBytes\":10,\"sessionExpiryHours\":24}}")
         assertEquals(10, capabilities.backup.maxChunkBytes)
     }
 
@@ -62,11 +62,6 @@ class DtoMappingTest {
 
         assertEquals(1200, trash.items.single().width)
         assertEquals("2026-08-23T10:30:00", trash.items.single().dateTaken)
-    }
-
-    @Test fun decodesPlaceThumbnailContract() {
-        val response = Json.decodeFromString<PlaceThumbnailResponse>("{\"thumbnail\":\"data:image/jpeg;base64,AQID\"}")
-        assertEquals("data:image/jpeg;base64,AQID", response.thumbnail)
     }
 
     @Test fun encodesMapBoundsAndAlbumMediaRequestContracts() {

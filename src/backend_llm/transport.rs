@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::ws::Message;
-use momento_common::llm::{JobResult, ServiceControlMessage};
+use momento_common::llm::result_stream::ResultManifest;
+use momento_common::llm::{encode_result_chunk, ServiceControlMessage, MAX_BINARY_CHUNK_BYTES};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::ServiceError;
@@ -38,19 +41,70 @@ pub struct RegisteredConnection {
 
 #[async_trait]
 pub trait ResultDeliveryTransport: Send + Sync {
+    async fn client_is_connected(&self, client_id: &str) -> bool;
+
     async fn deliver_result(
         &self,
         client_id: &str,
-        result: &JobResult,
+        manifest: &ResultManifest,
+        records_path: &Path,
         acknowledgement_timeout: Duration,
-    ) -> Result<(), String>;
+    ) -> Result<ResultDeliveryOutcome, ResultDeliveryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultDeliveryOutcome {
+    Received,
+    Deferred { retry_after_ms: u64 },
+    Rejected { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultDeliveryError {
+    ClientUnavailable { message: String },
+    AttemptFailed { message: String },
+}
+
+impl ResultDeliveryError {
+    pub fn client_unavailable(message: impl Into<String>) -> Self {
+        Self::ClientUnavailable {
+            message: message.into(),
+        }
+    }
+
+    pub fn attempt_failed(message: impl Into<String>) -> Self {
+        Self::AttemptFailed {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::ClientUnavailable { message } | Self::AttemptFailed { message } => message,
+        }
+    }
+}
+
+enum ResultDeliveryEvent {
+    Ready,
+    ChunkReady { offset: u64 },
+    Received,
+    Deferred { retry_after_ms: u64 },
+    Rejected { error: String },
+    TransportError(String),
+}
+
+#[derive(Clone, Copy)]
+pub struct ConnectionIdentity<'a> {
+    pub client_id: &'a str,
+    pub generation: u64,
 }
 
 #[derive(Default)]
 pub struct ConnectionRegistry {
     next_generation: AtomicU64,
     connections: Mutex<HashMap<String, ClientConnection>>,
-    pending_results: Mutex<HashMap<PendingResultKey, oneshot::Sender<Result<(), String>>>>,
+    pending_results: Mutex<HashMap<PendingResultKey, mpsc::Sender<ResultDeliveryEvent>>>,
 }
 
 impl ConnectionRegistry {
@@ -93,7 +147,9 @@ impl ConnectionRegistry {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(response) = pending_results.remove(&key) {
-                let _ = response.send(Err("client disconnected".to_string()));
+                let _ = response.try_send(ResultDeliveryEvent::TransportError(
+                    "client disconnected".to_string(),
+                ));
             }
         }
     }
@@ -146,13 +202,14 @@ impl ConnectionRegistry {
             .map_err(|_| format!("client connection closed: {client_id}"))
     }
 
-    pub async fn complete_result_delivery(
+    async fn send_result_delivery_event(
         &self,
         client_id: &str,
         generation: u64,
         job_id: &str,
         attempt: u32,
-        response: Result<(), String>,
+        event: ResultDeliveryEvent,
+        terminal: bool,
     ) -> Result<(), ServiceError> {
         let key = PendingResultKey {
             client_id: client_id.to_string(),
@@ -160,28 +217,98 @@ impl ConnectionRegistry {
             job_id: job_id.to_string(),
             attempt,
         };
-        let sender = self.pending_results.lock().await.remove(&key);
+        let sender = if terminal {
+            self.pending_results.lock().await.remove(&key)
+        } else {
+            self.pending_results.lock().await.get(&key).cloned()
+        };
         let Some(sender) = sender else {
             return Ok(());
         };
-        let _ = sender.send(response);
-        Ok(())
+        sender.try_send(event).map_err(|error| {
+            ServiceError::Conflict(format!("result delivery state is not ready: {error}"))
+        })
+    }
+
+    pub async fn result_ready(
+        &self,
+        connection: ConnectionIdentity<'_>,
+        job_id: &str,
+        attempt: u32,
+    ) -> Result<(), ServiceError> {
+        self.send_result_delivery_event(
+            connection.client_id,
+            connection.generation,
+            job_id,
+            attempt,
+            ResultDeliveryEvent::Ready,
+            false,
+        )
+        .await
+    }
+
+    pub async fn result_chunk_ready(
+        &self,
+        connection: ConnectionIdentity<'_>,
+        job_id: &str,
+        attempt: u32,
+        offset: u64,
+    ) -> Result<(), ServiceError> {
+        self.send_result_delivery_event(
+            connection.client_id,
+            connection.generation,
+            job_id,
+            attempt,
+            ResultDeliveryEvent::ChunkReady { offset },
+            false,
+        )
+        .await
+    }
+
+    pub async fn complete_result_delivery(
+        &self,
+        connection: ConnectionIdentity<'_>,
+        job_id: &str,
+        attempt: u32,
+        outcome: ResultDeliveryOutcome,
+    ) -> Result<(), ServiceError> {
+        let event = match outcome {
+            ResultDeliveryOutcome::Received => ResultDeliveryEvent::Received,
+            ResultDeliveryOutcome::Deferred { retry_after_ms } => {
+                ResultDeliveryEvent::Deferred { retry_after_ms }
+            }
+            ResultDeliveryOutcome::Rejected { error } => ResultDeliveryEvent::Rejected { error },
+        };
+        self.send_result_delivery_event(
+            connection.client_id,
+            connection.generation,
+            job_id,
+            attempt,
+            event,
+            true,
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl ResultDeliveryTransport for ConnectionRegistry {
+    async fn client_is_connected(&self, client_id: &str) -> bool {
+        self.connections.lock().await.contains_key(client_id)
+    }
+
     async fn deliver_result(
         &self,
         client_id: &str,
-        result: &JobResult,
+        manifest: &ResultManifest,
+        records_path: &Path,
         acknowledgement_timeout: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<ResultDeliveryOutcome, ResultDeliveryError> {
         let key = PendingResultKey {
             client_id: client_id.to_string(),
             generation: 0,
-            job_id: result.job_id.clone(),
-            attempt: result.attempt,
+            job_id: manifest.job_id.clone(),
+            attempt: manifest.attempt,
         };
         let connection = self
             .connections
@@ -189,53 +316,179 @@ impl ResultDeliveryTransport for ConnectionRegistry {
             .await
             .get(client_id)
             .cloned()
-            .ok_or_else(|| format!("client is not connected: {client_id}"))?;
+            .ok_or_else(|| {
+                ResultDeliveryError::client_unavailable(format!(
+                    "client is not connected: {client_id}"
+                ))
+            })?;
         let key = PendingResultKey {
             generation: connection.generation,
             ..key
         };
-        let (sender, receiver) = oneshot::channel();
+        let (sender, mut receiver) = mpsc::channel(1);
         let mut pending_results = self.pending_results.lock().await;
         if pending_results.contains_key(&key) {
-            return Err("result is already being delivered".to_string());
+            return Err(ResultDeliveryError::attempt_failed(
+                "result is already being delivered",
+            ));
         }
         pending_results.insert(key.clone(), sender);
         drop(pending_results);
-        let text = serde_json::to_string(&ServiceControlMessage::Result {
-            result: result.clone(),
+        let delivery = deliver_registered_result(
+            &connection,
+            manifest,
+            records_path,
+            acknowledgement_timeout,
+            &mut receiver,
+        )
+        .await;
+        self.pending_results.lock().await.remove(&key);
+        delivery
+    }
+}
+
+async fn deliver_registered_result(
+    connection: &ClientConnection,
+    manifest: &ResultManifest,
+    records_path: &Path,
+    acknowledgement_timeout: Duration,
+    receiver: &mut mpsc::Receiver<ResultDeliveryEvent>,
+) -> Result<ResultDeliveryOutcome, ResultDeliveryError> {
+    let text = serde_json::to_string(&ServiceControlMessage::ResultStart {
+        manifest: manifest.clone(),
+    })
+    .map_err(|error| {
+        ResultDeliveryError::attempt_failed(format!("failed to serialize service message: {error}"))
+    })?;
+    send_confirmed(connection, Message::Text(text)).await?;
+    match receive_result_event(receiver, acknowledgement_timeout).await? {
+        ResultDeliveryEvent::Ready => {}
+        ResultDeliveryEvent::Received => return Ok(ResultDeliveryOutcome::Received),
+        ResultDeliveryEvent::Deferred { retry_after_ms } => {
+            return Ok(ResultDeliveryOutcome::Deferred { retry_after_ms });
+        }
+        ResultDeliveryEvent::Rejected { error } => {
+            return Ok(ResultDeliveryOutcome::Rejected { error });
+        }
+        ResultDeliveryEvent::ChunkReady { .. } => {
+            return Err(ResultDeliveryError::attempt_failed(
+                "received result chunk credit before resultReady",
+            ));
+        }
+        ResultDeliveryEvent::TransportError(error) => {
+            return Err(ResultDeliveryError::client_unavailable(error));
+        }
+    }
+
+    let mut file = tokio::fs::File::open(records_path).await.map_err(|error| {
+        ResultDeliveryError::attempt_failed(format!(
+            "failed to open durable result records: {error}"
+        ))
+    })?;
+    let mut offset = 0_u64;
+    let mut buffer = vec![0_u8; MAX_BINARY_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer).await.map_err(|error| {
+            ResultDeliveryError::attempt_failed(format!(
+                "failed to read durable result records: {error}"
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        let frame = encode_result_chunk(&manifest.job_id, offset, &buffer[..read])
+            .map_err(ResultDeliveryError::attempt_failed)?;
+        send_confirmed(connection, Message::Binary(frame)).await?;
+        offset = offset.checked_add(read as u64).ok_or_else(|| {
+            ResultDeliveryError::attempt_failed("result delivery offset overflowed")
+        })?;
+        match receive_result_event(receiver, acknowledgement_timeout).await? {
+            ResultDeliveryEvent::ChunkReady {
+                offset: acknowledged,
+            } if acknowledged == offset => {}
+            ResultDeliveryEvent::Received => return Ok(ResultDeliveryOutcome::Received),
+            ResultDeliveryEvent::Deferred { retry_after_ms } => {
+                return Ok(ResultDeliveryOutcome::Deferred { retry_after_ms });
+            }
+            ResultDeliveryEvent::Rejected { error } => {
+                return Ok(ResultDeliveryOutcome::Rejected { error });
+            }
+            ResultDeliveryEvent::TransportError(error) => {
+                return Err(ResultDeliveryError::client_unavailable(error));
+            }
+            _ => {
+                return Err(ResultDeliveryError::attempt_failed(
+                    "result chunk acknowledgement is invalid",
+                ));
+            }
+        }
+    }
+    if offset != manifest.byte_size {
+        return Err(ResultDeliveryError::attempt_failed(
+            "durable result file size changed during delivery",
+        ));
+    }
+    let finished = serde_json::to_string(&ServiceControlMessage::ResultFinished {
+        job_id: manifest.job_id.clone(),
+        attempt: manifest.attempt,
+    })
+    .map_err(|error| {
+        ResultDeliveryError::attempt_failed(format!("failed to serialize resultFinished: {error}"))
+    })?;
+    send_confirmed(connection, Message::Text(finished)).await?;
+    let outcome = match receive_result_event(receiver, acknowledgement_timeout).await? {
+        ResultDeliveryEvent::Received => ResultDeliveryOutcome::Received,
+        ResultDeliveryEvent::Deferred { retry_after_ms } => {
+            ResultDeliveryOutcome::Deferred { retry_after_ms }
+        }
+        ResultDeliveryEvent::Rejected { error } => ResultDeliveryOutcome::Rejected { error },
+        ResultDeliveryEvent::TransportError(error) => {
+            return Err(ResultDeliveryError::client_unavailable(error));
+        }
+        _ => {
+            return Err(ResultDeliveryError::attempt_failed(
+                "result terminal receipt is invalid",
+            ));
+        }
+    };
+    Ok(outcome)
+}
+
+async fn send_confirmed(
+    connection: &ClientConnection,
+    message: Message,
+) -> Result<(), ResultDeliveryError> {
+    let (sent, sent_response) = oneshot::channel();
+    connection
+        .outbound
+        .send(OutboundMessage {
+            message,
+            sent: Some(sent),
         })
-        .map_err(|error| format!("failed to serialize service message: {error}"))?;
-        let (sent, sent_response) = oneshot::channel();
-        if let Err(error) = connection
-            .outbound
-            .send(OutboundMessage {
-                message: Message::Text(text),
-                sent: Some(sent),
-            })
-            .await
-        {
-            self.pending_results.lock().await.remove(&key);
-            return Err(format!("client connection closed: {client_id}: {error}"));
-        }
-        match sent_response.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                self.pending_results.lock().await.remove(&key);
-                return Err(error);
-            }
-            Err(_) => {
-                self.pending_results.lock().await.remove(&key);
-                return Err("result send confirmation channel closed".to_string());
-            }
-        }
-        match tokio::time::timeout(acknowledgement_timeout, receiver).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(_)) => Err("result receipt channel closed".to_string()),
-            Err(_) => {
-                self.pending_results.lock().await.remove(&key);
-                Err("result receipt timed out".to_string())
-            }
-        }
+        .await
+        .map_err(|error| {
+            ResultDeliveryError::client_unavailable(format!("client connection closed: {error}"))
+        })?;
+    sent_response
+        .await
+        .map_err(|_| {
+            ResultDeliveryError::client_unavailable("result send confirmation channel closed")
+        })?
+        .map_err(ResultDeliveryError::client_unavailable)
+}
+
+async fn receive_result_event(
+    receiver: &mut mpsc::Receiver<ResultDeliveryEvent>,
+    timeout: Duration,
+) -> Result<ResultDeliveryEvent, ResultDeliveryError> {
+    match tokio::time::timeout(timeout, receiver.recv()).await {
+        Ok(Some(event)) => Ok(event),
+        Ok(None) => Err(ResultDeliveryError::client_unavailable(
+            "result receipt channel closed",
+        )),
+        Err(_) => Err(ResultDeliveryError::attempt_failed(
+            "result receipt timed out",
+        )),
     }
 }
 

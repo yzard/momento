@@ -61,16 +61,10 @@ describe('placesApi', () => {
     })
   })
 
-  it('loads a freshly selected place thumbnail by place identifier', async () => {
-    post.mockResolvedValue({
-      data: { thumbnail: 'data:image/jpeg;base64,dGh1bWI=' },
-    })
-
+  it('builds a freshly selected place binary thumbnail URL', async () => {
     await expect(placesApi.getThumbnail('paris-france')).resolves.toBe(
-      'data:image/jpeg;base64,dGh1bWI='
+      '/api/v1/places/paris-france/thumbnail'
     )
-    expect(post).toHaveBeenCalledWith('/places/thumbnail', {
-      placeId: 'paris-france',
-    })
+    expect(post).not.toHaveBeenCalled()
   })
 })

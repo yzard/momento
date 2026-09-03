@@ -2,6 +2,21 @@ use crate::test_utils::{create_test_db, create_test_media};
 use momento_api::database::queries;
 
 #[test]
+fn fresh_schema_records_the_source_owned_database_identity() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("database connection");
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .expect("application ID");
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("schema version");
+
+    assert_eq!(application_id, 0x4d4f_4d4f);
+    assert_eq!(schema_version, 1);
+}
+
+#[test]
 fn creates_active_media_access_index() {
     let pool = create_test_db();
     let connection = pool.get().expect("Failed to get database connection");
@@ -21,7 +36,12 @@ fn creates_current_schema_without_removed_tables() {
     let pool = create_test_db();
     let connection = pool.get().expect("Failed to get database connection");
 
-    for removed_table in ["image_text", "media_similarity_failures", "schema_version"] {
+    for removed_table in [
+        "image_text",
+        "llm_job_results",
+        "media_similarity_failures",
+        "schema_version",
+    ] {
         let exists: i64 = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
@@ -132,6 +152,174 @@ fn creates_durable_metadata_and_ai_job_tables() {
             .expect("Failed to inspect classifier table");
         assert_eq!(exists, 1, "{classifier_table} should exist");
     }
+}
+
+#[test]
+fn llm_job_state_transitions_advance_the_fencing_version() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "llm-state-version.jpg");
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, task, status) VALUES ('versioned-job', ?, 'ocr', 'queued')",
+            [media_id],
+        )
+        .expect("queued job");
+    let initial: i64 = connection
+        .query_row(
+            "SELECT state_version FROM llm_jobs WHERE id = 'versioned-job'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("initial version");
+    assert_eq!(initial, 1);
+
+    assert_eq!(
+        connection
+            .execute(queries::ai_jobs::CLAIM, ["versioned-job"])
+            .expect("claim job"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT state_version FROM llm_jobs WHERE id = 'versioned-job'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("claimed version"),
+        2
+    );
+
+    assert_eq!(
+        connection
+            .execute(queries::ai_jobs::CANCEL_FOR_TASK, ["ocr"])
+            .expect("cancel job"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT state_version FROM llm_jobs WHERE id = 'versioned-job'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("cancelled version"),
+        3
+    );
+}
+
+#[test]
+fn creates_bounded_generic_file_operation_journal_schema() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("database connection");
+
+    for table in [
+        "file_operation_groups",
+        "file_operation_entries",
+        "file_operation_path_claims",
+        "data_dir_space_reservations",
+        "file_operation_retry_requests",
+    ] {
+        let exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("journal table lookup");
+        assert_eq!(exists, 1, "{table} should exist");
+    }
+    connection
+        .execute(
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count) VALUES ('group-1', 'test', 'test', 'owner-1', 'prepared', 1)",
+            [],
+        )
+        .expect("journal group");
+    connection
+        .execute(
+            "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path) VALUES ('group-1', 0, 'publish', 'journal', 'staging/a', 'final/a')",
+            [],
+        )
+        .expect("journal entry");
+    connection
+        .execute(
+            "INSERT INTO file_operation_path_claims (group_id, sequence, storage_root, relative_path, path_key, mode, scope, role) VALUES ('group-1', 0, 'originals', 'a', X'000161', 'write', 'exact', 'destination')",
+            [],
+        )
+        .expect("journal path claim");
+    assert!(connection
+        .execute(
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count) VALUES ('too-large', 'test', 'test', 'owner-2', 'prepared', 257)",
+            [],
+        )
+        .is_err());
+}
+
+#[test]
+fn creates_bounded_token_fenced_llm_result_receipt_schema() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "result-receipt-schema.jpg");
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('receipt-job', ?, 'ocr', 'submitted', 1)",
+            [media_id],
+        )
+        .expect("submitted job");
+    connection
+        .execute(
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, product_target, product_version, entry_count) VALUES ('receipt-group', 'llm_result_receive', 'llm_result', 'receipt-job', 'prepared', 'llm_result_inbox', 1, 1)",
+            [],
+        )
+        .expect("result receive group");
+    connection
+        .execute_batch(
+            "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('receipt-sqlite', 'sqlite', 'llm_result', 'receipt-job', 'test', 4096, 'active');",
+        )
+        .expect("result SQLite reservation");
+    connection
+        .execute(
+            "INSERT INTO llm_result_receipts (job_id, attempt, job_version, media_id, task, result_status, model_type, model_version, encoding, record_count, byte_size, content_hash, journal_group_id, sqlite_reservation_id, inbox_path, receive_token, state, result_product_version) VALUES ('receipt-job', 1, 1, ?, 'ocr', 'completed', 'ocr', 'test', 'momento-result-records-v1', 3, 72, ?, 'receipt-group', 'receipt-sqlite', 'llm-results/receipt-job/1.bin', '00000000-0000-0000-0000-000000000001', 'receiving', 1)",
+            rusqlite::params![media_id, "0".repeat(64)],
+        )
+        .expect("result receipt");
+    connection
+        .execute(
+            "INSERT INTO llm_result_staging (job_id, attempt, record_sequence, input_sequence, kind, byte_offset, encoded_size, normalized_payload) VALUES ('receipt-job', 1, 0, 0, 'ocr_text_continuation', 0, 24, X'')",
+            [],
+        )
+        .expect("bounded staging record");
+
+    assert!(connection
+        .execute(
+            "INSERT INTO llm_result_staging (job_id, attempt, record_sequence, input_sequence, kind, byte_offset, encoded_size, normalized_payload) VALUES ('receipt-job', 1, 1, 0, 'ocr_text', 24, 1048600, zeroblob(1048577))",
+            [],
+        )
+        .is_err());
+    assert!(connection
+        .execute(
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, product_target, product_version, entry_count) VALUES ('failed-receipt-group', 'llm_result_receive', 'llm_result', 'failed-receipt-job', 'prepared', 'llm_result_inbox', 1, 1)",
+            [],
+        )
+        .is_ok());
+    connection
+        .execute(
+            "INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('failed-receipt-job', ?, 'image_tagging', 'submitted', 1)",
+            [media_id],
+        )
+        .expect("second submitted job");
+    connection
+        .execute_batch(
+            "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('failed-receipt-sqlite', 'sqlite', 'llm_result', 'failed-receipt-job', 'test', 4096, 'active');",
+        )
+        .expect("failed result SQLite reservation");
+    assert!(connection
+        .execute(
+            "INSERT INTO llm_result_receipts (job_id, attempt, job_version, media_id, task, result_status, encoding, record_count, byte_size, content_hash, journal_group_id, sqlite_reservation_id, inbox_path, receive_token, state, result_product_version) VALUES ('failed-receipt-job', 1, 1, ?, 'image_tagging', 'completed', 'momento-result-records-v1', 1, 24, ?, 'failed-receipt-group', 'failed-receipt-sqlite', 'llm-results/failed-receipt-job/1.bin', '00000000-0000-0000-0000-000000000002', 'receiving', 1)",
+            rusqlite::params![media_id, "0".repeat(64)],
+        )
+        .is_err());
 }
 
 #[test]

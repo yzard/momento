@@ -1,11 +1,18 @@
 use async_trait::async_trait;
 use llm_service::config::{Config, SchedulerConfig};
-use llm_service::provider::ServiceManager;
+use llm_service::provider::{InferenceResponse, InputInferenceResponse, ServiceManager};
+use llm_service::result_output::encode_completed_result;
 use llm_service::scheduler::QueueInputDescriptor;
 use llm_service::scheduler::{QueueAdmission, QueueManifest, Scheduler};
-use llm_service::transport::ResultDeliveryTransport;
-use momento_common::llm::{CancelJobsRequest, JobResult};
+use llm_service::transport::{ResultDeliveryError, ResultDeliveryOutcome, ResultDeliveryTransport};
+use momento_common::llm::result_stream::{
+    ResultInputCorrelation, ResultManifest, ResultRecordChunkDecoder, ResultRecordCollector,
+    ValidatedResultValue,
+};
+use momento_common::llm::CancelJobsRequest;
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -13,13 +20,17 @@ use tokio::sync::Mutex;
 
 struct MockResultDeliveryTransport {
     failure: Option<String>,
-    deliveries: Mutex<Vec<(String, JobResult)>>,
+    outcome: ResultDeliveryOutcome,
+    connected: AtomicBool,
+    deliveries: Mutex<Vec<(String, ResultManifest, Vec<u8>)>>,
 }
 
 impl MockResultDeliveryTransport {
     fn acknowledging() -> Arc<Self> {
         Arc::new(Self {
             failure: None,
+            outcome: ResultDeliveryOutcome::Received,
+            connected: AtomicBool::new(true),
             deliveries: Mutex::new(Vec::new()),
         })
     }
@@ -27,43 +38,157 @@ impl MockResultDeliveryTransport {
     fn failing(error: &str) -> Arc<Self> {
         Arc::new(Self {
             failure: Some(error.to_string()),
+            outcome: ResultDeliveryOutcome::Received,
+            connected: AtomicBool::new(true),
             deliveries: Mutex::new(Vec::new()),
         })
+    }
+
+    fn returning(outcome: ResultDeliveryOutcome) -> Arc<Self> {
+        Arc::new(Self {
+            failure: None,
+            outcome,
+            connected: AtomicBool::new(true),
+            deliveries: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn disconnected() -> Arc<Self> {
+        Arc::new(Self {
+            failure: None,
+            outcome: ResultDeliveryOutcome::Received,
+            connected: AtomicBool::new(false),
+            deliveries: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn connect(&self) {
+        self.connected.store(true, Ordering::Release);
     }
 }
 
 #[async_trait]
 impl ResultDeliveryTransport for MockResultDeliveryTransport {
+    async fn client_is_connected(&self, _client_id: &str) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
     async fn deliver_result(
         &self,
         client_id: &str,
-        result: &JobResult,
+        manifest: &ResultManifest,
+        records_path: &Path,
         _acknowledgement_timeout: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<ResultDeliveryOutcome, ResultDeliveryError> {
+        let records = std::fs::read(records_path).map_err(|error| {
+            ResultDeliveryError::attempt_failed(format!("could not read result records: {error}"))
+        })?;
         self.deliveries
             .lock()
             .await
-            .push((client_id.to_string(), result.clone()));
+            .push((client_id.to_string(), manifest.clone(), records));
         match &self.failure {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
+            Some(error) => Err(ResultDeliveryError::attempt_failed(error.clone())),
+            None => Ok(self.outcome.clone()),
         }
     }
 }
 
-fn completed_result(job_id: &str, media_id: i64) -> JobResult {
-    JobResult {
+fn write_completed_result(job_path: &std::path::Path, manifest: &QueueManifest) {
+    let responses = manifest
+        .inputs
+        .iter()
+        .map(|input| InputInferenceResponse {
+            sequence: input.sequence,
+            frame_timestamp_ms: input.frame_timestamp_ms,
+            response: InferenceResponse {
+                task: manifest.task.clone(),
+                text: "result".to_string(),
+                markdown: "result".to_string(),
+                provider: "test".to_string(),
+                model_type: "ocr".to_string(),
+                model_version: "test".to_string(),
+                tags: Vec::new(),
+                embedding: None,
+                embedding_encoding: None,
+                embedding_dimensions: None,
+                perceptual_hash: None,
+                quality_score: None,
+                aesthetic_score: None,
+                scenic_score: None,
+                simplicity_score: None,
+                landscape_score: None,
+                technical_quality_score: None,
+                faces: Vec::new(),
+                detected: None,
+                confidence: None,
+            },
+        })
+        .collect();
+    let output = encode_completed_result(
+        &manifest.job_id,
+        manifest.media_id,
+        &manifest.task,
+        manifest.attempt,
+        &manifest.inputs,
+        responses,
+    )
+    .expect("encoded result");
+    std::fs::write(job_path.join("result-records.bin"), output.records).expect("result records");
+    std::fs::write(
+        job_path.join("result-manifest.json"),
+        serde_json::to_vec(&output.manifest).expect("result manifest JSON"),
+    )
+    .expect("result manifest");
+}
+
+fn write_callback_result(queue_dir: &Path, job_id: &str, client_id: &str) -> PathBuf {
+    let job_path = queue_dir.join("callback_pending").join(job_id);
+    std::fs::create_dir(&job_path).expect("callback job directory");
+    let manifest = QueueManifest {
+        client_id: client_id.to_string(),
         job_id: job_id.to_string(),
-        media_id,
+        media_id: 3,
         task: "ocr".to_string(),
         attempt: 1,
-        status: "completed".to_string(),
-        model_type: Some("ocr".to_string()),
-        model_version: Some("test".to_string()),
-        result: Some(serde_json::json!({"text": "result"})),
-        input_results: None,
-        error: None,
+        inputs: vec![result_descriptor()],
+    };
+    std::fs::write(
+        job_path.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("manifest JSON"),
+    )
+    .expect("manifest");
+    write_completed_result(&job_path, &manifest);
+    job_path
+}
+
+fn result_descriptor() -> QueueInputDescriptor {
+    QueueInputDescriptor {
+        sequence: 0,
+        filename: "result-input.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: 1,
+        content_hash: "0".repeat(64),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
     }
+}
+
+fn scheduler_with_capacity(queue_dir: &Path, max_queue_bytes: u64) -> Scheduler {
+    Scheduler::new(
+        queue_dir.to_path_buf(),
+        SchedulerConfig {
+            max_queue_bytes,
+            working_space_reserve_bytes: 1,
+            ..SchedulerConfig::default()
+        },
+        Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+            service: Vec::new(),
+            ..Config::default()
+        })))),
+        MockResultDeliveryTransport::acknowledging(),
+    )
+    .expect("scheduler")
 }
 
 #[test]
@@ -390,7 +515,7 @@ fn queue_admission_and_cancellation_recognize_classifier_tasks() {
                 QueueManifest {
                     client_id: "classifier-client".to_string(),
                     job_id: format!("abcdef0000000000000000000000000{index}"),
-                    media_id: index as i64,
+                    media_id: index as i64 + 1,
                     task: task.to_string(),
                     attempt: 1,
                     inputs: vec![descriptor.clone()],
@@ -446,7 +571,6 @@ async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_re
         Scheduler::new(
             directory.path().to_path_buf(),
             SchedulerConfig {
-                poll_interval_seconds: 1,
                 max_in_flight_jobs: 1,
                 ..SchedulerConfig::default()
             },
@@ -469,6 +593,9 @@ async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_re
             frame_timestamp_ms: Some(sequence as i64 * 1000),
         })
         .collect::<Vec<_>>();
+    let expected_descriptors = descriptors.clone();
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    tokio::task::yield_now().await;
     scheduler
         .accept(
             QueueManifest {
@@ -486,7 +613,6 @@ async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_re
         )
         .expect("classifier admission");
 
-    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
     for _ in 0..300 {
         if !result_delivery.deliveries.lock().await.is_empty() {
             break;
@@ -502,31 +628,40 @@ async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_re
         .expect("runtime shutdown");
 
     let deliveries = result_delivery.deliveries.lock().await;
-    let (_, result) = deliveries.first().expect("classifier delivery");
-    let aggregate = result.result.as_ref().expect("aggregate result");
-    let input_results = result.input_results.as_ref().expect("input results");
-    assert_eq!(aggregate["detected"], false);
-    assert!(
-        (aggregate["confidence"]
-            .as_f64()
-            .expect("aggregate confidence")
-            - 0.2)
-            .abs()
-            < 0.000_001
-    );
-    assert_eq!(input_results.len(), 2);
-    assert_eq!(input_results[0].sequence, 0);
-    assert_eq!(input_results[0].result["detected"], false);
-    assert_eq!(input_results[1].sequence, 1);
-    assert_eq!(input_results[1].result["detected"], true);
-    assert!(
-        (input_results[1].result["confidence"]
-            .as_f64()
-            .expect("second input confidence")
-            - 0.9)
-            .abs()
-            < 0.000_001
-    );
+    let (_, result_manifest, result_records) = deliveries.first().expect("classifier delivery");
+    let correlations = expected_descriptors
+        .iter()
+        .map(|input| ResultInputCorrelation {
+            sequence: input.sequence,
+            frame_timestamp_ms: input.frame_timestamp_ms,
+        })
+        .collect::<Vec<_>>();
+    let mut collector = ResultRecordCollector::new(
+        &result_manifest.task,
+        result_manifest.status,
+        &correlations,
+        result_manifest.record_count,
+        result_manifest.byte_size,
+    )
+    .expect("result collector");
+    let mut decoder = ResultRecordChunkDecoder::new();
+    decoder
+        .push(result_records, |record| {
+            collector.push(record.as_borrowed())
+        })
+        .expect("classifier records");
+    decoder.finish().expect("complete classifier records");
+    let result = collector.finish().expect("classifier result");
+    let ValidatedResultValue::DocumentDetection(first) = &result.inputs[0].value else {
+        panic!("expected first document result");
+    };
+    let ValidatedResultValue::DocumentDetection(second) = &result.inputs[1].value else {
+        panic!("expected second document result");
+    };
+    assert!(!first.detected);
+    assert!((first.confidence - 0.2).abs() < 0.000_001);
+    assert!(second.detected);
+    assert!((second.confidence - 0.9).abs() < 0.000_001);
 }
 
 #[test]
@@ -572,11 +707,303 @@ fn abandoned_staging_removes_temporary_queue_directory() {
 }
 
 #[test]
+fn admission_defers_before_creating_staging_when_queue_capacity_is_full() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = scheduler_with_capacity(directory.path(), 5);
+    let existing_bytes = b"12345".to_vec();
+    let existing_descriptor = QueueInputDescriptor {
+        sequence: 0,
+        filename: "existing.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: existing_bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(&existing_bytes)),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
+    };
+    scheduler
+        .accept(
+            QueueManifest {
+                client_id: "client-a".to_string(),
+                job_id: "0123456789abcdef0123456789abc001".to_string(),
+                media_id: 1,
+                task: "ocr".to_string(),
+                attempt: 1,
+                inputs: vec![existing_descriptor.clone()],
+            },
+            vec![(existing_descriptor.clone(), existing_bytes)],
+        )
+        .expect("seed queue content");
+    let next_job_id = "0123456789abcdef0123456789abc002";
+    let next_bytes = b"x";
+    let admission = scheduler
+        .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: next_job_id.to_string(),
+            media_id: 2,
+            task: "ocr".to_string(),
+            attempt: 1,
+            inputs: vec![QueueInputDescriptor {
+                sequence: 0,
+                filename: "next.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                byte_size: 1,
+                content_hash: format!("{:x}", Sha256::digest(next_bytes)),
+                input_kind: "image".to_string(),
+                frame_timestamp_ms: None,
+            }],
+        })
+        .expect("capacity decision");
+
+    assert!(matches!(admission, QueueAdmission::Deferred(_)));
+    assert!(!directory.path().join(".tmp").join(next_job_id).exists());
+
+    let cached_job_id = "0123456789abcdef0123456789abc003";
+    let cached = scheduler
+        .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: cached_job_id.to_string(),
+            media_id: 3,
+            task: "image_tagging".to_string(),
+            attempt: 1,
+            inputs: vec![existing_descriptor],
+        })
+        .expect("cached admission");
+    let QueueAdmission::Staging(cached) = cached else {
+        panic!("cached content must not consume queue capacity");
+    };
+    assert!(cached.required_sequences().is_empty());
+}
+
+#[test]
+fn cached_source_is_not_reused_until_its_first_admission_commits() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = scheduler_with_capacity(directory.path(), 10);
+    let bytes = b"shared";
+    let descriptor = QueueInputDescriptor {
+        sequence: 0,
+        filename: "shared.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(bytes)),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
+    };
+    let first_manifest = QueueManifest {
+        client_id: "client-a".to_string(),
+        job_id: "0123456789abcdef0123456789abc030".to_string(),
+        media_id: 1,
+        task: "ocr".to_string(),
+        attempt: 1,
+        inputs: vec![descriptor.clone()],
+    };
+    let QueueAdmission::Staging(mut first) = scheduler
+        .begin_admission(first_manifest)
+        .expect("first admission")
+    else {
+        panic!("first admission must stage");
+    };
+    first
+        .write_input(&descriptor, bytes)
+        .expect("publish first input");
+
+    let second_manifest = QueueManifest {
+        client_id: "client-a".to_string(),
+        job_id: "0123456789abcdef0123456789abc031".to_string(),
+        media_id: 2,
+        task: "image_tagging".to_string(),
+        attempt: 1,
+        inputs: vec![descriptor.clone()],
+    };
+    assert!(matches!(
+        scheduler
+            .begin_admission(second_manifest.clone())
+            .expect("second capacity decision"),
+        QueueAdmission::Deferred(_)
+    ));
+
+    assert!(first.commit().expect("commit first admission"));
+    let QueueAdmission::Staging(second) = scheduler
+        .begin_admission(second_manifest)
+        .expect("second admission after commit")
+    else {
+        panic!("committed cached source must be reusable");
+    };
+    assert!(second.required_sequences().is_empty());
+}
+
+#[test]
+fn cancelling_a_queued_job_releases_unique_content_capacity() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = scheduler_with_capacity(directory.path(), 5);
+    let first_job_id = "0123456789abcdef0123456789abc010";
+    let first_bytes = b"12345".to_vec();
+    let first_descriptor = QueueInputDescriptor {
+        sequence: 0,
+        filename: "first.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: first_bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(&first_bytes)),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
+    };
+    scheduler
+        .accept(
+            QueueManifest {
+                client_id: "client-a".to_string(),
+                job_id: first_job_id.to_string(),
+                media_id: 1,
+                task: "ocr".to_string(),
+                attempt: 1,
+                inputs: vec![first_descriptor.clone()],
+            },
+            vec![(first_descriptor, first_bytes)],
+        )
+        .expect("first admission");
+
+    let response = scheduler
+        .cancel_jobs(
+            "client-a",
+            &CancelJobsRequest {
+                all: false,
+                tasks: vec!["ocr".to_string()],
+                job_ids: vec![first_job_id.to_string()],
+            },
+        )
+        .expect("cancel first job");
+    assert_eq!(response.cancelled_jobs, 1);
+
+    let second_job_id = "0123456789abcdef0123456789abc011";
+    let second_bytes = b"abcde";
+    let admission = scheduler
+        .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: second_job_id.to_string(),
+            media_id: 2,
+            task: "ocr".to_string(),
+            attempt: 1,
+            inputs: vec![QueueInputDescriptor {
+                sequence: 0,
+                filename: "second.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                byte_size: second_bytes.len() as u64,
+                content_hash: format!("{:x}", Sha256::digest(second_bytes)),
+                input_kind: "image".to_string(),
+                frame_timestamp_ms: None,
+            }],
+        })
+        .expect("second capacity decision");
+    assert!(matches!(admission, QueueAdmission::Staging(_)));
+}
+
+#[tokio::test]
+async fn acknowledged_result_releases_unique_content_capacity() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = Arc::new(scheduler_with_capacity(directory.path(), 5));
+    let first_job_id = "0123456789abcdef0123456789abc020";
+    let first_bytes = b"12345".to_vec();
+    let first_descriptor = QueueInputDescriptor {
+        sequence: 0,
+        filename: "first.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        byte_size: first_bytes.len() as u64,
+        content_hash: format!("{:x}", Sha256::digest(&first_bytes)),
+        input_kind: "image".to_string(),
+        frame_timestamp_ms: None,
+    };
+    let first_manifest = QueueManifest {
+        client_id: "client-a".to_string(),
+        job_id: first_job_id.to_string(),
+        media_id: 1,
+        task: "ocr".to_string(),
+        attempt: 1,
+        inputs: vec![first_descriptor.clone()],
+    };
+    scheduler
+        .accept(
+            first_manifest.clone(),
+            vec![(first_descriptor, first_bytes)],
+        )
+        .expect("first admission");
+    let callback_path = directory.path().join("callback_pending").join(first_job_id);
+    std::fs::rename(
+        directory.path().join("queuing").join(first_job_id),
+        &callback_path,
+    )
+    .expect("callback transition fixture");
+    write_completed_result(&callback_path, &first_manifest);
+
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    for _ in 0..100 {
+        if !callback_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    scheduler_task.abort();
+    assert!(!callback_path.exists(), "acknowledged job was not removed");
+
+    let second_job_id = "0123456789abcdef0123456789abc021";
+    let second_bytes = b"abcde";
+    let admission = scheduler
+        .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: second_job_id.to_string(),
+            media_id: 2,
+            task: "ocr".to_string(),
+            attempt: 1,
+            inputs: vec![QueueInputDescriptor {
+                sequence: 0,
+                filename: "second.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                byte_size: second_bytes.len() as u64,
+                content_hash: format!("{:x}", Sha256::digest(second_bytes)),
+                input_kind: "image".to_string(),
+                frame_timestamp_ms: None,
+            }],
+        })
+        .expect("second capacity decision");
+    assert!(matches!(admission, QueueAdmission::Staging(_)));
+}
+
+#[test]
+fn admission_permanently_rejects_a_job_larger_than_the_queue_budget() {
+    let directory = tempdir().expect("queue directory");
+    let scheduler = scheduler_with_capacity(directory.path(), 4);
+    let job_id = "0123456789abcdef0123456789abc004";
+    let bytes = b"12345";
+    let admission = scheduler
+        .begin_admission(QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: job_id.to_string(),
+            media_id: 1,
+            task: "ocr".to_string(),
+            attempt: 1,
+            inputs: vec![QueueInputDescriptor {
+                sequence: 0,
+                filename: "large.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                byte_size: bytes.len() as u64,
+                content_hash: format!("{:x}", Sha256::digest(bytes)),
+                input_kind: "image".to_string(),
+                frame_timestamp_ms: None,
+            }],
+        })
+        .expect("capacity decision");
+
+    assert!(matches!(admission, QueueAdmission::JobTooLarge(_)));
+    assert!(!directory.path().join(".tmp").join(job_id).exists());
+}
+
+#[test]
 fn admission_allows_streamed_media_descriptors_larger_than_twenty_gibibytes() {
     let directory = tempdir().expect("queue directory");
     let scheduler = Scheduler::new(
         directory.path().to_path_buf(),
-        SchedulerConfig::default(),
+        SchedulerConfig {
+            max_queue_bytes: 32 * 1024 * 1024 * 1024,
+            working_space_reserve_bytes: 1,
+            ..SchedulerConfig::default()
+        },
         Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
             service: Vec::new(),
             ..Config::default()
@@ -639,7 +1066,7 @@ fn queue_selection_is_task_aware_and_bounded() {
                 QueueManifest {
                     client_id: "client-a".to_string(),
                     job_id: format!("{index:032x}"),
-                    media_id: i64::from(index),
+                    media_id: i64::from(index) + 1,
                     task: if index % 2 == 0 {
                         "image_tagging".to_string()
                     } else {
@@ -826,7 +1253,7 @@ async fn scheduler_refills_a_completed_slot_before_a_slow_job_finishes() {
                 QueueManifest {
                     client_id: "client-a".to_string(),
                     job_id: (*job_id).to_string(),
-                    media_id: media_id as i64,
+                    media_id: media_id as i64 + 1,
                     task: "face_detection".to_string(),
                     attempt: 1,
                     inputs: vec![descriptor.clone()],
@@ -1015,19 +1442,55 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
             .join(format!("processing/{processing_job_id}")),
     )
     .expect("move processing");
-    let callback_job_id = "018f36e77c917cc89f7054252a33eaf3";
+    std::fs::write(
+        directory
+            .path()
+            .join(format!("processing/{processing_job_id}/result-records.tmp")),
+        b"partial result",
+    )
+    .expect("partial processing result");
+    let completed_processing_job_id = "018f36e77c917cc89f7054252a33eaf5";
+    let completed_processing_manifest = QueueManifest {
+        client_id: "client-a".to_string(),
+        job_id: completed_processing_job_id.to_string(),
+        media_id: 3,
+        task: "ocr".to_string(),
+        attempt: 1,
+        inputs: vec![descriptor.clone()],
+    };
     scheduler
         .accept(
-            QueueManifest {
-                client_id: "client-a".to_string(),
-                job_id: callback_job_id.to_string(),
-                media_id: 2,
-                task: "ocr".to_string(),
-                attempt: 1,
-                inputs: vec![descriptor.clone()],
-            },
-            vec![(descriptor, raw_bytes)],
+            completed_processing_manifest.clone(),
+            vec![(descriptor.clone(), raw_bytes.clone())],
         )
+        .expect("accepted completed processing job");
+    let completed_processing_path = directory
+        .path()
+        .join(format!("processing/{completed_processing_job_id}"));
+    std::fs::rename(
+        directory
+            .path()
+            .join(format!("queuing/{completed_processing_job_id}")),
+        &completed_processing_path,
+    )
+    .expect("move completed processing job");
+    write_completed_result(&completed_processing_path, &completed_processing_manifest);
+    std::fs::write(
+        completed_processing_path.join("result-manifest.tmp"),
+        b"stale temporary",
+    )
+    .expect("stale result temporary");
+    let callback_job_id = "018f36e77c917cc89f7054252a33eaf3";
+    let callback_manifest = QueueManifest {
+        client_id: "client-a".to_string(),
+        job_id: callback_job_id.to_string(),
+        media_id: 2,
+        task: "ocr".to_string(),
+        attempt: 1,
+        inputs: vec![descriptor.clone()],
+    };
+    scheduler
+        .accept(callback_manifest.clone(), vec![(descriptor, raw_bytes)])
         .expect("accepted");
     std::fs::rename(
         directory.path().join(format!("queuing/{callback_job_id}")),
@@ -1036,13 +1499,12 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
             .join(format!("callback_pending/{callback_job_id}")),
     )
     .expect("move callback pending");
-    std::fs::write(
-        directory
+    write_completed_result(
+        &directory
             .path()
-            .join(format!("callback_pending/{callback_job_id}/result.json")),
-        "{}",
-    )
-    .expect("callback result");
+            .join(format!("callback_pending/{callback_job_id}")),
+        &callback_manifest,
+    );
     drop(scheduler);
     let config = Arc::new(Config {
         service: Vec::new(),
@@ -1059,9 +1521,33 @@ fn scheduler_recovers_processing_jobs_and_retains_callback_results() {
         .path()
         .join(format!("queuing/{processing_job_id}"))
         .is_dir());
+    assert!(!directory
+        .path()
+        .join(format!("queuing/{processing_job_id}/result-records.tmp"))
+        .exists());
     assert!(directory
         .path()
-        .join(format!("callback_pending/{callback_job_id}/result.json"))
+        .join(format!(
+            "callback_pending/{completed_processing_job_id}/result-records.bin"
+        ))
+        .is_file());
+    assert!(!directory
+        .path()
+        .join(format!(
+            "callback_pending/{completed_processing_job_id}/result-manifest.tmp"
+        ))
+        .exists());
+    assert!(directory
+        .path()
+        .join(format!(
+            "callback_pending/{callback_job_id}/result-manifest.json"
+        ))
+        .is_file());
+    assert!(directory
+        .path()
+        .join(format!(
+            "callback_pending/{callback_job_id}/result-records.bin"
+        ))
         .is_file());
 }
 
@@ -1077,7 +1563,6 @@ async fn result_delivery_failure_is_recorded_for_retry() {
         Scheduler::new(
             directory.path().to_path_buf(),
             SchedulerConfig {
-                poll_interval_seconds: 60,
                 result_delivery_retry_delay_seconds: 60,
                 result_delivery_max_concurrent_deliveries: 4,
                 ..SchedulerConfig::default()
@@ -1088,26 +1573,7 @@ async fn result_delivery_failure_is_recorded_for_retry() {
         .expect("scheduler"),
     );
     let job_id = "018f36e77c917cc89f7054252a33eaf4";
-    let job_path = directory.path().join(format!("callback_pending/{job_id}"));
-    std::fs::create_dir(&job_path).expect("callback job directory");
-    std::fs::write(
-        job_path.join("manifest.json"),
-        serde_json::to_vec(&QueueManifest {
-            client_id: "client-a".to_string(),
-            job_id: job_id.to_string(),
-            media_id: 3,
-            task: "ocr".to_string(),
-            attempt: 1,
-            inputs: Vec::new(),
-        })
-        .expect("manifest JSON"),
-    )
-    .expect("manifest");
-    std::fs::write(
-        job_path.join("result.json"),
-        serde_json::to_vec(&completed_result(job_id, 3)).expect("result JSON"),
-    )
-    .expect("result");
+    let job_path = write_callback_result(directory.path(), job_id, "client-a");
 
     let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
     let callback_state_path = job_path.join("callback.json");
@@ -1134,6 +1600,133 @@ async fn result_delivery_failure_is_recorded_for_retry() {
 }
 
 #[tokio::test]
+async fn deferred_result_delivery_does_not_consume_a_delivery_attempt() {
+    let directory = tempdir().expect("queue directory");
+    let config = Arc::new(Config {
+        service: Vec::new(),
+        ..Config::default()
+    });
+    let result_delivery = MockResultDeliveryTransport::returning(ResultDeliveryOutcome::Deferred {
+        retry_after_ms: 60_000,
+    });
+    let scheduler = Arc::new(
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig {
+                result_delivery_max_concurrent_deliveries: 1,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(Mutex::new(ServiceManager::new(config))),
+            result_delivery,
+        )
+        .expect("scheduler"),
+    );
+    let job_id = "018f36e77c917cc89f7054252a33eaf5";
+    let job_path = write_callback_result(directory.path(), job_id, "client-a");
+
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    let callback_state_path = job_path.join("callback.json");
+    for _ in 0..50 {
+        if callback_state_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    scheduler_task.abort();
+
+    let callback_state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(callback_state_path).expect("callback deferred state"),
+    )
+    .expect("callback state JSON");
+    assert_eq!(callback_state["attempts"], 0);
+    assert!(job_path.is_dir());
+}
+
+#[tokio::test]
+async fn disconnected_client_results_resume_when_the_client_reconnects() {
+    let directory = tempdir().expect("queue directory");
+    let config = Arc::new(Config {
+        service: Vec::new(),
+        ..Config::default()
+    });
+    let result_delivery = MockResultDeliveryTransport::disconnected();
+    let scheduler = Arc::new(
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig {
+                result_delivery_max_attempts: 1,
+                result_delivery_max_concurrent_deliveries: 1,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(Mutex::new(ServiceManager::new(config))),
+            result_delivery.clone(),
+        )
+        .expect("scheduler"),
+    );
+    let job_id = "018f36e77c917cc89f7054252a33eaf7";
+    let job_path = write_callback_result(directory.path(), job_id, "client-a");
+
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(job_path.is_dir());
+    assert!(!job_path.join("callback.json").exists());
+    assert!(result_delivery.deliveries.lock().await.is_empty());
+
+    result_delivery.connect();
+    scheduler.wake_result_delivery();
+    for _ in 0..100 {
+        if !job_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    scheduler_task.abort();
+
+    assert!(!job_path.exists());
+    assert_eq!(result_delivery.deliveries.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn rejected_result_delivery_is_moved_to_failed_with_evidence() {
+    let directory = tempdir().expect("queue directory");
+    let config = Arc::new(Config {
+        service: Vec::new(),
+        ..Config::default()
+    });
+    let result_delivery = MockResultDeliveryTransport::returning(ResultDeliveryOutcome::Rejected {
+        error: "permanent protocol rejection".to_string(),
+    });
+    let scheduler = Arc::new(
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig {
+                result_delivery_max_concurrent_deliveries: 1,
+                ..SchedulerConfig::default()
+            },
+            Arc::new(Mutex::new(ServiceManager::new(config))),
+            result_delivery,
+        )
+        .expect("scheduler"),
+    );
+    let job_id = "018f36e77c917cc89f7054252a33eaf6";
+    write_callback_result(directory.path(), job_id, "client-a");
+
+    let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
+    let failed_path = directory.path().join(format!("failed/{job_id}"));
+    for _ in 0..50 {
+        if failed_path.is_dir() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    scheduler_task.abort();
+
+    let evidence = std::fs::read_to_string(failed_path.join("failure.json"))
+        .expect("durable rejection evidence");
+    assert!(evidence.contains("permanent protocol rejection"));
+}
+
+#[tokio::test]
 async fn result_delivery_window_refills_and_prioritizes_fresh_results() {
     let directory = tempdir().expect("queue directory");
     let config = Arc::new(Config {
@@ -1145,7 +1738,6 @@ async fn result_delivery_window_refills_and_prioritizes_fresh_results() {
         Scheduler::new(
             directory.path().to_path_buf(),
             SchedulerConfig {
-                poll_interval_seconds: 60,
                 result_delivery_max_concurrent_deliveries: 2,
                 ..SchedulerConfig::default()
             },
@@ -1158,24 +1750,20 @@ async fn result_delivery_window_refills_and_prioritizes_fresh_results() {
         let job_id = format!("{index:032x}");
         let job_path = directory.path().join("callback_pending").join(&job_id);
         std::fs::create_dir(&job_path).expect("callback job directory");
+        let manifest = QueueManifest {
+            client_id: "client-a".to_string(),
+            job_id: job_id.clone(),
+            media_id: index + 1,
+            task: "ocr".to_string(),
+            attempt: 1,
+            inputs: vec![result_descriptor()],
+        };
         std::fs::write(
             job_path.join("manifest.json"),
-            serde_json::to_vec(&QueueManifest {
-                client_id: "client-a".to_string(),
-                job_id: job_id.clone(),
-                media_id: index,
-                task: "ocr".to_string(),
-                attempt: 1,
-                inputs: Vec::new(),
-            })
-            .expect("manifest JSON"),
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
         )
         .expect("manifest");
-        std::fs::write(
-            job_path.join("result.json"),
-            serde_json::to_vec(&completed_result(&job_id, index)).expect("result JSON"),
-        )
-        .expect("result");
+        write_completed_result(&job_path, &manifest);
         if index == 0 {
             std::fs::write(
                 job_path.join("callback.json"),
@@ -1206,7 +1794,7 @@ async fn result_delivery_window_refills_and_prioritizes_fresh_results() {
     assert_eq!(deliveries.len(), 5);
     let stale_position = deliveries
         .iter()
-        .position(|(_, result)| result.job_id == "00000000000000000000000000000000")
+        .position(|(_, result, _)| result.job_id == "00000000000000000000000000000000")
         .expect("stale retry delivery");
     assert!(stale_position >= 2);
 }
@@ -1272,7 +1860,10 @@ async fn cancelled_processing_failure_is_deleted_instead_of_retained_as_failed()
         .expect("running cancellation");
     let callback_pending = directory.path().join("callback_pending").join(job_id);
     std::fs::rename(&processing, &callback_pending).expect("completed processing state");
-    std::fs::write(callback_pending.join("result.json"), "{}").expect("callback result");
+    std::fs::write(callback_pending.join("result-records.bin"), b"invalid")
+        .expect("callback records");
+    std::fs::write(callback_pending.join("result-manifest.json"), b"{}")
+        .expect("callback manifest");
 
     let scheduler_task = tokio::spawn(Arc::clone(&scheduler).run());
     for _ in 0..100 {

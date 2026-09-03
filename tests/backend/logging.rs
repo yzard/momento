@@ -1,5 +1,11 @@
 use axum::body::{to_bytes, Body};
-use momento_api::logging::{begin_payload_capture, redact_request_values};
+use momento_api::logging::{
+    begin_payload_capture, redact_request_values, MAX_REQUEST_LOG_CAPTURE_BYTES,
+};
+
+fn test_cpu_executor() -> momento_api::executor::CpuExecutorHandle {
+    crate::test_utils::test_executor_handles(crate::test_utils::create_test_db()).cpu
+}
 
 #[test]
 fn redacts_binary_and_sensitive_request_values_recursively() {
@@ -44,36 +50,36 @@ async fn captures_and_restores_a_json_payload_for_the_handler() {
         .body(Body::from(original.as_slice()))
         .expect("request");
 
-    let capture = begin_payload_capture(&mut request, 1024).expect("payload capture");
+    let capture = begin_payload_capture(&mut request).expect("payload capture");
     let downstream = to_bytes(request.into_body(), usize::MAX)
         .await
         .expect("downstream body");
 
     assert_eq!(downstream.as_ref(), original);
     assert_eq!(
-        capture.render(),
+        capture.render(&test_cpu_executor()).await,
         r#"{"label":"keep","password":"[redacted]"}"#
     );
 }
 
 #[tokio::test]
 async fn truncates_logging_without_truncating_the_handler_body() {
-    let original = br#"{"label":"a body larger than the capture limit"}"#;
+    let original = vec![b'x'; MAX_REQUEST_LOG_CAPTURE_BYTES + 1];
     let mut request = axum::http::Request::builder()
         .method("POST")
         .header("content-type", "application/json")
-        .body(Body::from(original.as_slice()))
+        .body(Body::from(original.clone()))
         .expect("request");
 
-    let capture = begin_payload_capture(&mut request, 8).expect("payload capture");
+    let capture = begin_payload_capture(&mut request).expect("payload capture");
     let downstream = to_bytes(request.into_body(), usize::MAX)
         .await
         .expect("downstream body");
 
-    assert_eq!(downstream.as_ref(), original);
+    assert_eq!(downstream.as_ref(), original.as_slice());
     assert_eq!(
-        capture.render(),
-        "[request body omitted: exceeded logging limit of 8 bytes]"
+        capture.render(&test_cpu_executor()).await,
+        "[request body omitted: exceeded logging limit of 49152 bytes]"
     );
 }
 
@@ -86,12 +92,15 @@ async fn omits_multipart_payload_without_reading_it() {
         .body(Body::from(original.as_slice()))
         .expect("request");
 
-    let capture = begin_payload_capture(&mut request, 8).expect("payload capture");
+    let capture = begin_payload_capture(&mut request).expect("payload capture");
     let downstream = to_bytes(request.into_body(), usize::MAX)
         .await
         .expect("downstream body");
 
-    assert_eq!(capture.render(), "[multipart body omitted]");
+    assert_eq!(
+        capture.render(&test_cpu_executor()).await,
+        "[multipart body omitted]"
+    );
     assert_eq!(downstream.as_ref(), original);
 }
 
@@ -104,12 +113,15 @@ async fn omits_binary_payload_without_reading_it() {
         .body(Body::from(original.as_slice()))
         .expect("request");
 
-    let capture = begin_payload_capture(&mut request, 8).expect("payload capture");
+    let capture = begin_payload_capture(&mut request).expect("payload capture");
     let downstream = to_bytes(request.into_body(), usize::MAX)
         .await
         .expect("downstream body");
 
-    assert_eq!(capture.render(), "[binary body omitted]");
+    assert_eq!(
+        capture.render(&test_cpu_executor()).await,
+        "[binary body omitted]"
+    );
     assert_eq!(downstream.as_ref(), original);
 }
 
@@ -121,5 +133,5 @@ fn does_not_capture_non_post_requests() {
         .body(Body::from("large streamed upload"))
         .expect("request");
 
-    assert!(begin_payload_capture(&mut request, 8).is_none());
+    assert!(begin_payload_capture(&mut request).is_none());
 }

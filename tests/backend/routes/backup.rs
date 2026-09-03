@@ -254,6 +254,40 @@ async fn writing_upload_rejects_cancellation_until_chunk_finalization() {
         .await;
     cancelled.assert_status_ok();
     assert_eq!(cancelled.json::<Value>()["status"], "cancelled");
+    let (cleanup_state, cleanup_groups, cleanup_claims): (String, i64, i64) = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT file_operation_groups.state,
+                    (SELECT COUNT(*) FROM file_operation_groups WHERE kind = 'backup_cancel_cleanup'),
+                    (SELECT COUNT(*) FROM file_operation_path_claims WHERE group_id = file_operation_groups.id)
+               FROM file_operation_groups
+              WHERE kind = 'backup_cancel_cleanup'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("cancel cleanup journal");
+    assert_eq!(cleanup_state, "cleanup_pending");
+    assert_eq!(cleanup_groups, 1);
+    assert_eq!(cleanup_claims, 1);
+
+    let repeated = server
+        .post("/api/v1/backup/upload/cancel")
+        .add_header(AUTHORIZATION, format!("Bearer {access_token}"))
+        .json(&json!({"uploadId": upload_id}))
+        .await;
+    repeated.assert_status_ok();
+    assert_eq!(repeated.json::<Value>()["status"], "cancelled");
+    let cleanup_groups: i64 = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT COUNT(*) FROM file_operation_groups WHERE kind = 'backup_cancel_cleanup'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("idempotent cleanup group count");
+    assert_eq!(cleanup_groups, 1);
 }
 
 #[tokio::test]

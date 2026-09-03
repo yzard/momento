@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::io::{self, Write};
 use std::time::Instant;
 
 use axum::{
@@ -9,16 +9,134 @@ use axum::{
     response::Response,
 };
 use futures::StreamExt;
+use tokio::sync::{mpsc, oneshot};
+use tracing::Metadata;
 use tracing::{error, info, warn};
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::prelude::*;
+
+use crate::io::log::{DroppedLogEvents, LogEventProducer, LogSeverity, MAX_LOG_EVENT_BYTES};
 
 const MULTIPART_BODY_OMITTED: &str = "[multipart body omitted]";
 const BINARY_BODY_OMITTED: &str = "[binary body omitted]";
 const BINARY_PAYLOAD_OMITTED: &str = "[binary payload omitted]";
 const BASE64_VALUE_OMITTED: &str = "[base64 omitted]";
 const SENSITIVE_VALUE_REDACTED: &str = "[redacted]";
+pub const MAX_REQUEST_LOG_CAPTURE_BYTES: usize = 48 * 1024;
+
+pub struct LoggingGuard {
+    producer: LogEventProducer,
+}
+
+impl LoggingGuard {
+    pub fn dropped_events(&self) -> DroppedLogEvents {
+        self.producer.dropped_events()
+    }
+}
+
+pub fn init_logging(producer: LogEventProducer) -> io::Result<LoggingGuard> {
+    let console_writer = std::io::stderr
+        .with_max_level(tracing::Level::WARN)
+        .or_else(std::io::stdout);
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .event_format(momento_common::logging::EventFormatter::new(true))
+        .with_writer(console_writer);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .event_format(momento_common::logging::EventFormatter::new(false))
+        .with_writer(LogMakeWriter::new(producer.clone()));
+
+    tracing_subscriber::registry()
+        .with(LevelFilter::INFO)
+        .with(console_layer)
+        .with(file_layer)
+        .try_init()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    Ok(LoggingGuard { producer })
+}
+
+#[derive(Clone)]
+struct LogMakeWriter {
+    producer: LogEventProducer,
+}
+
+impl LogMakeWriter {
+    fn new(producer: LogEventProducer) -> Self {
+        Self { producer }
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogMakeWriter {
+    type Writer = LogEventWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        LogEventWriter::new(self.producer.clone(), LogSeverity::Info)
+    }
+
+    fn make_writer_for(&'writer self, metadata: &Metadata<'_>) -> Self::Writer {
+        let severity = match *metadata.level() {
+            tracing::Level::ERROR => LogSeverity::Error,
+            tracing::Level::WARN => LogSeverity::Warn,
+            tracing::Level::INFO => LogSeverity::Info,
+            tracing::Level::DEBUG | tracing::Level::TRACE => LogSeverity::Debug,
+        };
+        LogEventWriter::new(self.producer.clone(), severity)
+    }
+}
+
+struct LogEventWriter {
+    producer: LogEventProducer,
+    severity: LogSeverity,
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+impl LogEventWriter {
+    fn new(producer: LogEventProducer, severity: LogSeverity) -> Self {
+        Self {
+            producer,
+            severity,
+            bytes: Vec::with_capacity(MAX_LOG_EVENT_BYTES),
+            overflowed: false,
+        }
+    }
+}
+
+impl Write for LogEventWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let remaining = MAX_LOG_EVENT_BYTES.saturating_sub(self.bytes.len());
+        if bytes.len() > remaining {
+            self.overflowed = true;
+            return Ok(bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for LogEventWriter {
+    fn drop(&mut self) {
+        if self.overflowed {
+            self.bytes.clear();
+        }
+        self.producer
+            .try_emit(self.severity, std::mem::take(&mut self.bytes));
+    }
+}
+
+#[derive(Clone)]
+pub struct RequestLoggerState {
+    pub cpu: crate::executor::CpuExecutorHandle,
+}
 
 pub async fn request_logger(
-    State(maximum_capture_bytes): State<usize>,
+    State(state): State<RequestLoggerState>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -27,7 +145,7 @@ pub async fn request_logger(
     let path = uri.path().to_string();
 
     let is_static = path.starts_with("/assets/") || path.ends_with(".js") || path.ends_with(".css");
-    let payload_capture = begin_payload_capture(&mut request, maximum_capture_bytes);
+    let payload_capture = begin_payload_capture(&mut request);
 
     let start = Instant::now();
     let response = next.run(request).await;
@@ -37,9 +155,10 @@ pub async fn request_logger(
     if !is_static {
         let duration_ms = duration.as_secs_f64() * 1000.0;
         let duration_text = format!("{:05.2}", duration_ms);
-        let payload_text = payload_capture
-            .map(|capture| capture.render())
-            .unwrap_or_else(|| "{}".to_string());
+        let payload_text = match payload_capture {
+            Some(capture) => capture.render(&state.cpu).await,
+            None => "{}".to_string(),
+        };
         let log_line = format!(
             "{} {} {} {}ms {}",
             method,
@@ -68,15 +187,25 @@ pub async fn request_logger(
     response
 }
 
-#[derive(Clone)]
 pub struct PayloadCapture {
     content: PayloadCaptureContent,
 }
 
-#[derive(Clone)]
 enum PayloadCaptureContent {
     Fixed(&'static str),
-    Streaming(Arc<Mutex<CapturedBody>>),
+    Streaming {
+        raw: oneshot::Receiver<CapturedBody>,
+        typed: mpsc::Receiver<String>,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct TypedControlLogPayloadSender(mpsc::Sender<String>);
+
+impl TypedControlLogPayloadSender {
+    pub(crate) fn send(&self, payload: String) {
+        let _ = self.0.try_send(payload);
+    }
 }
 
 #[derive(Debug)]
@@ -103,20 +232,6 @@ impl CapturedBody {
             self.truncated = true;
         }
     }
-
-    fn render(&self) -> String {
-        if self.truncated {
-            return format!(
-                "[request body omitted: exceeded logging limit of {} bytes]",
-                self.maximum_bytes
-            );
-        }
-        if self.bytes.is_empty() {
-            return "{}".to_string();
-        }
-
-        compact_and_redact_payload(&self.bytes)
-    }
 }
 
 impl PayloadCapture {
@@ -126,29 +241,38 @@ impl PayloadCapture {
         }
     }
 
-    fn streaming(state: Arc<Mutex<CapturedBody>>) -> Self {
+    fn streaming(raw: oneshot::Receiver<CapturedBody>, typed: mpsc::Receiver<String>) -> Self {
         Self {
-            content: PayloadCaptureContent::Streaming(state),
+            content: PayloadCaptureContent::Streaming { raw, typed },
         }
     }
 
-    pub fn render(&self) -> String {
-        match &self.content {
-            PayloadCaptureContent::Fixed(value) => (*value).to_string(),
-            PayloadCaptureContent::Streaming(state) => {
-                let state = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.render()
+    pub async fn render(self, cpu: &crate::executor::CpuExecutorHandle) -> String {
+        match self.content {
+            PayloadCaptureContent::Fixed(value) => value.to_string(),
+            PayloadCaptureContent::Streaming { raw, mut typed } => {
+                if let Ok(payload) = typed.try_recv() {
+                    return payload;
+                }
+                match raw.await {
+                    Ok(captured) => cpu
+                        .render_request_log_payload_request(
+                            captured.bytes,
+                            captured.maximum_bytes,
+                            captured.truncated,
+                        )
+                        .await
+                        .unwrap_or_else(|error| {
+                            format!("[request body logging unavailable: {error}]")
+                        }),
+                    Err(_) => "[request body was not fully consumed]".to_string(),
+                }
             }
         }
     }
 }
 
-pub fn begin_payload_capture(
-    request: &mut Request<Body>,
-    maximum_capture_bytes: usize,
-) -> Option<PayloadCapture> {
+pub fn begin_payload_capture(request: &mut Request<Body>) -> Option<PayloadCapture> {
     if request.method() != Method::POST {
         return None;
     }
@@ -164,21 +288,38 @@ pub fn begin_payload_capture(
         return Some(PayloadCapture::fixed(BINARY_BODY_OMITTED));
     }
 
-    let state = Arc::new(Mutex::new(CapturedBody::new(maximum_capture_bytes)));
-    let capture_state = Arc::clone(&state);
+    let (sender, receiver) = oneshot::channel();
+    let (typed_sender, typed_receiver) = mpsc::channel(1);
+    request
+        .extensions_mut()
+        .insert(TypedControlLogPayloadSender(typed_sender));
     let body = std::mem::replace(request.body_mut(), Body::empty());
-    let stream = body.into_data_stream().map(move |result| {
-        if let Ok(bytes) = &result {
-            let mut state = capture_state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.record(bytes);
-        }
-        result
-    });
+    let stream = futures::stream::unfold(
+        (
+            body.into_data_stream(),
+            CapturedBody::new(MAX_REQUEST_LOG_CAPTURE_BYTES),
+            Some(sender),
+        ),
+        |(mut body, mut captured, mut sender)| async move {
+            match body.next().await {
+                Some(result) => {
+                    if let Ok(bytes) = &result {
+                        captured.record(bytes);
+                    }
+                    Some((result, (body, captured, sender)))
+                }
+                None => {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(captured);
+                    }
+                    None
+                }
+            }
+        },
+    );
     *request.body_mut() = Body::from_stream(stream);
 
-    Some(PayloadCapture::streaming(state))
+    Some(PayloadCapture::streaming(receiver, typed_receiver))
 }
 
 fn is_multipart_content_type(content_type: &str) -> bool {
@@ -201,21 +342,34 @@ fn is_binary_content_type(content_type: &str) -> bool {
         || mime_type.starts_with("audio/")
 }
 
-fn compact_and_redact_payload(bytes: &[u8]) -> String {
-    let Ok(body) = std::str::from_utf8(bytes) else {
-        return BINARY_PAYLOAD_OMITTED.to_string();
-    };
-
-    match serde_json::from_str::<serde_json::Value>(body) {
+pub(crate) fn render_captured_request_payload(
+    bytes: &[u8],
+    maximum_bytes: usize,
+    truncated: bool,
+) -> String {
+    if truncated {
+        return format!("[request body omitted: exceeded logging limit of {maximum_bytes} bytes]");
+    }
+    if bytes.is_empty() {
+        return "{}".to_string();
+    }
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(mut value) => {
             redact_request_values(&mut value);
             value.to_string()
         }
-        Err(_) if body.to_ascii_lowercase().contains("base64") => {
-            BINARY_PAYLOAD_OMITTED.to_string()
-        }
-        Err(_) => body.trim().to_string(),
+        Err(_) => render_invalid_control_payload(bytes),
     }
+}
+
+pub(crate) fn render_invalid_control_payload(bytes: &[u8]) -> String {
+    let Ok(body) = std::str::from_utf8(bytes) else {
+        return BINARY_PAYLOAD_OMITTED.to_string();
+    };
+    if body.to_ascii_lowercase().contains("base64") {
+        return BINARY_PAYLOAD_OMITTED.to_string();
+    }
+    body.trim().to_string()
 }
 
 pub fn redact_request_values(value: &mut serde_json::Value) {

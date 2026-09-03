@@ -1,14 +1,16 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
 use std::ffi::OsString;
-use std::fs;
 use std::path::Path;
 use tracing::{info, warn};
 
 use crate::config::{Config, MediaProcessConfig};
 use crate::constants::{image_mime_type, video_mime_type};
-use crate::database::DbPool;
-use crate::utils::process::{bounded_error_detail, ExternalProcess, ExternalProcessOutput};
+use crate::executor::process::{
+    bounded_error_detail, ffprobe_single_thread_arguments, run_storage_media_tool,
+    ExternalProcessOutput, MediaTool, StorageChildDescriptor,
+};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
+use crate::runtime::ExecutorHandles;
 
 #[derive(Debug, Default, Clone)]
 pub struct MediaMetadata {
@@ -56,7 +58,7 @@ impl MetadataSourceType {
 #[derive(Debug, Clone)]
 pub struct MetadataSource {
     pub source_type: MetadataSourceType,
-    pub payload: serde_json::Value,
+    pub payload_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -66,21 +68,16 @@ pub struct ExtractedMediaMetadata {
 }
 
 pub async fn generate_media_metadata(
-    pool: &DbPool,
+    executors: &ExecutorHandles,
     media_id: i64,
+    claim_token: &str,
     config: &Config,
 ) -> Result<(), String> {
-    generation::generate_media_metadata(pool, media_id, config).await
+    generation::generate_media_metadata(executors, media_id, claim_token, config).await
 }
 
 mod generation;
 pub mod reverse_geocoding;
-
-pub fn supplemental_metadata_path(file_path: &Path) -> Option<std::path::PathBuf> {
-    supplemental_metadata_candidates(file_path)
-        .into_iter()
-        .find(|path| path.is_file())
-}
 
 pub(crate) fn supplemental_metadata_candidates(file_path: &Path) -> Vec<std::path::PathBuf> {
     const SUPPLEMENTAL_METADATA_SUFFIX: &str = ".supplemental-metadata.json";
@@ -181,91 +178,116 @@ fn split_takeout_duplicate_filename(file_name: &str) -> Option<(String, &str)> {
     ))
 }
 
-pub fn load_supplemental_metadata(file_path: &Path) -> Option<serde_json::Value> {
-    let metadata_path = supplemental_metadata_path(file_path)?;
-    let content = fs::read_to_string(&metadata_path).ok()?;
-    match serde_json::from_str(&content) {
-        Ok(metadata) => Some(metadata),
-        Err(error) => {
-            warn!(
-                "Failed to parse supplemental metadata {:?}: {}",
-                metadata_path.file_name().unwrap_or_default(),
-                error
-            );
-            None
+pub async fn load_supplemental_metadata_storage(
+    executors: &ExecutorHandles,
+    storage_root: StorageRootId,
+    media_path: &NormalizedStoragePath,
+) -> Result<Option<crate::executor::ParsedSupplementalMetadata>, String> {
+    const MAXIMUM_SIDECAR_BYTES: u64 = 4 * 1024 * 1024;
+
+    let logical_path = Path::new(media_path.relative_path());
+    for candidate in supplemental_metadata_candidates(logical_path) {
+        let candidate = NormalizedStoragePath::parse(&candidate.to_string_lossy())
+            .map_err(|error| error.to_string())?;
+        let (session, snapshot) = match executors
+            .file_io
+            .open_storage_read_session_durable(storage_root, candidate.clone())
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) if error.kind == crate::executor::ExecutorErrorKind::FileNotFound => {
+                continue
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if snapshot.byte_size == 0 || snapshot.byte_size > MAXIMUM_SIDECAR_BYTES {
+            return Err(format!(
+                "supplemental metadata {} contains {} bytes; expected 1..={MAXIMUM_SIDECAR_BYTES}",
+                candidate.relative_path(),
+                snapshot.byte_size
+            ));
         }
+        let capacity = usize::try_from(snapshot.byte_size)
+            .map_err(|_| "supplemental metadata size exceeds this platform".to_string())?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|error| format!("failed to reserve supplemental metadata buffer: {error}"))?;
+        let mut session = Some(session);
+        loop {
+            let (returned_session, chunk) = executors
+                .file_io
+                .read_storage_session_durable(
+                    session.take().ok_or_else(|| {
+                        "supplemental metadata session is unavailable".to_string()
+                    })?,
+                    crate::runtime::FILE_IO_CHUNK_BYTES as usize,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            session = Some(returned_session);
+            if chunk.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() as u64 > snapshot.byte_size {
+                return Err("supplemental metadata changed while reading".to_string());
+            }
+        }
+        executors
+            .file_io
+            .close_storage_session_durable(
+                session
+                    .take()
+                    .ok_or_else(|| "supplemental metadata session is unavailable".to_string())?,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if bytes.len() as u64 != snapshot.byte_size {
+            return Err("supplemental metadata changed while reading".to_string());
+        }
+        let metadata = executors
+            .cpu
+            .parse_supplemental_metadata_durable(bytes)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to parse supplemental metadata {}: {error}",
+                    candidate.relative_path()
+                )
+            })?;
+        return Ok(Some(metadata));
     }
+    Ok(None)
 }
 
-pub fn apply_supplemental_metadata(metadata: &mut MediaMetadata, data: &serde_json::Value) {
+pub fn apply_supplemental_metadata(
+    metadata: &mut MediaMetadata,
+    data: &crate::executor::ParsedSupplementalMetadata,
+) {
     if metadata.gps_latitude == Some(0.0) && metadata.gps_longitude == Some(0.0) {
         metadata.gps_latitude = None;
         metadata.gps_longitude = None;
     }
 
-    let supplemental_date = data
-        .get("photoTakenTime")
-        .and_then(|value| value.get("timestamp"))
-        .and_then(parse_unix_timestamp)
-        .or_else(|| {
-            data.get("creationTime")
-                .and_then(|value| value.get("timestamp"))
-                .and_then(parse_unix_timestamp)
-        });
-    if supplemental_date.is_some() {
-        metadata.date_taken = supplemental_date;
+    if data.date_taken.is_some() {
+        metadata.date_taken = data.date_taken;
     }
 
-    let geo_data_exif = data.get("geoDataExif");
-    let geo_data = data.get("geoData");
-    let coordinates = geo_data_exif
-        .and_then(gps_pair_from_json)
-        .or_else(|| geo_data.and_then(gps_pair_from_json));
-    if let Some((latitude, longitude)) = coordinates {
+    if let Some((latitude, longitude)) = data.gps_latitude.zip(data.gps_longitude) {
         metadata.gps_latitude = Some(latitude);
         metadata.gps_longitude = Some(longitude);
         metadata.location_city = None;
         metadata.location_state = None;
         metadata.location_country = None;
     }
-    let supplemental_altitude = geo_data_exif
-        .and_then(|data| json_f64(data.get("altitude")))
-        .or_else(|| geo_data.and_then(|data| json_f64(data.get("altitude"))));
-    if supplemental_altitude.is_some() {
-        metadata.gps_altitude = supplemental_altitude;
+    if data.gps_altitude.is_some() {
+        metadata.gps_altitude = data.gps_altitude;
     }
 
-    let supplemental_keywords = data
-        .get("description")
-        .and_then(|value| value.as_str())
-        .filter(|description| !description.is_empty())
-        .map(str::to_string);
-    if supplemental_keywords.is_some() {
-        metadata.keywords = supplemental_keywords;
+    if data.description.is_some() {
+        metadata.keywords = data.description.clone();
     }
-}
-
-fn parse_unix_timestamp(value: &serde_json::Value) -> Option<DateTime<Utc>> {
-    let timestamp = value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))?;
-    DateTime::from_timestamp(timestamp, 0)
-}
-
-fn json_f64(value: Option<&serde_json::Value>) -> Option<f64> {
-    value
-        .and_then(|value| value.as_f64())
-        .or_else(|| value.and_then(|value| value.as_str()?.parse().ok()))
-}
-
-fn gps_pair_from_json(data: &serde_json::Value) -> Option<(f64, f64)> {
-    let latitude = json_f64(data.get("latitude"))?;
-    let longitude = json_f64(data.get("longitude"))?;
-    if !is_valid_gps_pair(latitude, longitude) {
-        return None;
-    }
-
-    Some((latitude, longitude))
 }
 
 fn is_valid_gps_pair(latitude: f64, longitude: f64) -> bool {
@@ -295,10 +317,20 @@ pub fn normalize_gps_coordinates(metadata: &mut MediaMetadata) {
 }
 
 pub async fn extract_image_metadata(
+    executors: &ExecutorHandles,
     file_path: &Path,
+    storage_root: StorageRootId,
+    storage_path: &NormalizedStoragePath,
     process_config: &MediaProcessConfig,
 ) -> Result<ExtractedMediaMetadata, String> {
-    let mut extracted = extract_exif_metadata(file_path, process_config).await?;
+    let mut extracted = extract_exif_metadata(
+        executors,
+        file_path,
+        storage_root,
+        storage_path,
+        process_config,
+    )
+    .await?;
 
     if extracted.metadata.mime_type.is_none() {
         extracted.metadata.mime_type = Some(
@@ -313,23 +345,28 @@ pub async fn extract_image_metadata(
 }
 
 async fn extract_exif_metadata(
+    executors: &ExecutorHandles,
     file_path: &Path,
+    storage_root: StorageRootId,
+    storage_path: &NormalizedStoragePath,
     process_config: &MediaProcessConfig,
 ) -> Result<ExtractedMediaMetadata, String> {
     let mut metadata = MediaMetadata::default();
     let mut sources = Vec::new();
 
-    let output = ExternalProcess::new(
-        "exiftool",
-        vec![
-            OsString::from("-json"),
-            OsString::from("-n"),
-            file_path.as_os_str().to_os_string(),
-        ],
+    let output = run_storage_media_tool(
+        &executors.cpu,
+        &executors.file_io,
+        MediaTool::ExifTool,
+        exiftool_metadata_arguments(),
         process_config.maximum_metadata_output_bytes,
         process_config.maximum_stderr_bytes,
+        vec![StorageChildDescriptor::Read {
+            storage_root,
+            path: storage_path.clone(),
+            child_fd: 10,
+        }],
     )
-    .run()
     .await
     .map_err(|error| {
         let detail = format!(
@@ -361,24 +398,16 @@ async fn extract_exif_metadata(
         .as_deref()
         .map(|detail| format!("; {detail}"))
         .unwrap_or_default();
-    let json_str = String::from_utf8(output.stdout).map_err(|error| {
-        format!(
-            "exiftool returned non-UTF-8 JSON for {}: {error}{command_failure_context}",
-            file_path.display(),
-        )
-    })?;
-    let exif_data = serde_json::from_str::<Vec<serde_json::Value>>(&json_str).map_err(|error| {
-        format!(
-            "exiftool returned invalid JSON for {}: {error}{command_failure_context}",
-            file_path.display(),
-        )
-    })?;
-    let data = exif_data.first().ok_or_else(|| {
-        format!(
-            "exiftool returned no metadata record for {}{command_failure_context}",
-            file_path.display(),
-        )
-    })?;
+    let exif_payload = executors
+        .cpu
+        .parse_exif_metadata_durable(output.stdout)
+        .await
+        .map_err(|error| {
+            format!(
+                "exiftool returned invalid JSON for {}: {error}{command_failure_context}",
+                file_path.display(),
+            )
+        })?;
     if let Some(detail) = command_failure_detail {
         warn!(
             input_path = %file_path.display(),
@@ -386,151 +415,115 @@ async fn extract_exif_metadata(
             "ExifTool returned usable metadata with a non-success exit status"
         );
     }
-    apply_exif_data(&mut metadata, data);
+    apply_exif_data(&mut metadata, &exif_payload);
     normalize_gps_coordinates(&mut metadata);
     sources.push(MetadataSource {
         source_type: MetadataSourceType::ExifTool,
-        payload: data.clone(),
+        payload_json: exif_payload.payload_json,
     });
     Ok(ExtractedMediaMetadata { metadata, sources })
 }
 
-fn apply_exif_data(metadata: &mut MediaMetadata, data: &serde_json::Value) {
-    fn get_str(data: &serde_json::Value, keys: &[&str]) -> Option<String> {
-        for key in keys {
-            if let Some(v) = data.get(key) {
-                if let Some(s) = v.as_str() {
-                    return Some(s.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    fn get_i32(data: &serde_json::Value, keys: &[&str]) -> Option<i32> {
-        for key in keys {
-            if let Some(v) = data.get(key) {
-                if let Some(n) = v.as_i64() {
-                    return Some(n as i32);
-                }
-                if let Some(n) = v.as_f64() {
-                    return Some(n as i32);
-                }
-            }
-        }
-        None
-    }
-
-    fn get_f64(data: &serde_json::Value, keys: &[&str]) -> Option<f64> {
-        for key in keys {
-            if let Some(v) = data.get(key) {
-                if let Some(n) = v.as_f64() {
-                    return Some(n);
-                }
-                if let Some(n) = v.as_i64() {
-                    return Some(n as f64);
-                }
-            }
-        }
-        None
-    }
-
-    if let Some(date_str) = get_str(data, &["DateTimeOriginal", "CreateDate", "ModifyDate"]) {
-        metadata.date_taken = parse_exif_datetime(&date_str);
-    }
-
-    metadata.gps_latitude = get_f64(data, &["GPSLatitude"]);
-    metadata.gps_longitude = get_f64(data, &["GPSLongitude"]);
-    metadata.gps_altitude = get_f64(data, &["GPSAltitude"]);
-
-    metadata.camera_make = get_str(data, &["Make"]);
-    metadata.camera_model = get_str(data, &["Model", "HostComputer"]);
-    metadata.lens_make = get_str(data, &["LensMake"]);
-    metadata.lens_model = get_str(data, &["LensModel", "LensID"]);
-
-    metadata.iso = get_i32(data, &["ISO"]);
-    metadata.f_number = get_f64(data, &["FNumber", "Aperture"]);
-    metadata.focal_length = get_f64(data, &["FocalLength"]);
-    metadata.focal_length_35mm = get_f64(data, &["FocalLengthIn35mmFormat", "FocalLength35efl"]);
-
-    if let Some(exp) = get_f64(data, &["ExposureTime", "ShutterSpeed"]) {
-        if exp > 0.0 && exp < 1.0 {
-            metadata.exposure_time = Some(format!("1/{}", (1.0 / exp).round() as i32));
-        } else {
-            metadata.exposure_time = Some(format!("{}", exp));
-        }
-    }
-
-    if let Some(kw) = data.get("Keywords") {
-        metadata.keywords = match kw {
-            serde_json::Value::String(s) => Some(s.clone()),
-            serde_json::Value::Array(arr) => {
-                let strs: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-                if strs.is_empty() {
-                    None
-                } else {
-                    Some(strs.join(","))
-                }
-            }
-            _ => None,
-        };
-    }
-
-    metadata.width = get_i32(data, &["ImageWidth", "ExifImageWidth", "SourceImageWidth"]);
-    metadata.height = get_i32(
-        data,
-        &["ImageHeight", "ExifImageHeight", "SourceImageHeight"],
-    );
-
-    if let Some(mime) = get_str(data, &["MIMEType"]) {
-        metadata.mime_type = Some(mime);
-    }
+fn apply_exif_data(metadata: &mut MediaMetadata, data: &crate::executor::ParsedExifMetadata) {
+    metadata.date_taken = data.date_taken;
+    metadata.gps_latitude = data.gps_latitude;
+    metadata.gps_longitude = data.gps_longitude;
+    metadata.gps_altitude = data.gps_altitude;
+    metadata.camera_make = data.camera_make.clone();
+    metadata.camera_model = data.camera_model.clone();
+    metadata.lens_make = data.lens_make.clone();
+    metadata.lens_model = data.lens_model.clone();
+    metadata.iso = data.iso;
+    metadata.exposure_time = data.exposure_time.clone();
+    metadata.f_number = data.f_number;
+    metadata.focal_length = data.focal_length;
+    metadata.focal_length_35mm = data.focal_length_35mm;
+    metadata.keywords = data.keywords.clone();
+    metadata.width = data.width;
+    metadata.height = data.height;
+    metadata.mime_type = data.mime_type.clone();
 }
 
-fn parse_exif_datetime(dt_str: &str) -> Option<DateTime<Utc>> {
-    // Try common formats
-    let formats = [
-        "%Y:%m:%d %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y:%m:%d",
-        "%Y-%m-%d",
-    ];
-
-    let clean_str = dt_str.trim();
-    for fmt in &formats {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(clean_str, fmt) {
-            return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
-        }
-    }
-
-    None
+fn exiftool_metadata_arguments() -> Vec<OsString> {
+    let mut arguments = vec![OsString::from("-json"), OsString::from("-n")];
+    arguments.extend(
+        [
+            "DateTimeOriginal",
+            "CreateDate",
+            "ModifyDate",
+            "GPSLatitude",
+            "GPSLongitude",
+            "GPSAltitude",
+            "Make",
+            "Model",
+            "HostComputer",
+            "LensMake",
+            "LensModel",
+            "LensID",
+            "ISO",
+            "FNumber",
+            "Aperture",
+            "FocalLength",
+            "FocalLengthIn35mmFormat",
+            "FocalLength35efl",
+            "ExposureTime",
+            "ShutterSpeed",
+            "Keywords",
+            "ImageWidth",
+            "ExifImageWidth",
+            "SourceImageWidth",
+            "ImageHeight",
+            "ExifImageHeight",
+            "SourceImageHeight",
+            "MIMEType",
+        ]
+        .into_iter()
+        .map(|field| OsString::from(format!("-{field}"))),
+    );
+    arguments.push(OsString::from("/proc/self/fd/10"));
+    arguments
 }
 
 pub async fn extract_video_metadata(
+    executors: &ExecutorHandles,
     file_path: &Path,
+    storage_root: StorageRootId,
+    storage_path: &NormalizedStoragePath,
     process_config: &MediaProcessConfig,
 ) -> Result<ExtractedMediaMetadata, String> {
-    let mut extracted = extract_exif_metadata(file_path, process_config).await?;
+    let mut extracted = extract_exif_metadata(
+        executors,
+        file_path,
+        storage_root,
+        storage_path,
+        process_config,
+    )
+    .await?;
 
     // Run ffprobe
-    let output = ExternalProcess::new(
-        "ffprobe",
-        vec![
-            OsString::from("-v"),
-            OsString::from("error"),
-            OsString::from("-print_format"),
-            OsString::from("json"),
-            OsString::from("-show_format"),
-            OsString::from("-show_streams"),
-            file_path.as_os_str().to_os_string(),
-        ],
+    let mut arguments = ffprobe_single_thread_arguments();
+    arguments.extend([
+        OsString::from("-v"),
+        OsString::from("error"),
+        OsString::from("-print_format"),
+        OsString::from("json"),
+        OsString::from("-show_format"),
+        OsString::from("-show_streams"),
+        OsString::from("/proc/self/fd/10"),
+    ]);
+    let output = run_storage_media_tool(
+        &executors.cpu,
+        &executors.file_io,
+        MediaTool::Ffprobe,
+        arguments,
         process_config.maximum_metadata_output_bytes,
         process_config.maximum_stderr_bytes,
+        vec![StorageChildDescriptor::Read {
+            storage_root,
+            path: storage_path.clone(),
+            child_fd: 10,
+        }],
     )
-    .run()
     .await
     .map_err(|error| {
         let detail = format!(
@@ -560,77 +553,33 @@ pub async fn extract_video_metadata(
             process_config.maximum_metadata_output_bytes
         ));
     }
-    let json_str = String::from_utf8(output.stdout).map_err(|error| {
-        format!(
-            "ffprobe returned non-UTF-8 JSON for {}: {error}",
-            file_path.display()
-        )
-    })?;
-
-    let ffprobe_payload: serde_json::Value = serde_json::from_str(&json_str).map_err(|error| {
-        format!(
-            "ffprobe returned invalid JSON for {}: {error}",
-            file_path.display()
-        )
-    })?;
+    let ffprobe_payload = executors
+        .cpu
+        .parse_ffprobe_metadata_durable(output.stdout)
+        .await
+        .map_err(|error| {
+            format!(
+                "ffprobe returned invalid JSON for {}: {error}",
+                file_path.display()
+            )
+        })?;
     extracted.sources.push(MetadataSource {
         source_type: MetadataSourceType::Ffprobe,
-        payload: ffprobe_payload.clone(),
+        payload_json: ffprobe_payload.payload_json.clone(),
     });
-    let ffprobe_data: FfprobeOutput = serde_json::from_value(ffprobe_payload).map_err(|error| {
-        format!(
-            "ffprobe returned an unsupported metadata structure for {}: {error}",
-            file_path.display()
-        )
-    })?;
     let metadata = &mut extracted.metadata;
-
-    // Extract video stream info
-    if let Some(streams) = ffprobe_data.streams {
-        for stream in streams {
-            if stream.codec_type.as_deref() == Some("video") {
-                metadata.width = stream.width;
-                metadata.height = stream.height;
-                metadata.video_codec = stream.codec_name;
-                break;
-            }
-        }
+    metadata.width = ffprobe_payload.width.or(metadata.width);
+    metadata.height = ffprobe_payload.height.or(metadata.height);
+    metadata.video_codec = ffprobe_payload.video_codec;
+    metadata.duration_seconds = ffprobe_payload.duration_seconds;
+    if ffprobe_payload.date_taken.is_some() {
+        metadata.date_taken = ffprobe_payload.date_taken;
     }
-
-    // Extract format info
-    if let Some(format) = ffprobe_data.format {
-        // Duration
-        if let Some(duration) = format.duration {
-            metadata.duration_seconds = duration.parse().ok();
-        }
-
-        if let Some(container_metadata) = format.container_metadata {
-            // Creation time
-            let creation_time = container_metadata
-                .creation_time
-                .or(container_metadata.com_apple_quicktime_creationdate);
-            if let Some(ct) = creation_time {
-                let clean_ct = ct.replace("Z", "+00:00");
-                if let Ok(dt) = DateTime::parse_from_rfc3339(&clean_ct) {
-                    metadata.date_taken = Some(dt.with_timezone(&Utc));
-                }
-            }
-
-            // Location
-            let location = container_metadata
-                .location
-                .or(container_metadata.com_apple_quicktime_location_iso6709);
-            if let Some(loc) = location {
-                if let Some((lat, lon)) = parse_iso6709_location(&loc) {
-                    if metadata.gps_latitude.is_none() {
-                        metadata.gps_latitude = Some(lat);
-                    }
-                    if metadata.gps_longitude.is_none() {
-                        metadata.gps_longitude = Some(lon);
-                    }
-                }
-            }
-        }
+    if metadata.gps_latitude.is_none() {
+        metadata.gps_latitude = ffprobe_payload.gps_latitude;
+    }
+    if metadata.gps_longitude.is_none() {
+        metadata.gps_longitude = ffprobe_payload.gps_longitude;
     }
 
     metadata.mime_type = Some(
@@ -657,37 +606,6 @@ fn log_metadata_command_failure(
         stderr_truncated = output.stderr_truncated,
         "Metadata command failed"
     );
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeOutput {
-    streams: Option<Vec<FfprobeStream>>,
-    format: Option<FfprobeFormat>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeStream {
-    codec_type: Option<String>,
-    codec_name: Option<String>,
-    width: Option<i32>,
-    height: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeFormat {
-    duration: Option<String>,
-    #[serde(rename = "tags")]
-    container_metadata: Option<FfprobeContainerMetadata>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeContainerMetadata {
-    creation_time: Option<String>,
-    #[serde(rename = "com.apple.quicktime.creationdate")]
-    com_apple_quicktime_creationdate: Option<String>,
-    location: Option<String>,
-    #[serde(rename = "com.apple.quicktime.location.ISO6709")]
-    com_apple_quicktime_location_iso6709: Option<String>,
 }
 
 fn log_extracted_metadata(file_path: &Path, metadata: &MediaMetadata) {
@@ -765,39 +683,4 @@ fn log_extracted_metadata(file_path: &Path, metadata: &MediaMetadata) {
         file_path.file_name().unwrap_or_default(),
         fields.join(", ")
     );
-}
-
-fn parse_iso6709_location(location: &str) -> Option<(f64, f64)> {
-    let location = location.trim_end_matches('/');
-    if location.len() < 2 {
-        return None;
-    }
-
-    // Find second +/- after position 1
-    let chars: Vec<char> = location.chars().collect();
-    let mut split_idx = 0;
-
-    for (i, &c) in chars.iter().enumerate().skip(1) {
-        if c == '+' || c == '-' {
-            split_idx = i;
-            break;
-        }
-    }
-
-    if split_idx == 0 {
-        return None;
-    }
-
-    let lat_str: String = chars[..split_idx].iter().collect();
-    let mut lon_str: String = chars[split_idx..].iter().collect();
-
-    // Handle altitude suffix
-    if let Some(pos) = lon_str[1..].find(['+', '-']) {
-        lon_str = lon_str[..pos + 1].to_string();
-    }
-
-    let lat: f64 = lat_str.parse().ok()?;
-    let lon: f64 = lon_str.parse().ok()?;
-
-    Some((lat, lon))
 }

@@ -5,8 +5,6 @@ import kotlinx.serialization.Serializable
 @Serializable data class Place(val placeId: String, val city: String, val state: String?, val country: String, val mediaCount: Long)
 @Serializable data class PageRequest(val cursor: String?, val limit: Int)
 @Serializable data class PlaceRequest(val placeId: String, val cursor: String?, val limit: Int)
-@Serializable data class PlaceThumbnailRequest(val placeId: String)
-@Serializable data class PlaceThumbnailResponse(val thumbnail: String?)
 @Serializable data class PlacesResponse(val places: List<Place>, val nextCursor: String?, val hasMore: Boolean)
 @Serializable data class PlaceResponse(val place: Place, val media: List<Media>, val nextCursor: String?, val hasMore: Boolean)
 
@@ -42,4 +40,3 @@ import kotlinx.serialization.Serializable
 @Serializable data class MapCluster(val id: String, val lat: Double, val lng: Double, val count: Long, val representativeId: Long)
 @Serializable data class MapClustersResponse(val clusters: List<MapCluster>, val totalCount: Long)
 @Serializable data class MapMediaResponse(val items: List<Media>)
-

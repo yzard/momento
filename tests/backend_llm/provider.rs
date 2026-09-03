@@ -4,11 +4,12 @@ use llm_service::provider::{
     InferenceInput, RuntimeCatalog, RuntimeSpec, ServiceManager, ServiceType,
 };
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::{NamedTempFile, TempDir};
 
 const MOCK_RUNTIME: &str = r#"
@@ -129,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', '0'))
             request = json.loads(self.rfile.read(content_length))
             image_url = request['messages'][0]['content'][1]['image_url']['url']
-            if not image_url.startswith('file://' + arguments.input_root + '/'):
+            if not image_url.startswith('file://'):
                 self.send_json(400, {'detail': 'OCR input was not a local file URL'})
                 return
             self.send_json(200, {'choices': [{'message': {'content': 'OCR text'}}]})
@@ -146,7 +147,7 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             self.send_json(400, {'detail': 'input was not a JSON descriptor'})
             return
-        if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType'}:
+        if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType', 'inputFilename'}:
             self.send_json(400, {'detail': 'invalid input descriptor'})
             return
         if 'screenshot_detection' in arguments.mode or 'document_detection' in arguments.mode or 'classifier' in arguments.mode:
@@ -267,11 +268,18 @@ ThreadingHTTPServer(('127.0.0.1', arguments.port), Handler).serve_forever()
 "#;
 
 fn available_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to reserve test port");
-    listener
-        .local_addr()
-        .expect("Failed to read test port")
-        .port()
+    static USED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let used_ports = USED_PORTS.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to reserve test port");
+        let port = listener
+            .local_addr()
+            .expect("Failed to read test port")
+            .port();
+        if used_ports.lock().expect("test port registry").insert(port) {
+            return port;
+        }
+    }
 }
 
 #[test]

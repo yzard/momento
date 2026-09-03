@@ -130,6 +130,10 @@ describe('Places page', () => {
     expect(screen.getByText('Ile-de-France, France')).toBeTruthy()
     expect(screen.getByText('8 media')).toBeTruthy()
     expect(screen.getByText('Japan')).toBeTruthy()
+    expect(
+      screen.getByRole('heading', { name: 'Places' }).closest('[data-page-frame="true"]')
+    ).toBeTruthy()
+    expect(parisCard.parentElement?.className).toContain('2xl:grid-cols-5')
 
     const cardObserver = observedElements.find(({ target }) => target === parisCard)
     expect(cardObserver).toBeDefined()

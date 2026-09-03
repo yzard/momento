@@ -3,13 +3,13 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  getThumbnailBatch: vi.fn(),
+  getThumbnailURL: vi.fn(),
   albumCard: vi.fn(),
   deleteAlbum: vi.fn(),
 }))
 
 vi.mock('../../../../src/frontend/api/media', () => ({
-  mediaApi: { getThumbnailBatch: mocks.getThumbnailBatch },
+  mediaApi: { getThumbnailURL: mocks.getThumbnailURL },
 }))
 
 vi.mock('../../../../src/frontend/hooks/useAlbums', () => ({
@@ -65,39 +65,33 @@ import AlbumList from '../../../../src/frontend/components/albums/AlbumList'
 
 describe('AlbumList', () => {
   beforeEach(() => {
-    mocks.getThumbnailBatch.mockReset()
+    mocks.getThumbnailURL.mockReset()
     mocks.albumCard.mockReset()
     mocks.deleteAlbum.mockReset()
     mocks.deleteAlbum.mockResolvedValue(undefined)
-    mocks.getThumbnailBatch.mockResolvedValue(
-      new Map([
-        [10, 'first-cover'],
-        [11, 'shared-cover'],
-        [12, 'third-cover'],
-        [13, 'fourth-cover'],
-        [20, 'second-cover'],
-      ])
-    )
+    mocks.getThumbnailURL.mockImplementation((mediaId: number) => `${mediaId}-cover`)
   })
 
   afterEach(cleanup)
 
-  it('loads all album covers in one batch and passes them to cards', async () => {
+  it('passes direct binary cover URLs to cards', async () => {
     render(<AlbumList onAlbumClick={vi.fn()} />)
 
-    await waitFor(() => expect(mocks.getThumbnailBatch).toHaveBeenCalledOnce())
-    expect(mocks.getThumbnailBatch).toHaveBeenCalledWith([10, 11, 12, 13, 20], 'normal')
+    expect(screen.getByRole('heading', { name: 'Albums' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Create Album' })).toBeTruthy()
+    expect(mocks.getThumbnailURL).toHaveBeenCalledWith(10, 'normal')
+    expect(mocks.getThumbnailURL).toHaveBeenCalledWith(20, 'normal')
     await waitFor(() => {
       expect(mocks.albumCard).toHaveBeenCalledWith(
         expect.objectContaining({
           album: expect.objectContaining({ id: 1 }),
-          thumbnailUrls: ['first-cover', 'shared-cover', 'third-cover', 'fourth-cover'],
+          thumbnailUrls: ['10-cover', '11-cover', '12-cover', '13-cover'],
         })
       )
       expect(mocks.albumCard).toHaveBeenCalledWith(
         expect.objectContaining({
           album: expect.objectContaining({ id: 2 }),
-          thumbnailUrls: ['second-cover', 'shared-cover'],
+          thumbnailUrls: ['20-cover', '11-cover'],
         })
       )
     })

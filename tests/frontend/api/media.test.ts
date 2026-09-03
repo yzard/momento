@@ -4,19 +4,19 @@ const { post } = vi.hoisted(() => ({ post: vi.fn() }))
 
 vi.mock('../../../src/frontend/api/client', () => ({ apiClient: { post } }))
 
-import { mediaApi, thumbnailResponseMap } from '../../../src/frontend/api/media'
+import { mediaApi } from '../../../src/frontend/api/media'
 
 describe('mediaApi timeline classification', () => {
   beforeEach(() => {
     post.mockReset()
     post.mockResolvedValue({ data: { groups: [], markers: [] } })
-    mediaApi.clearCache()
   })
 
-  it('decodes only valid thumbnail payloads', () => {
-    expect(thumbnailResponseMap({ '7': 'thumbnail', invalid: 'ignored', '8': null })).toEqual(
-      new Map([[7, 'thumbnail']])
-    )
+  it('builds binary thumbnail and preview URLs without requesting JSON payloads', () => {
+    expect(mediaApi.getThumbnailURL(7, 'normal')).toBe('/api/v1/media/7/thumbnail')
+    expect(mediaApi.getThumbnailURL(7, 'tiny')).toBe('/api/v1/media/7/thumbnail/tiny')
+    expect(mediaApi.getPreviewURL(7)).toBe('/api/v1/media/7/preview')
+    expect(post).not.toHaveBeenCalled()
   })
 
   it('posts classification with timeline page requests', async () => {
@@ -60,21 +60,9 @@ describe('mediaApi timeline classification', () => {
     })
   })
 
-  it('does not cache a thumbnail response after the session cache is cleared', async () => {
-    let resolveThumbnails!: (value: { data: { thumbnails: Record<string, string> } }) => void
-    post.mockReturnValue(
-      new Promise((resolve) => {
-        resolveThumbnails = resolve
-      })
+  it('rejects invalid media IDs before constructing an asset URL', () => {
+    expect(() => mediaApi.getThumbnailURL(0, 'normal')).toThrow(
+      'mediaId must be a positive safe integer'
     )
-    const pendingBatch = mediaApi.getThumbnailBatch([42], 'normal')
-
-    mediaApi.clearCache()
-    resolveThumbnails({
-      data: { thumbnails: { '42': 'data:image/webp;base64,stale' } },
-    })
-
-    await expect(pendingBatch).rejects.toThrow('Thumbnail request was superseded')
-    expect(mediaApi.getCachedThumbnailURL(42, 'normal')).toBeUndefined()
   })
 })

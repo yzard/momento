@@ -85,11 +85,23 @@ describe('Timeline classification UI', () => {
   ])('renders %s title and search UI', (classification, title, placeholder) => {
     renderTimeline(classification)
 
-    expect(screen.getByRole('heading', { name: title })).toBeTruthy()
+    const heading = screen.getByRole('heading', { name: title })
+    expect(heading.closest('[data-page-frame="true"]')?.className).toContain('w-full')
     expect(screen.getByPlaceholderText(placeholder)).toBeTruthy()
     expect(mocks.timelineView).toHaveBeenCalledWith(
       expect.objectContaining({ mediaType: 'image', classification })
     )
+  })
+
+  it('orders the period control before Select in the right-aligned action group', () => {
+    renderTimeline('screenshot')
+
+    const periodButton = screen.getByRole('button', { name: 'Group timeline by period: Day' })
+    const selectButton = screen.getByRole('button', { name: 'Select' })
+    expect(
+      periodButton.compareDocumentPosition(selectButton) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(periodButton.parentElement?.parentElement?.className).toContain('justify-end')
   })
 
   it.each([

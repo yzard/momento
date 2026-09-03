@@ -4,7 +4,6 @@ use crate::auth::{
     AdminPasswordReset,
 };
 use crate::config::ConfigManager;
-use crate::database::{fetch_one, queries, DbPool};
 use crate::error::AppError;
 use crate::models::MediaAccessResource;
 use axum::{
@@ -28,7 +27,8 @@ pub struct CurrentUser {
 #[derive(Clone)]
 pub struct AppState {
     pub config: ConfigManager,
-    pub pool: DbPool,
+    pub executors: crate::runtime::ExecutorHandles,
+    pub scheduler: crate::runtime::SchedulerHandle,
     pub llm_transport: crate::processor::ai::transport::TransportHandle,
     pub webdav_request_gate: crate::webdav::WebDAVRequestGate,
     pub admin_password_reset: AdminPasswordReset,
@@ -69,7 +69,7 @@ where
             }
         }
 
-        load_current_user(&app_state, user_id)
+        load_current_user(&app_state, user_id).await
     }
 }
 
@@ -115,7 +115,7 @@ where
                 .sub
                 .parse::<i64>()
                 .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
-            let current_user = load_current_user(&app_state, user_id)?;
+            let current_user = load_current_user(&app_state, user_id).await?;
             if current_user.must_change_password {
                 return Err(AppError::PasswordChangeRequired);
             }
@@ -168,25 +168,15 @@ fn has_user_authentication(parts: &Parts) -> bool {
     bearer_token(parts).is_some() || access_token_cookie(&parts.headers).is_some()
 }
 
-fn load_current_user(app_state: &AppState, user_id: i64) -> Result<CurrentUser, AppError> {
-    let connection = app_state.pool.get().map_err(AppError::Pool)?;
-    let user = fetch_one(
-        &connection,
-        queries::auth::SELECT_USER_FOR_TOKEN,
-        &[&user_id],
-        |row| {
-            Ok(UserRow {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                email: row.get(2)?,
-                role: row.get(3)?,
-                must_change_password: row.get(4)?,
-                is_active: row.get(5)?,
-            })
-        },
-    )?
-    .ok_or_else(|| AppError::Authentication("User not found".to_string()))?;
-    if user.is_active == 0 {
+async fn load_current_user(app_state: &AppState, user_id: i64) -> Result<CurrentUser, AppError> {
+    let user = app_state
+        .executors
+        .sqlite
+        .load_user_for_token_request(user_id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::Authentication("User not found".to_string()))?;
+    if !user.is_active {
         return Err(AppError::Authentication("User is inactive".to_string()));
     }
 
@@ -195,7 +185,7 @@ fn load_current_user(app_state: &AppState, user_id: i64) -> Result<CurrentUser, 
         username: user.username,
         email: user.email,
         role: user.role,
-        must_change_password: user.must_change_password != 0
+        must_change_password: user.must_change_password
             || app_state
                 .admin_password_reset
                 .requires_password_change(user.id),
@@ -243,15 +233,6 @@ fn is_password_change_route(path: &str) -> bool {
         "/api/v1/user/change-password",
     ]
     .contains(&path)
-}
-
-struct UserRow {
-    id: i64,
-    username: String,
-    email: String,
-    role: String,
-    must_change_password: i32,
-    is_active: i32,
 }
 
 // Helper trait for extracting AppState from state

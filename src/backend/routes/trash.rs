@@ -1,26 +1,27 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::HeaderMap,
     response::Response,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
 use chrono::{Duration, Utc};
 
 use crate::auth::{AppState, CurrentUser};
 use crate::constants::TRASH_RETENTION_DAYS;
-use crate::database::{execute_query, fetch_all, queries};
-use crate::error::{AppError, AppResult};
-use crate::models::{
-    ThumbnailBatchRequest, ThumbnailBatchResponse, TrashDeleteRequest, TrashListResponse,
-    TrashMediaResponse, TrashResponse, TrashRestoreRequest,
+use crate::database::operations::{
+    DeleteExpiredTrashPage, DeleteTrashMedia, DeleteTrashPage, RestoreTrash, TrashDeletionOutcome,
 };
-use crate::processor::media_deletion::permanently_delete_for_user;
+use crate::error::{AppError, AppResult};
+use crate::models::{TrashDeleteRequest, TrashListResponse, TrashResponse, TrashRestoreRequest};
+use crate::routes::{render_json, CpuJson};
+use crate::runtime::HttpRequestAdmission;
+
+const TRASH_DELETE_PAGE_SIZE: u16 = 256;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/trash/list", post(list_trash))
-        .route("/trash/thumbnails/get", post(get_deleted_thumbnail_batch))
         .route(
             "/trash/:media_id/thumbnail/tiny",
             get(get_deleted_tiny_thumbnail),
@@ -30,253 +31,187 @@ pub fn router() -> Router<AppState> {
         .route("/trash/empty", post(empty_trash))
 }
 
-async fn get_deleted_thumbnail_batch(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-    Json(request): Json<ThumbnailBatchRequest>,
-) -> AppResult<Json<ThumbnailBatchResponse>> {
-    let media_ids = crate::routes::media::unique_batch_ids(request.media_ids)?;
-    if media_ids.is_empty() {
-        return Ok(Json(ThumbnailBatchResponse {
-            thumbnails: std::collections::HashMap::new(),
-        }));
-    }
-
-    let rows: Vec<crate::routes::media::ThumbnailBatchRow> = {
-        let connection = state.pool.get().map_err(AppError::Pool)?;
-        let query = queries::trash::build_thumbnail_batch_query(media_ids.len());
-        let parameters =
-            crate::routes::media::user_media_id_parameters(&current_user.id, &media_ids);
-        fetch_all(&connection, &query, &parameters, |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })?
-    };
-    Ok(Json(
-        crate::routes::media::encode_thumbnail_batch(rows, request.size).await,
-    ))
-}
-
 async fn get_deleted_tiny_thumbnail(
     State(state): State<AppState>,
+    Extension(admission): Extension<HttpRequestAdmission>,
     current_user: CurrentUser,
     Path(media_id): Path<i64>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    crate::routes::media::serve_deleted_tiny_thumbnail(&state, current_user.id, media_id, &headers)
-        .await
-}
-
-fn map_trash_row(row: &rusqlite::Row) -> rusqlite::Result<TrashMediaResponse> {
-    Ok(TrashMediaResponse {
-        id: row.get(0)?,
-        filename: row.get(1)?,
-        original_filename: row.get(2)?,
-        media_type: row.get(3)?,
-        mime_type: row.get(4)?,
-        width: row.get(5)?,
-        height: row.get(6)?,
-        file_size: row.get(7)?,
-        duration_seconds: row.get(8)?,
-        date_taken: row.get(9)?,
-        deleted_at: row.get(10)?,
-        created_at: row.get(11)?,
-    })
+    crate::routes::media::serve_deleted_tiny_thumbnail(
+        &state,
+        &admission,
+        current_user.id,
+        media_id,
+        &headers,
+    )
+    .await
 }
 
 async fn list_trash(
     State(state): State<AppState>,
     current_user: CurrentUser,
-) -> AppResult<Json<TrashListResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let items = fetch_all(
-        &conn,
-        queries::trash::SELECT_DELETED,
-        &[&current_user.id],
-        map_trash_row,
-    )?;
-
+) -> AppResult<Response> {
+    let items = state
+        .executors
+        .sqlite
+        .load_trash_request(current_user.id)
+        .await?;
     let total_count = items.len() as i64;
 
-    Ok(Json(TrashListResponse { items, total_count }))
-}
-
-fn trash_media_query_parameters(
-    media_ids: &[i64],
-    user_id: i64,
-) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let placeholders = vec!["?"; media_ids.len()].join(",");
-    let mut parameters = media_ids
-        .iter()
-        .map(|media_id| Box::new(*media_id) as Box<dyn rusqlite::ToSql>)
-        .collect::<Vec<_>>();
-    parameters.push(Box::new(user_id));
-    (placeholders, parameters)
+    render_json(&state, TrashListResponse { items, total_count }).await
 }
 
 async fn restore_from_trash(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<TrashRestoreRequest>,
-) -> AppResult<Json<TrashResponse>> {
+    CpuJson(request): CpuJson<TrashRestoreRequest>,
+) -> AppResult<Response> {
     if request.media_ids.is_empty() {
-        return Ok(Json(TrashResponse {
-            message: "No media to restore".to_string(),
-            affected_count: 0,
-        }));
+        return render_json(
+            &state,
+            TrashResponse {
+                message: "No media to restore".to_string(),
+                affected_count: 0,
+            },
+        )
+        .await;
     }
 
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    let media_ids = crate::routes::media::unique_batch_ids(request.media_ids)?;
+    let affected_count = state
+        .executors
+        .sqlite
+        .restore_trash_request(RestoreTrash {
+            user_id: current_user.id,
+            media_ids,
+        })
+        .await?;
 
-    let (placeholders, parameters) =
-        trash_media_query_parameters(&request.media_ids, current_user.id);
-
-    let sql = queries::trash::RESTORE_MEDIA.replace("{}", &placeholders);
-    let parameter_references = parameters
-        .iter()
-        .map(|parameter| parameter.as_ref())
-        .collect::<Vec<_>>();
-    execute_query(&conn, &sql, &parameter_references)?;
-
-    Ok(Json(TrashResponse {
-        message: "Media restored successfully".to_string(),
-        affected_count: request.media_ids.len() as i64,
-    }))
+    render_json(
+        &state,
+        TrashResponse {
+            message: "Media restored successfully".to_string(),
+            affected_count: affected_count as i64,
+        },
+    )
+    .await
 }
 
 async fn permanently_delete(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<TrashDeleteRequest>,
-) -> AppResult<Json<TrashResponse>> {
+    CpuJson(request): CpuJson<TrashDeleteRequest>,
+) -> AppResult<Response> {
     if request.media_ids.is_empty() {
-        return Ok(Json(TrashResponse {
-            message: "No media to delete".to_string(),
-            affected_count: 0,
-        }));
+        return render_json(
+            &state,
+            TrashResponse {
+                message: "No media to delete".to_string(),
+                affected_count: 0,
+            },
+        )
+        .await;
     }
 
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let (placeholders, parameters) =
-        trash_media_query_parameters(&request.media_ids, current_user.id);
-
-    let sql = queries::trash::SELECT_FOR_DELETE.replace("{}", &placeholders);
-    let parameter_references = parameters
-        .iter()
-        .map(|parameter| parameter.as_ref())
-        .collect::<Vec<_>>();
-
-    let rows: Vec<MediaFileInfo> = fetch_all(&conn, &sql, &parameter_references, |row| {
-        Ok(MediaFileInfo {
-            id: row.get(0)?,
-            file_path: row.get(1)?,
-            thumbnail_path: row.get(2)?,
+    let media_ids = crate::routes::media::unique_batch_ids(request.media_ids)?;
+    let outcome = state
+        .executors
+        .sqlite
+        .delete_trash_media_request(DeleteTrashMedia {
+            user_id: current_user.id,
+            media_ids,
         })
-    })?;
+        .await?;
+    let deleted_count = apply_trash_deletion_outcome(&state.scheduler, outcome)?.0;
 
-    let mut deleted_count = 0;
-    for row in rows {
-        permanently_delete_for_user(
-            &conn,
-            row.id,
-            current_user.id,
-            &row.file_path,
-            row.thumbnail_path.as_deref(),
-        )?;
-        deleted_count += 1;
-    }
-
-    Ok(Json(TrashResponse {
-        message: "Media permanently deleted".to_string(),
-        affected_count: deleted_count,
-    }))
-}
-
-struct MediaFileInfo {
-    id: i64,
-    file_path: String,
-    thumbnail_path: Option<String>,
+    render_json(
+        &state,
+        TrashResponse {
+            message: "Media permanently deleted".to_string(),
+            affected_count: i64::try_from(deleted_count)
+                .map_err(|_| AppError::Internal("trash deletion count overflow".to_string()))?,
+        },
+    )
+    .await
 }
 
 async fn empty_trash(
     State(state): State<AppState>,
     current_user: CurrentUser,
-) -> AppResult<Json<TrashResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let rows: Vec<MediaFileInfo> = fetch_all(
-        &conn,
-        queries::trash::SELECT_ALL_DELETED,
-        &[&current_user.id],
-        |row| {
-            Ok(MediaFileInfo {
-                id: row.get(0)?,
-                file_path: row.get(1)?,
-                thumbnail_path: row.get(2)?,
+) -> AppResult<Response> {
+    let mut deleted_count = 0usize;
+    loop {
+        let outcome = state
+            .executors
+            .sqlite
+            .delete_trash_page_request(DeleteTrashPage {
+                user_id: current_user.id,
+                limit: TRASH_DELETE_PAGE_SIZE,
             })
-        },
-    )?;
-
-    let mut deleted_count = 0;
-    for row in rows {
-        permanently_delete_for_user(
-            &conn,
-            row.id,
-            current_user.id,
-            &row.file_path,
-            row.thumbnail_path.as_deref(),
-        )?;
-        deleted_count += 1;
+            .await?;
+        let (affected, has_more) = apply_trash_deletion_outcome(&state.scheduler, outcome)?;
+        deleted_count = deleted_count
+            .checked_add(affected)
+            .ok_or_else(|| AppError::Internal("trash deletion count overflow".to_string()))?;
+        if !has_more {
+            break;
+        }
     }
 
-    Ok(Json(TrashResponse {
-        message: "Trash emptied".to_string(),
-        affected_count: deleted_count,
-    }))
+    render_json(
+        &state,
+        TrashResponse {
+            message: "Trash emptied".to_string(),
+            affected_count: i64::try_from(deleted_count)
+                .map_err(|_| AppError::Internal("trash deletion count overflow".to_string()))?,
+        },
+    )
+    .await
 }
 
-pub fn cleanup_expired_trash(conn: &crate::database::DbConn) -> AppResult<i64> {
+pub async fn cleanup_expired_trash(
+    sqlite: &crate::executor::SqliteExecutorHandle,
+    scheduler: &crate::runtime::SchedulerHandle,
+) -> AppResult<i64> {
     let cutoff_date = (Utc::now() - Duration::days(TRASH_RETENTION_DAYS)).to_rfc3339();
-
-    let rows: Vec<MediaFileInfoWithUser> = fetch_all(
-        conn,
-        queries::trash::SELECT_OLD_DELETED,
-        &[&cutoff_date],
-        |row| {
-            Ok(MediaFileInfoWithUser {
-                id: row.get(0)?,
-                file_path: row.get(1)?,
-                thumbnail_path: row.get(2)?,
-                user_id: row.get(3)?,
+    let mut deleted_count = 0usize;
+    loop {
+        let outcome = sqlite
+            .delete_expired_trash_page_durable(DeleteExpiredTrashPage {
+                cutoff: cutoff_date.clone(),
+                limit: TRASH_DELETE_PAGE_SIZE,
             })
-        },
-    )?;
-
-    let mut deleted_count = 0;
-    for row in rows {
-        permanently_delete_for_user(
-            conn,
-            row.id,
-            row.user_id,
-            &row.file_path,
-            row.thumbnail_path.as_deref(),
-        )?;
-        deleted_count += 1;
+            .await?;
+        let (affected, has_more) = apply_trash_deletion_outcome(scheduler, outcome)?;
+        deleted_count = deleted_count
+            .checked_add(affected)
+            .ok_or_else(|| AppError::Internal("expired trash count overflow".to_string()))?;
+        if !has_more {
+            break;
+        }
     }
-
-    Ok(deleted_count)
+    i64::try_from(deleted_count)
+        .map_err(|_| AppError::Internal("expired trash count overflow".to_string()))
 }
 
-struct MediaFileInfoWithUser {
-    id: i64,
-    file_path: String,
-    thumbnail_path: Option<String>,
-    user_id: i64,
+fn apply_trash_deletion_outcome(
+    scheduler: &crate::runtime::SchedulerHandle,
+    outcome: TrashDeletionOutcome,
+) -> AppResult<(usize, bool)> {
+    match outcome {
+        TrashDeletionOutcome::Deleted {
+            affected_count,
+            cleanup_groups,
+            has_more,
+        } => {
+            if cleanup_groups > 0 {
+                scheduler.wake_journal_recovery();
+            }
+            Ok((affected_count, has_more))
+        }
+        TrashDeletionOutcome::PathConflict => Err(AppError::Conflict(
+            "media files are being changed by another operation".to_string(),
+        )),
+    }
 }

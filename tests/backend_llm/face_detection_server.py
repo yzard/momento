@@ -186,6 +186,7 @@ class FaceDetectionServerTests(unittest.TestCase):
                     "byteSize": len(image_bytes),
                     "contentHash": hashlib.sha256(image_bytes).hexdigest(),
                     "mimeType": "image/jpeg",
+                    "inputFilename": "input-0",
                 }
             ).encode()
             FACE_DETECTION_SERVER.Handler.runtime = runtime

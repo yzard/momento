@@ -1,15 +1,13 @@
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderMap;
-use sha2::{Digest, Sha256};
-use tokio::sync::Semaphore;
 
-use crate::auth::{hash_password, verify_password_or_dummy};
 use crate::config::SecurityConfig;
+use crate::database::operations::{AuthAttemptDecision, ClearAuthAttempts, RegisterAuthAttempt};
 use crate::error::{AppError, AppResult};
+use crate::executor::{CpuExecutorHandle, SqliteExecutorHandle};
 
 #[derive(Clone)]
 pub struct AuthenticationProtection {
@@ -17,38 +15,33 @@ pub struct AuthenticationProtection {
 }
 
 struct AuthenticationProtectionInner {
-    attempts: Mutex<AttemptState>,
-    attempt_window: Duration,
+    cpu: CpuExecutorHandle,
+    sqlite: SqliteExecutorHandle,
+    attempt_window_seconds: u64,
     identity_limit: u32,
     source_limit: u32,
-    lockout: Duration,
-    password_hash_slots: Arc<Semaphore>,
+    lockout_seconds: u64,
     trusted_proxy_ip_addresses: Vec<IpAddr>,
-}
-
-#[derive(Default)]
-struct AttemptState {
-    buckets: HashMap<String, AttemptBucket>,
-}
-
-struct AttemptBucket {
-    window_started: Instant,
-    last_seen: Instant,
-    attempts: u32,
-    locked_until: Option<Instant>,
+    dummy_password_hash: String,
 }
 
 impl AuthenticationProtection {
-    pub fn new(config: &SecurityConfig) -> Self {
+    pub fn new(
+        config: &SecurityConfig,
+        cpu: CpuExecutorHandle,
+        sqlite: SqliteExecutorHandle,
+        dummy_password_hash: String,
+    ) -> Self {
         Self {
             inner: Arc::new(AuthenticationProtectionInner {
-                attempts: Mutex::new(AttemptState::default()),
-                attempt_window: Duration::from_secs(config.password_attempt_window_seconds),
+                cpu,
+                sqlite,
+                attempt_window_seconds: config.password_attempt_window_seconds,
                 identity_limit: config.password_attempts_per_identity,
                 source_limit: config.password_attempts_per_source,
-                lockout: Duration::from_secs(config.password_lockout_seconds),
-                password_hash_slots: Arc::new(Semaphore::new(config.password_hash_max_concurrent)),
+                lockout_seconds: config.password_lockout_seconds,
                 trusted_proxy_ip_addresses: config.trusted_proxy_ip_addresses.clone(),
+                dummy_password_hash,
             }),
         }
     }
@@ -61,130 +54,92 @@ impl AuthenticationProtection {
         )
     }
 
-    pub fn begin_password_attempt(&self, source: &str, identity: &str) -> AppResult<()> {
-        let now = Instant::now();
-        let mut state = self.inner.attempts.lock().map_err(|_| {
-            AppError::Internal("Authentication attempt state is unavailable".into())
-        })?;
-        state.prune(now, self.inner.attempt_window, self.inner.lockout);
-
-        let source_retry = state.register(
-            attempt_key("source", source),
-            self.inner.source_limit,
-            now,
-            self.inner.attempt_window,
-            self.inner.lockout,
-        );
-        let identity_retry = state.register(
-            attempt_key("identity", &identity.to_lowercase()),
-            self.inner.identity_limit,
-            now,
-            self.inner.attempt_window,
-            self.inner.lockout,
-        );
-        match source_retry.into_iter().chain(identity_retry).max() {
-            Some(retry_after_seconds) => Err(AppError::RateLimited {
+    pub async fn begin_password_attempt(&self, source: &str, identity: &str) -> AppResult<()> {
+        let (source_key, identity_key) = self
+            .inner
+            .cpu
+            .auth_attempt_digests_durable(source.to_string(), identity.to_string())
+            .await
+            .map_err(AppError::from)?;
+        let decision = self
+            .inner
+            .sqlite
+            .register_auth_attempt_request(RegisterAuthAttempt {
+                source_key,
+                identity_key,
+                now_epoch_seconds: epoch_seconds()?,
+                attempt_window_seconds: duration_to_i64(
+                    self.inner.attempt_window_seconds,
+                    "password attempt window",
+                )?,
+                identity_limit: self.inner.identity_limit,
+                source_limit: self.inner.source_limit,
+                lockout_seconds: duration_to_i64(self.inner.lockout_seconds, "password lockout")?,
+            })
+            .await
+            .map_err(AppError::from)?;
+        match decision {
+            AuthAttemptDecision::Allowed => Ok(()),
+            AuthAttemptDecision::RateLimited {
+                retry_after_seconds,
+            }
+            | AuthAttemptDecision::CapacityExhausted {
+                retry_after_seconds,
+            } => Err(AppError::RateLimited {
                 retry_after_seconds,
             }),
-            None => Ok(()),
         }
     }
 
-    pub fn record_password_success(&self, source: &str, identity: &str) {
-        let Ok(mut state) = self.inner.attempts.lock() else {
-            return;
-        };
-        state
-            .buckets
-            .remove(&attempt_key("identity", &identity.to_lowercase()));
-        state.buckets.remove(&attempt_key("source", source));
+    pub async fn record_password_success(&self, source: &str, identity: &str) -> AppResult<()> {
+        let (source_key, identity_key) = self
+            .inner
+            .cpu
+            .auth_attempt_digests_durable(source.to_string(), identity.to_string())
+            .await
+            .map_err(AppError::from)?;
+        self.inner
+            .sqlite
+            .clear_auth_attempts_request(ClearAuthAttempts {
+                source_key,
+                identity_key,
+            })
+            .await
+            .map_err(AppError::from)
     }
 
     pub async fn verify_password(&self, password: &str, hash: Option<&str>) -> AppResult<bool> {
-        let permit = Arc::clone(&self.inner.password_hash_slots)
-            .acquire_owned()
+        self.inner
+            .cpu
+            .verify_password_durable(
+                password.to_string(),
+                hash.map(str::to_string),
+                self.inner.dummy_password_hash.clone(),
+            )
             .await
-            .map_err(|_| AppError::Internal("Password verification is unavailable".into()))?;
-        let password = password.to_string();
-        let hash = hash.map(str::to_string);
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            verify_password_or_dummy(&password, hash.as_deref())
-        })
-        .await
-        .map_err(|error| AppError::Internal(format!("Password verification failed: {error}")))
+            .map_err(AppError::from)
     }
 
     pub async fn hash_password(&self, password: &str) -> AppResult<String> {
-        let permit = Arc::clone(&self.inner.password_hash_slots)
-            .acquire_owned()
+        self.inner
+            .cpu
+            .hash_password_durable(password.to_string())
             .await
-            .map_err(|_| AppError::Internal("Password hashing is unavailable".into()))?;
-        let password = password.to_string();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            hash_password(&password)
-        })
-        .await
-        .map_err(|error| AppError::Internal(format!("Password hashing failed: {error}")))?
-        .map_err(|error| AppError::Internal(format!("Failed to hash password: {error}")))
+            .map_err(AppError::from)
     }
 }
 
-impl AttemptState {
-    fn register(
-        &mut self,
-        key: String,
-        limit: u32,
-        now: Instant,
-        attempt_window: Duration,
-        lockout: Duration,
-    ) -> Option<u64> {
-        let bucket = self.buckets.entry(key).or_insert(AttemptBucket {
-            window_started: now,
-            last_seen: now,
-            attempts: 0,
-            locked_until: None,
-        });
-        bucket.last_seen = now;
-
-        if let Some(locked_until) = bucket.locked_until {
-            if locked_until > now {
-                return Some(remaining_seconds(locked_until, now));
-            }
-            bucket.locked_until = None;
-            bucket.window_started = now;
-            bucket.attempts = 0;
-        }
-        if now.duration_since(bucket.window_started) >= attempt_window {
-            bucket.window_started = now;
-            bucket.attempts = 0;
-        }
-        if bucket.attempts >= limit {
-            let locked_until = now + lockout;
-            bucket.locked_until = Some(locked_until);
-            return Some(remaining_seconds(locked_until, now));
-        }
-        bucket.attempts += 1;
-        None
-    }
-
-    fn prune(&mut self, now: Instant, attempt_window: Duration, lockout: Duration) {
-        let retention = attempt_window.max(lockout).saturating_mul(2);
-        self.buckets.retain(|_, bucket| {
-            bucket.locked_until.is_some_and(|until| until > now)
-                || now.duration_since(bucket.last_seen) < retention
-        });
-    }
+fn epoch_seconds() -> AppResult<i64> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AppError::Internal(format!("system clock precedes Unix epoch: {error}")))?
+        .as_secs();
+    duration_to_i64(seconds, "system clock")
 }
 
-fn attempt_key(namespace: &str, value: &str) -> String {
-    let digest = Sha256::digest(format!("{namespace}\0{value}").as_bytes());
-    format!("{digest:x}")
-}
-
-fn remaining_seconds(deadline: Instant, now: Instant) -> u64 {
-    deadline.duration_since(now).as_secs().max(1)
+fn duration_to_i64(value: u64, name: &str) -> AppResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| AppError::Internal(format!("{name} exceeds the supported duration")))
 }
 
 fn client_source(

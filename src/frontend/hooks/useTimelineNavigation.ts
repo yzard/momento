@@ -36,7 +36,6 @@ interface TimelinePagingOptions {
   scrollRef: RefObject<HTMLDivElement | null>
   hasOlder: boolean
   hasNewer: boolean
-  isFetching: boolean
   isLoadingOlder: boolean
   isLoadingNewer: boolean
   requestOlder: () => Promise<void>
@@ -44,27 +43,31 @@ interface TimelinePagingOptions {
   updateActiveMarker: () => void
 }
 
+const TIMELINE_PREFETCH_VIEWPORTS = 3
+
+export function timelinePrefetchDistance(viewportHeight: number): number {
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return 0
+  return viewportHeight * TIMELINE_PREFETCH_VIEWPORTS
+}
+
 export function useTimelinePaging(options: TimelinePagingOptions) {
   const {
     scrollRef,
     hasOlder,
     hasNewer,
-    isFetching,
     isLoadingOlder,
     isLoadingNewer,
     requestOlder,
     requestNewer,
     updateActiveMarker,
   } = options
-  const userInteractedRef = useRef(false)
-  const pendingNewerRef = useRef(false)
   const loadingNewerRef = useRef(false)
+  const previousScrollTopRef = useRef(0)
 
   const loadNewer = useCallback(async () => {
     if (!hasNewer || isLoadingNewer || loadingNewerRef.current) return
     const container = scrollRef.current
     if (!container) return
-    pendingNewerRef.current = false
     loadingNewerRef.current = true
     const previousHeight = container.scrollHeight
     try {
@@ -84,40 +87,57 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
   }, [hasOlder, isLoadingOlder, requestOlder])
 
   useEffect(() => {
-    if (!pendingNewerRef.current || isFetching || !hasNewer) return
-    void loadNewer()
-  }, [hasNewer, isFetching, loadNewer])
+    if (!hasOlder || isLoadingOlder) return
+
+    const frame = requestAnimationFrame(() => {
+      const container = scrollRef.current
+      if (!container || container.clientHeight <= 0) return
+      const remaining = container.scrollHeight - container.scrollTop - container.clientHeight
+      if (remaining <= timelinePrefetchDistance(container.clientHeight)) loadOlder()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [hasOlder, isLoadingOlder, loadOlder, scrollRef])
+
+  useEffect(() => {
+    if (!hasNewer || isLoadingNewer) return
+
+    const frame = requestAnimationFrame(() => {
+      const container = scrollRef.current
+      if (!container || container.clientHeight <= 0) return
+      if (container.scrollTop <= timelinePrefetchDistance(container.clientHeight)) {
+        void loadNewer()
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [hasNewer, isLoadingNewer, loadNewer, scrollRef])
 
   const checkBoundaries = useCallback(
     (deltaY: number) => {
       const container = scrollRef.current
-      if (!container) return
-      if (deltaY < 0 && container.scrollTop <= 100) {
-        if (hasNewer || isFetching) pendingNewerRef.current = true
-        if (!isFetching) void loadNewer()
+      if (!container || container.clientHeight <= 0) return
+      const prefetchDistance = timelinePrefetchDistance(container.clientHeight)
+      if (deltaY < 0 && container.scrollTop <= prefetchDistance) {
+        void loadNewer()
       }
-      if (
-        !isFetching &&
-        deltaY > 0 &&
-        container.scrollTop + container.clientHeight >= container.scrollHeight - 240
-      ) {
+      const remaining = container.scrollHeight - container.scrollTop - container.clientHeight
+      if (deltaY > 0 && remaining <= prefetchDistance) {
         loadOlder()
       }
     },
-    [hasNewer, isFetching, loadNewer, loadOlder, scrollRef]
+    [loadNewer, loadOlder, scrollRef]
   )
 
   const handleScroll = useCallback(() => {
     const container = scrollRef.current
     if (!container) return
-    if (container.scrollTop > 0) userInteractedRef.current = true
+    const scrollDelta = container.scrollTop - previousScrollTopRef.current
+    previousScrollTopRef.current = container.scrollTop
     updateActiveMarker()
-    if (userInteractedRef.current) checkBoundaries(container.scrollTop <= 100 ? -1 : 1)
+    if (scrollDelta !== 0) checkBoundaries(scrollDelta)
   }, [checkBoundaries, scrollRef, updateActiveMarker])
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLElement>) => {
-      userInteractedRef.current = true
       const container = scrollRef.current
       if (!container) return
       if (event.currentTarget !== container) {
@@ -129,14 +149,10 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
     [checkBoundaries, scrollRef]
   )
 
-  const markInteracted = useCallback(() => {
-    userInteractedRef.current = true
-  }, [])
   const reset = useCallback(() => {
-    userInteractedRef.current = false
-    pendingNewerRef.current = false
+    previousScrollTopRef.current = 0
     scrollRef.current?.scrollTo({ top: 0 })
   }, [scrollRef])
 
-  return { handleScroll, handleWheel, markInteracted, reset }
+  return { handleScroll, handleWheel, reset }
 }

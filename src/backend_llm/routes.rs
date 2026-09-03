@@ -14,7 +14,8 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use momento_common::llm::{
     decode_input_chunk, is_valid_client_id, ClientControlMessage, JobInputDescriptor, JobManifest,
-    ServiceControlMessage, MAX_CONTROL_MESSAGE_BYTES, WEBSOCKET_PROTOCOL,
+    ServiceControlMessage, SubmissionDeferredReason, MAX_LLM_SERVICE_WS_MESSAGE_BYTES,
+    MAX_WS_WRITE_BUFFER_BYTES, QUEUE_CAPACITY_RETRY_AFTER_MS, WEBSOCKET_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -23,7 +24,7 @@ use crate::config::Config;
 use crate::error::ServiceError;
 use crate::provider::ServiceManager;
 use crate::scheduler::{QueueAdmission, QueueManifest, QueueStaging, Scheduler};
-use crate::transport::SharedConnectionRegistry;
+use crate::transport::{ConnectionIdentity, ResultDeliveryOutcome, SharedConnectionRegistry};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -84,12 +85,16 @@ async fn connect(
         )));
     }
     let registration = state.connections.register(client_id).await?;
+    state.scheduler.wake_result_delivery();
     let client_id = client_id.to_string();
     let failed_connections = Arc::clone(&state.connections);
     let failed_client_id = client_id.clone();
     let generation = registration.generation;
     Ok(websocket
-        .max_message_size(MAX_CONTROL_MESSAGE_BYTES)
+        .write_buffer_size(0)
+        .max_write_buffer_size(MAX_WS_WRITE_BUFFER_BYTES)
+        .max_message_size(MAX_LLM_SERVICE_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_LLM_SERVICE_WS_MESSAGE_BYTES)
         .protocols([WEBSOCKET_PROTOCOL])
         .on_failed_upgrade(move |_| {
             tokio::spawn(async move {
@@ -221,10 +226,67 @@ async fn handle_control(
                 .await
                 .map_err(ServiceError::Internal)
         }
+        ClientControlMessage::ResultReady { job_id, attempt } => {
+            state
+                .connections
+                .result_ready(
+                    ConnectionIdentity {
+                        client_id,
+                        generation,
+                    },
+                    &job_id,
+                    attempt,
+                )
+                .await
+        }
+        ClientControlMessage::ResultChunkReady {
+            job_id,
+            attempt,
+            offset,
+        } => {
+            state
+                .connections
+                .result_chunk_ready(
+                    ConnectionIdentity {
+                        client_id,
+                        generation,
+                    },
+                    &job_id,
+                    attempt,
+                    offset,
+                )
+                .await
+        }
         ClientControlMessage::ResultReceived { job_id, attempt } => {
             state
                 .connections
-                .complete_result_delivery(client_id, generation, &job_id, attempt, Ok(()))
+                .complete_result_delivery(
+                    ConnectionIdentity {
+                        client_id,
+                        generation,
+                    },
+                    &job_id,
+                    attempt,
+                    ResultDeliveryOutcome::Received,
+                )
+                .await
+        }
+        ClientControlMessage::ResultReceiptDeferred {
+            job_id,
+            attempt,
+            retry_after_ms,
+        } => {
+            state
+                .connections
+                .complete_result_delivery(
+                    ConnectionIdentity {
+                        client_id,
+                        generation,
+                    },
+                    &job_id,
+                    attempt,
+                    ResultDeliveryOutcome::Deferred { retry_after_ms },
+                )
                 .await
         }
         ClientControlMessage::ResultReceiptRejected {
@@ -234,7 +296,15 @@ async fn handle_control(
         } => {
             state
                 .connections
-                .complete_result_delivery(client_id, generation, &job_id, attempt, Err(error))
+                .complete_result_delivery(
+                    ConnectionIdentity {
+                        client_id,
+                        generation,
+                    },
+                    &job_id,
+                    attempt,
+                    ResultDeliveryOutcome::Rejected { error },
+                )
                 .await
         }
     }
@@ -271,6 +341,7 @@ async fn start_submission(
         Ok(QueueAdmission::Staging(staging)) => {
             let job_id = manifest.job_id.clone();
             let attempt = manifest.attempt;
+            let required_input_sequences = staging.required_sequences();
             submissions.insert(
                 job_id.clone(),
                 SubmissionUpload {
@@ -284,7 +355,11 @@ async fn start_submission(
                 .send(
                     client_id,
                     generation,
-                    ServiceControlMessage::SubmissionReady { job_id, attempt },
+                    ServiceControlMessage::SubmissionReady {
+                        job_id,
+                        attempt,
+                        required_input_sequences,
+                    },
                 )
                 .await
                 .map_err(ServiceError::Internal)
@@ -295,6 +370,50 @@ async fn start_submission(
         Ok(QueueAdmission::Cancelled) => {
             send_submission_acknowledgement(state, client_id, generation, &manifest, "cancelled")
                 .await
+        }
+        Ok(QueueAdmission::Deferred(status)) => {
+            tracing::warn!(
+                job_id = manifest.job_id,
+                required_bytes = status.required_bytes,
+                available_bytes = status.available_bytes,
+                used_bytes = status.used_bytes,
+                reserved_bytes = status.reserved_bytes,
+                max_queue_bytes = status.max_queue_bytes,
+                filesystem_available_bytes = status.filesystem_available_bytes,
+                working_space_reserve_bytes = status.working_space_reserve_bytes,
+                "LLM submission deferred because queue capacity is unavailable"
+            );
+            state
+                .connections
+                .send(
+                    client_id,
+                    generation,
+                    ServiceControlMessage::SubmissionDeferred {
+                        job_id: manifest.job_id,
+                        attempt: manifest.attempt,
+                        reason: SubmissionDeferredReason::QueueCapacity,
+                        required_bytes: status.required_bytes,
+                        available_bytes: status.available_bytes,
+                        retry_after_ms: QUEUE_CAPACITY_RETRY_AFTER_MS,
+                    },
+                )
+                .await
+                .map_err(ServiceError::Internal)
+        }
+        Ok(QueueAdmission::JobTooLarge(status)) => {
+            send_submission_rejection(
+                state,
+                client_id,
+                generation,
+                &manifest.job_id,
+                manifest.attempt,
+                false,
+                format!(
+                    "job requires {} uncached input bytes but llm-service max_queue_bytes is {}",
+                    status.required_bytes, status.max_queue_bytes
+                ),
+            )
+            .await
         }
         Err(error) => {
             send_submission_rejection(

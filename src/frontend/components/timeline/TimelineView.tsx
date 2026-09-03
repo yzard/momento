@@ -134,14 +134,13 @@ export default function TimelineView({
     scrollRef,
     hasOlder: hasNextPage,
     hasNewer: hasPreviousPage,
-    isFetching,
     isLoadingOlder,
     isLoadingNewer,
     requestOlder,
     requestNewer,
     updateActiveMarker,
   })
-  const { handleScroll, handleWheel, markInteracted, reset: resetPaging } = paging
+  const { handleScroll, handleWheel, reset: resetPaging } = paging
 
   useEffect(() => {
     setSelectedMarker(markers[0] ?? null)
@@ -187,9 +186,6 @@ export default function TimelineView({
         className="h-full overflow-y-auto overscroll-contain pr-4 md:pr-20"
         onScroll={handleScroll}
         onWheel={handleWheel}
-        onTouchMove={markInteracted}
-        onPointerDown={markInteracted}
-        onKeyDown={markInteracted}
       >
         {timelineGroups.map((group) => (
           <section key={group.date} data-timeline-group={group.date} className="mb-2">

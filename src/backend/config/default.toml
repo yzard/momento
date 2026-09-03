@@ -13,8 +13,12 @@ data_dir = "{{SERVER_DATA_DIR}}"
 static_dir = "{{SERVER_STATIC_DIR}}"
 # Buffered API extractors such as JSON are bounded independently from streaming media uploads.
 api_request_body_max_bytes = {{SERVER_API_REQUEST_BODY_MAX_BYTES}}
-# Request logging retains at most this many POST body bytes; larger bodies still reach handlers.
-request_log_body_max_bytes = {{SERVER_REQUEST_LOG_BODY_MAX_BYTES}}
+
+[thread_pool]
+# Startup-only execution-domain sizes. Changing them requires a restart.
+cpu_workers = {{THREAD_POOL_CPU_WORKERS}}
+io_workers = {{THREAD_POOL_IO_WORKERS}}
+sqlite_workers = {{THREAD_POOL_SQLITE_WORKERS}}
 
 [security]
 # Use a long random value, for example: openssl rand -hex 32
@@ -30,66 +34,36 @@ password_attempt_window_seconds = {{PASSWORD_ATTEMPT_WINDOW_SECONDS}}
 password_attempts_per_identity = {{PASSWORD_ATTEMPTS_PER_IDENTITY}}
 password_attempts_per_source = {{PASSWORD_ATTEMPTS_PER_SOURCE}}
 password_lockout_seconds = {{PASSWORD_LOCKOUT_SECONDS}}
-# Bounds simultaneous Argon2 work so authentication cannot exhaust the blocking worker pool.
-password_hash_max_concurrent = {{PASSWORD_HASH_MAX_CONCURRENT}}
 # Forwarded client addresses are used only when the direct peer is in this explicit list.
 trusted_proxy_ip_addresses = []
 refresh_token_cleanup_interval_seconds = {{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}
 
 [media_process]
-# Media parsers/converters may run for as long as required; resource and output limits remain bounded.
+# Media commands may run as long as required and use one internal thread; worker concurrency controls parallelism.
 maximum_stderr_bytes = {{MEDIA_PROCESS_MAXIMUM_STDERR_BYTES}}
 maximum_metadata_output_bytes = {{MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES}}
 maximum_normalized_image_output_bytes = {{MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES}}
 maximum_decoded_image_pixels = {{MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS}}
-imagemagick_memory_limit_mebibytes = {{IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES}}
-imagemagick_map_limit_mebibytes = {{IMAGEMAGICK_MAP_LIMIT_MEBIBYTES}}
-imagemagick_disk_limit_mebibytes = {{IMAGEMAGICK_DISK_LIMIT_MEBIBYTES}}
-imagemagick_maximum_threads = {{IMAGEMAGICK_MAXIMUM_THREADS}}
 
 [webdav]
 # WebDAV is always available; uploads are staged below data_dir/webdav and imported automatically.
 mount_path = "{{WEBDAV_MOUNT_PATH}}"
 realm = "{{WEBDAV_REALM}}"
 max_upload_bytes = {{WEBDAV_MAX_UPLOAD_BYTES}}
-max_concurrent_requests = {{WEBDAV_MAX_CONCURRENT_REQUESTS}}
-poll_interval_seconds = {{WEBDAV_POLL_INTERVAL_SECONDS}}
 stable_file_age_seconds = {{WEBDAV_STABLE_FILE_AGE_SECONDS}}
-max_concurrent_processing = {{WEBDAV_MAX_CONCURRENT_PROCESSING}}
 
 [backup]
 # Android uploads are resumable and staged below data_dir/backups before import.
 max_upload_bytes = {{BACKUP_MAX_UPLOAD_BYTES}}
 max_chunk_bytes = {{BACKUP_MAX_CHUNK_BYTES}}
-max_active_uploads_per_user = {{BACKUP_MAX_ACTIVE_UPLOADS_PER_USER}}
 session_expiry_hours = {{BACKUP_SESSION_EXPIRY_HOURS}}
-worker_poll_interval_seconds = {{BACKUP_WORKER_POLL_INTERVAL_SECONDS}}
-worker_concurrency = {{BACKUP_WORKER_CONCURRENCY}}
 
 [metadata]
 # Thumbnail dimensions are maximum bounding-box sizes in pixels; qualities use 1-100.
 thumbnails_max_size = {{THUMBNAILS_MAX_SIZE}}
 thumbnails_tiny_size = {{THUMBNAILS_TINY_SIZE}}
 thumbnails_quality = {{THUMBNAILS_QUALITY}}
-thumbnails_video_frame_quality = {{THUMBNAILS_VIDEO_FRAME_QUALITY}}
 # GPS coordinates are reverse geocoded locally with the GeoNames data embedded in Momento.
-
-[metadata_worker]
-# Metadata jobs are leased durably so interrupted workers can recover them.
-poll_interval_seconds = {{METADATA_WORKER_POLL_INTERVAL_SECONDS}}
-concurrency = {{METADATA_WORKER_CONCURRENCY}}
-lease_seconds = {{METADATA_WORKER_LEASE_SECONDS}}
-max_attempts = {{METADATA_WORKER_MAX_ATTEMPTS}}
-
-[llm_submission_worker]
-# This is the global rolling window for streaming prepared jobs to llm-service.
-poll_interval_seconds = {{LLM_SUBMISSION_POLL_INTERVAL_SECONDS}}
-max_async_submission_tasks = {{LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS}}
-
-[llm_result_worker]
-# CPU workers continuously prepare queued AI results; one dedicated writer persists each completed result.
-poll_interval_seconds = {{LLM_RESULT_POLL_INTERVAL_SECONDS}}
-concurrency = {{LLM_RESULT_CONCURRENCY}}
 
 [llm]
 # The API initiates one authenticated WebSocket to llm-service.

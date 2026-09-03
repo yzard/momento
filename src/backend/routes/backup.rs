@@ -1,26 +1,34 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{header, HeaderMap},
+    response::Response,
     routing::{post, put},
-    Json, Router,
+    Router,
 };
 use chrono::DateTime;
 use futures::StreamExt;
-use rusqlite::{OptionalExtension, TransactionBehavior};
-use sha2::{Digest, Sha256};
 use std::path::Path as FilePath;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::{paths, IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS};
-use crate::database::queries;
+use crate::constants::{IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS};
+use crate::database::operations::{
+    AbandonBackupChunk, CancelBackupUpload, CancelBackupUploadOutcome, ClaimBackupChunk,
+    ClaimBackupChunkOutcome, CreateBackupUpload, CreateBackupUploadOutcome, FinishBackupChunk,
+    FinishBackupChunkOutcome, LoadBackupUpload, PrepareBackupCompletion,
+    PrepareBackupCompletionOutcome, QueueBackupCompletion, QueueBackupCompletionOutcome,
+    RegisterBackupDevice,
+};
 use crate::error::{AppError, AppResult};
+use crate::executor::{CpuExecutorHandle, FileIoExecutorHandle, Sha256Session};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
+use crate::io::StorageFileSession;
 use crate::models::{
     BackupDeviceRegisterRequest, BackupDeviceRegisterResponse, BackupUploadCreateRequest,
-    BackupUploadIdRequest, BackupUploadResponse,
+    BackupUploadIdRequest,
 };
-use crate::utils::path::resolve_storage_path;
+use crate::routes::{render_json, CpuJson};
+use crate::runtime::{ExecutorHandles, HttpRequestAdmission};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -35,87 +43,39 @@ pub fn router() -> Router<AppState> {
 async fn register_device(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<BackupDeviceRegisterRequest>,
-) -> AppResult<Json<BackupDeviceRegisterResponse>> {
+    CpuJson(request): CpuJson<BackupDeviceRegisterRequest>,
+) -> AppResult<Response> {
     validate_identifier(&request.device_id, "deviceId")?;
     validate_device_name(&request.device_name)?;
 
-    let connection = state.pool.get().map_err(AppError::Pool)?;
-    connection.execute(
-        queries::backup::UPSERT_DEVICE,
-        rusqlite::params![
-            current_user.id,
-            request.device_id,
-            request.device_name.trim()
-        ],
-    )?;
+    state
+        .executors
+        .sqlite
+        .register_backup_device_request(RegisterBackupDevice {
+            user_id: current_user.id,
+            device_id: request.device_id,
+            device_name: request.device_name.trim().to_string(),
+        })
+        .await?;
 
-    Ok(Json(BackupDeviceRegisterResponse { registered: true }))
+    render_json(&state, BackupDeviceRegisterResponse { registered: true }).await
 }
 
 async fn create_upload(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<BackupUploadCreateRequest>,
-) -> AppResult<Json<BackupUploadResponse>> {
+    CpuJson(request): CpuJson<BackupUploadCreateRequest>,
+) -> AppResult<Response> {
     let config = state.config.current();
     validate_identifier(&request.device_id, "deviceId")?;
     validate_identifier(&request.client_asset_id, "clientAssetId")?;
     validate_identifier(&request.operation_id, "operationId")?;
     validate_upload_metadata(&request, config.backup.max_upload_bytes)?;
-
-    let mut connection = state.pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-    if let Some(upload) =
-        select_upload_by_operation(&transaction, current_user.id, &request.operation_id)?
-    {
-        validate_idempotent_create(&transaction, current_user.id, &upload.upload_id, &request)?;
-        let upgraded_upload =
-            select_upload_by_operation(&transaction, current_user.id, &request.operation_id)?
-                .ok_or_else(|| {
-                    AppError::Internal("upgraded backup upload disappeared".to_string())
-                })?;
-        transaction.commit()?;
-        return Ok(Json(upgraded_upload));
-    }
-    if let Some(upload) = select_upload_by_client_asset(
-        &transaction,
-        current_user.id,
-        &request.device_id,
-        &request.client_asset_id,
-    )? {
-        validate_idempotent_create(&transaction, current_user.id, &upload.upload_id, &request)?;
-        let upgraded_upload = select_upload_by_client_asset(
-            &transaction,
-            current_user.id,
-            &request.device_id,
-            &request.client_asset_id,
-        )?
-        .ok_or_else(|| AppError::Internal("upgraded backup upload disappeared".to_string()))?;
-        transaction.commit()?;
-        return Ok(Json(upgraded_upload));
-    }
-
-    let device_exists: bool = transaction.query_row(
-        queries::backup::DEVICE_EXISTS,
-        rusqlite::params![current_user.id, request.device_id],
-        |row| row.get(0),
-    )?;
-    if !device_exists {
-        return Err(AppError::NotFound("backup device not found".to_string()));
-    }
-
-    let active_uploads: i64 = transaction.query_row(
-        queries::backup::COUNT_ACTIVE_UPLOADS,
-        [current_user.id],
-        |row| row.get(0),
-    )?;
-    if active_uploads >= config.backup.max_active_uploads_per_user as i64 {
-        return Err(AppError::Conflict(
-            "maximum active backup uploads reached".to_string(),
-        ));
-    }
+    let metadata_json = state
+        .executors
+        .cpu
+        .serialize_backup_metadata(request.metadata)
+        .await?;
 
     let upload_id = uuid::Uuid::new_v4().simple().to_string();
     let extension = FilePath::new(&request.original_filename)
@@ -126,184 +86,174 @@ async fn create_upload(
         "{}/{}/{}.{}",
         current_user.id, request.device_id, upload_id, extension
     );
-    transaction.execute(
-        queries::backup::INSERT_ASSET,
-        rusqlite::params![
-            current_user.id,
-            request.device_id,
-            request.client_asset_id,
-            request.operation_id,
-            request.original_filename,
-            request.mime_type,
-            request.byte_size as i64,
-            request.source_modified_at,
-            staged_path,
-        ],
-    )?;
-    let asset_id = transaction.last_insert_rowid();
-    let expiry = format!("+{} hours", config.backup.session_expiry_hours);
-    transaction.execute(
-        queries::backup::INSERT_SESSION,
-        rusqlite::params![
+    let outcome = state
+        .executors
+        .sqlite
+        .create_backup_upload_request(CreateBackupUpload {
+            user_id: current_user.id,
             upload_id,
-            asset_id,
-            current_user.id,
-            request.byte_size as i64,
-            expiry
-        ],
-    )?;
-    transaction.execute(
-        queries::backup::INSERT_MANIFEST,
-        rusqlite::params![
-            asset_id,
-            request.protocol_version,
-            request.content_hash,
-            serde_json::to_string(&request.metadata)?,
-        ],
-    )?;
-    transaction.commit()?;
-
-    Ok(Json(BackupUploadResponse {
-        upload_id,
-        status: "uploading".to_string(),
-        uploaded_size: 0,
-        expected_size: request.byte_size as i64,
-        content_hash: Some(request.content_hash),
-        media_id: None,
-        error: None,
-    }))
+            device_id: request.device_id,
+            client_asset_id: request.client_asset_id,
+            operation_id: request.operation_id,
+            original_filename: request.original_filename,
+            mime_type: request.mime_type,
+            expected_size: i64::try_from(request.byte_size)
+                .map_err(|_| AppError::BadRequest("byteSize is too large".to_string()))?,
+            source_modified_at: request.source_modified_at,
+            staged_path,
+            protocol_version: request.protocol_version,
+            content_hash: request.content_hash,
+            metadata_json,
+            session_expiry_hours: config.backup.session_expiry_hours,
+        })
+        .await?;
+    match outcome {
+        CreateBackupUploadOutcome::Created(response) => {
+            state.scheduler.wake_backup_import();
+            render_json(&state, response).await
+        }
+        CreateBackupUploadOutcome::Existing(response) => render_json(&state, response).await,
+        CreateBackupUploadOutcome::DeviceNotFound => {
+            Err(AppError::NotFound("backup device not found".to_string()))
+        }
+        CreateBackupUploadOutcome::ContractConflict => Err(AppError::Conflict(
+            "idempotency key already belongs to a different backup manifest".to_string(),
+        )),
+    }
 }
 
 async fn upload_status(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<BackupUploadIdRequest>,
-) -> AppResult<Json<BackupUploadResponse>> {
+    CpuJson(request): CpuJson<BackupUploadIdRequest>,
+) -> AppResult<Response> {
     validate_identifier(&request.upload_id, "uploadId")?;
-    Ok(Json(lookup_upload(
-        &state,
-        current_user.id,
-        &request.upload_id,
-    )?))
+    let upload = state
+        .executors
+        .sqlite
+        .load_backup_upload_request(LoadBackupUpload {
+            user_id: current_user.id,
+            upload_id: request.upload_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("backup upload not found".to_string()))?;
+    render_json(&state, upload).await
 }
 
 async fn complete_upload(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<BackupUploadIdRequest>,
-) -> AppResult<Json<BackupUploadResponse>> {
+    CpuJson(request): CpuJson<BackupUploadIdRequest>,
+) -> AppResult<Response> {
     validate_identifier(&request.upload_id, "uploadId")?;
-    let upload = {
-        let connection = state.pool.get().map_err(AppError::Pool)?;
-        select_upload(&connection, current_user.id, &request.upload_id)?
+    let (asset_id, staged_relative_path, expected_content_hash) = match state
+        .executors
+        .sqlite
+        .prepare_backup_completion_request(PrepareBackupCompletion {
+            user_id: current_user.id,
+            upload_id: request.upload_id.clone(),
+        })
+        .await?
+    {
+        PrepareBackupCompletionOutcome::AlreadyQueued(response) => {
+            return render_json(&state, response).await
+        }
+        PrepareBackupCompletionOutcome::Ready {
+            asset_id,
+            staged_path,
+            expected_content_hash,
+        } => (asset_id, staged_path, expected_content_hash),
+        PrepareBackupCompletionOutcome::NotFound => {
+            return Err(AppError::NotFound("backup upload not found".to_string()))
+        }
+        PrepareBackupCompletionOutcome::NotReady => {
+            return Err(AppError::Conflict(
+                "backup upload is not ready to complete".to_string(),
+            ))
+        }
+        PrepareBackupCompletionOutcome::MissingManifest => {
+            return Err(AppError::Conflict(
+                "backup upload is missing a lossless manifest".to_string(),
+            ))
+        }
     };
-
-    if matches!(
-        upload.status.as_str(),
-        "queued" | "processing" | "completed"
-    ) {
-        return Ok(Json(upload.response()));
-    }
-    if upload.status != "uploading" || upload.uploaded_size != upload.expected_size {
-        return Err(AppError::Conflict(
-            "backup upload is not ready to complete".to_string(),
-        ));
-    }
-    let expected_content_hash = upload.content_hash.as_deref().ok_or_else(|| {
-        AppError::Conflict("backup upload is missing a lossless manifest".to_string())
-    })?;
-    let staged_path = resolve_storage_path(&paths().backups, &upload.staged_path)?;
-    let actual_content_hash = crate::utils::hash::calculate_file_hash(&staged_path).await?;
+    let staged_path = NormalizedStoragePath::parse(&staged_relative_path)
+        .map_err(|error| AppError::Internal(format!("invalid stored backup path: {error}")))?;
+    let actual_content_hash =
+        calculate_backup_hash(&state.executors.file_io, &state.executors.cpu, staged_path).await?;
     if actual_content_hash != expected_content_hash {
         return Err(AppError::Conflict(
             "backup upload content hash does not match the original".to_string(),
         ));
     }
-
-    let mut connection = state.pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let changed = transaction.execute(
-        queries::backup::QUEUE_SESSION,
-        rusqlite::params![request.upload_id, current_user.id],
-    )?;
-    if changed != 1 {
-        return Err(AppError::Conflict(
+    match state
+        .executors
+        .sqlite
+        .queue_backup_completion_request(QueueBackupCompletion {
+            user_id: current_user.id,
+            upload_id: request.upload_id,
+            asset_id,
+        })
+        .await?
+    {
+        QueueBackupCompletionOutcome::Queued(response) => {
+            state.scheduler.wake_backup_import();
+            render_json(&state, response).await
+        }
+        QueueBackupCompletionOutcome::Changed => Err(AppError::Conflict(
             "backup upload changed concurrently".to_string(),
-        ));
+        )),
     }
-    transaction.execute(queries::backup::QUEUE_ASSET, [upload.asset_id])?;
-    transaction.commit()?;
-
-    Ok(Json(lookup_upload(
-        &state,
-        current_user.id,
-        &request.upload_id,
-    )?))
 }
 
 async fn cancel_upload(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<BackupUploadIdRequest>,
-) -> AppResult<Json<BackupUploadResponse>> {
+    CpuJson(request): CpuJson<BackupUploadIdRequest>,
+) -> AppResult<Response> {
     validate_identifier(&request.upload_id, "uploadId")?;
-    let staged_path = {
-        let mut connection = state.pool.get().map_err(AppError::Pool)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let upload = select_upload(&transaction, current_user.id, &request.upload_id)?;
-
-        if upload.status == "cancelled" {
-            transaction.commit()?;
-            return Ok(Json(upload.response()));
+    match state
+        .executors
+        .sqlite
+        .cancel_backup_upload_request(CancelBackupUpload {
+            user_id: current_user.id,
+            upload_id: request.upload_id,
+        })
+        .await?
+    {
+        CancelBackupUploadOutcome::Cancelled(response) => {
+            state.scheduler.wake_journal_recovery();
+            render_json(&state, response).await
         }
-        if upload.session_status == "writing" {
-            return Err(AppError::Conflict(
-                "backup upload chunk is still being written".to_string(),
-            ));
+        CancelBackupUploadOutcome::AlreadyCancelled(response) => {
+            render_json(&state, response).await
         }
-        if !matches!(upload.status.as_str(), "uploading" | "queued")
-            || !matches!(upload.session_status.as_str(), "uploading" | "queued")
-        {
-            return Err(AppError::Conflict(
-                "backup upload can no longer be cancelled".to_string(),
-            ));
+        CancelBackupUploadOutcome::NotFound => {
+            Err(AppError::NotFound("backup upload not found".to_string()))
         }
-
-        let cancelled_session = transaction.execute(
-            queries::backup::CANCEL_SESSION,
-            rusqlite::params![request.upload_id, current_user.id],
-        )?;
-        if cancelled_session != 1 {
-            return Err(AppError::Conflict(
-                "backup upload changed concurrently".to_string(),
-            ));
-        }
-        let cancelled_asset =
-            transaction.execute(queries::backup::CANCEL_ASSET, [upload.asset_id])?;
-        if cancelled_asset != 1 {
-            return Err(AppError::Conflict(
-                "backup upload changed concurrently".to_string(),
-            ));
-        }
-        transaction.commit()?;
-        upload.staged_path
-    };
-
-    remove_staged_file(&staged_path).await;
-    Ok(Json(lookup_upload(
-        &state,
-        current_user.id,
-        &request.upload_id,
-    )?))
+        CancelBackupUploadOutcome::Writing => Err(AppError::Conflict(
+            "backup upload chunk is still being written".to_string(),
+        )),
+        CancelBackupUploadOutcome::NotCancellable => Err(AppError::Conflict(
+            "backup upload can no longer be cancelled".to_string(),
+        )),
+        CancelBackupUploadOutcome::Changed => Err(AppError::Conflict(
+            "backup upload changed concurrently".to_string(),
+        )),
+        CancelBackupUploadOutcome::PathConflict => Err(AppError::Conflict(
+            "backup staging cleanup conflicts with another file operation".to_string(),
+        )),
+    }
 }
 
 async fn upload_chunk(
     State(state): State<AppState>,
+    Extension(admission): Extension<HttpRequestAdmission>,
     current_user: CurrentUser,
     Path(upload_id): Path<String>,
     headers: HeaderMap,
     body: Body,
-) -> AppResult<Json<BackupUploadResponse>> {
+) -> AppResult<Response> {
     let config = state.config.current();
     validate_identifier(&upload_id, "uploadId")?;
     let declared_length = content_length(&headers)?;
@@ -324,32 +274,39 @@ async fn upload_chunk(
         ));
     }
 
-    let connection = state.pool.get().map_err(AppError::Pool)?;
-    let upload = select_upload(&connection, current_user.id, &upload_id)?;
-    if upload.status != "uploading"
-        || upload.expected_size as u64 != total
-        || upload.uploaded_size as u64 != start
-    {
-        return Err(AppError::Conflict(
-            "upload offset or status does not accept this chunk".to_string(),
-        ));
-    }
     if end >= total || total > config.backup.max_upload_bytes {
         return Err(AppError::BadRequest("invalid Content-Range".to_string()));
     }
+    admission
+        .convert_to_stream()
+        .map_err(AppError::Unavailable)?;
+    let staged_path = match state
+        .executors
+        .sqlite
+        .claim_backup_chunk_request(ClaimBackupChunk {
+            user_id: current_user.id,
+            upload_id: upload_id.clone(),
+            start,
+            total,
+        })
+        .await?
+    {
+        ClaimBackupChunkOutcome::Accepted { staged_path } => staged_path,
+        ClaimBackupChunkOutcome::Rejected => {
+            return Err(AppError::Conflict(
+                "upload offset or status does not accept this chunk".to_string(),
+            ))
+        }
+        ClaimBackupChunkOutcome::NotFound => {
+            return Err(AppError::NotFound("backup upload not found".to_string()))
+        }
+    };
 
-    let claimed = connection.execute(
-        queries::backup::CLAIM_CHUNK,
-        rusqlite::params![upload_id, current_user.id, start as i64],
-    )?;
-    if claimed != 1 {
-        return Err(AppError::Conflict(
-            "backup upload changed concurrently".to_string(),
-        ));
-    }
-
+    let staged_path = NormalizedStoragePath::parse(&staged_path)
+        .map_err(|error| AppError::Internal(format!("invalid stored backup path: {error}")))?;
     let write_result = write_chunk(
-        &upload.staged_path,
+        &state.executors,
+        &staged_path,
         start,
         declared_length,
         &expected_chunk_hash,
@@ -357,94 +314,209 @@ async fn upload_chunk(
     )
     .await;
     if let Err(error) = write_result {
-        let _ = connection.execute(
-            queries::backup::ABANDON_CHUNK,
-            rusqlite::params![upload_id, current_user.id],
-        );
+        if let Err(abandon_error) = state
+            .executors
+            .sqlite
+            .abandon_backup_chunk_request(AbandonBackupChunk {
+                user_id: current_user.id,
+                upload_id,
+            })
+            .await
+        {
+            tracing::error!(
+                write_error = %error,
+                abandon_error = %abandon_error,
+                "backup chunk write failed and its durable claim could not be released"
+            );
+            return Err(abandon_error.into());
+        }
         return Err(error);
     }
-
-    let changed = connection.execute(
-        queries::backup::COMPLETE_CHUNK,
-        rusqlite::params![end as i64 + 1, upload_id, current_user.id, start as i64],
-    )?;
-    if changed != 1 {
-        return Err(AppError::Conflict(
+    match state
+        .executors
+        .sqlite
+        .finish_backup_chunk_request(FinishBackupChunk {
+            user_id: current_user.id,
+            upload_id,
+            start,
+            next_offset: end + 1,
+        })
+        .await?
+    {
+        FinishBackupChunkOutcome::Completed(response) => render_json(&state, response).await,
+        FinishBackupChunkOutcome::Changed => Err(AppError::Conflict(
             "backup upload changed while the chunk was written".to_string(),
-        ));
+        )),
     }
-
-    Ok(Json(lookup_upload(&state, current_user.id, &upload_id)?))
 }
 
 async fn write_chunk(
-    staged_path: &str,
+    executors: &ExecutorHandles,
+    staged_path: &NormalizedStoragePath,
     start: u64,
     declared_length: u64,
     expected_chunk_hash: &str,
     body: Body,
 ) -> AppResult<()> {
-    let path = resolve_storage_path(&paths().backups, staged_path)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Internal("backup staging path has no parent".to_string()))?;
-    tokio::fs::create_dir_all(parent).await?;
-    let created_file = !path.exists();
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .await?;
-    if created_file {
-        sync_directory(parent)?;
-    }
-    file.set_len(start).await?;
-    file.seek(std::io::SeekFrom::Start(start)).await?;
-
+    let mut session = Some(
+        executors
+            .file_io
+            .open_storage_write_session_request(StorageRootId::Backups, staged_path.clone(), start)
+            .await?,
+    );
     let mut written = 0_u64;
-    let mut hasher = Sha256::new();
+    let mut hash_session = Some(executors.cpu.start_sha256_session_request().await?);
     let mut stream = body.into_data_stream();
     while let Some(frame) = stream.next().await {
-        let chunk =
-            frame.map_err(|error| AppError::BadRequest(format!("invalid chunk body: {error}")))?;
-        written = written
-            .checked_add(chunk.len() as u64)
-            .ok_or_else(|| AppError::BadRequest("chunk body exceeds Content-Length".to_string()))?;
-        if written > declared_length {
-            file.set_len(start).await?;
-            file.sync_data().await?;
+        let chunk = match frame {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                abort_backup_session(&executors.file_io, session.take()).await?;
+                return Err(AppError::BadRequest(format!("invalid chunk body: {error}")));
+            }
+        };
+        let Some(next_written) = written.checked_add(chunk.len() as u64) else {
+            abort_backup_session(&executors.file_io, session.take()).await?;
+            return Err(AppError::BadRequest(
+                "chunk body exceeds Content-Length".to_string(),
+            ));
+        };
+        if next_written > declared_length {
+            abort_backup_session(&executors.file_io, session.take()).await?;
             return Err(AppError::BadRequest(
                 "chunk body exceeds Content-Length".to_string(),
             ));
         }
-        hasher.update(&chunk);
-        file.write_all(&chunk).await?;
+        for bytes in chunk.chunks(crate::runtime::FILE_IO_CHUNK_BYTES as usize) {
+            let _chunk_admission = executors
+                .scheduler
+                .acquire_file_chunk()
+                .await
+                .map_err(AppError::Unavailable)?;
+            if start.checked_add(written).is_none() {
+                abort_backup_session(&executors.file_io, session.take()).await?;
+                return Err(AppError::BadRequest("chunk offset overflow".to_string()));
+            }
+            let active_session = session.take().ok_or_else(|| {
+                AppError::Internal("backup file session is unavailable".to_string())
+            })?;
+            let active_hash_session = hash_session.take().ok_or_else(|| {
+                AppError::Internal("backup hash session is unavailable".to_string())
+            })?;
+            let (returned_hash_session, bytes) = executors
+                .cpu
+                .update_sha256_session_request(active_hash_session, bytes.to_vec())
+                .await?;
+            hash_session = Some(returned_hash_session);
+            let byte_count = bytes.len();
+            let result = executors
+                .file_io
+                .write_storage_session_request(active_session, bytes)
+                .await;
+            match result {
+                Ok((returned_session, count)) if count == byte_count => {
+                    session = Some(returned_session);
+                    written = written.checked_add(count as u64).ok_or_else(|| {
+                        AppError::BadRequest("chunk body length overflow".to_string())
+                    })?;
+                }
+                Ok((returned_session, _)) => {
+                    session = Some(returned_session);
+                    abort_backup_session(&executors.file_io, session.take()).await?;
+                    return Err(AppError::Internal(
+                        "file worker returned a short backup write".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    return Err(error.into());
+                }
+            }
+        }
     }
     if written != declared_length {
-        file.set_len(start).await?;
-        file.sync_data().await?;
+        abort_backup_session(&executors.file_io, session.take()).await?;
         return Err(AppError::BadRequest(
             "chunk body does not match Content-Length".to_string(),
         ));
     }
-    let actual_chunk_hash = format!("{:x}", hasher.finalize());
+    let actual_chunk_hash =
+        executors
+            .cpu
+            .finish_sha256_session_request(hash_session.take().ok_or_else(|| {
+                AppError::Internal("backup hash session is unavailable".to_string())
+            })?)
+            .await?;
     if actual_chunk_hash != expected_chunk_hash {
-        file.set_len(start).await?;
-        file.sync_data().await?;
+        abort_backup_session(&executors.file_io, session.take()).await?;
         return Err(AppError::BadRequest(
             "chunk content hash does not match X-Content-SHA256".to_string(),
         ));
     }
-    file.sync_data().await?;
+    executors
+        .file_io
+        .commit_storage_session_request(
+            session.take().ok_or_else(|| {
+                AppError::Internal("backup file session is unavailable".to_string())
+            })?,
+        )
+        .await?;
     Ok(())
 }
 
-fn sync_directory(path: &FilePath) -> AppResult<()> {
-    std::fs::File::open(path)?.sync_all()?;
+async fn abort_backup_session(
+    file_io: &FileIoExecutorHandle,
+    session: Option<StorageFileSession>,
+) -> AppResult<()> {
+    if let Some(session) = session {
+        file_io.abort_storage_session_request(session).await?;
+    }
     Ok(())
+}
+
+async fn calculate_backup_hash(
+    file_io: &FileIoExecutorHandle,
+    cpu: &CpuExecutorHandle,
+    staged_path: NormalizedStoragePath,
+) -> AppResult<String> {
+    let (opened_session, _) = file_io
+        .open_storage_read_session_request(StorageRootId::Backups, staged_path)
+        .await?;
+    let mut session = Some(opened_session);
+    let mut hash_session: Option<Sha256Session> = Some(cpu.start_sha256_session_request().await?);
+    loop {
+        let active_session = session.take().ok_or_else(|| {
+            AppError::Internal("backup hash file session is unavailable".to_string())
+        })?;
+        let (returned_session, bytes) = file_io
+            .read_storage_session_request(
+                active_session,
+                crate::runtime::FILE_IO_CHUNK_BYTES as usize,
+            )
+            .await?;
+        session = Some(returned_session);
+        if bytes.is_empty() {
+            break;
+        }
+        let active_hash_session = hash_session
+            .take()
+            .ok_or_else(|| AppError::Internal("backup hash session is unavailable".to_string()))?;
+        let (returned_hash_session, _) = cpu
+            .update_sha256_session_request(active_hash_session, bytes)
+            .await?;
+        hash_session = Some(returned_hash_session);
+    }
+    file_io
+        .close_storage_session_request(session.take().ok_or_else(|| {
+            AppError::Internal("backup hash file session is unavailable".to_string())
+        })?)
+        .await?;
+    Ok(cpu
+        .finish_sha256_session_request(
+            hash_session.take().ok_or_else(|| {
+                AppError::Internal("backup hash session is unavailable".to_string())
+            })?,
+        )
+        .await?)
 }
 
 fn validate_identifier(value: &str, name: &str) -> AppResult<()> {
@@ -483,11 +555,6 @@ fn validate_upload_metadata(
     if !request.metadata.is_object() {
         return Err(AppError::BadRequest(
             "metadata must be an object".to_string(),
-        ));
-    }
-    if serde_json::to_vec(&request.metadata)?.len() > 1024 * 1024 {
-        return Err(AppError::BadRequest(
-            "metadata exceeds the 1 MiB limit".to_string(),
         ));
     }
     if request.byte_size == 0 || request.byte_size > maximum_upload_bytes {
@@ -612,182 +679,4 @@ fn parse_content_range(value: &str) -> AppResult<(u64, u64, u64)> {
         return Err(AppError::BadRequest("invalid Content-Range".to_string()));
     }
     Ok((start, end, total))
-}
-
-struct UploadRow {
-    asset_id: i64,
-    upload_id: String,
-    status: String,
-    session_status: String,
-    uploaded_size: i64,
-    expected_size: i64,
-    staged_path: String,
-    content_hash: Option<String>,
-    media_id: Option<i64>,
-    error: Option<String>,
-}
-
-impl UploadRow {
-    fn response(&self) -> BackupUploadResponse {
-        BackupUploadResponse {
-            upload_id: self.upload_id.clone(),
-            status: self.status.clone(),
-            uploaded_size: self.uploaded_size,
-            expected_size: self.expected_size,
-            content_hash: self.content_hash.clone(),
-            media_id: self.media_id,
-            error: self.error.clone(),
-        }
-    }
-}
-
-fn upload_response_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackupUploadResponse> {
-    Ok(BackupUploadResponse {
-        upload_id: row.get(0)?,
-        status: row.get(1)?,
-        uploaded_size: row.get(2)?,
-        expected_size: row.get(3)?,
-        content_hash: row.get(6)?,
-        media_id: row.get(4)?,
-        error: row.get(5)?,
-    })
-}
-
-fn select_upload(
-    connection: &rusqlite::Connection,
-    user_id: i64,
-    upload_id: &str,
-) -> AppResult<UploadRow> {
-    connection
-        .query_row(
-            queries::backup::SELECT_UPLOAD,
-            rusqlite::params![upload_id, user_id],
-            |row| {
-                Ok(UploadRow {
-                    asset_id: row.get(0)?,
-                    upload_id: row.get(1)?,
-                    status: row.get(2)?,
-                    session_status: row.get(3)?,
-                    uploaded_size: row.get(4)?,
-                    expected_size: row.get(5)?,
-                    staged_path: row.get(6)?,
-                    media_id: row.get(7)?,
-                    error: row.get(8)?,
-                    content_hash: row.get(9)?,
-                })
-            },
-        )
-        .optional()?
-        .ok_or_else(|| AppError::NotFound("backup upload not found".to_string()))
-}
-
-fn validate_idempotent_create(
-    connection: &rusqlite::Connection,
-    user_id: i64,
-    upload_id: &str,
-    request: &BackupUploadCreateRequest,
-) -> AppResult<()> {
-    let stored_contract = connection.query_row(
-        queries::backup::SELECT_CREATE_CONTRACT,
-        rusqlite::params![upload_id, user_id],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<u32>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-            ))
-        },
-    )?;
-    let request_metadata = serde_json::to_string(&request.metadata)?;
-    let base_contract_matches = stored_contract.1 == request.device_id
-        && stored_contract.2 == request.client_asset_id
-        && stored_contract.3 == request.operation_id
-        && stored_contract.4 == request.original_filename
-        && stored_contract.5 == request.mime_type
-        && stored_contract.6 == request.byte_size as i64
-        && stored_contract.7.as_deref() == Some(request.source_modified_at.as_str());
-    let manifest_is_missing =
-        stored_contract.8.is_none() && stored_contract.9.is_none() && stored_contract.10.is_none();
-    if base_contract_matches && manifest_is_missing {
-        connection.execute(
-            queries::backup::INSERT_MANIFEST,
-            rusqlite::params![
-                stored_contract.0,
-                request.protocol_version,
-                request.content_hash,
-                request_metadata,
-            ],
-        )?;
-        return Ok(());
-    }
-    let matches = base_contract_matches
-        && stored_contract.8 == Some(request.protocol_version)
-        && stored_contract.9.as_deref() == Some(request.content_hash.as_str())
-        && stored_contract.10.as_deref() == Some(request_metadata.as_str());
-    if !matches {
-        return Err(AppError::Conflict(
-            "idempotency key already belongs to a different backup manifest".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn select_upload_by_operation(
-    connection: &rusqlite::Connection,
-    user_id: i64,
-    operation_id: &str,
-) -> AppResult<Option<BackupUploadResponse>> {
-    connection
-        .query_row(
-            queries::backup::SELECT_BY_OPERATION,
-            rusqlite::params![user_id, operation_id],
-            upload_response_from_row,
-        )
-        .optional()
-        .map_err(AppError::from)
-}
-
-fn select_upload_by_client_asset(
-    connection: &rusqlite::Connection,
-    user_id: i64,
-    device_id: &str,
-    client_asset_id: &str,
-) -> AppResult<Option<BackupUploadResponse>> {
-    connection
-        .query_row(
-            queries::backup::SELECT_BY_CLIENT_ASSET,
-            rusqlite::params![user_id, device_id, client_asset_id],
-            upload_response_from_row,
-        )
-        .optional()
-        .map_err(AppError::from)
-}
-
-fn lookup_upload(
-    state: &AppState,
-    user_id: i64,
-    upload_id: &str,
-) -> AppResult<BackupUploadResponse> {
-    let connection = state.pool.get().map_err(AppError::Pool)?;
-    Ok(select_upload(&connection, user_id, upload_id)?.response())
-}
-
-async fn remove_staged_file(staged_path: &str) {
-    let Ok(path) = resolve_storage_path(&paths().backups, staged_path) else {
-        tracing::warn!(staged_path, "invalid backup staging cleanup path");
-        return;
-    };
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(staged_path, "backup staging cleanup failed: {error}"),
-    }
 }

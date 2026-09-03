@@ -1,11 +1,11 @@
 use crate::test_utils::{
     create_test_app, create_test_db, create_test_media_with_gps_and_date, create_test_user,
-    grant_media_access,
+    grant_media_access, test_data_directory,
 };
 use axum::http::{
     header::{
         AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
-        RANGE,
+        LAST_MODIFIED, RANGE,
     },
     StatusCode,
 };
@@ -102,15 +102,10 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
     grant_media_access(&pool, media_id, user_id);
     let relative_path = format!("route-tests/{media_id}.jpg");
     let thumbnail_path = format!("route-tests/{media_id}.jpg");
-    let originals = momento_api::constants::paths()
-        .originals
-        .join(&relative_path);
-    let thumbnail = momento_api::constants::paths()
-        .thumbnails
-        .join(&thumbnail_path);
-    let tiny_thumbnail = momento_api::constants::paths()
-        .thumbnails_tiny
-        .join(&thumbnail_path);
+    let data_directory = test_data_directory(&pool);
+    let originals = data_directory.join("originals").join(&relative_path);
+    let thumbnail = data_directory.join("thumbnails").join(&thumbnail_path);
+    let tiny_thumbnail = data_directory.join("thumbnails_tiny").join(&thumbnail_path);
     std::fs::create_dir_all(originals.parent().expect("original parent"))
         .expect("original directory");
     std::fs::create_dir_all(thumbnail.parent().expect("thumbnail parent"))
@@ -221,6 +216,11 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
     original.assert_header(CACHE_CONTROL, "private");
     original.assert_header(CONTENT_DISPOSITION, "inline; filename=\"binary-media.jpg\"");
     let etag = original.header(ETAG).to_str().expect("etag").to_string();
+    let last_modified = original
+        .header(LAST_MODIFIED)
+        .to_str()
+        .expect("last modified")
+        .to_string();
     server
         .get(&format!("/api/v1/media/{media_id}/original"))
         .add_header(AUTHORIZATION, authorization.clone())
@@ -240,7 +240,8 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
         .add_header(RANGE, "bytes=1-3")
         .add_header("if-range", etag.clone())
         .await;
-    matching_if_range.assert_status(StatusCode::PARTIAL_CONTENT);
+    matching_if_range.assert_status_ok();
+    matching_if_range.assert_header(CONTENT_LENGTH, "6");
     let stale_if_range = server
         .get(&format!("/api/v1/media/{media_id}/original"))
         .add_header(AUTHORIZATION, authorization.clone())
@@ -256,6 +257,13 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
         .add_header("if-range", "Tue, 15 Nov 1994 08:12:31 GMT")
         .await;
     date_if_range.assert_status_ok();
+    let matching_date_if_range = server
+        .get(&format!("/api/v1/media/{media_id}/original"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .add_header(RANGE, "bytes=1-3")
+        .add_header("if-range", last_modified)
+        .await;
+    matching_date_if_range.assert_status(StatusCode::PARTIAL_CONTENT);
     let open_range = server
         .get(&format!("/api/v1/media/{media_id}/original"))
         .add_header(AUTHORIZATION, authorization.clone())
@@ -303,6 +311,63 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
 }
 
 #[tokio::test]
+async fn converted_preview_uses_the_atomically_persisted_generation_path() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(
+        &pool,
+        "preview-generation",
+        "preview-generation@example.com",
+    );
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "preview-generation.heic",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    let data_directory = test_data_directory(&pool);
+    let legacy_path = format!("media/{media_id}/preview.jpg");
+    let generation_path = format!("media/{media_id}/v3/preview.jpg");
+    for path in [&legacy_path, &generation_path] {
+        let absolute = data_directory.join("previews").join(path);
+        std::fs::create_dir_all(absolute.parent().expect("preview parent"))
+            .expect("preview directory");
+        std::fs::write(absolute, path.as_bytes()).expect("preview fixture");
+    }
+    let connection = pool.get().expect("database");
+    connection
+        .execute(
+            "UPDATE media SET mime_type = 'image/heic' WHERE id = ?",
+            [media_id],
+        )
+        .expect("HEIC media");
+    drop(connection);
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+
+    server
+        .get(&format!("/api/v1/media/{media_id}/preview"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_not_found();
+
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE media_metadata SET preview_path = ?, artifact_version = 3 WHERE media_id = ?",
+            rusqlite::params![generation_path, media_id],
+        )
+        .expect("published preview generation");
+    let response = server
+        .get(&format!("/api/v1/media/{media_id}/preview"))
+        .add_header(AUTHORIZATION, authorization)
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.as_bytes(), generation_path.as_bytes());
+}
+
+#[tokio::test]
 async fn individual_media_endpoints_reject_traversal_in_stored_paths() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "unsafe-paths", "unsafe-paths@example.com");
@@ -344,7 +409,49 @@ async fn individual_media_endpoints_reject_traversal_in_stored_paths() {
 }
 
 #[tokio::test]
-async fn media_asset_batches_only_return_requested_accessible_media_and_bound_input_size() {
+async fn thumbnail_endpoints_require_a_persisted_thumbnail_reference() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "missing-thumbnail", "missing-thumbnail@example.com");
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "derived.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE media SET file_path = 'legacy/derived.jpg' WHERE id = ?",
+            [media_id],
+        )
+        .expect("legacy original path");
+    let guessed_thumbnail = test_data_directory(&pool)
+        .join("thumbnails")
+        .join("legacy/derived.jpg");
+    std::fs::create_dir_all(guessed_thumbnail.parent().expect("thumbnail parent"))
+        .expect("thumbnail directory");
+    std::fs::write(guessed_thumbnail, b"must-not-be-served").expect("legacy thumbnail");
+
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(user_id));
+    server
+        .get(&format!("/api/v1/media/{media_id}/thumbnail"))
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_not_found();
+
+    server
+        .post("/api/v1/thumbnail/get")
+        .add_header(AUTHORIZATION, authorization)
+        .json(&json!({"mediaIds": [media_id]}))
+        .await
+        .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn removed_media_asset_batch_endpoints_are_not_routable() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "batch-assets", "batch-assets@example.com");
     let visible_id = create_test_media_with_gps_and_date(
@@ -354,41 +461,20 @@ async fn media_asset_batches_only_return_requested_accessible_media_and_bound_in
         -74.0,
         "2024-01-15T10:30:00",
     );
-    let hidden_id = create_test_media_with_gps_and_date(
-        &pool,
-        "hidden-asset.jpg",
-        40.0,
-        -74.0,
-        "2024-01-15T10:31:00",
-    );
     grant_media_access(&pool, visible_id, user_id);
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {}", access_token(user_id));
 
     for (path, body) in [
-        (
-            "/api/v1/thumbnail/get",
-            json!({"mediaIds": [visible_id, hidden_id, visible_id]}),
-        ),
-        (
-            "/api/v1/preview/get",
-            json!({"ids": [visible_id, hidden_id, visible_id]}),
-        ),
+        ("/api/v1/thumbnail/get", json!({"mediaIds": [visible_id]})),
+        ("/api/v1/preview/get", json!({"ids": [visible_id]})),
     ] {
         let response = server
             .post(path)
             .add_header(AUTHORIZATION, authorization.clone())
             .json(&body)
             .await;
-        response.assert_status_ok();
-        let response_body: Value = response.json();
-        let assets = response_body
-            .as_object()
-            .and_then(|body| body.values().next())
-            .and_then(Value::as_object)
-            .expect("asset map");
-        assert_eq!(assets.len(), 1);
-        assert!(assets.contains_key(&visible_id.to_string()));
+        response.assert_status_not_found();
     }
 
     let too_many_ids = (1..=501).collect::<Vec<_>>();
@@ -397,7 +483,7 @@ async fn media_asset_batches_only_return_requested_accessible_media_and_bound_in
         .add_header(AUTHORIZATION, authorization)
         .json(&json!({"mediaIds": too_many_ids}))
         .await
-        .assert_status_bad_request();
+        .assert_status_not_found();
 }
 
 #[tokio::test]
@@ -872,7 +958,7 @@ async fn test_timeline_markers_respect_media_type() {
 }
 
 #[tokio::test]
-async fn test_timeline_marker_query_stays_within_selected_month() {
+async fn test_timeline_marker_anchor_fills_page_across_periods() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "testuser", "timeline-marker@example.com");
     let december_id = create_test_media_with_gps_and_date(
@@ -922,7 +1008,7 @@ async fn test_timeline_marker_query_stays_within_selected_month() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
-            "limit": 100,
+            "limit": 2,
             "search": "",
             "anchorDate": marker["anchorDate"],
             "direction": "older",
@@ -931,16 +1017,20 @@ async fn test_timeline_marker_query_stays_within_selected_month() {
     response.assert_status_ok();
 
     let body: Value = response.json();
-    assert_eq!(body["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(body["groups"].as_array().unwrap().len(), 2);
     assert_eq!(body["groups"][0]["media"][0]["id"], json!(december_id));
-    assert_ne!(body["groups"][0]["media"][0]["id"], json!(old_id));
+    assert_eq!(
+        body["groups"][1]["media"][0]["id"],
+        json!(early_december_id)
+    );
+    assert!(body["hasOlder"].as_bool().unwrap());
 
     let next_response = server
         .post("/api/v1/timeline/list")
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
-            "limit": 100,
+            "limit": 2,
             "search": "",
             "cursor": body["nextCursor"],
             "direction": "older"
@@ -948,11 +1038,8 @@ async fn test_timeline_marker_query_stays_within_selected_month() {
         .await;
     next_response.assert_status_ok();
     let next_body: Value = next_response.json();
-    assert_eq!(
-        next_body["groups"][0]["media"][0]["id"],
-        json!(early_december_id)
-    );
-    assert_ne!(next_body["groups"][0]["media"][0]["id"], json!(old_id));
+    assert_eq!(next_body["groups"][0]["media"][0]["id"], json!(old_id));
+    assert!(!next_body["hasOlder"].as_bool().unwrap());
 }
 
 #[tokio::test]
@@ -989,7 +1076,7 @@ async fn test_timeline_reverse_pagination_does_not_repeat_media() {
     let request = |cursor: Option<&Value>| {
         let mut body = json!({
             "groupBy": "day",
-            "limit": 100,
+            "limit": 1,
             "search": "",
             "anchorDate": "9999-12-31T23:59:59",
             "direction": "older",
@@ -1047,6 +1134,13 @@ async fn test_timeline_jump_can_page_newer_media() {
         -74.0060,
         "2024-03-15T10:30:00",
     );
+    let latest_id = create_test_media_with_gps_and_date(
+        &pool,
+        "latest.jpg",
+        40.7128,
+        -74.0060,
+        "2024-04-15T10:30:00",
+    );
     let older_id = create_test_media_with_gps_and_date(
         &pool,
         "older.jpg",
@@ -1056,6 +1150,7 @@ async fn test_timeline_jump_can_page_newer_media() {
     );
     grant_media_access(&pool, newer_id, user_id);
     grant_media_access(&pool, newest_id, user_id);
+    grant_media_access(&pool, latest_id, user_id);
     grant_media_access(&pool, older_id, user_id);
 
     let server = TestServer::new(app).expect("Failed to create test server");
@@ -1065,7 +1160,7 @@ async fn test_timeline_jump_can_page_newer_media() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
-            "limit": 100,
+            "limit": 1,
             "search": "",
             "cursor": format!("2024-02-15T10:30:00_{}", newer_id),
             "direction": "older",
@@ -1080,7 +1175,7 @@ async fn test_timeline_jump_can_page_newer_media() {
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
-            "limit": 100,
+            "limit": 2,
             "search": "",
             "cursor": older_body["previousCursor"],
             "direction": "newer",
@@ -1088,14 +1183,17 @@ async fn test_timeline_jump_can_page_newer_media() {
         .await;
     newer_response.assert_status_ok();
     let newer_body: Value = newer_response.json();
-    assert_eq!(newer_body["groups"][0]["media"][0]["id"], json!(newer_id));
+    assert_eq!(newer_body["groups"].as_array().unwrap().len(), 2);
+    assert_eq!(newer_body["groups"][0]["media"][0]["id"], json!(newest_id));
+    assert_eq!(newer_body["groups"][1]["media"][0]["id"], json!(newer_id));
+    assert!(newer_body["hasNewer"].as_bool().unwrap());
 
     let newest_response = server
         .post("/api/v1/timeline/list")
         .add_header(AUTHORIZATION, format!("Bearer {}", token))
         .json(&json!({
             "groupBy": "day",
-            "limit": 100,
+            "limit": 1,
             "search": "",
             "cursor": newer_body["previousCursor"],
             "direction": "newer",
@@ -1103,7 +1201,7 @@ async fn test_timeline_jump_can_page_newer_media() {
         .await;
     newest_response.assert_status_ok();
     let newest_body: Value = newest_response.json();
-    assert_eq!(newest_body["groups"][0]["media"][0]["id"], json!(newest_id));
+    assert_eq!(newest_body["groups"][0]["media"][0]["id"], json!(latest_id));
     assert!(!newest_body["hasNewer"].as_bool().unwrap());
 }
 

@@ -8,7 +8,6 @@ pub(crate) const SERVER_RESET_ADMIN_PASSWORD: bool = false;
 pub(crate) const SERVER_DATA_DIR: &str = "/data";
 pub(crate) const SERVER_STATIC_DIR: &str = "/app/static";
 pub(crate) const SERVER_API_REQUEST_BODY_MAX_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const SERVER_REQUEST_LOG_BODY_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const ACCESS_TOKEN_EXPIRE_MINUTES: i64 = 30;
 pub(crate) const REFRESH_TOKEN_EXPIRE_DAYS: i64 = 7;
 pub(crate) const MEDIA_ACCESS_TICKET_EXPIRE_HOURS: i64 = 24;
@@ -17,36 +16,21 @@ pub(crate) const PASSWORD_ATTEMPT_WINDOW_SECONDS: u64 = 60;
 pub(crate) const PASSWORD_ATTEMPTS_PER_IDENTITY: u32 = 5;
 pub(crate) const PASSWORD_ATTEMPTS_PER_SOURCE: u32 = 30;
 pub(crate) const PASSWORD_LOCKOUT_SECONDS: u64 = 900;
-pub(crate) const PASSWORD_HASH_MAX_CONCURRENT: usize = 4;
+pub(crate) const THREAD_POOL_CPU_WORKERS: usize = 8;
+pub(crate) const THREAD_POOL_IO_WORKERS: usize = 8;
+pub(crate) const THREAD_POOL_SQLITE_WORKERS: usize = 4;
 pub(crate) const REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS: u64 = 3600;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_STDERR_BYTES: usize = 1024 * 1024;
-pub(crate) const MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS: u64 = 200_000_000;
-pub(crate) const IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES: u64 = 512;
-pub(crate) const IMAGEMAGICK_MAP_LIMIT_MEBIBYTES: u64 = 1024;
-pub(crate) const IMAGEMAGICK_DISK_LIMIT_MEBIBYTES: u64 = 4096;
-pub(crate) const IMAGEMAGICK_MAXIMUM_THREADS: usize = 2;
 pub(crate) const WEBDAV_MOUNT_PATH: &str = "/webdav";
 pub(crate) const WEBDAV_REALM: &str = "Momento WebDAV";
 pub(crate) const WEBDAV_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
-pub(crate) const WEBDAV_MAX_CONCURRENT_REQUESTS: usize = 16;
-pub(crate) const WEBDAV_POLL_INTERVAL_SECONDS: u64 = 1;
 pub(crate) const WEBDAV_STABLE_FILE_AGE_SECONDS: u64 = 2;
-pub(crate) const WEBDAV_MAX_CONCURRENT_PROCESSING: usize = 4;
 pub(crate) const BACKUP_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 pub(crate) const BACKUP_MAX_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
-pub(crate) const BACKUP_MAX_ACTIVE_UPLOADS_PER_USER: usize = 4;
 pub(crate) const BACKUP_SESSION_EXPIRY_HOURS: u64 = 24;
-pub(crate) const BACKUP_WORKER_POLL_INTERVAL_SECONDS: u64 = 2;
-pub(crate) const BACKUP_WORKER_CONCURRENCY: usize = 2;
-pub(crate) const METADATA_WORKER_POLL_INTERVAL_SECONDS: u64 = 10;
-pub(crate) const METADATA_WORKER_LEASE_SECONDS: u64 = 300;
-pub(crate) const METADATA_WORKER_MAX_ATTEMPTS: u32 = 5;
-pub(crate) const LLM_SUBMISSION_POLL_INTERVAL_SECONDS: u64 = 5;
-pub(crate) const LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS: usize = 128;
-pub(crate) const LLM_RESULT_POLL_INTERVAL_SECONDS: u64 = 1;
-pub(crate) const LLM_RESULT_CONCURRENCY: usize = 8;
 pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.50;
 pub(crate) const FACE_REPRESENTATIVE_CONFIDENCE_WEIGHT: f64 = 0.05;
 pub(crate) const FACE_REPRESENTATIVE_FACE_SIZE_WEIGHT: f64 = 0.10;
@@ -67,19 +51,10 @@ pub(crate) mod fallback {
     pub(crate) const THUMBNAILS_MAX_SIZE: u32 = 400;
     pub(crate) const THUMBNAILS_TINY_SIZE: u32 = 48;
     pub(crate) const THUMBNAILS_QUALITY: u8 = 85;
-    pub(crate) const THUMBNAILS_VIDEO_FRAME_QUALITY: u8 = 2;
     pub(crate) const LLM_ENABLED: bool = false;
     pub(crate) const LLM_SERVER_ADDRESS: &str = "127.0.0.1:8100";
     pub(crate) const LLM_CLIENT_ID: &str = "";
     pub(crate) const LLM_API_KEY: &str = "";
-
-    pub(crate) fn metadata_worker_concurrency() -> usize {
-        num_cpus::get()
-    }
-
-    pub(crate) fn regenerate_num_cpus() -> usize {
-        num_cpus::get()
-    }
 }
 
 mod template {
@@ -88,8 +63,6 @@ mod template {
     pub(super) const THUMBNAILS_MAX_SIZE: u32 = 1200;
     pub(super) const THUMBNAILS_TINY_SIZE: u32 = 300;
     pub(super) const THUMBNAILS_QUALITY: u8 = 85;
-    pub(super) const THUMBNAILS_VIDEO_FRAME_QUALITY: u8 = 85;
-    pub(super) const METADATA_WORKER_CONCURRENCY: usize = 16;
     pub(super) const LLM_ENABLED: bool = true;
     pub(super) const LLM_SERVER_ADDRESS: &str = "${LLM_SERVICE_ADDRESS}";
     pub(super) const LLM_CLIENT_ID: &str = "playground";
@@ -122,10 +95,6 @@ pub(crate) fn server_static_dir() -> PathBuf {
 
 pub(crate) fn server_api_request_body_max_bytes() -> usize {
     SERVER_API_REQUEST_BODY_MAX_BYTES
-}
-
-pub(crate) fn server_request_log_body_max_bytes() -> usize {
-    SERVER_REQUEST_LOG_BODY_MAX_BYTES
 }
 
 pub(crate) fn security_secret_key() -> String {
@@ -164,10 +133,6 @@ pub(crate) fn password_lockout_seconds() -> u64 {
     PASSWORD_LOCKOUT_SECONDS
 }
 
-pub(crate) fn password_hash_max_concurrent() -> usize {
-    PASSWORD_HASH_MAX_CONCURRENT
-}
-
 pub(crate) fn trusted_proxy_ip_addresses() -> Vec<IpAddr> {
     Vec::new()
 }
@@ -192,22 +157,6 @@ pub(crate) fn media_process_maximum_decoded_image_pixels() -> u64 {
     MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS
 }
 
-pub(crate) fn imagemagick_memory_limit_mebibytes() -> u64 {
-    IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES
-}
-
-pub(crate) fn imagemagick_map_limit_mebibytes() -> u64 {
-    IMAGEMAGICK_MAP_LIMIT_MEBIBYTES
-}
-
-pub(crate) fn imagemagick_disk_limit_mebibytes() -> u64 {
-    IMAGEMAGICK_DISK_LIMIT_MEBIBYTES
-}
-
-pub(crate) fn imagemagick_maximum_threads() -> usize {
-    IMAGEMAGICK_MAXIMUM_THREADS
-}
-
 pub(crate) fn webdav_mount_path() -> String {
     WEBDAV_MOUNT_PATH.to_string()
 }
@@ -220,20 +169,8 @@ pub(crate) fn webdav_max_upload_bytes() -> u64 {
     WEBDAV_MAX_UPLOAD_BYTES
 }
 
-pub(crate) fn webdav_max_concurrent_requests() -> usize {
-    WEBDAV_MAX_CONCURRENT_REQUESTS
-}
-
-pub(crate) fn webdav_poll_interval_seconds() -> u64 {
-    WEBDAV_POLL_INTERVAL_SECONDS
-}
-
 pub(crate) fn webdav_stable_file_age_seconds() -> u64 {
     WEBDAV_STABLE_FILE_AGE_SECONDS
-}
-
-pub(crate) fn webdav_max_concurrent_processing() -> usize {
-    WEBDAV_MAX_CONCURRENT_PROCESSING
 }
 
 pub(crate) fn backup_max_upload_bytes() -> u64 {
@@ -244,20 +181,8 @@ pub(crate) fn backup_max_chunk_bytes() -> u64 {
     BACKUP_MAX_CHUNK_BYTES
 }
 
-pub(crate) fn backup_max_active_uploads_per_user() -> usize {
-    BACKUP_MAX_ACTIVE_UPLOADS_PER_USER
-}
-
 pub(crate) fn backup_session_expiry_hours() -> u64 {
     BACKUP_SESSION_EXPIRY_HOURS
-}
-
-pub(crate) fn backup_worker_poll_interval_seconds() -> u64 {
-    BACKUP_WORKER_POLL_INTERVAL_SECONDS
-}
-
-pub(crate) fn backup_worker_concurrency() -> usize {
-    BACKUP_WORKER_CONCURRENCY
 }
 
 pub(crate) fn thumbnails_max_size() -> u32 {
@@ -270,22 +195,6 @@ pub(crate) fn thumbnails_tiny_size() -> u32 {
 
 pub(crate) fn thumbnails_quality() -> u8 {
     fallback::THUMBNAILS_QUALITY
-}
-
-pub(crate) fn thumbnails_video_frame_quality() -> u8 {
-    fallback::THUMBNAILS_VIDEO_FRAME_QUALITY
-}
-
-pub(crate) fn metadata_worker_poll_interval_seconds() -> u64 {
-    METADATA_WORKER_POLL_INTERVAL_SECONDS
-}
-
-pub(crate) fn metadata_worker_lease_seconds() -> u64 {
-    METADATA_WORKER_LEASE_SECONDS
-}
-
-pub(crate) fn metadata_worker_max_attempts() -> u32 {
-    METADATA_WORKER_MAX_ATTEMPTS
 }
 
 pub(crate) fn ocr_cron() -> String {
@@ -360,22 +269,6 @@ pub(crate) fn face_representative_feature_clarity_weight() -> f64 {
     FACE_REPRESENTATIVE_FEATURE_CLARITY_WEIGHT
 }
 
-pub(crate) fn llm_submission_poll_interval_seconds() -> u64 {
-    LLM_SUBMISSION_POLL_INTERVAL_SECONDS
-}
-
-pub(crate) fn llm_submission_max_async_submission_tasks() -> usize {
-    LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS
-}
-
-pub(crate) fn llm_result_poll_interval_seconds() -> u64 {
-    LLM_RESULT_POLL_INTERVAL_SECONDS
-}
-
-pub(crate) fn llm_result_concurrency() -> usize {
-    LLM_RESULT_CONCURRENCY
-}
-
 pub(crate) fn render_template(source: &str) -> String {
     let replacements = [
         ("{{SERVER_HOST}}", SERVER_HOST.to_string()),
@@ -392,8 +285,16 @@ pub(crate) fn render_template(source: &str) -> String {
             SERVER_API_REQUEST_BODY_MAX_BYTES.to_string(),
         ),
         (
-            "{{SERVER_REQUEST_LOG_BODY_MAX_BYTES}}",
-            SERVER_REQUEST_LOG_BODY_MAX_BYTES.to_string(),
+            "{{THREAD_POOL_CPU_WORKERS}}",
+            THREAD_POOL_CPU_WORKERS.to_string(),
+        ),
+        (
+            "{{THREAD_POOL_IO_WORKERS}}",
+            THREAD_POOL_IO_WORKERS.to_string(),
+        ),
+        (
+            "{{THREAD_POOL_SQLITE_WORKERS}}",
+            THREAD_POOL_SQLITE_WORKERS.to_string(),
         ),
         (
             "{{SECURITY_SECRET_KEY}}",
@@ -432,10 +333,6 @@ pub(crate) fn render_template(source: &str) -> String {
             PASSWORD_LOCKOUT_SECONDS.to_string(),
         ),
         (
-            "{{PASSWORD_HASH_MAX_CONCURRENT}}",
-            PASSWORD_HASH_MAX_CONCURRENT.to_string(),
-        ),
-        (
             "{{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}",
             REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS.to_string(),
         ),
@@ -455,22 +352,6 @@ pub(crate) fn render_template(source: &str) -> String {
             "{{MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS}}",
             MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS.to_string(),
         ),
-        (
-            "{{IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES}}",
-            IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES.to_string(),
-        ),
-        (
-            "{{IMAGEMAGICK_MAP_LIMIT_MEBIBYTES}}",
-            IMAGEMAGICK_MAP_LIMIT_MEBIBYTES.to_string(),
-        ),
-        (
-            "{{IMAGEMAGICK_DISK_LIMIT_MEBIBYTES}}",
-            IMAGEMAGICK_DISK_LIMIT_MEBIBYTES.to_string(),
-        ),
-        (
-            "{{IMAGEMAGICK_MAXIMUM_THREADS}}",
-            IMAGEMAGICK_MAXIMUM_THREADS.to_string(),
-        ),
         ("{{WEBDAV_MOUNT_PATH}}", WEBDAV_MOUNT_PATH.to_string()),
         ("{{WEBDAV_REALM}}", WEBDAV_REALM.to_string()),
         (
@@ -478,20 +359,8 @@ pub(crate) fn render_template(source: &str) -> String {
             WEBDAV_MAX_UPLOAD_BYTES.to_string(),
         ),
         (
-            "{{WEBDAV_MAX_CONCURRENT_REQUESTS}}",
-            WEBDAV_MAX_CONCURRENT_REQUESTS.to_string(),
-        ),
-        (
-            "{{WEBDAV_POLL_INTERVAL_SECONDS}}",
-            WEBDAV_POLL_INTERVAL_SECONDS.to_string(),
-        ),
-        (
             "{{WEBDAV_STABLE_FILE_AGE_SECONDS}}",
             WEBDAV_STABLE_FILE_AGE_SECONDS.to_string(),
-        ),
-        (
-            "{{WEBDAV_MAX_CONCURRENT_PROCESSING}}",
-            WEBDAV_MAX_CONCURRENT_PROCESSING.to_string(),
         ),
         (
             "{{BACKUP_MAX_UPLOAD_BYTES}}",
@@ -502,20 +371,8 @@ pub(crate) fn render_template(source: &str) -> String {
             BACKUP_MAX_CHUNK_BYTES.to_string(),
         ),
         (
-            "{{BACKUP_MAX_ACTIVE_UPLOADS_PER_USER}}",
-            BACKUP_MAX_ACTIVE_UPLOADS_PER_USER.to_string(),
-        ),
-        (
             "{{BACKUP_SESSION_EXPIRY_HOURS}}",
             BACKUP_SESSION_EXPIRY_HOURS.to_string(),
-        ),
-        (
-            "{{BACKUP_WORKER_POLL_INTERVAL_SECONDS}}",
-            BACKUP_WORKER_POLL_INTERVAL_SECONDS.to_string(),
-        ),
-        (
-            "{{BACKUP_WORKER_CONCURRENCY}}",
-            BACKUP_WORKER_CONCURRENCY.to_string(),
         ),
         (
             "{{THUMBNAILS_MAX_SIZE}}",
@@ -528,42 +385,6 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{THUMBNAILS_QUALITY}}",
             template::THUMBNAILS_QUALITY.to_string(),
-        ),
-        (
-            "{{THUMBNAILS_VIDEO_FRAME_QUALITY}}",
-            template::THUMBNAILS_VIDEO_FRAME_QUALITY.to_string(),
-        ),
-        (
-            "{{METADATA_WORKER_POLL_INTERVAL_SECONDS}}",
-            METADATA_WORKER_POLL_INTERVAL_SECONDS.to_string(),
-        ),
-        (
-            "{{METADATA_WORKER_CONCURRENCY}}",
-            template::METADATA_WORKER_CONCURRENCY.to_string(),
-        ),
-        (
-            "{{METADATA_WORKER_LEASE_SECONDS}}",
-            METADATA_WORKER_LEASE_SECONDS.to_string(),
-        ),
-        (
-            "{{METADATA_WORKER_MAX_ATTEMPTS}}",
-            METADATA_WORKER_MAX_ATTEMPTS.to_string(),
-        ),
-        (
-            "{{LLM_SUBMISSION_POLL_INTERVAL_SECONDS}}",
-            LLM_SUBMISSION_POLL_INTERVAL_SECONDS.to_string(),
-        ),
-        (
-            "{{LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS}}",
-            LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS.to_string(),
-        ),
-        (
-            "{{LLM_RESULT_POLL_INTERVAL_SECONDS}}",
-            LLM_RESULT_POLL_INTERVAL_SECONDS.to_string(),
-        ),
-        (
-            "{{LLM_RESULT_CONCURRENCY}}",
-            LLM_RESULT_CONCURRENCY.to_string(),
         ),
         ("{{LLM_ENABLED}}", template::LLM_ENABLED.to_string()),
         (

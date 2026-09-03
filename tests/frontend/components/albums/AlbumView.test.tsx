@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   batchLoad: vi.fn(),
-  getCachedThumbnailURL: vi.fn(),
   reorder: vi.fn(),
   removeMedia: vi.fn(),
   album: {
@@ -20,13 +19,11 @@ const mocks = vi.hoisted(() => ({
   },
 }))
 
-vi.mock('../../../../src/frontend/utils/batcher', () => ({
-  batchLoader: { load: mocks.batchLoad },
+vi.mock('../../../../src/frontend/utils/assetUrlLoader', () => ({
+  thumbnailUrlLoader: { load: mocks.batchLoad },
 }))
 
-vi.mock('../../../../src/frontend/api/media', () => ({
-  mediaApi: { getCachedThumbnailURL: mocks.getCachedThumbnailURL },
-}))
+vi.mock('../../../../src/frontend/api/media', () => ({ mediaApi: {} }))
 
 vi.mock('../../../../src/frontend/hooks/useAlbums', () => ({
   useAlbum: () => ({
@@ -69,7 +66,6 @@ class VisibleIntersectionObserver implements IntersectionObserver {
 describe('AlbumView', () => {
   beforeEach(() => {
     vi.stubGlobal('IntersectionObserver', VisibleIntersectionObserver)
-    mocks.getCachedThumbnailURL.mockReturnValue(null)
     mocks.batchLoad.mockResolvedValue('batched-thumbnail')
     mocks.reorder.mockResolvedValue(undefined)
     mocks.removeMedia.mockResolvedValue(undefined)
@@ -104,7 +100,7 @@ describe('AlbumView', () => {
     vi.clearAllMocks()
   })
 
-  it('loads visible album media through the shared thumbnail batcher', async () => {
+  it('loads visible album media through the shared thumbnail URL loader', async () => {
     render(<AlbumView albumId={7} onBack={vi.fn()} onPhotoClick={vi.fn()} />)
 
     await waitFor(() => expect(mocks.batchLoad).toHaveBeenCalledWith(42))

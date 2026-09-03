@@ -1,22 +1,22 @@
 use std::collections::HashMap;
 
-use rusqlite::OptionalExtension;
-use tracing::warn;
-
 use crate::config::{Config, LlmConfig};
 use crate::constants::{
     DOCUMENT_DETECTION_MODEL_TYPE, FACE_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
     IMAGE_TAGGING_MODEL_TYPE, OCR_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
 };
-use crate::database::{queries, DbPool};
-use crate::error::{AppError, AppResult};
+use crate::database::queries;
+use crate::io::file::{NormalizedStoragePath, PathClaimMode, PathClaimScope, StorageRootId};
+use crate::io::journal::{
+    FileEntryAction, FileEntryPlan, FileOperationPlan, FilePathClaimPlan, PrepareJournalOutcome,
+};
 use crate::models::{
     AiActionResponse, AiFeatureActionResult, AiFeatureScheduleResponse, AiJobCounts,
     AiStatusResponse, AiTaskStatusResponse, DeduplicateStatusResponse,
 };
-use crate::processor::{deduplicator, face_detection};
-
-use super::{cancel_active_jobs, queue_task};
+use crate::processor::deduplicator;
+use momento_common::llm::IMAGE_CLUSTERING_MODEL_VERSION;
+use rusqlite::OptionalExtension;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AiFeature {
@@ -27,6 +27,18 @@ pub enum AiFeature {
     DocumentDetection,
     FaceDetection,
     Deduplicate,
+}
+
+#[derive(Debug)]
+pub(crate) enum AiFeatureCleanOutcome {
+    Cleaned {
+        result: AiFeatureActionResult,
+        cleanup_group_created: bool,
+    },
+    ActiveWork,
+    PendingCancellation,
+    PendingResultCleanup,
+    PathConflict,
 }
 
 impl AiFeature {
@@ -106,140 +118,153 @@ impl AiFeature {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AiStartSource<'a> {
-    Manual,
-    Scheduled { scheduled_for: &'a str },
-    StartupRecovery,
-}
-
-pub fn start_feature(
-    config: &Config,
-    pool: &DbPool,
+pub(crate) fn start_feature_on_connection(
+    connection: &mut rusqlite::Connection,
     feature: AiFeature,
-    source: AiStartSource<'_>,
-) -> AppResult<usize> {
-    if !config.llm.enabled {
-        return Err(AppError::Validation(format!(
-            "{} is unavailable because LLM is disabled",
-            feature.name()
-        )));
+    trigger: &str,
+    scheduled_for: Option<&str>,
+) -> rusqlite::Result<usize> {
+    let transaction = connection.unchecked_transaction()?;
+    if transaction.query_row(queries::metadata_jobs::IS_RESET_ACTIVE, [], |row| {
+        row.get::<_, bool>(0)
+    })? {
+        transaction.rollback()?;
+        return Ok(0);
     }
-    match feature {
+    let queued_jobs = match feature {
         AiFeature::Ocr
         | AiFeature::ImageTagging
         | AiFeature::ImageAesthetics
         | AiFeature::ScreenshotDetection
         | AiFeature::DocumentDetection => {
-            queue_task(pool, feature.name(), true).map_err(AppError::Database)
+            let task = feature.name();
+            let queued = if task == IMAGE_AESTHETICS_MODEL_TYPE {
+                transaction.execute(queries::ai_jobs::INSERT_AESTHETICS_ELIGIBLE, [])?
+            } else if task == SCREENSHOT_DETECTION_MODEL_TYPE {
+                transaction.execute(queries::ai_jobs::INSERT_SCREENSHOT_ELIGIBLE, [])?
+            } else if task == DOCUMENT_DETECTION_MODEL_TYPE {
+                transaction.execute(queries::ai_jobs::INSERT_DOCUMENT_ELIGIBLE, [])?
+            } else {
+                transaction.execute(
+                    queries::ai_jobs::INSERT_ELIGIBLE,
+                    rusqlite::params![task, task, task, task],
+                )?
+            };
+            transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+            queued
         }
-        AiFeature::FaceDetection => face_detection::start(pool, true),
-        AiFeature::Deduplicate => start_deduplicate(pool, source),
-    }
-}
-
-pub fn start_all_features(
-    config: &Config,
-    pool: &DbPool,
-    source: AiStartSource<'_>,
-) -> AppResult<usize> {
-    if !config.llm.enabled {
-        return Err(AppError::Validation("LLM is disabled".to_string()));
-    }
-    let mut queued_jobs = 0;
-    let mut successful_features = 0;
-    let mut first_error = None;
-    for feature in AiFeature::ALL {
-        match start_feature(config, pool, feature, source) {
-            Ok(feature_jobs) => {
-                successful_features += 1;
-                queued_jobs += feature_jobs;
+        AiFeature::FaceDetection => {
+            if transaction
+                .query_row(queries::faces::SELECT_ACTIVE_RUN, [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?
+                .is_some()
+            {
+                transaction.rollback()?;
+                return Ok(0);
             }
-            Err(error) => {
-                warn!(
-                    feature = feature.name(),
-                    "Could not start AI feature: {error}"
-                );
-                if first_error.is_none() {
-                    first_error = Some(error);
+            transaction.execute(queries::faces::INSERT_GROUPING_RUN, [])?;
+            let run_id = transaction.last_insert_rowid();
+            let queued = transaction.execute(queries::ai_jobs::INSERT_FACE_ELIGIBLE, [run_id])?;
+            transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+            queued
+        }
+        AiFeature::Deduplicate => {
+            let inserted = transaction.execute(
+                queries::deduplicate::INSERT_RUN,
+                rusqlite::params![trigger, scheduled_for],
+            );
+            let run_id = match inserted {
+                Ok(_) => transaction.last_insert_rowid(),
+                Err(rusqlite::Error::SqliteFailure(database_error, _))
+                    if database_error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    transaction.rollback()?;
+                    return Ok(0);
                 }
+                Err(error) => return Err(error),
+            };
+            let indexes_from_other_model = transaction.query_row(
+                queries::deduplicate::COUNT_INDEXES_FROM_OTHER_MODEL,
+                [IMAGE_CLUSTERING_MODEL_VERSION],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if indexes_from_other_model > 0 {
+                transaction.execute(
+                    queries::deduplicate::DELETE_HASH_BANDS_FROM_OTHER_MODEL,
+                    [IMAGE_CLUSTERING_MODEL_VERSION],
+                )?;
+                transaction.execute(
+                    queries::deduplicate::DELETE_INDEXES_FROM_OTHER_MODEL,
+                    [IMAGE_CLUSTERING_MODEL_VERSION],
+                )?;
+                transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
             }
+            let queued = transaction.execute(
+                queries::deduplicate::CREATE_CLUSTERING_JOBS,
+                rusqlite::params![run_id, run_id],
+            )?;
+            transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+            queued
         }
-    }
-    if successful_features == 0 {
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-    }
+    };
+    transaction.commit()?;
     Ok(queued_jobs)
 }
 
-pub fn action_response(action: &str, results: Vec<AiFeatureActionResult>) -> AiActionResponse {
-    AiActionResponse {
-        action: action.to_string(),
-        results,
-    }
-}
-
-pub fn start_feature_action(
-    config: &Config,
-    pool: &DbPool,
+pub(crate) fn cancel_feature_on_connection(
+    connection: &mut rusqlite::Connection,
     feature: AiFeature,
-) -> AppResult<AiFeatureActionResult> {
-    let queued_jobs = start_feature(config, pool, feature, AiStartSource::Manual)? as i64;
-    Ok(AiFeatureActionResult {
-        feature: feature.name().to_string(),
-        outcome: if queued_jobs > 0 { "queued" } else { "noWork" }.to_string(),
-        affected_jobs: queued_jobs,
-        error: None,
-    })
-}
-
-pub fn start_all_actions(config: &Config, pool: &DbPool) -> Vec<AiFeatureActionResult> {
-    AiFeature::ALL
-        .into_iter()
-        .map(|feature| {
-            if !config.llm.enabled {
-                return AiFeatureActionResult {
-                    feature: feature.name().to_string(),
-                    outcome: "disabled".to_string(),
-                    affected_jobs: 0,
-                    error: None,
-                };
-            }
-            match start_feature_action(config, pool, feature) {
-                Ok(result) => result,
-                Err(error) => AiFeatureActionResult {
-                    feature: feature.name().to_string(),
-                    outcome: "failed".to_string(),
-                    affected_jobs: 0,
-                    error: Some(error.to_string()),
-                },
-            }
-        })
-        .collect()
-}
-
-pub fn cancel_feature_action(
-    pool: &DbPool,
-    feature: AiFeature,
-) -> AppResult<AiFeatureActionResult> {
-    let affected_jobs = count_jobs(pool, feature.inference_task(), true)?;
+) -> rusqlite::Result<AiFeatureActionResult> {
+    let transaction = connection.unchecked_transaction()?;
+    let task = feature.inference_task();
+    let affected_jobs =
+        transaction.query_row(queries::ai_jobs::COUNT_ACTIVE_FOR_TASK, [task], |row| {
+            row.get::<_, i64>(0)
+        })?;
     let cancellation_requested = match feature {
-        AiFeature::Deduplicate => deduplicator::request_cancel(pool)?,
+        AiFeature::Deduplicate => {
+            let run = transaction
+                .query_row(
+                    queries::deduplicate::SELECT_LATEST_RUN,
+                    [],
+                    deduplicator::map_run_status,
+                )
+                .optional()?;
+            if let Some(run) = run.filter(|run| run.status == "running") {
+                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
+                transaction.execute(queries::deduplicate::REQUEST_CANCEL, [run.id])? > 0
+            } else {
+                false
+            }
+        }
         AiFeature::FaceDetection => {
             if affected_jobs > 0 {
-                cancel_active_jobs(pool, Some(feature.inference_task()))?;
+                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
             }
-            face_detection::cancel(pool)? || affected_jobs > 0
+            let cancelled_runs = transaction.execute(queries::faces::REQUEST_CANCEL_RUNS, [])? > 0;
+            affected_jobs > 0 || cancelled_runs
         }
         _ => {
             if affected_jobs > 0 {
-                cancel_active_jobs(pool, Some(feature.inference_task()))?;
+                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?;
+                transaction.execute(queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
+                true
+            } else {
+                false
             }
-            affected_jobs > 0
         }
     };
+    transaction.commit()?;
     Ok(AiFeatureActionResult {
         feature: feature.name().to_string(),
         outcome: if cancellation_requested {
@@ -253,55 +278,68 @@ pub fn cancel_feature_action(
     })
 }
 
-pub fn cancel_all_actions(pool: &DbPool) -> Vec<AiFeatureActionResult> {
-    let counts = AiFeature::ALL
-        .into_iter()
-        .map(|feature| {
-            count_jobs(pool, feature.inference_task(), true).map(|count| (feature, count))
-        })
-        .collect::<AppResult<Vec<_>>>();
-    let counts = match counts {
-        Ok(counts) => counts,
-        Err(error) => return failed_actions("cancel", error),
-    };
-    if counts.iter().any(|(_, count)| *count > 0) {
-        if let Err(error) = cancel_active_jobs(pool, None) {
-            return failed_actions("cancel", AppError::Database(error));
-        }
+pub(crate) fn cancel_all_on_connection(
+    connection: &mut rusqlite::Connection,
+) -> rusqlite::Result<Vec<AiFeatureActionResult>> {
+    let transaction = connection.unchecked_transaction()?;
+    let mut counts = Vec::with_capacity(AiFeature::ALL.len());
+    for feature in AiFeature::ALL {
+        let count = transaction.query_row(
+            queries::ai_jobs::COUNT_ACTIVE_FOR_TASK,
+            [feature.inference_task()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        counts.push((feature, count));
     }
-    let face_result = face_detection::cancel(pool);
-    let deduplicate_result = deduplicator::request_cancel(pool);
-
-    counts
+    let has_active_jobs = counts.iter().any(|(_, count)| *count > 0);
+    if has_active_jobs {
+        transaction.execute(queries::ai_jobs::QUEUE_ALL_CANCELLATION_SCOPE, [])?;
+        transaction.execute(queries::ai_jobs::QUEUE_ALL_CANCELLATIONS, [])?;
+        transaction.execute(queries::ai_jobs::CANCEL_ALL, [])?;
+        transaction.execute(queries::ai_jobs::CANCEL_ALL_RESULT_RECEIPTS, [])?;
+    }
+    let face_run_cancelled = transaction.execute(queries::faces::REQUEST_CANCEL_RUNS, [])? > 0;
+    let deduplicate_run = transaction
+        .query_row(
+            queries::deduplicate::SELECT_LATEST_RUN,
+            [],
+            deduplicator::map_run_status,
+        )
+        .optional()?
+        .filter(|run| run.status == "running");
+    let deduplicate_run_cancelled = if let Some(run) = deduplicate_run {
+        if !has_active_jobs {
+            transaction.execute(
+                queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
+                [AiFeature::Deduplicate.inference_task()],
+            )?;
+            transaction.execute(
+                queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK,
+                [AiFeature::Deduplicate.inference_task()],
+            )?;
+            transaction.execute(
+                queries::ai_jobs::CANCEL_FOR_TASK,
+                [AiFeature::Deduplicate.inference_task()],
+            )?;
+            transaction.execute(
+                queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK,
+                [AiFeature::Deduplicate.inference_task()],
+            )?;
+        }
+        transaction.execute(queries::deduplicate::REQUEST_CANCEL, [run.id])? > 0
+    } else {
+        false
+    };
+    transaction.commit()?;
+    Ok(counts
         .into_iter()
         .map(|(feature, affected_jobs)| {
-            if feature == AiFeature::FaceDetection {
-                return match &face_result {
-                    Ok(requested) => AiFeatureActionResult {
-                        feature: feature.name().to_string(),
-                        outcome: if *requested || affected_jobs > 0 {
-                            "cancellationRequested"
-                        } else {
-                            "noActiveWork"
-                        }
-                        .to_string(),
-                        affected_jobs,
-                        error: None,
-                    },
-                    Err(error) => action_failure(feature, error.to_string()),
-                };
-            }
-            let cancellation_requested = if feature == AiFeature::Deduplicate {
-                match &deduplicate_result {
-                    Ok(requested) => *requested,
-                    Err(error) => return action_failure(feature, error.to_string()),
-                }
-            } else {
-                affected_jobs > 0
-            };
+            let requested = affected_jobs > 0
+                || (feature == AiFeature::FaceDetection && face_run_cancelled)
+                || (feature == AiFeature::Deduplicate && deduplicate_run_cancelled);
             AiFeatureActionResult {
                 feature: feature.name().to_string(),
-                outcome: if cancellation_requested {
+                outcome: if requested {
                     "cancellationRequested"
                 } else {
                     "noActiveWork"
@@ -311,46 +349,181 @@ pub fn cancel_all_actions(pool: &DbPool) -> Vec<AiFeatureActionResult> {
                 error: None,
             }
         })
-        .collect()
+        .collect())
 }
 
-pub fn clean_feature_action(pool: &DbPool, feature: AiFeature) -> AppResult<AiFeatureActionResult> {
-    ensure_feature_is_cleanable(pool, feature)?;
-    let affected_jobs = count_jobs(pool, feature.inference_task(), false)?;
-    match feature {
-        AiFeature::Deduplicate => deduplicator::clean(pool)?,
-        AiFeature::FaceDetection => face_detection::clean(pool)?,
-        _ => clean_inference_feature(pool, feature)?,
+pub(crate) fn clean_feature_on_connection(
+    connection: &mut rusqlite::Connection,
+    feature: AiFeature,
+    cleanup_group_id: &str,
+) -> rusqlite::Result<AiFeatureCleanOutcome> {
+    let transaction = connection.unchecked_transaction()?;
+    let task = feature.inference_task();
+    let active_jobs =
+        transaction.query_row(queries::ai_jobs::COUNT_ACTIVE_FOR_TASK, [task], |row| {
+            row.get::<_, i64>(0)
+        })?;
+    if active_jobs > 0 {
+        transaction.rollback()?;
+        return Ok(AiFeatureCleanOutcome::ActiveWork);
     }
-    Ok(AiFeatureActionResult {
-        feature: feature.name().to_string(),
-        outcome: "cleaned".to_string(),
-        affected_jobs,
-        error: None,
+    let pending_cancellation = transaction.query_row(
+        queries::ai_jobs::COUNT_PENDING_CANCELLATION_SCOPE_FOR_TASK,
+        [task],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if pending_cancellation > 0 {
+        transaction.rollback()?;
+        return Ok(AiFeatureCleanOutcome::PendingCancellation);
+    }
+    let pending_result_cleanup = transaction.query_row(
+        queries::ai_jobs::COUNT_PENDING_RESULT_CLEANUP_FOR_TASK,
+        [task],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if pending_result_cleanup > 0 {
+        transaction.rollback()?;
+        return Ok(AiFeatureCleanOutcome::PendingResultCleanup);
+    }
+    let affected_jobs =
+        transaction.query_row(queries::ai_jobs::COUNT_JOBS_FOR_TASK, [task], |row| {
+            row.get::<_, i64>(0)
+        })?;
+
+    let cleanup_group_created = match feature {
+        AiFeature::Ocr | AiFeature::ImageTagging => {
+            transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
+            transaction.execute(queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
+            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            false
+        }
+        AiFeature::ImageAesthetics => {
+            transaction.execute(queries::ai_jobs::DELETE_AESTHETICS, [])?;
+            transaction.execute(queries::ai_jobs::DELETE_AESTHETIC_INPUTS, [])?;
+            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            false
+        }
+        AiFeature::ScreenshotDetection => {
+            transaction.execute(queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATIONS, [])?;
+            transaction.execute(
+                queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
+                [],
+            )?;
+            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            false
+        }
+        AiFeature::DocumentDetection => {
+            transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
+            transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS, [])?;
+            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            false
+        }
+        AiFeature::FaceDetection => {
+            let active_runs =
+                transaction.query_row(queries::faces::COUNT_ACTIVE_RUNS, [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            if active_runs > 0 {
+                transaction.rollback()?;
+                return Ok(AiFeatureCleanOutcome::ActiveWork);
+            }
+            let faces_path =
+                NormalizedStoragePath::parse("faces").map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let plan = FileOperationPlan {
+                group_id: cleanup_group_id.to_string(),
+                kind: "face_detection_clean".to_string(),
+                owner_kind: "ai_feature".to_string(),
+                owner_id: feature.name().to_string(),
+                claim_token: None,
+                product_target: None,
+                product_version: None,
+                entries: vec![FileEntryPlan {
+                    action: FileEntryAction::Cleanup,
+                    storage_root: StorageRootId::Previews,
+                    source_path: Some(faces_path.clone()),
+                    temporary_path: None,
+                    destination_path: None,
+                    tombstone_path: None,
+                    expected_size: None,
+                    expected_sha256: None,
+                    expected_version: None,
+                }],
+                claims: vec![FilePathClaimPlan {
+                    storage_root: StorageRootId::Previews,
+                    path: faces_path,
+                    mode: PathClaimMode::Write,
+                    scope: PathClaimScope::Subtree,
+                    role: "face_crop_tree".to_string(),
+                    expected_version: None,
+                }],
+                space_reservation: None,
+            };
+            if crate::io::journal::prepare_committed_cleanup(&transaction, plan)?
+                == PrepareJournalOutcome::PathConflict
+            {
+                transaction.rollback()?;
+                return Ok(AiFeatureCleanOutcome::PathConflict);
+            }
+            transaction.execute(queries::faces::CLEAN_JOBS, [])?;
+            transaction.execute(queries::faces::CLEAN_GENERATION_STATE, [])?;
+            transaction.execute(queries::faces::CLEAN_GROUPS, [])?;
+            transaction.execute(queries::faces::CLEAN_GENERATIONS, [])?;
+            transaction.execute(queries::faces::CLEAN_RUNS, [])?;
+            transaction.execute(queries::faces::CLEAN_MANUAL_STATE, [])?;
+            transaction.execute(queries::faces::CLEAN_FACES, [])?;
+            transaction.execute(queries::faces::CLEAN_RESULTS, [])?;
+            true
+        }
+        AiFeature::Deduplicate => {
+            transaction.execute(queries::deduplicate::LOCK_RUNS, [])?;
+            let active_runs =
+                transaction.query_row(queries::deduplicate::COUNT_ACTIVE_RUNS, [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            if active_runs > 0 {
+                transaction.rollback()?;
+                return Ok(AiFeatureCleanOutcome::ActiveWork);
+            }
+            transaction.execute(queries::deduplicate::CLEAN_CLUSTERS, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_FINALIZATION_DIRTY, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_EDGES, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_LABELS, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_FINALIZATIONS, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_GENERATION_STATE, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_GENERATIONS, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_JOBS, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_BANDS, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_INDEX, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_DIRTY, [])?;
+            transaction.execute(queries::deduplicate::CLEAN_RUNS, [])?;
+            transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
+            false
+        }
+    };
+    transaction.commit()?;
+    Ok(AiFeatureCleanOutcome::Cleaned {
+        result: AiFeatureActionResult {
+            feature: feature.name().to_string(),
+            outcome: "cleaned".to_string(),
+            affected_jobs,
+            error: None,
+        },
+        cleanup_group_created,
     })
 }
 
-pub fn clean_all_actions(pool: &DbPool) -> Vec<AiFeatureActionResult> {
-    AiFeature::ALL
-        .into_iter()
-        .map(|feature| match clean_feature_action(pool, feature) {
-            Ok(result) => result,
-            Err(error) => AiFeatureActionResult {
-                feature: feature.name().to_string(),
-                outcome: "failed".to_string(),
-                affected_jobs: 0,
-                error: Some(error.to_string()),
-            },
-        })
-        .collect()
+pub fn action_response(action: &str, results: Vec<AiFeatureActionResult>) -> AiActionResponse {
+    AiActionResponse {
+        action: action.to_string(),
+        results,
+    }
 }
 
-pub fn status(
+pub(crate) fn status_on_connection(
     config: &Config,
-    pool: &DbPool,
+    connection: &rusqlite::Connection,
     schedules: Vec<AiFeatureScheduleResponse>,
-) -> AppResult<AiStatusResponse> {
-    let connection = pool.get()?;
+) -> rusqlite::Result<AiStatusResponse> {
     let transaction = connection.unchecked_transaction()?;
     let mut counts_by_task = HashMap::<String, AiJobCounts>::new();
     for row in transaction
@@ -419,90 +592,6 @@ pub fn status(
     })
 }
 
-fn start_deduplicate(pool: &DbPool, source: AiStartSource<'_>) -> AppResult<usize> {
-    let (trigger, scheduled_for) = match source {
-        AiStartSource::Manual => ("manual", None),
-        AiStartSource::Scheduled { scheduled_for } => ("scheduled", Some(scheduled_for)),
-        AiStartSource::StartupRecovery => ("startup", None),
-    };
-    let run_id = match deduplicator::create_run(pool, trigger, scheduled_for) {
-        Ok(run_id) => run_id,
-        Err(AppError::Conflict(_)) => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    deduplicator::queue_clustering_jobs(pool, run_id)
-}
-
-fn count_jobs(pool: &DbPool, task: &str, active_only: bool) -> AppResult<i64> {
-    let query = if active_only {
-        queries::ai_jobs::COUNT_ACTIVE_FOR_TASK
-    } else {
-        queries::ai_jobs::COUNT_JOBS_FOR_TASK
-    };
-    Ok(pool.get()?.query_row(query, [task], |row| row.get(0))?)
-}
-
-fn ensure_feature_is_cleanable(pool: &DbPool, feature: AiFeature) -> AppResult<()> {
-    let task = feature.inference_task();
-    if count_jobs(pool, task, true)? > 0 {
-        return Err(AppError::Conflict(format!(
-            "{} has active jobs and cannot be cleaned",
-            feature.name()
-        )));
-    }
-    let pending_cancellation: i64 = pool.get()?.query_row(
-        queries::ai_jobs::COUNT_PENDING_CANCELLATION_SCOPE_FOR_TASK,
-        [task],
-        |row| row.get(0),
-    )?;
-    if pending_cancellation > 0 {
-        return Err(AppError::Conflict(format!(
-            "{} cancellation has not been acknowledged",
-            feature.name()
-        )));
-    }
-    Ok(())
-}
-
-fn clean_inference_feature(pool: &DbPool, feature: AiFeature) -> AppResult<()> {
-    let connection = pool.get()?;
-    let transaction = connection.unchecked_transaction()?;
-    match feature {
-        AiFeature::Ocr | AiFeature::ImageTagging => {
-            transaction.execute(
-                queries::ai_jobs::DELETE_TEXT_FOR_TASK,
-                [feature.inference_task()],
-            )?;
-            transaction.execute(
-                queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK,
-                [feature.inference_task()],
-            )?;
-        }
-        AiFeature::ImageAesthetics => {
-            transaction.execute(queries::ai_jobs::DELETE_AESTHETICS, [])?;
-            transaction.execute(queries::ai_jobs::DELETE_AESTHETIC_INPUTS, [])?;
-        }
-        AiFeature::ScreenshotDetection => {
-            transaction.execute(queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATIONS, [])?;
-            transaction.execute(
-                queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
-                [],
-            )?;
-        }
-        AiFeature::DocumentDetection => {
-            transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
-            transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS, [])?;
-        }
-        AiFeature::FaceDetection | AiFeature::Deduplicate => unreachable!(),
-    }
-    transaction.execute(
-        queries::ai_jobs::DELETE_JOBS_FOR_TASK,
-        [feature.inference_task()],
-    )?;
-    transaction.commit()?;
-    Ok(())
-}
-
 fn set_job_count(counts: &mut AiJobCounts, status: &str, count: i64) {
     match status {
         "queued" => counts.queued = count,
@@ -529,23 +618,6 @@ fn task_state(counts: &AiJobCounts) -> &'static str {
         return "failed";
     }
     "idle"
-}
-
-fn failed_actions(action: &str, error: AppError) -> Vec<AiFeatureActionResult> {
-    let error = error.to_string();
-    AiFeature::ALL
-        .into_iter()
-        .map(|feature| action_failure(feature, format!("{action}: {error}")))
-        .collect()
-}
-
-fn action_failure(feature: AiFeature, error: String) -> AiFeatureActionResult {
-    AiFeatureActionResult {
-        feature: feature.name().to_string(),
-        outcome: "failed".to_string(),
-        affected_jobs: 0,
-        error: Some(error),
-    }
 }
 
 fn deduplicate_status(

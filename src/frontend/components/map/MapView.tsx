@@ -4,7 +4,7 @@ import type { LatLngTuple } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import ClusterMarker from './ClusterMarker'
 import { useMapClusters, type MapCluster } from '../../hooks/useMapClusters'
-import type { BoundingBox } from '../../api/map'
+import { normalizeMapBounds, type BoundingBox } from '../../api/map'
 import { Loader2 } from 'lucide-react'
 
 const VIEWPORT_STORAGE_KEY = 'map_viewport'
@@ -71,12 +71,12 @@ function MapViewportTracker({
     viewportUpdateTimeoutReference.current = window.setTimeout(() => {
       const mapBounds = map.getBounds()
       onViewportChange({
-        bounds: {
+        bounds: normalizeMapBounds({
           north: mapBounds.getNorth(),
           south: mapBounds.getSouth(),
           east: mapBounds.getEast(),
           west: mapBounds.getWest(),
-        },
+        }),
         zoom: map.getZoom(),
       })
     }, 200)

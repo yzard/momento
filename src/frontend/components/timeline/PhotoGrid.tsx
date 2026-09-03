@@ -1,8 +1,7 @@
 import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
-import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { Play } from 'lucide-react'
-import { batchLoader } from '../../utils/batcher'
+import { thumbnailUrlLoader } from '../../utils/assetUrlLoader'
 import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
 import { useLazyImage } from '../../hooks/useLazyImage'
 import { mediaFormatBadge } from '../../lib/mediaFormat'
@@ -233,8 +232,8 @@ function useHoverPreview(item: Media, shouldPreview: boolean) {
 function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
   const { targetRef: containerRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
     resourceId: item.id,
-    loader: batchLoader,
-    getCachedUrl: (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal'),
+    loader: thumbnailUrlLoader,
+    getCachedUrl: null,
     rootMargin: '400px',
   })
 

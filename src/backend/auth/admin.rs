@@ -3,9 +3,8 @@ use std::sync::{
     Arc,
 };
 
-use crate::auth::hash_password;
-use crate::database::{execute_query, fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
+use crate::runtime::ExecutorHandles;
 
 pub const RESERVED_ADMIN_USERNAME: &str = "admin";
 pub const TEMPORARY_ADMIN_USERNAME: &str = RESERVED_ADMIN_USERNAME;
@@ -62,43 +61,33 @@ impl AdminPasswordReset {
     }
 }
 
-pub fn ensure_default_admin(pool: &DbPool) -> AppResult<i64> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let existing = fetch_one(&connection, queries::users::CHECK_ADMIN, &[], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    if let Some(admin_id) = existing {
+pub async fn ensure_default_admin(executors: &ExecutorHandles) -> AppResult<i64> {
+    if let Some(admin_id) = executors.sqlite.load_admin_id_durable().await? {
         return Ok(admin_id);
     }
-
-    let password_hash = hash_password(TEMPORARY_ADMIN_PASSWORD)
-        .map_err(|error| AppError::Internal(format!("Failed to hash admin password: {error}")))?;
-    let email = format!("{TEMPORARY_ADMIN_USERNAME}@localhost");
-    connection.execute(
-        queries::users::INSERT_ADMIN,
-        (TEMPORARY_ADMIN_USERNAME, &email, &password_hash),
-    )?;
-    Ok(connection.last_insert_rowid())
+    let password_hash = executors
+        .cpu
+        .hash_password_durable(TEMPORARY_ADMIN_PASSWORD.to_string())
+        .await?;
+    executors
+        .sqlite
+        .insert_default_admin_durable(password_hash)
+        .await
+        .map_err(AppError::from)
 }
 
-pub fn prepare_admin_password_reset(pool: &DbPool, admin_id: i64) -> AppResult<()> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let admin_exists = fetch_one(
-        &connection,
-        queries::users::CHECK_ADMIN_BY_ID,
-        &[&admin_id],
-        |row| row.get::<_, i64>(0),
-    )?
-    .is_some();
-    if !admin_exists {
+pub async fn prepare_admin_password_reset(
+    executors: &ExecutorHandles,
+    admin_id: i64,
+) -> AppResult<()> {
+    if !executors
+        .sqlite
+        .prepare_admin_password_reset_durable(admin_id)
+        .await?
+    {
         return Err(AppError::NotFound(
             "Administrator account not found".to_string(),
         ));
     }
-    execute_query(
-        &connection,
-        queries::auth::DELETE_ALL_USER_TOKENS,
-        &[&admin_id],
-    )?;
     Ok(())
 }

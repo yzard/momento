@@ -80,6 +80,7 @@ interface SidebarProps {
 interface NavSectionProps {
   item: NavItem
   isCollapsed: boolean
+  childPlacement: 'before' | 'after'
   onNavigate: () => void
 }
 
@@ -88,7 +89,7 @@ function PrimaryNavLink({
   isCollapsed,
   search,
   onNavigate,
-}: NavSectionProps & { search: string }) {
+}: Omit<NavSectionProps, 'childPlacement'> & { search: string }) {
   return (
     <NavLink
       to={`${item.to}${search}`}
@@ -129,19 +130,23 @@ function ChildNavLinks({
   children,
   expanded,
   isCollapsed,
+  placement,
   search,
   onNavigate,
 }: {
   children: NavItem[] | undefined
   expanded: boolean
   isCollapsed: boolean
+  placement: 'before' | 'after'
   search: string
   onNavigate: () => void
 }) {
   if (!children || !expanded) return null
 
   return (
-    <div className={cn('mt-1 space-y-1', !isCollapsed && 'ml-4')}>
+    <div
+      className={cn('space-y-1', placement === 'before' ? 'mb-1' : 'mt-1', !isCollapsed && 'ml-4')}
+    >
       {children.map((child) => (
         <NavLink
           key={child.to}
@@ -172,16 +177,27 @@ function ChildNavLinks({
   )
 }
 
-function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
+function NavSection({ item, isCollapsed, childPlacement, onNavigate }: NavSectionProps) {
   const location = useLocation()
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null)
   const isFocused = location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
   const hasChildren = Boolean(item.children?.length)
   const isExpanded = hasChildren && (expandedOverride ?? isFocused)
   const search = item.to.startsWith('/timeline') ? location.search : ''
+  const childLinks = (
+    <ChildNavLinks
+      children={item.children}
+      expanded={isExpanded}
+      isCollapsed={isCollapsed}
+      placement={childPlacement}
+      search={search}
+      onNavigate={onNavigate}
+    />
+  )
 
   return (
     <div>
+      {childPlacement === 'before' && childLinks}
       <div className="flex items-center">
         <PrimaryNavLink
           item={item}
@@ -210,13 +226,7 @@ function NavSection({ item, isCollapsed, onNavigate }: NavSectionProps) {
           </button>
         )}
       </div>
-      <ChildNavLinks
-        children={item.children}
-        expanded={isExpanded}
-        isCollapsed={isCollapsed}
-        search={search}
-        onNavigate={onNavigate}
-      />
+      {childPlacement === 'after' && childLinks}
     </div>
   )
 }
@@ -344,7 +354,7 @@ export default function Sidebar({
       </div>
 
       <nav
-        className={cn('flex-1 overflow-y-auto', isCollapsed ? 'px-2 space-y-4' : 'px-6 space-y-8')}
+        className={cn('flex flex-1 flex-col overflow-y-auto pb-2', isCollapsed ? 'px-2' : 'px-6')}
       >
         <div className="space-y-2">
           {navItems.map((item) => (
@@ -352,13 +362,21 @@ export default function Sidebar({
               key={item.to}
               item={item}
               isCollapsed={isCollapsed}
+              childPlacement="after"
               onNavigate={onNavigate}
             />
           ))}
-          {user?.role === 'admin' && (
-            <NavSection item={adminNavItem} isCollapsed={isCollapsed} onNavigate={onNavigate} />
-          )}
         </div>
+        {user?.role === 'admin' && (
+          <div className="mt-auto pt-4" data-navigation-anchor="bottom">
+            <NavSection
+              item={adminNavItem}
+              isCollapsed={isCollapsed}
+              childPlacement="before"
+              onNavigate={onNavigate}
+            />
+          </div>
+        )}
       </nav>
 
       <SidebarFooter

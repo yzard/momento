@@ -2,14 +2,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use llm_service::config::Config;
+use llm_service::config::{Config, SchedulerConfig};
 use llm_service::provider::ServiceManager;
 use llm_service::routes::{router, AppState};
 use llm_service::scheduler::{QueueInputDescriptor, QueueManifest, Scheduler};
 use llm_service::transport::ConnectionRegistry;
 use momento_common::llm::{
     encode_input_chunk, CancelJobsRequest, ClientControlMessage, JobManifest,
-    ServiceControlMessage, WEBSOCKET_PROTOCOL,
+    ServiceControlMessage, SubmissionDeferredReason, QUEUE_CAPACITY_RETRY_AFTER_MS,
+    WEBSOCKET_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -23,9 +24,13 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-async fn start_server(queue_dir: &Path) -> (String, Arc<Scheduler>, JoinHandle<()>) {
+async fn start_server(
+    queue_dir: &Path,
+    scheduler_configuration: SchedulerConfig,
+) -> (String, Arc<Scheduler>, JoinHandle<()>) {
     let mut config = Config::default();
     config.server.api_key = "test-key".to_string();
+    config.scheduler = scheduler_configuration;
     let config = Arc::new(config);
     let manager = Arc::new(Mutex::new(ServiceManager::new(Arc::clone(&config))));
     let connections = Arc::new(ConnectionRegistry::default());
@@ -144,7 +149,8 @@ fn queue_job(scheduler: &Scheduler, client_id: &str, job_id: &str) {
 #[tokio::test]
 async fn websocket_requires_api_key_client_id_and_protocol() {
     let directory = tempdir().expect("queue directory");
-    let (url, _scheduler, server) = start_server(directory.path()).await;
+    let (url, _scheduler, server) =
+        start_server(directory.path(), SchedulerConfig::default()).await;
 
     let error = tokio_tungstenite::connect_async(connection_request(&url, "wrong-key", "client-a"))
         .await
@@ -182,7 +188,8 @@ async fn websocket_requires_api_key_client_id_and_protocol() {
 #[tokio::test]
 async fn websocket_submission_streams_and_durably_admits_input() {
     let directory = tempdir().expect("queue directory");
-    let (url, _scheduler, server) = start_server(directory.path()).await;
+    let (url, _scheduler, server) =
+        start_server(directory.path(), SchedulerConfig::default()).await;
     let mut socket = connect(&url, "client-a").await;
     let job_id = "0123456789abcdef0123456789abcdef";
     let bytes = b"raw image bytes";
@@ -206,6 +213,7 @@ async fn websocket_submission_streams_and_durably_admits_input() {
         ServiceControlMessage::SubmissionReady {
             job_id: job_id.to_string(),
             attempt: 3,
+            required_input_sequences: vec![0],
         }
     );
     socket
@@ -255,9 +263,180 @@ async fn websocket_submission_streams_and_durably_admits_input() {
 }
 
 #[tokio::test]
+async fn websocket_submission_reuses_cached_content_without_retransmitting_bytes() {
+    let directory = tempdir().expect("queue directory");
+    let (url, scheduler, server) = start_server(directory.path(), SchedulerConfig::default()).await;
+    let bytes = b"shared raw image bytes";
+    let descriptor = input_descriptor(bytes);
+    scheduler
+        .accept(
+            QueueManifest {
+                client_id: "client-a".to_string(),
+                job_id: "11111111111111111111111111111111".to_string(),
+                media_id: 41,
+                task: "ocr".to_string(),
+                attempt: 1,
+                inputs: vec![descriptor.clone()],
+            },
+            vec![(descriptor.clone(), bytes.to_vec())],
+        )
+        .expect("seed cached input");
+
+    let mut socket = connect(&url, "client-a").await;
+    let job_id = "22222222222222222222222222222222";
+    send_control(
+        &mut socket,
+        ClientControlMessage::SubmissionStart {
+            manifest: JobManifest {
+                job_id: job_id.to_string(),
+                media_id: 42,
+                task: "image_tagging".to_string(),
+                attempt: 1,
+                inputs: vec![descriptor],
+            },
+        },
+    )
+    .await;
+    assert_eq!(
+        receive_control(&mut socket).await,
+        ServiceControlMessage::SubmissionReady {
+            job_id: job_id.to_string(),
+            attempt: 1,
+            required_input_sequences: Vec::new(),
+        }
+    );
+    send_control(
+        &mut socket,
+        ClientControlMessage::SubmissionFinished {
+            job_id: job_id.to_string(),
+        },
+    )
+    .await;
+    assert_eq!(
+        receive_control(&mut socket).await,
+        ServiceControlMessage::SubmissionAcknowledged {
+            job_id: job_id.to_string(),
+            attempt: 1,
+            status: "queued".to_string(),
+        }
+    );
+    assert_eq!(
+        std::fs::read(
+            directory
+                .path()
+                .join("queuing")
+                .join(job_id)
+                .join("input-0")
+        )
+        .expect("linked cached input"),
+        bytes
+    );
+
+    socket.close(None).await.expect("close WebSocket");
+    server.abort();
+}
+
+#[tokio::test]
+async fn websocket_defers_capacity_without_requesting_or_staging_input_bytes() {
+    let directory = tempdir().expect("queue directory");
+    let (url, scheduler, server) = start_server(
+        directory.path(),
+        SchedulerConfig {
+            max_queue_bytes: 5,
+            working_space_reserve_bytes: 1,
+            ..SchedulerConfig::default()
+        },
+    )
+    .await;
+    queue_job(&scheduler, "client-a", "00000000000000000000000000000010");
+    let mut socket = connect(&url, "client-a").await;
+    let job_id = "00000000000000000000000000000011";
+    let descriptor = input_descriptor(b"x");
+
+    send_control(
+        &mut socket,
+        ClientControlMessage::SubmissionStart {
+            manifest: JobManifest {
+                job_id: job_id.to_string(),
+                media_id: 2,
+                task: "ocr".to_string(),
+                attempt: 1,
+                inputs: vec![descriptor],
+            },
+        },
+    )
+    .await;
+
+    assert_eq!(
+        receive_control(&mut socket).await,
+        ServiceControlMessage::SubmissionDeferred {
+            job_id: job_id.to_string(),
+            attempt: 1,
+            reason: SubmissionDeferredReason::QueueCapacity,
+            required_bytes: 1,
+            available_bytes: 0,
+            retry_after_ms: QUEUE_CAPACITY_RETRY_AFTER_MS,
+        }
+    );
+    assert!(!directory.path().join(".tmp").join(job_id).exists());
+
+    socket.close(None).await.expect("close WebSocket");
+    server.abort();
+}
+
+#[tokio::test]
+async fn websocket_permanently_rejects_a_job_larger_than_the_queue_budget() {
+    let directory = tempdir().expect("queue directory");
+    let (url, _scheduler, server) = start_server(
+        directory.path(),
+        SchedulerConfig {
+            max_queue_bytes: 4,
+            working_space_reserve_bytes: 1,
+            ..SchedulerConfig::default()
+        },
+    )
+    .await;
+    let mut socket = connect(&url, "client-a").await;
+    let job_id = "00000000000000000000000000000012";
+
+    send_control(
+        &mut socket,
+        ClientControlMessage::SubmissionStart {
+            manifest: JobManifest {
+                job_id: job_id.to_string(),
+                media_id: 2,
+                task: "ocr".to_string(),
+                attempt: 1,
+                inputs: vec![input_descriptor(b"12345")],
+            },
+        },
+    )
+    .await;
+
+    let ServiceControlMessage::SubmissionRejected {
+        job_id: rejected_job_id,
+        attempt,
+        retryable,
+        error,
+    } = receive_control(&mut socket).await
+    else {
+        panic!("oversized job must be rejected");
+    };
+    assert_eq!(rejected_job_id, job_id);
+    assert_eq!(attempt, 1);
+    assert!(!retryable);
+    assert!(error.contains("max_queue_bytes"));
+    assert!(!directory.path().join(".tmp").join(job_id).exists());
+
+    socket.close(None).await.expect("close WebSocket");
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_rejects_a_duplicate_connected_client() {
     let directory = tempdir().expect("queue directory");
-    let (url, _scheduler, server) = start_server(directory.path()).await;
+    let (url, _scheduler, server) =
+        start_server(directory.path(), SchedulerConfig::default()).await;
     let mut first = connect(&url, "client-a").await;
 
     let error = tokio_tungstenite::connect_async(connection_request(&url, "test-key", "client-a"))
@@ -275,7 +454,7 @@ async fn websocket_rejects_a_duplicate_connected_client() {
 #[tokio::test]
 async fn websocket_cancellation_is_scoped_to_the_authenticated_client() {
     let directory = tempdir().expect("queue directory");
-    let (url, scheduler, server) = start_server(directory.path()).await;
+    let (url, scheduler, server) = start_server(directory.path(), SchedulerConfig::default()).await;
     let client_job_id = "00000000000000000000000000000001";
     let other_job_id = "00000000000000000000000000000002";
     queue_job(&scheduler, "client-a", client_job_id);

@@ -1,6 +1,6 @@
 use crate::test_utils::{
     create_test_app, create_test_config_manager, create_test_db, create_test_media,
-    create_test_user, init_test_paths,
+    create_test_user,
 };
 use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use axum::http::StatusCode;
@@ -9,7 +9,6 @@ use momento_api::app::create_app;
 use momento_api::auth::{create_access_token, hash_password};
 use momento_api::config::Config;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 fn authorization(user_id: i64, username: &str) -> String {
     let token = create_access_token(user_id, username, "user", &Config::default(), None)
@@ -214,7 +213,6 @@ async fn password_verification_rejects_expired_links() {
 
 #[tokio::test]
 async fn public_share_password_verification_is_rate_limited() {
-    init_test_paths();
     let pool = create_test_db();
     let owner_id = create_test_user(&pool, "limited-owner", "limited-owner@example.com");
     let media_id = create_test_media(&pool, "limited.jpg");
@@ -231,10 +229,7 @@ async fn public_share_password_verification_is_rate_limited() {
     config.security.password_attempts_per_source = 10;
     let app = create_app(
         create_test_config_manager(config),
-        pool,
-        Default::default(),
-        Arc::new(tokio::sync::Semaphore::new(16)),
-        None,
+        crate::test_utils::test_app_dependencies(pool, None),
     );
     let server = TestServer::new(app).expect("server");
 

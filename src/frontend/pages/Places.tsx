@@ -7,6 +7,7 @@ import { placesApi, type PlaceSummary } from '../api/places'
 import type { Media } from '../api/types'
 import MemoryCardOverlay from '../components/common/MemoryCardOverlay'
 import PageState from '../components/common/PageState'
+import { PageFrame, PageHeader } from '../components/layout/PageLayout'
 import PhotoGrid from '../components/timeline/PhotoGrid'
 import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import { useInfiniteScroll } from '../hooks/useInfiniteScroll'
@@ -49,13 +50,8 @@ function PlaceList() {
       ref={scrollContainerRef}
       className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent"
     >
-      <div className="container mx-auto max-w-[1800px] px-4 py-6 pb-20 sm:px-6 md:px-10 md:py-10 animate-fade-in">
-        <div className="mb-8">
-          <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">
-            Places
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">Explore your library by city.</p>
-        </div>
+      <PageFrame className="animate-fade-in">
+        <PageHeader title="Places" description="Explore your library by city." actions={null} />
 
         {placesQuery.isLoading ? (
           <PageState
@@ -89,7 +85,7 @@ function PlaceList() {
         ) : null}
 
         {places.length > 0 ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
             {places.map((place) => (
               <PlaceCard key={place.placeId} place={place} />
             ))}
@@ -103,7 +99,7 @@ function PlaceList() {
           retry={() => void placesQuery.fetchNextPage()}
           label="places"
         />
-      </div>
+      </PageFrame>
     </div>
   )
 }
@@ -181,7 +177,7 @@ function PlaceDetail({ placeId }: { placeId: string }) {
       ref={scrollContainerRef}
       className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent"
     >
-      <div className="container mx-auto max-w-[1800px] px-4 py-6 pb-20 sm:px-6 md:px-10 md:py-10 animate-fade-in">
+      <PageFrame className="animate-fade-in">
         <button
           type="button"
           onClick={() => navigate('/places')}
@@ -217,14 +213,11 @@ function PlaceDetail({ placeId }: { placeId: string }) {
 
         {place ? (
           <>
-            <div className="mb-8">
-              <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">
-                {place.city}, {place.country}
-              </h1>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {place.mediaCount} media in this place.
-              </p>
-            </div>
+            <PageHeader
+              title={`${place.city}, ${place.country}`}
+              description={`${place.mediaCount} media in this place.`}
+              actions={null}
+            />
             {media.length > 0 ? (
               <PhotoGrid media={media} onPhotoClick={openMedia} selection={null} />
             ) : (
@@ -244,7 +237,7 @@ function PlaceDetail({ placeId }: { placeId: string }) {
           retry={() => void placeQuery.fetchNextPage()}
           label="media"
         />
-      </div>
+      </PageFrame>
 
       <ManagedLightbox controller={lightbox} />
     </div>

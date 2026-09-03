@@ -30,6 +30,250 @@ macro_rules! media_response_columns {
     };
 }
 
+pub mod file_operations {
+    pub const INSERT_GROUP: &str = "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count, recovery_order) VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?, ?, (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups))";
+    pub const INSERT_COMMITTED_CLEANUP_GROUP: &str = "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count, completion_outcome, recovery_order) VALUES (?, ?, ?, ?, ?, 'cleanup_pending', ?, ?, ?, 'published', (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups))";
+    pub const INSERT_ENTRY: &str = "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, source_path, temporary_path, destination_path, tombstone_path, expected_size, expected_sha256, expected_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    pub const INSERT_DIRECTORY_COPY: &str = "INSERT INTO directory_copy_constructions (group_id, storage_root, source_root, temporary_root, expected_file_bytes, expected_entry_count, expected_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    pub const INSERT_DIRECTORY_COPY_ROOT_CURSOR: &str = "INSERT INTO directory_copy_cursors (group_id, depth, source_path, temporary_path, resume_offset) VALUES (?, 0, ?, ?, 0)";
+    pub const SELECT_DIRECTORY_COPY: &str = "SELECT c.group_id, c.storage_root, c.expected_file_bytes, c.expected_entry_count, c.expected_fingerprint, c.copied_file_bytes, c.copied_entry_count, c.copied_fingerprint, c.state, g.entry_count FROM directory_copy_constructions AS c JOIN file_operation_groups AS g ON g.id = c.group_id WHERE g.state = 'prepared' AND (? IS NULL OR c.group_id = ?) ORDER BY c.group_id LIMIT 1";
+    pub const SELECT_DIRECTORY_COPY_CURSORS: &str = "SELECT depth, source_path, temporary_path, resume_offset FROM directory_copy_cursors WHERE group_id = ? ORDER BY depth";
+    pub const SELECT_DIRECTORY_COPY_CURSOR: &str = "SELECT source_path, temporary_path, resume_offset FROM directory_copy_cursors WHERE group_id = ? AND depth = ?";
+    pub const ADVANCE_DIRECTORY_COPY_CURSOR: &str = "UPDATE directory_copy_cursors SET resume_offset = ? WHERE group_id = ? AND depth = ? AND resume_offset = ?";
+    pub const INSERT_DIRECTORY_COPY_CURSOR: &str = "INSERT INTO directory_copy_cursors (group_id, depth, source_path, temporary_path, resume_offset) VALUES (?, ?, ?, ?, 0)";
+    pub const UPDATE_DIRECTORY_COPY_MEASUREMENT: &str = "UPDATE directory_copy_constructions SET copied_file_bytes = copied_file_bytes + ?, copied_entry_count = copied_entry_count + 1, copied_fingerprint = ?, updated_at = datetime('now') WHERE group_id = ? AND state = 'building' AND copied_file_bytes <= expected_file_bytes - ? AND copied_entry_count < expected_entry_count";
+    pub const DELETE_DIRECTORY_COPY_CURSOR: &str =
+        "DELETE FROM directory_copy_cursors WHERE group_id = ? AND depth = ?";
+    pub const COMPLETE_DIRECTORY_COPY: &str = "UPDATE directory_copy_constructions SET state = 'complete', updated_at = datetime('now') WHERE group_id = ? AND state = 'building' AND copied_file_bytes = expected_file_bytes AND copied_entry_count = expected_entry_count AND copied_fingerprint = expected_fingerprint AND NOT EXISTS (SELECT 1 FROM directory_copy_cursors WHERE group_id = directory_copy_constructions.group_id)";
+    pub const INSERT_PATH_CLAIM: &str = "INSERT INTO file_operation_path_claims (group_id, sequence, storage_root, relative_path, path_key, mode, scope, role, expected_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    pub const INSERT_JOURNAL_RESERVATION: &str = "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, journal_group_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES (?, 'journal', ?, ?, ?, ?, ?, 'active')";
+    pub const INSERT_SQLITE_RESULT_RESERVATION: &str = "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, filesystem_id, reserved_peak_additional_bytes, state, version) VALUES (?, 'sqlite', 'llm_result', ?, ?, ?, 'active', ?)";
+    pub const FIND_EQUAL_CLAIM_CONFLICT: &str = "SELECT 1 FROM file_operation_path_claims WHERE storage_root = ? AND path_key = ? AND (? = 'write' OR mode = 'write') LIMIT 1";
+    pub const FIND_SUBTREE_ANCESTOR_CONFLICT: &str = "SELECT 1 FROM file_operation_path_claims WHERE storage_root = ? AND path_key = ? AND scope = 'subtree' AND (? = 'write' OR mode = 'write') LIMIT 1";
+    pub const FIND_SUBTREE_DESCENDANT_CONFLICT: &str = "SELECT 1 FROM file_operation_path_claims WHERE storage_root = ? AND path_key >= ? AND path_key < ? AND (? = 'write' OR mode = 'write') LIMIT 1";
+    pub const BEGIN_PUBLICATION: &str = "UPDATE file_operation_groups SET state = 'publishing', version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'prepared' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
+    pub const VERIFY_PUBLICATION: &str =
+        "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'publishing' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
+    pub const SELECT_PENDING_PUBLICATION_ENTRIES: &str = "SELECT sequence, action, storage_root, source_path, temporary_path, destination_path, tombstone_path, expected_size, expected_sha256, expected_version FROM file_operation_entries WHERE group_id = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared' ORDER BY sequence";
+    pub const COMMIT_ENTRY: &str = "UPDATE file_operation_entries SET state = 'committed', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared'";
+    pub const COUNT_UNCOMMITTED_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND action IN ('publish', 'move', 'tombstone') AND state != 'committed'";
+    pub const CHECKPOINT_PUBLICATION: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'publishing' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
+    pub const COMPLETE_PUBLICATION: &str = "UPDATE file_operation_groups SET state = CASE WHEN EXISTS (SELECT 1 FROM file_operation_entries WHERE group_id = file_operation_groups.id AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))) THEN 'cleanup_pending' ELSE 'completed' END, completion_outcome = CASE WHEN cancel_requested = 1 THEN 'discarded' ELSE 'published' END, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN EXISTS (SELECT 1 FROM file_operation_entries WHERE group_id = file_operation_groups.id AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))) THEN NULL ELSE datetime('now') END WHERE id = ? AND version = ? AND state = 'files_committed' AND product_target IS NULL AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing'))";
+    pub const VERIFY_OPERATION_CLAIM_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = ?1 AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = ?1 AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = ?1)";
+    pub const VERIFY_CLEANUP: &str = "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
+    pub const SELECT_PENDING_CLEANUP_ENTRIES: &str = "SELECT e.sequence, 'cleanup', e.storage_root, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.destination_path WHEN e.action = 'publish' THEN e.temporary_path ELSE e.source_path END, NULL, NULL, NULL, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_size WHEN e.action = 'cleanup' THEN e.expected_size ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_sha256 WHEN e.action = 'cleanup' THEN e.expected_sha256 ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_version WHEN e.action = 'cleanup' THEN e.expected_version ELSE NULL END FROM file_operation_entries AS e JOIN file_operation_groups AS g ON g.id = e.group_id WHERE e.group_id = ? AND e.cleanup_state = 'pending' AND (e.action = 'cleanup' OR (e.action = 'publish' AND e.state = 'committed')) ORDER BY e.sequence";
+    pub const CLEAN_ENTRY: &str = "UPDATE file_operation_entries SET cleanup_state = 'cleaned', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))";
+    pub const COUNT_UNCLEANED_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND cleanup_state != 'cleaned' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))";
+    pub const CHECKPOINT_CLEANUP: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'cleaned' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
+    pub const RECORD_PUBLICATION_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET state = 'publication_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'publishing'";
+    pub const RECORD_PUBLICATION_FAILURE_ENTRY: &str = "UPDATE file_operation_entries SET last_error_kind = ?, last_error = ? WHERE group_id = ? AND sequence = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared'";
+    pub const RECORD_CLEANUP_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET state = 'cleanup_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
+    pub const RECORD_CLEANUP_FAILURE_ENTRY: &str = "UPDATE file_operation_entries SET cleanup_state = 'failed', last_error_kind = ?, last_error = ? WHERE group_id = ? AND sequence = ? AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))";
+    pub const RELEASE_GROUP_CLAIMS: &str =
+        "DELETE FROM file_operation_path_claims WHERE group_id = ?";
+    pub const RELEASE_GROUP_RESERVATION: &str = "UPDATE data_dir_space_reservations SET state = 'released', version = version + 1, updated_at = datetime('now') WHERE journal_group_id = ? AND state = 'active'";
+    pub const SELECT_TERMINAL_SQLITE_RESULT_RESERVATION: &str = r#"
+        SELECT s.id
+          FROM llm_result_receipts AS r
+          JOIN file_operation_groups AS g ON g.id = r.journal_group_id
+          JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id
+         WHERE r.job_id = ?
+           AND r.state IN ('cleaned', 'discarded', 'failed')
+           AND g.state IN ('cleaned', 'rolled_back')
+           AND s.class = 'sqlite'
+           AND s.owner_kind IN ('llm_result', 'llm_result_cleanup')
+           AND s.owner_id = r.job_id
+           AND s.state = 'active'
+           AND NOT EXISTS (
+                   SELECT 1 FROM llm_result_staging AS staging
+                    WHERE staging.job_id = r.job_id
+               )
+    "#;
+    pub const RELEASE_SQLITE_RESULT_RESERVATION: &str = r#"
+        UPDATE data_dir_space_reservations
+           SET state = 'released'
+             , version = version + 1
+             , updated_at = datetime('now')
+         WHERE id = ?
+           AND state = 'active'
+    "#;
+    pub const RELEASE_ROLLED_BACK_SQLITE_RESULT_RESERVATION: &str = r#"
+        UPDATE data_dir_space_reservations
+           SET state = 'released'
+             , version = version + 1
+             , updated_at = datetime('now')
+         WHERE id = (
+                   SELECT r.sqlite_reservation_id
+                     FROM llm_result_receipts AS r
+                     JOIN file_operation_groups AS g ON g.id = r.journal_group_id
+                    WHERE r.journal_group_id = ?
+                      AND r.state = 'discarded'
+                      AND g.state = 'rolled_back'
+                      AND NOT EXISTS (
+                              SELECT 1 FROM llm_result_staging AS staging
+                               WHERE staging.job_id = r.job_id
+                          )
+               )
+           AND state = 'active'
+    "#;
+    pub const DELETE_REPLAYABLE_RESULT_RECEIPT_AFTER_TERMINATION: &str = r#"
+        DELETE FROM llm_result_receipts
+         WHERE journal_group_id = ?
+           AND state = 'discarded'
+           AND EXISTS (
+                   SELECT 1 FROM file_operation_groups
+                    WHERE id = llm_result_receipts.journal_group_id
+                      AND (
+                              state = 'rolled_back'
+                           OR (state = 'cleaned' AND completion_outcome = 'discarded')
+                          )
+               )
+           AND EXISTS (
+                   SELECT 1 FROM llm_jobs
+                    WHERE id = llm_result_receipts.job_id AND status = 'submitted'
+               )
+    "#;
+    pub const DELETE_RELEASED_RESULT_RESERVATION: &str = r#"
+        DELETE FROM data_dir_space_reservations
+         WHERE id = ?
+           AND class = 'sqlite'
+           AND owner_kind = 'llm_result'
+           AND state = 'released'
+           AND NOT EXISTS (
+                   SELECT 1 FROM llm_result_receipts
+                    WHERE sqlite_reservation_id = data_dir_space_reservations.id
+               )
+    "#;
+    pub const SELECT_REPLAYABLE_TERMINAL_RESULT_RECEIPTS: &str = r#"
+        SELECT r.journal_group_id, r.sqlite_reservation_id
+          FROM llm_result_receipts AS r
+          JOIN file_operation_groups AS g ON g.id = r.journal_group_id
+          JOIN llm_jobs AS j ON j.id = r.job_id
+          JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id
+         WHERE r.state = 'discarded'
+           AND (
+                   g.state = 'rolled_back'
+                OR (g.state = 'cleaned' AND g.completion_outcome = 'discarded')
+               )
+           AND j.status = 'submitted'
+           AND s.state = 'released'
+         ORDER BY r.job_id
+         LIMIT 256
+    "#;
+    pub const DELETE_ORPHANED_RELEASED_RESULT_RESERVATIONS_PAGE: &str = r#"
+        DELETE FROM data_dir_space_reservations
+         WHERE id IN (
+                   SELECT s.id
+                     FROM data_dir_space_reservations AS s
+                    WHERE s.class = 'sqlite'
+                      AND s.owner_kind = 'llm_result'
+                      AND s.state = 'released'
+                      AND NOT EXISTS (
+                              SELECT 1 FROM llm_result_receipts AS r
+                               WHERE r.sqlite_reservation_id = s.id
+                          )
+                    ORDER BY s.id
+                    LIMIT 256
+               )
+    "#;
+    pub const SELECT_ORPHANED_ACTIVE_RESULT_RESERVATIONS_PAGE: &str = r#"
+        SELECT s.id
+          FROM data_dir_space_reservations AS s
+         WHERE s.class = 'sqlite'
+           AND s.owner_kind IN ('llm_result', 'llm_result_cleanup')
+           AND s.state = 'active'
+           AND NOT EXISTS (
+                   SELECT 1
+                     FROM llm_result_receipts AS r
+                    WHERE r.sqlite_reservation_id = s.id
+               )
+      ORDER BY s.id
+         LIMIT 256
+    "#;
+    pub const SELECT_LINKED_RELEASED_SQLITE_RESULT_RESERVATION: &str = "SELECT sqlite_reservation_id FROM llm_result_receipts WHERE journal_group_id = ? AND sqlite_reservation_id IN (SELECT id FROM data_dir_space_reservations WHERE state = 'released')";
+    pub const SELECT_ACTIVE_SQLITE_RESULT_RESERVATION: &str = "SELECT s.id, s.class, s.owner_kind, s.owner_id, s.journal_group_id, s.filesystem_id, s.reserved_peak_additional_bytes, s.newly_allocated_blocks, s.version FROM llm_result_receipts AS r JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id WHERE r.job_id = ? AND s.class = 'sqlite' AND s.owner_kind IN ('llm_result', 'llm_result_cleanup') AND s.owner_id = r.job_id AND s.state = 'active'";
+    pub const CONSUME_SQLITE_RESULT_RESERVATION: &str = "UPDATE data_dir_space_reservations SET newly_allocated_blocks = newly_allocated_blocks + ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND newly_allocated_blocks + ? <= reserved_peak_additional_bytes";
+    pub const SHRINK_SQLITE_RESULT_RESERVATION_TO_CLEANUP: &str = "UPDATE data_dir_space_reservations SET owner_kind = 'llm_result_cleanup', newly_allocated_blocks = reserved_peak_additional_bytes - ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND reserved_peak_additional_bytes - newly_allocated_blocks >= ?";
+    pub const SELECT_GROUP_VERSION: &str = "SELECT version FROM file_operation_groups WHERE id = ?";
+    pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') ORDER BY recovery_order, id LIMIT 1";
+    pub const YIELD_RECOVERY_PROGRESS: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state IN ('cleanup_pending', 'rollback_pending')";
+    pub const SELECT_RETRY_RECEIPT: &str = "SELECT group_id, expected_version, request_hash, response_state, response_version, expires_at > datetime('now') FROM file_operation_retry_requests WHERE retry_request_id = ?";
+    pub const COUNT_LIVE_RETRY_RECEIPTS: &str = "SELECT COUNT(*) FROM file_operation_retry_requests WHERE group_id = ? AND expires_at > datetime('now')";
+    pub const SELECT_FAILED_GROUP_FOR_RETRY: &str =
+        "SELECT state, version FROM file_operation_groups WHERE id = ?";
+    pub const RETRY_FAILED_GROUP: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), finalization_error_kind = NULL, finalization_error = NULL, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = ?";
+    pub const RESET_PUBLICATION_ENTRY_FAILURES: &str = "UPDATE file_operation_entries SET last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared'";
+    pub const RESET_CLEANUP_ENTRY_FAILURES: &str = "UPDATE file_operation_entries SET cleanup_state = 'pending', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND cleanup_state = 'failed' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))";
+    pub const INSERT_RETRY_RECEIPT: &str = "INSERT INTO file_operation_retry_requests (retry_request_id, group_id, expected_version, request_hash, response_state, response_version, expires_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+604800 seconds'))";
+    pub const LIST_GROUPS: &str = "SELECT id, kind, owner_kind, owner_id, state, product_target, product_version, cancel_requested, completion_outcome, finalization_error_kind, finalization_error, rollback_error_kind, rollback_error, entry_count, version, created_at, updated_at, terminal_at FROM file_operation_groups WHERE state IN (SELECT value FROM json_each(?)) AND (? IS NULL OR updated_at < (SELECT updated_at FROM file_operation_groups WHERE id = ?) OR (updated_at = (SELECT updated_at FROM file_operation_groups WHERE id = ?) AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?";
+    pub const SELECT_GROUP_DETAIL: &str = "SELECT id, kind, owner_kind, owner_id, state, product_target, product_version, cancel_requested, completion_outcome, finalization_error_kind, finalization_error, rollback_error_kind, rollback_error, entry_count, version, created_at, updated_at, terminal_at, detail_level, entry_action_summary, entry_state_summary, cleanup_summary FROM file_operation_groups WHERE id = ?";
+    pub const SELECT_GROUP_ENTRIES: &str = "SELECT sequence, action, storage_root, source_path, temporary_path, destination_path, tombstone_path, expected_size, expected_sha256, expected_version, state, cleanup_state, last_error_kind, last_error FROM file_operation_entries WHERE group_id = ? ORDER BY sequence";
+    pub const SELECT_GROUP_CLAIMS: &str = "SELECT sequence, storage_root, relative_path, mode, scope, role, expected_version FROM file_operation_path_claims WHERE group_id = ? ORDER BY sequence";
+    pub const SELECT_EXPIRED_RETRY_RECEIPTS: &str = "SELECT retry_request_id FROM file_operation_retry_requests WHERE expires_at <= datetime('now') ORDER BY expires_at, retry_request_id LIMIT 256";
+    pub const DELETE_RETRY_RECEIPT: &str = "DELETE FROM file_operation_retry_requests WHERE retry_request_id = ? AND expires_at <= datetime('now')";
+    pub const SELECT_EXPIRED_LLM_RESULT_RECEIPTS: &str = "SELECT r.job_id FROM llm_result_receipts AS r JOIN file_operation_groups AS g ON g.id = r.journal_group_id WHERE r.state IN ('cleaned', 'discarded', 'failed') AND r.updated_at <= datetime('now', '-604800 seconds') AND g.state IN ('cleaned', 'rolled_back') ORDER BY r.updated_at, r.job_id LIMIT 64";
+    pub const DELETE_EXPIRED_LLM_RESULT_RECEIPT: &str = "DELETE FROM llm_result_receipts WHERE job_id = ? AND state IN ('cleaned', 'discarded', 'failed') AND updated_at <= datetime('now', '-604800 seconds') AND journal_group_id IN (SELECT id FROM file_operation_groups WHERE state IN ('cleaned', 'rolled_back'))";
+    pub const SELECT_COMPACTION_CANDIDATE: &str = "SELECT id, state, version FROM file_operation_groups WHERE detail_level = 'full' AND state IN ('cleaned', 'rolled_back') AND terminal_at IS NOT NULL ORDER BY terminal_at, id LIMIT 1";
+    pub const COUNT_ENTRY_ACTIONS: &str = "SELECT action, COUNT(*) FROM file_operation_entries WHERE group_id = ? GROUP BY action ORDER BY action";
+    pub const COUNT_ENTRY_STATES: &str = "SELECT state, COUNT(*) FROM file_operation_entries WHERE group_id = ? GROUP BY state ORDER BY state";
+    pub const COUNT_CLEANUP_STATES: &str = "SELECT cleanup_state, COUNT(*) FROM file_operation_entries WHERE group_id = ? GROUP BY cleanup_state ORDER BY cleanup_state";
+    pub const DELETE_GROUP_ENTRIES: &str = "DELETE FROM file_operation_entries WHERE group_id = ?";
+    pub const DELETE_DIRECTORY_COPY: &str =
+        "DELETE FROM directory_copy_constructions WHERE group_id = ?";
+    pub const DELETE_GROUP_CLAIMS: &str =
+        "DELETE FROM file_operation_path_claims WHERE group_id = ?";
+    pub const COMPACT_GROUP: &str = "UPDATE file_operation_groups SET detail_level = 'compacted', entry_action_summary = ?, entry_state_summary = ?, cleanup_summary = ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND state = ? AND version = ? AND detail_level = 'full'";
+    pub const SELECT_PRUNE_CANDIDATE: &str = "SELECT id FROM file_operation_groups WHERE detail_level = 'compacted' AND state IN ('cleaned', 'rolled_back') AND terminal_at <= datetime('now', '-604800 seconds') ORDER BY terminal_at, id LIMIT 1";
+    pub const PRUNE_GROUP: &str = "DELETE FROM file_operation_groups WHERE id = ? AND detail_level = 'compacted' AND state IN ('cleaned', 'rolled_back') AND terminal_at <= datetime('now', '-604800 seconds')";
+    pub const SELECT_GROUP_FOR_CANCELLATION: &str =
+        "SELECT state, version, cancel_requested FROM file_operation_groups WHERE id = ?";
+    pub const REQUEST_PRECOMMIT_ROLLBACK: &str = "UPDATE file_operation_groups SET cancel_requested = 1, state = 'rollback_pending', version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'prepared'";
+    pub const ACTIVATE_METADATA_RESET_CLEANUP: &str = r#"
+    UPDATE file_operation_groups
+       SET state = 'cleanup_pending'
+         , completion_outcome = 'published'
+         , version = version + 1
+         , recovery_order = (
+               SELECT COALESCE(MAX(recovery_order), 0) + 1
+                 FROM file_operation_groups
+           )
+         , updated_at = datetime('now')
+         , terminal_at = NULL
+     WHERE id = ?
+       AND kind = 'metadata_reset'
+       AND owner_kind = 'metadata'
+       AND owner_id = 'all'
+       AND state = 'prepared'
+    "#;
+    pub const REQUEST_FORWARD_DISCARD: &str = "UPDATE file_operation_groups SET cancel_requested = 1, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state IN ('publishing', 'publication_failed', 'files_committed', 'finalize_failed')";
+    pub const DETACH_CANCELLED_DISCARDABLE_PRODUCT: &str = "UPDATE file_operation_groups SET product_target = NULL WHERE id = ? AND owner_kind IN ('llm_result', 'metadata_generation', 'import') AND cancel_requested = 1";
+    pub const MARK_NON_PUBLISH_ENTRIES_ROLLED_BACK: &str = "UPDATE file_operation_entries SET state = 'rolled_back' WHERE group_id = ? AND action != 'publish' AND state = 'prepared'";
+    pub const COUNT_PENDING_ROLLBACK_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND action = 'publish' AND state = 'prepared'";
+    pub const COMPLETE_EMPTY_ROLLBACK: &str = "UPDATE file_operation_groups SET state = 'rolled_back', terminal_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND state = 'rollback_pending'";
+    pub const VERIFY_ROLLBACK: &str = "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'rollback_pending'";
+    pub const SELECT_PENDING_ROLLBACK_ENTRIES: &str = r#"
+        SELECT e.sequence
+             , e.action
+             , e.storage_root
+             , e.source_path
+             , e.temporary_path
+             , e.destination_path
+             , e.tombstone_path
+             , CASE WHEN g.kind = 'llm_result_receive' THEN NULL ELSE e.expected_size END
+             , CASE WHEN g.kind = 'llm_result_receive' THEN NULL ELSE e.expected_sha256 END
+             , CASE WHEN g.kind = 'llm_result_receive' THEN NULL ELSE e.expected_version END
+          FROM file_operation_entries AS e
+          JOIN file_operation_groups AS g ON g.id = e.group_id
+         WHERE e.group_id = ? AND e.action = 'publish' AND e.state = 'prepared'
+      ORDER BY e.sequence DESC
+    "#;
+    pub const ROLLBACK_ENTRY: &str = "UPDATE file_operation_entries SET state = 'rolled_back', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND action = 'publish' AND state = 'prepared'";
+    pub const CHECKPOINT_ROLLBACK: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'rolled_back' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'rollback_pending'";
+    pub const RECORD_FINALIZE_FAILURE: &str = "UPDATE file_operation_groups SET state = 'finalize_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'files_committed'";
+    pub const RECORD_ROLLBACK_FAILURE_ENTRY: &str = "UPDATE file_operation_entries SET last_error_kind = ?, last_error = ? WHERE group_id = ? AND sequence = ? AND action = 'publish' AND state = 'prepared'";
+    pub const RECORD_ROLLBACK_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), rollback_error_kind = ?, rollback_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'rollback_pending'";
+}
+
 macro_rules! timeline_media_filters {
     () => {
         r#"AND (
@@ -77,6 +321,29 @@ macro_rules! timeline_window_prefix {
 }
 
 pub mod import {
+    pub const INSERT_CONTENT_HASH_CLAIM: &str = r#"
+    INSERT INTO import_content_hash_claims (content_hash, claim_token, import_source)
+    VALUES (?, ?, ?)
+    ON CONFLICT(content_hash) DO NOTHING
+    "#;
+
+    pub const RELEASE_CONTENT_HASH_CLAIM: &str = r#"
+    DELETE FROM import_content_hash_claims
+     WHERE content_hash = ?
+       AND claim_token = ?
+    "#;
+
+    pub const RECOVER_CONTENT_HASH_CLAIMS: &str = "DELETE FROM import_content_hash_claims";
+
+    pub const SELECT_INTERRUPTED_PAGE: &str = r#"
+    SELECT id
+      FROM media
+     WHERE import_state = 'importing'
+       AND id > ?
+     ORDER BY id
+     LIMIT ?
+    "#;
+
     pub const COUNT_IMPORTED_MEDIA: &str = r#"
     SELECT COUNT(*)
       FROM media
@@ -210,7 +477,6 @@ pub mod backup {
        AND backup_assets.device_id = ?
        AND backup_assets.client_asset_id = ?
     "#;
-    pub const COUNT_ACTIVE_UPLOADS: &str = "SELECT COUNT(*) FROM backup_upload_sessions WHERE user_id = ? AND status IN ('uploading', 'writing') AND expires_at > datetime('now')";
     pub const INSERT_ASSET: &str = r#"
     INSERT INTO backup_assets (
         user_id
@@ -363,18 +629,22 @@ pub mod backup {
     pub const MARK_SESSION_PROCESSING: &str = "UPDATE backup_upload_sessions SET status = 'processing', updated_at = datetime('now') WHERE asset_id = ? AND status = 'queued'";
     pub const SELECT_MANIFEST_FOR_ASSET: &str =
         "SELECT content_hash, metadata_json FROM backup_asset_manifests WHERE asset_id = ?";
+    pub const SELECT_STAGED_PATH_FOR_ASSET: &str =
+        "SELECT staged_path FROM backup_assets WHERE id = ?";
     pub const COMPLETE_ASSET: &str = "UPDATE backup_assets SET status = 'completed', media_id = ?, error = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
     pub const COMPLETE_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'completed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
     pub const FAIL_ASSET: &str = "UPDATE backup_assets SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
     pub const FAIL_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'failed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
-    pub const SELECT_PROCESSING_ASSETS: &str = r#"
+    pub const SELECT_PROCESSING_ASSETS_PAGE: &str = r#"
     SELECT id
          , user_id
          , staged_path
          , content_hash
       FROM backup_assets
      WHERE status = 'processing'
+       AND id > ?
      ORDER BY id
+     LIMIT ?
     "#;
     pub const SELECT_RECOVERED_MEDIA: &str = r#"
     SELECT media.id
@@ -389,18 +659,22 @@ pub mod backup {
     pub const RECOVER_QUEUED_ASSET: &str = "UPDATE backup_assets SET status = 'queued', updated_at = datetime('now') WHERE id = ? AND status = 'processing'";
     pub const RECOVER_QUEUED_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'queued', updated_at = datetime('now') WHERE asset_id = ? AND status = 'processing'";
     pub const RECOVER_WRITING_SESSIONS: &str = "UPDATE backup_upload_sessions SET status = 'uploading', updated_at = datetime('now') WHERE status = 'writing'";
-    pub const SELECT_RESUMABLE_FILES: &str = r#"
+    pub const SELECT_RESUMABLE_FILES_PAGE: &str = r#"
     SELECT backup_assets.id
          , backup_assets.staged_path
          , backup_upload_sessions.uploaded_size
       FROM backup_assets
       JOIN backup_upload_sessions ON backup_upload_sessions.asset_id = backup_assets.id
      WHERE backup_upload_sessions.status = 'uploading'
+       AND backup_assets.id > ?
+     ORDER BY backup_assets.id
+     LIMIT ?
     "#;
     pub const FAIL_MISSING_STAGED_ASSET: &str = "UPDATE backup_assets SET status = 'failed', error = 'backup staging file is missing', updated_at = datetime('now') WHERE id = ? AND status = 'uploading'";
     pub const FAIL_MISSING_STAGED_SESSION: &str = "UPDATE backup_upload_sessions SET status = 'failed', updated_at = datetime('now') WHERE asset_id = ? AND status = 'uploading'";
     pub const EXPIRE_SESSIONS: &str = "UPDATE backup_upload_sessions SET status = 'expired', updated_at = datetime('now') WHERE status IN ('uploading', 'writing') AND expires_at <= datetime('now')";
     pub const EXPIRE_ASSETS: &str = "UPDATE backup_assets SET status = 'expired', updated_at = datetime('now') WHERE id IN (SELECT asset_id FROM backup_upload_sessions WHERE status = 'expired') AND status = 'uploading'";
+    pub const SELECT_NEXT_EXPIRATION_SECONDS: &str = "SELECT CAST((julianday(MIN(expires_at)) - julianday('now')) * 86400 AS INTEGER) + 1 FROM backup_upload_sessions WHERE status IN ('uploading', 'writing')";
 }
 
 pub mod webdav_ready {
@@ -429,9 +703,20 @@ pub mod webdav_ready {
            AND file_path = ?
     )
     "#;
+    pub const SELECT_IMPORT_PAGE: &str = r#"
+    SELECT wr.user_id, u.username, wr.file_path
+      FROM webdav_ready_files AS wr
+      JOIN users AS u ON u.id = wr.user_id
+     WHERE wr.user_id > ?
+        OR (wr.user_id = ? AND wr.file_path > ?)
+     ORDER BY wr.user_id, wr.file_path
+     LIMIT ?
+    "#;
 }
 
 pub mod metadata_jobs {
+    pub const COUNT_IMPORTED_MEDIA: &str =
+        "SELECT COUNT(*) FROM media WHERE import_state = 'imported'";
     pub const INSERT_QUEUED: &str = r#"
     INSERT INTO media_metadata_jobs (media_id, status, available_at)
     VALUES (?, 'queued', datetime('now'))
@@ -455,6 +740,10 @@ pub mod metadata_jobs {
             ELSE 0
         END
       , available_at = datetime('now')
+      , claim_token = CASE
+            WHEN media_metadata_jobs.status = 'processing' THEN media_metadata_jobs.claim_token
+            ELSE NULL
+        END
       , completed_at = NULL
       , last_error = NULL
       , updated_at = datetime('now')
@@ -489,56 +778,237 @@ pub mod metadata_jobs {
     "#;
 
     pub const SELECT_ALL_MEDIA_IDS: &str = "SELECT id FROM media";
-    pub const DELETE_TEXT: &str = "DELETE FROM media_text";
-    pub const DELETE_TEXT_INPUTS: &str = "DELETE FROM media_text_inputs";
-    pub const DELETE_AI_INPUTS: &str = "DELETE FROM media_ai_inputs";
-    pub const DELETE_LLM_JOBS: &str = "DELETE FROM llm_jobs";
-    pub const DELETE_SIMILARITY_CLUSTERS: &str = "DELETE FROM media_similarity_clusters";
-    pub const DELETE_SIMILARITY_BANDS: &str = "DELETE FROM media_similarity_hash_bands";
-    pub const DELETE_SIMILARITY_INDEX: &str = "DELETE FROM media_similarity_index";
-    pub const DELETE_SIMILARITY_DIRTY: &str = "DELETE FROM media_similarity_dirty";
-    pub const DELETE_FACE_GROUPING_RUNS: &str = "DELETE FROM face_grouping_runs";
-    pub const DELETE_FACE_GROUPS: &str = "DELETE FROM face_groups";
-    pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces";
-    pub const DELETE_FACE_DETECTION_RESULTS: &str = "DELETE FROM media_face_detection_results";
-    pub const DELETE_AESTHETICS: &str = "DELETE FROM media_aesthetics";
-    pub const DELETE_AESTHETIC_INPUTS: &str = "DELETE FROM media_aesthetic_inputs";
-    pub const DELETE_SCREENSHOT_CLASSIFICATIONS: &str =
-        "DELETE FROM media_screenshot_classifications";
-    pub const DELETE_SCREENSHOT_CLASSIFICATION_INPUTS: &str =
-        "DELETE FROM media_screenshot_classification_inputs";
-    pub const DELETE_DOCUMENT_CLASSIFICATIONS: &str = "DELETE FROM media_document_classifications";
-    pub const DELETE_DOCUMENT_CLASSIFICATION_INPUTS: &str =
-        "DELETE FROM media_document_classification_inputs";
-    pub const DELETE_RTREE: &str = "DELETE FROM media_rtree";
-    pub const DELETE_METADATA_SOURCES: &str = "DELETE FROM media_metadata_sources";
-    pub const DELETE_METADATA: &str = "DELETE FROM media_metadata";
-    pub const RESET_IMPORTED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, available_at = datetime('now'), claimed_at = NULL, completed_at = NULL, last_error = NULL, updated_at = datetime('now') WHERE media_id IN (SELECT id FROM media WHERE import_state = 'imported')";
-    pub const MARK_IMPORTED_DIRTY: &str = "INSERT INTO media_similarity_dirty (media_id, marked_at) SELECT id, datetime('now') FROM media WHERE import_state = 'imported'";
+    pub const SELECT_RESET_STATE: &str = r#"
+    SELECT cleanup_group_id, phase, media_cursor, media_count
+      FROM metadata_reset_operations
+     WHERE id = 1
+    "#;
+    pub const IS_RESET_ACTIVE: &str =
+        "SELECT EXISTS (SELECT 1 FROM metadata_reset_operations WHERE id = 1)";
+    pub const INSERT_RESET_STATE: &str = r#"
+    INSERT INTO metadata_reset_operations (
+        id, cleanup_group_id, phase, media_cursor, media_count
+    )
+    VALUES (
+        1, ?, 'metadata_jobs', 0,
+        (SELECT COUNT(*) FROM media WHERE import_state = 'imported')
+    )
+    "#;
+    pub const CANCEL_LLM_JOBS_FOR_RESET: &str = r#"
+    UPDATE llm_jobs
+       SET status = 'cancelled'
+         , state_version = state_version + 1
+         , attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END
+         , completed_at = datetime('now')
+         , updated_at = datetime('now')
+     WHERE status IN ('queued', 'submitting', 'submitted')
+    "#;
+    pub const DISCARD_LLM_RESULT_RECEIPTS_FOR_RESET: &str = r#"
+    UPDATE llm_result_receipts
+       SET state = 'discarded'
+         , cancel_requested = 1
+         , claim_token = NULL
+         , last_error = 'metadata reset superseded this result'
+         , updated_at = datetime('now')
+     WHERE state IN ('received', 'processing')
+    "#;
+    pub const SELECT_LLM_RESULT_GROUPS_PAGE: &str = r#"
+    SELECT DISTINCT g.id
+      FROM file_operation_groups AS g
+      JOIN llm_result_receipts AS r ON r.journal_group_id = g.id
+     WHERE g.state != 'cleaned'
+     ORDER BY g.id
+     LIMIT ?
+    "#;
+    pub const RETIRE_LLM_RESULT_GROUP_ENTRIES: &str = r#"
+    UPDATE file_operation_entries
+       SET state = CASE WHEN action = 'publish' THEN 'committed' ELSE state END
+         , cleanup_state = 'cleaned'
+         , last_error_kind = NULL
+         , last_error = NULL
+     WHERE group_id = ?
+    "#;
+    pub const RETIRE_LLM_RESULT_GROUP: &str = r#"
+    UPDATE file_operation_groups
+       SET state = 'cleaned'
+         , product_target = NULL
+         , completion_outcome = 'discarded'
+         , cancel_requested = 1
+         , version = version + 1
+         , updated_at = datetime('now')
+         , terminal_at = datetime('now')
+     WHERE id = ? AND state != 'cleaned'
+    "#;
+    pub const RELEASE_LLM_RESULT_GROUP_CLAIMS: &str =
+        "DELETE FROM file_operation_path_claims WHERE group_id = ?";
+    pub const RELEASE_LLM_RESULT_GROUP_RESERVATIONS: &str = "UPDATE data_dir_space_reservations SET state = 'released', version = version + 1, updated_at = datetime('now') WHERE journal_group_id = ? AND state IN ('active', 'releasing')";
+    pub const SELECT_IMPORTED_PAGE: &str = r#"
+    SELECT id
+      FROM media
+     WHERE import_state = 'imported'
+       AND id > ?
+     ORDER BY id
+     LIMIT ?
+    "#;
+    pub const RESET_JOB_FOR_MEDIA: &str = r#"
+    INSERT INTO media_metadata_jobs (
+        media_id, status, claim_token, attempts, rerun_requested, available_at,
+        claimed_at, completed_at, last_error, updated_at
+    )
+    VALUES (?, 'queued', NULL, 0, 0, datetime('now'), NULL, NULL, NULL, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET
+        status = 'queued'
+      , claim_token = NULL
+      , attempts = 0
+      , rerun_requested = 0
+      , available_at = datetime('now')
+      , claimed_at = NULL
+      , completed_at = NULL
+      , last_error = NULL
+      , updated_at = datetime('now')
+    "#;
+    pub const MARK_MEDIA_DIRTY: &str = r#"
+    INSERT INTO media_similarity_dirty (media_id, marked_at)
+    VALUES (?, datetime('now'))
+    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at
+    "#;
+    pub const UPDATE_RESET_CURSOR: &str = r#"
+    UPDATE metadata_reset_operations
+       SET media_cursor = ?, updated_at = datetime('now')
+     WHERE id = 1 AND phase = ?
+    "#;
+    pub const ADVANCE_RESET_PHASE: &str = r#"
+    UPDATE metadata_reset_operations
+       SET phase = ?, media_cursor = 0, updated_at = datetime('now')
+     WHERE id = 1 AND phase = ?
+    "#;
+    pub const DELETE_RESET_STATE: &str =
+        "DELETE FROM metadata_reset_operations WHERE id = 1 AND phase = 'activate_cleanup'";
+    pub const DELETE_LLM_RESULT_STAGING_PAGE: &str = "DELETE FROM llm_result_staging WHERE rowid IN (SELECT rowid FROM llm_result_staging ORDER BY rowid LIMIT ?)";
+    pub const DELETE_LLM_RESULT_RECEIPTS_PAGE: &str = "DELETE FROM llm_result_receipts WHERE rowid IN (SELECT rowid FROM llm_result_receipts ORDER BY rowid LIMIT ?)";
+    pub const RELEASE_LLM_RESERVATIONS_PAGE: &str = "UPDATE data_dir_space_reservations SET state = 'released', version = version + 1, updated_at = datetime('now') WHERE id IN (SELECT id FROM data_dir_space_reservations WHERE state = 'active' AND owner_kind IN ('llm_result', 'llm_result_cleanup') ORDER BY id LIMIT ?)";
+    pub const DELETE_LLM_JOB_CANCELLATIONS_PAGE: &str = "DELETE FROM llm_job_cancellations WHERE rowid IN (SELECT rowid FROM llm_job_cancellations ORDER BY rowid LIMIT ?)";
+    pub const DELETE_LLM_CANCELLATION_SCOPES_PAGE: &str = "DELETE FROM llm_cancellation_scopes WHERE rowid IN (SELECT rowid FROM llm_cancellation_scopes ORDER BY rowid LIMIT ?)";
+    pub const DELETE_LLM_JOBS_PAGE: &str =
+        "DELETE FROM llm_jobs WHERE rowid IN (SELECT rowid FROM llm_jobs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_TEXT_INPUTS_PAGE: &str = "DELETE FROM media_text_inputs WHERE rowid IN (SELECT rowid FROM media_text_inputs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_TEXT_PAGE: &str = "DELETE FROM media_text WHERE rowid IN (SELECT rowid FROM media_text ORDER BY rowid LIMIT ?)";
+    pub const DELETE_AESTHETIC_INPUTS_PAGE: &str = "DELETE FROM media_aesthetic_inputs WHERE rowid IN (SELECT rowid FROM media_aesthetic_inputs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_AESTHETICS_PAGE: &str = "DELETE FROM media_aesthetics WHERE rowid IN (SELECT rowid FROM media_aesthetics ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SCREENSHOT_INPUTS_PAGE: &str = "DELETE FROM media_screenshot_classification_inputs WHERE rowid IN (SELECT rowid FROM media_screenshot_classification_inputs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SCREENSHOTS_PAGE: &str = "DELETE FROM media_screenshot_classifications WHERE rowid IN (SELECT rowid FROM media_screenshot_classifications ORDER BY rowid LIMIT ?)";
+    pub const DELETE_DOCUMENT_INPUTS_PAGE: &str = "DELETE FROM media_document_classification_inputs WHERE rowid IN (SELECT rowid FROM media_document_classification_inputs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_DOCUMENTS_PAGE: &str = "DELETE FROM media_document_classifications WHERE rowid IN (SELECT rowid FROM media_document_classifications ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_FINALIZATION_FACES_PAGE: &str = "DELETE FROM face_group_finalization_faces WHERE rowid IN (SELECT rowid FROM face_group_finalization_faces ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_FINALIZATION_ANCHORS_PAGE: &str = "DELETE FROM face_group_finalization_manual_anchors WHERE rowid IN (SELECT rowid FROM face_group_finalization_manual_anchors ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_FINALIZATION_GROUPS_PAGE: &str = "DELETE FROM face_group_finalization_groups WHERE rowid IN (SELECT rowid FROM face_group_finalization_groups ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_REPRESENTATIVES_PAGE: &str = "DELETE FROM face_group_representatives WHERE rowid IN (SELECT rowid FROM face_group_representatives ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_MEMBERS_PAGE: &str = "DELETE FROM face_group_members WHERE rowid IN (SELECT rowid FROM face_group_members ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_GROUPS_PAGE: &str = "DELETE FROM face_groups WHERE rowid IN (SELECT rowid FROM face_groups ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_FINALIZATIONS_PAGE: &str = "DELETE FROM face_group_finalizations WHERE rowid IN (SELECT rowid FROM face_group_finalizations ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_GENERATION_STATE_PAGE: &str = "DELETE FROM face_group_generation_state WHERE rowid IN (SELECT rowid FROM face_group_generation_state ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_MANUAL_STATE_PAGE: &str = "DELETE FROM face_group_manual_state WHERE rowid IN (SELECT rowid FROM face_group_manual_state ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_GENERATIONS_PAGE: &str = "DELETE FROM face_group_generations WHERE rowid IN (SELECT rowid FROM face_group_generations ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_RUNS_PAGE: &str = "DELETE FROM face_grouping_runs WHERE rowid IN (SELECT rowid FROM face_grouping_runs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_MEDIA_FACES_PAGE: &str = "DELETE FROM media_faces WHERE rowid IN (SELECT rowid FROM media_faces ORDER BY rowid LIMIT ?)";
+    pub const DELETE_FACE_RESULTS_PAGE: &str = "DELETE FROM media_face_detection_results WHERE rowid IN (SELECT rowid FROM media_face_detection_results ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_CLUSTER_MEMBERS_PAGE: &str = "DELETE FROM media_similarity_cluster_members WHERE rowid IN (SELECT rowid FROM media_similarity_cluster_members ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_CLUSTERS_PAGE: &str = "DELETE FROM media_similarity_clusters WHERE rowid IN (SELECT rowid FROM media_similarity_clusters ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_DIRTY_SNAPSHOT_PAGE: &str = "DELETE FROM media_similarity_finalization_dirty WHERE rowid IN (SELECT rowid FROM media_similarity_finalization_dirty ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_EDGES_PAGE: &str = "DELETE FROM media_similarity_edges WHERE rowid IN (SELECT rowid FROM media_similarity_edges ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_LABELS_PAGE: &str = "DELETE FROM media_similarity_labels WHERE rowid IN (SELECT rowid FROM media_similarity_labels ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_FINALIZATIONS_PAGE: &str = "DELETE FROM media_similarity_finalizations WHERE rowid IN (SELECT rowid FROM media_similarity_finalizations ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_GENERATION_STATE_PAGE: &str = "DELETE FROM media_similarity_generation_state WHERE rowid IN (SELECT rowid FROM media_similarity_generation_state ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_GENERATIONS_PAGE: &str = "DELETE FROM media_similarity_generations WHERE rowid IN (SELECT rowid FROM media_similarity_generations ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_BANDS_PAGE: &str = "DELETE FROM media_similarity_hash_bands WHERE rowid IN (SELECT rowid FROM media_similarity_hash_bands ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_INDEX_PAGE: &str = "DELETE FROM media_similarity_index WHERE rowid IN (SELECT rowid FROM media_similarity_index ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_DIRTY_PAGE: &str = "DELETE FROM media_similarity_dirty WHERE rowid IN (SELECT rowid FROM media_similarity_dirty ORDER BY rowid LIMIT ?)";
+    pub const DELETE_SIMILARITY_RUNS_PAGE: &str = "DELETE FROM media_similarity_runs WHERE rowid IN (SELECT rowid FROM media_similarity_runs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_AI_INPUTS_PAGE: &str = "DELETE FROM media_ai_inputs WHERE rowid IN (SELECT rowid FROM media_ai_inputs ORDER BY rowid LIMIT ?)";
+    pub const DELETE_RTREE_PAGE: &str = "DELETE FROM media_rtree WHERE rowid IN (SELECT rowid FROM media_rtree ORDER BY rowid LIMIT ?)";
+    pub const DELETE_METADATA_SOURCES_PAGE: &str = "DELETE FROM media_metadata_sources WHERE rowid IN (SELECT rowid FROM media_metadata_sources ORDER BY rowid LIMIT ?)";
+    pub const DELETE_METADATA_PAGE: &str = "DELETE FROM media_metadata WHERE rowid IN (SELECT rowid FROM media_metadata ORDER BY rowid LIMIT ?)";
     pub const SELECT_INPUT_PATHS: &str =
         "SELECT storage_root, file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
-    pub const CLAIM_NEXT_QUEUED: &str = "UPDATE media_metadata_jobs SET status = 'processing', claimed_at = datetime('now'), attempts = attempts + 1, updated_at = datetime('now') WHERE media_id = (SELECT media_id FROM media_metadata_jobs WHERE status = 'queued' AND available_at <= datetime('now') ORDER BY media_id LIMIT 1) AND status = 'queued' RETURNING media_id";
-    pub const RECLAIM_EXPIRED: &str = "UPDATE media_metadata_jobs SET status = 'queued', rerun_requested = 0, claimed_at = NULL, available_at = datetime('now'), last_error = 'metadata worker lease expired', updated_at = datetime('now') WHERE status = 'processing' AND claimed_at < datetime('now', ?)";
-    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' ELSE 'completed' END, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
-    pub const MARK_FAILED_OR_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' WHEN attempts >= ? THEN 'failed' ELSE 'queued' END, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') WHEN attempts >= ? THEN available_at ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END, updated_at = datetime('now') WHERE media_id = ? AND status = 'processing'";
+    pub const CLAIM_NEXT_QUEUED: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = 'processing'
+         , claim_token = ?
+         , claimed_at = datetime('now')
+         , attempts = attempts + 1
+         , updated_at = datetime('now')
+     WHERE media_id = (
+               SELECT media_id
+                 FROM media_metadata_jobs
+                WHERE status = 'queued'
+                  AND available_at <= datetime('now')
+                  AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+                ORDER BY media_id
+                LIMIT 1
+           )
+       AND status = 'queued'
+    RETURNING media_id, claim_token
+    "#;
+    pub const NEXT_AVAILABLE_DELAY_SECONDS: &str = r#"
+    SELECT CAST(
+               MAX(1, unixepoch(MIN(available_at)) - unixepoch('now'))
+               AS INTEGER
+           )
+      FROM media_metadata_jobs
+     WHERE status = 'queued'
+       AND available_at > datetime('now')
+       AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+    "#;
+    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' ELSE 'completed' END, claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
+    pub const MARK_RETRY: &str = "UPDATE media_metadata_jobs SET status = 'queued', claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
+    pub const RECOVER_ORPHANED_CLAIMS: &str = "UPDATE media_metadata_jobs SET status = 'queued', claim_token = NULL, available_at = datetime('now'), claimed_at = NULL, updated_at = datetime('now') WHERE status = 'processing' AND claim_token IS NOT NULL";
+    pub const VERIFY_CLAIM: &str = "SELECT 1 FROM media_metadata_jobs WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
     pub const SELECT_FAILURES: &str = "SELECT last_error FROM media_metadata_jobs WHERE status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
 }
 
 pub mod ai_jobs {
-    pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_SCREENSHOT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'screenshot_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'screenshot_detection') AND NOT EXISTS (SELECT 1 FROM media_screenshot_classifications WHERE media_screenshot_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'screenshot_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_DOCUMENT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'document_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'document_detection') AND NOT EXISTS (SELECT 1 FROM media_document_classifications WHERE media_document_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'document_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_SCREENSHOT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'screenshot_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'screenshot_detection') AND NOT EXISTS (SELECT 1 FROM media_screenshot_classifications WHERE media_screenshot_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'screenshot_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_DOCUMENT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'document_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'document_detection') AND NOT EXISTS (SELECT 1 FROM media_document_classifications WHERE media_document_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'document_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') AND NOT EXISTS (SELECT 1 FROM llm_cancellation_scopes WHERE llm_cancellation_scopes.scope = 'all' OR (llm_cancellation_scopes.scope = 'task' AND llm_cancellation_scopes.task = llm_jobs.task)) ORDER BY created_at LIMIT ?";
-    pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued'";
-    pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
-    pub const REQUEUE_AMBIGUOUS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const NEXT_AVAILABLE_DELAY_SECONDS: &str = r#"
+    WITH future_work(ready_at) AS (
+        SELECT available_at
+          FROM llm_jobs
+         WHERE status = 'queued'
+           AND available_at > datetime('now')
+           AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+           AND NOT EXISTS (
+                   SELECT 1
+                     FROM llm_cancellation_scopes
+                    WHERE llm_cancellation_scopes.scope = 'all'
+                       OR (llm_cancellation_scopes.scope = 'task'
+                           AND llm_cancellation_scopes.task = llm_jobs.task)
+               )
+        UNION ALL
+        SELECT datetime(claimed_at, '+5 minutes')
+          FROM llm_jobs
+         WHERE status = 'submitting'
+           AND claimed_at IS NOT NULL
+           AND datetime(claimed_at, '+5 minutes') > datetime('now')
+    )
+    SELECT CAST(
+               MAX(1, unixepoch(MIN(ready_at)) - unixepoch('now'))
+               AS INTEGER
+           )
+      FROM future_work
+    "#;
+    pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', state_version = state_version + 1, claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)";
+    pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', state_version = state_version + 1, attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
+    pub const REQUEUE_AMBIGUOUS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const REQUEUE_DEFERRED: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, available_at = datetime('now', '+' || ? || ' seconds'), last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const SNAPSHOT_QUEUED_INPUTS: &str = "INSERT OR IGNORE INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) SELECT llm_jobs.id, media_ai_inputs.sequence, media_ai_inputs.input_kind, media_ai_inputs.storage_root, media_ai_inputs.file_path, media_ai_inputs.filename, media_ai_inputs.mime_type, media_ai_inputs.byte_size, media_ai_inputs.content_hash, media_ai_inputs.frame_timestamp_ms FROM llm_jobs JOIN media_ai_inputs ON media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = llm_jobs.task WHERE llm_jobs.status = 'queued'";
     pub const SELECT_INPUTS: &str = "SELECT sequence, storage_root, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
-    pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND claimed_at < datetime('now', '-5 minutes')";
-    pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
-    pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND (claimed_at IS NULL OR claimed_at <= datetime('now', '-5 minutes'))";
+    pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, state_version = state_version + 1, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+    pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', state_version = state_version + 1, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const SELECT_LATEST_STATUS_COUNTS: &str = r#"
     WITH ranked_jobs AS (
         SELECT task
@@ -581,6 +1051,13 @@ pub mod ai_jobs {
             , updated_at DESC
     "#;
     pub const COUNT_ACTIVE_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_jobs WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const COUNT_PENDING_RESULT_CLEANUP_FOR_TASK: &str = r#"
+        SELECT COUNT(*)
+          FROM llm_result_receipts AS r
+          JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id
+         WHERE r.task = ?
+           AND s.state = 'active'
+    "#;
     pub const COUNT_JOBS_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_jobs WHERE task = ?";
     pub const COUNT_PENDING_CANCELLATION_SCOPE_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_cancellation_scopes WHERE scope = 'all' OR (scope = 'task' AND task = ?)";
     pub const DELETE_TEXT_FOR_TASK: &str = "DELETE FROM media_text WHERE model_type = ?";
@@ -596,8 +1073,10 @@ pub mod ai_jobs {
     pub const DELETE_DOCUMENT_CLASSIFICATION_INPUTS: &str =
         "DELETE FROM media_document_classification_inputs";
     pub const DELETE_JOBS_FOR_TASK: &str = "DELETE FROM llm_jobs WHERE task = ?";
-    pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
-    pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted')";
+    pub const CANCEL_FOR_TASK: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const CANCEL_ALL: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE status IN ('queued', 'submitting', 'submitted')";
+    pub const CANCEL_RESULT_RECEIPTS_FOR_TASK: &str = "UPDATE llm_result_receipts SET cancel_requested = 1, state = 'discarded', claim_token = NULL, updated_at = datetime('now') WHERE task = ? AND state IN ('receiving', 'received', 'processing')";
+    pub const CANCEL_ALL_RESULT_RECEIPTS: &str = "UPDATE llm_result_receipts SET cancel_requested = 1, state = 'discarded', claim_token = NULL, updated_at = datetime('now') WHERE state IN ('receiving', 'received', 'processing')";
     pub const QUEUE_CANCELLATION_SCOPE_FOR_TASK: &str =
         "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) VALUES ('task', ?)";
     pub const QUEUE_ALL_CANCELLATION_SCOPE: &str =
@@ -618,7 +1097,7 @@ pub mod ai_jobs {
 }
 
 pub mod faces {
-    pub const COUNT_GROUPS: &str = "SELECT COUNT(*) FROM face_groups";
+    pub const COUNT_GROUPS: &str = "SELECT COUNT(*) FROM face_groups WHERE manual_curated = 1 OR automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1))";
     pub const INSERT_GROUPING_RUN: &str =
         "INSERT INTO face_grouping_runs (status) VALUES ('running')";
     pub const SELECT_ACTIVE_RUN: &str = "SELECT id, status FROM face_grouping_runs WHERE status IN ('running', 'cancelling') ORDER BY id DESC LIMIT 1";
@@ -626,42 +1105,301 @@ pub mod faces {
     pub const COUNT_FAILED_JOBS: &str =
         "SELECT COUNT(*) FROM llm_jobs WHERE face_grouping_run_id = ? AND task = 'face_detection' AND status = 'failed'";
     pub const MARK_RUN: &str = "UPDATE face_grouping_runs SET status = ?, completed_at = datetime('now'), error = ? WHERE id = ? AND status IN ('running', 'cancelling')";
-    pub const CANCEL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted')";
-    pub const SELECT_FACES_FOR_GROUPING: &str = r#"
+    pub const CANCEL_ACTIVE: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted')";
+    pub const SELECT_FINALIZATION_STATE: &str = r#"
+    SELECT generation_id
+         , phase
+         , manual_revision
+         , face_snapshot_cursor
+         , manual_snapshot_cursor
+         , face_cursor
+         , current_face_id
+         , candidate_kind
+         , candidate_cursor
+         , best_group_id
+         , best_similarity
+         , group_cursor
+         , current_group_id
+         , representative_cursor
+         , best_representative_face_id
+         , best_representative_score
+         , completion_error
+      FROM face_group_finalizations
+     WHERE run_id = ?
+    "#;
+    pub const INSERT_GENERATION: &str =
+        "INSERT INTO face_group_generations (run_id, status) VALUES (?, 'building')";
+    pub const INSERT_FINALIZATION: &str = r#"
+    INSERT INTO face_group_finalizations
+      ( run_id
+      , generation_id
+      , phase
+      , manual_revision
+      , completion_error
+    ) VALUES (?, ?, 'face_snapshot', ?, ?)
+    "#;
+    pub const SELECT_MANUAL_REVISION: &str =
+        "SELECT COALESCE((SELECT revision FROM face_group_manual_state WHERE id = 1), 0)";
+    pub const INCREMENT_MANUAL_REVISION: &str = r#"
+    INSERT INTO face_group_manual_state (id, revision)
+    VALUES (1, 1)
+    ON CONFLICT(id) DO UPDATE SET
+        revision = revision + 1,
+        updated_at = datetime('now')
+    "#;
+    pub const SELECT_FACE_SNAPSHOT_PAGE: &str = r#"
     SELECT media_faces.id
          , media_faces.embedding
       FROM media_faces
-     WHERE NOT EXISTS (
+     WHERE media_faces.id > ?
+       AND NOT EXISTS (
                SELECT 1
                  FROM face_group_members
                 WHERE face_group_members.face_id = media_faces.id
                   AND face_group_members.manual_anchor = 1
            )
      ORDER BY media_faces.id
+     LIMIT ?
     "#;
-    pub const SELECT_MANUAL_GROUP_ANCHORS: &str = r#"
-    SELECT face_groups.id
+    pub const INSERT_FINALIZATION_FACE: &str = r#"
+    INSERT INTO face_group_finalization_faces
+      ( generation_id
+      , face_id
+      , embedding
+    ) VALUES (?, ?, ?)
+    "#;
+    pub const ADVANCE_FACE_SNAPSHOT: &str =
+        "UPDATE face_group_finalizations SET face_snapshot_cursor = ?, updated_at = datetime('now') WHERE run_id = ? AND phase = 'face_snapshot'";
+    pub const FINISH_FACE_SNAPSHOT: &str =
+        "UPDATE face_group_finalizations SET phase = 'manual_snapshot', updated_at = datetime('now') WHERE run_id = ? AND phase = 'face_snapshot'";
+    pub const SELECT_MANUAL_SNAPSHOT_PAGE: &str = r#"
+    SELECT face_group_members.face_id
+         , face_group_members.face_group_id
          , media_faces.embedding
-      FROM face_groups
-      JOIN face_group_members
-        ON face_group_members.face_group_id = face_groups.id
+      FROM face_group_members
+      JOIN face_groups
+        ON face_groups.id = face_group_members.face_group_id
       JOIN media_faces
         ON media_faces.id = face_group_members.face_id
-     WHERE face_groups.manual_curated = 1
-       AND face_group_members.manual_anchor = 1
+     WHERE face_group_members.manual_anchor = 1
+       AND face_groups.manual_curated = 1
+       AND face_group_members.face_id > ?
+     ORDER BY face_group_members.face_id
+     LIMIT ?
+    "#;
+    pub const INSERT_FINALIZATION_MANUAL_ANCHOR: &str = r#"
+    INSERT INTO face_group_finalization_manual_anchors
+      ( generation_id
+      , face_id
+      , face_group_id
+      , embedding
+    ) VALUES (?, ?, ?, ?)
+    "#;
+    pub const ADVANCE_MANUAL_SNAPSHOT: &str =
+        "UPDATE face_group_finalizations SET manual_snapshot_cursor = ?, updated_at = datetime('now') WHERE run_id = ? AND phase = 'manual_snapshot'";
+    pub const FINISH_MANUAL_SNAPSHOT: &str =
+        "UPDATE face_group_finalizations SET phase = 'grouping', updated_at = datetime('now') WHERE run_id = ? AND phase = 'manual_snapshot'";
+    pub const SELECT_NEXT_FINALIZATION_FACE: &str =
+        "SELECT face_id FROM face_group_finalization_faces WHERE generation_id = ? AND face_id > ? ORDER BY face_id LIMIT 1";
+    pub const START_FINALIZATION_FACE: &str =
+        "UPDATE face_group_finalizations SET current_face_id = ?, candidate_kind = 'manual', candidate_cursor = 0, best_group_id = NULL, best_similarity = NULL, updated_at = datetime('now') WHERE run_id = ? AND phase = 'grouping' AND current_face_id IS NULL";
+    pub const SELECT_FINALIZATION_FACE: &str =
+        "SELECT embedding FROM face_group_finalization_faces WHERE generation_id = ? AND face_id = ?";
+    pub const SELECT_MANUAL_CANDIDATE_PAGE: &str = r#"
+    SELECT face_group_id
+         , face_id
+         , embedding
+      FROM face_group_finalization_manual_anchors
+     WHERE generation_id = ?
+       AND face_id > ?
+     ORDER BY face_id
+     LIMIT ?
+    "#;
+    pub const SELECT_AUTOMATIC_CANDIDATE_PAGE: &str = r#"
+    SELECT face_groups.id
+         , media_faces.id
+         , media_faces.embedding
+      FROM face_groups
+      JOIN media_faces
+        ON media_faces.id = face_groups.representative_face_id
+     WHERE face_groups.automatic_generation_id = ?
+       AND face_groups.id > ?
      ORDER BY face_groups.id
-            , media_faces.id
+     LIMIT ?
     "#;
-    pub const DELETE_AUTOMATIC_GROUPS: &str = "DELETE FROM face_groups WHERE manual_curated = 0";
-    pub const DELETE_AUTOMATIC_MANUAL_GROUP_MEMBERS: &str = r#"
-    DELETE FROM face_group_members
-     WHERE manual_anchor = 0
-       AND face_group_id IN (
-               SELECT id
-                 FROM face_groups
-                WHERE manual_curated = 1
+    pub const ADVANCE_COMPARISON_PAGE: &str = r#"
+    UPDATE face_group_finalizations
+       SET candidate_cursor = ?
+         , best_group_id = ?
+         , best_similarity = ?
+         , updated_at = datetime('now')
+     WHERE run_id = ?
+       AND generation_id = ?
+       AND phase = 'grouping'
+       AND current_face_id = ?
+       AND candidate_kind = ?
+    "#;
+    pub const SWITCH_TO_AUTOMATIC_CANDIDATES: &str = r#"
+    UPDATE face_group_finalizations
+       SET candidate_kind = 'automatic'
+         , candidate_cursor = 0
+         , best_group_id = NULL
+         , best_similarity = NULL
+         , updated_at = datetime('now')
+     WHERE run_id = ?
+       AND generation_id = ?
+       AND phase = 'grouping'
+       AND current_face_id = ?
+       AND candidate_kind = 'manual'
+    "#;
+    pub const INSERT_GENERATION_GROUP: &str = r#"
+    INSERT INTO face_groups
+      ( representative_face_id
+      , manual_curated
+      , automatic_generation_id
+    ) VALUES (?, 0, ?)
+    "#;
+    pub const INSERT_GENERATION_MEMBER: &str = r#"
+    INSERT INTO face_group_members
+      ( face_group_id
+      , face_id
+      , manual_anchor
+      , automatic_generation_id
+    ) VALUES (?, ?, 0, ?)
+    ON CONFLICT(automatic_generation_id, face_id)
+        WHERE manual_anchor = 0
+    DO UPDATE SET
+        face_group_id = excluded.face_group_id
+    "#;
+    pub const TRACK_FINALIZATION_GROUP: &str = r#"
+    INSERT INTO face_group_finalization_groups
+      ( generation_id
+      , face_group_id
+    ) VALUES (?, ?)
+    ON CONFLICT(generation_id, face_group_id) DO NOTHING
+    "#;
+    pub const FINISH_FINALIZATION_FACE: &str = r#"
+    UPDATE face_group_finalizations
+       SET face_cursor = ?
+         , current_face_id = NULL
+         , candidate_kind = 'manual'
+         , candidate_cursor = 0
+         , best_group_id = NULL
+         , best_similarity = NULL
+         , updated_at = datetime('now')
+     WHERE run_id = ?
+       AND generation_id = ?
+       AND phase = 'grouping'
+       AND current_face_id = ?
+    "#;
+    pub const FINISH_FACE_GROUPING: &str =
+        "UPDATE face_group_finalizations SET phase = 'representatives', updated_at = datetime('now') WHERE run_id = ? AND phase = 'grouping' AND current_face_id IS NULL";
+    pub const SELECT_NEXT_FINALIZATION_GROUP: &str =
+        "SELECT face_group_id FROM face_group_finalization_groups WHERE generation_id = ? AND complete = 0 AND face_group_id > ? ORDER BY face_group_id LIMIT 1";
+    pub const START_REPRESENTATIVE_GROUP: &str =
+        "UPDATE face_group_finalizations SET current_group_id = ?, representative_cursor = 0, best_representative_face_id = NULL, best_representative_score = NULL, updated_at = datetime('now') WHERE run_id = ? AND phase = 'representatives' AND current_group_id IS NULL";
+    pub const SELECT_REPRESENTATIVE_CANDIDATE_PAGE: &str = r#"
+    SELECT media_faces.id
+         , media_faces.crop_path
+         , media_faces.x
+         , media_faces.y
+         , media_faces.width
+         , media_faces.height
+         , media_faces.confidence
+         , media_faces.face_size_score
+         , media_faces.frontality_score
+         , media_faces.visibility_score
+         , media_faces.feature_clarity_score
+      FROM media_faces
+     WHERE media_faces.id > ?
+       AND (
+               EXISTS (
+                   SELECT 1
+                     FROM face_group_finalization_manual_anchors
+                    WHERE face_group_finalization_manual_anchors.generation_id = ?
+                      AND face_group_finalization_manual_anchors.face_group_id = ?
+                      AND face_group_finalization_manual_anchors.face_id = media_faces.id
+               )
+            OR EXISTS (
+                   SELECT 1
+                     FROM face_group_members
+                    WHERE face_group_members.automatic_generation_id = ?
+                      AND face_group_members.face_group_id = ?
+                      AND face_group_members.face_id = media_faces.id
+               )
            )
+     ORDER BY media_faces.id
+     LIMIT ?
     "#;
+    pub const ADVANCE_REPRESENTATIVE_PAGE: &str = r#"
+    UPDATE face_group_finalizations
+       SET representative_cursor = ?
+         , best_representative_face_id = ?
+         , best_representative_score = ?
+         , updated_at = datetime('now')
+     WHERE run_id = ?
+       AND generation_id = ?
+       AND phase = 'representatives'
+       AND current_group_id = ?
+    "#;
+    pub const UPSERT_GENERATION_REPRESENTATIVE: &str = r#"
+    INSERT INTO face_group_representatives
+      ( generation_id
+      , face_group_id
+      , face_id
+    ) VALUES (?, ?, ?)
+    ON CONFLICT(generation_id, face_group_id) DO UPDATE SET
+        face_id = excluded.face_id
+    "#;
+    pub const UPDATE_BUILDING_AUTOMATIC_REPRESENTATIVE: &str =
+        "UPDATE face_groups SET representative_face_id = ? WHERE id = ? AND automatic_generation_id = ?";
+    pub const COMPLETE_FINALIZATION_GROUP: &str =
+        "UPDATE face_group_finalization_groups SET representative_face_id = ?, representative_score = ?, complete = 1 WHERE generation_id = ? AND face_group_id = ? AND complete = 0";
+    pub const FINISH_REPRESENTATIVE_GROUP: &str =
+        "UPDATE face_group_finalizations SET group_cursor = ?, current_group_id = NULL, representative_cursor = 0, best_representative_face_id = NULL, best_representative_score = NULL, updated_at = datetime('now') WHERE run_id = ? AND generation_id = ? AND phase = 'representatives' AND current_group_id = ?";
+    pub const FINISH_REPRESENTATIVES: &str =
+        "UPDATE face_group_finalizations SET phase = 'publishing', updated_at = datetime('now') WHERE run_id = ? AND phase = 'representatives' AND current_group_id IS NULL";
+    pub const COUNT_INCOMPLETE_FINALIZATION_GROUPS: &str =
+        "SELECT COUNT(*) FROM face_group_finalization_groups WHERE generation_id = ? AND complete = 0";
+    pub const RETIRE_ACTIVE_GENERATION: &str =
+        "UPDATE face_group_generations SET status = 'retired' WHERE status = 'active' AND id <> ?";
+    pub const ACTIVATE_GENERATION: &str =
+        "UPDATE face_group_generations SET status = 'active', published_at = datetime('now') WHERE id = ? AND status = 'building'";
+    pub const SWITCH_ACTIVE_GENERATION: &str = r#"
+    INSERT INTO face_group_generation_state
+      ( id
+      , active_generation_id
+    ) VALUES (1, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        active_generation_id = excluded.active_generation_id,
+        updated_at = datetime('now')
+    "#;
+    pub const ENTER_FINALIZATION_CLEANUP: &str =
+        "UPDATE face_group_finalizations SET phase = 'cleanup', updated_at = datetime('now') WHERE run_id = ? AND phase = 'publishing'";
+    pub const ENTER_RESTART_CLEANUP: &str =
+        "UPDATE face_group_finalizations SET phase = 'restart_cleanup', updated_at = datetime('now') WHERE run_id = ?";
+    pub const CANCEL_BUILDING_GENERATION: &str =
+        "UPDATE face_group_generations SET status = 'cancelled' WHERE run_id = ? AND status = 'building'";
+    pub const SELECT_GENERATION_STATUS: &str =
+        "SELECT status FROM face_group_generations WHERE id = ?";
+    pub const SELECT_FINALIZATION_CLEANUP: &str =
+        "SELECT run_id, generation_id, phase FROM face_group_finalizations WHERE phase IN ('cleanup', 'restart_cleanup') ORDER BY run_id LIMIT 1";
+    pub const DELETE_FINALIZATION_FACE_PAGE: &str =
+        "DELETE FROM face_group_finalization_faces WHERE rowid IN (SELECT rowid FROM face_group_finalization_faces WHERE generation_id = ? ORDER BY face_id LIMIT ?)";
+    pub const DELETE_FINALIZATION_MANUAL_PAGE: &str =
+        "DELETE FROM face_group_finalization_manual_anchors WHERE rowid IN (SELECT rowid FROM face_group_finalization_manual_anchors WHERE generation_id = ? ORDER BY face_id LIMIT ?)";
+    pub const DELETE_FINALIZATION_GROUP_PAGE: &str =
+        "DELETE FROM face_group_finalization_groups WHERE rowid IN (SELECT rowid FROM face_group_finalization_groups WHERE generation_id = ? ORDER BY face_group_id LIMIT ?)";
+    pub const DELETE_FINALIZATION: &str = "DELETE FROM face_group_finalizations WHERE run_id = ?";
+    pub const SELECT_RETIRED_GENERATION: &str = "SELECT id FROM face_group_generations WHERE status IN ('retired', 'cancelled') AND NOT EXISTS (SELECT 1 FROM face_group_finalizations WHERE face_group_finalizations.generation_id = face_group_generations.id) ORDER BY id LIMIT 1";
+    pub const DELETE_RETIRED_MEMBER_PAGE: &str =
+        "DELETE FROM face_group_members WHERE id IN (SELECT id FROM face_group_members WHERE automatic_generation_id = ? ORDER BY id LIMIT ?)";
+    pub const DELETE_RETIRED_REPRESENTATIVE_PAGE: &str =
+        "DELETE FROM face_group_representatives WHERE rowid IN (SELECT rowid FROM face_group_representatives WHERE generation_id = ? ORDER BY face_group_id LIMIT ?)";
+    pub const DELETE_RETIRED_GROUP_PAGE: &str =
+        "DELETE FROM face_groups WHERE id IN (SELECT id FROM face_groups WHERE automatic_generation_id = ? ORDER BY id LIMIT ?)";
+    pub const DELETE_RETIRED_GENERATION: &str =
+        "DELETE FROM face_group_generations WHERE id = ? AND status IN ('retired', 'cancelled')";
     pub const INSERT_GROUP: &str = "INSERT INTO face_groups (manual_curated) VALUES (0)";
     pub const INSERT_AUTOMATIC_MEMBER: &str = r#"
     INSERT INTO face_group_members
@@ -669,8 +1407,6 @@ pub mod faces {
       , face_id
       , manual_anchor
     ) VALUES (?, ?, 0)
-    ON CONFLICT(face_group_id, face_id) DO UPDATE SET
-        manual_anchor = 0
     "#;
     pub const INSERT_MANUAL_MEMBER: &str = r#"
     INSERT INTO face_group_members
@@ -678,9 +1414,13 @@ pub mod faces {
       , face_id
       , manual_anchor
     ) VALUES (?, ?, 1)
-    ON CONFLICT(face_group_id, face_id) DO UPDATE SET
-        manual_anchor = 1
+    ON CONFLICT(face_id)
+        WHERE manual_anchor = 1
+    DO UPDATE SET
+        face_group_id = excluded.face_group_id
     "#;
+    pub const DELETE_AUTOMATIC_MEMBERSHIP_FOR_FACE: &str =
+        "DELETE FROM face_group_members WHERE face_id = ? AND manual_anchor = 0";
     pub const INSERT_FACE: &str = r#"
     INSERT INTO media_faces
       ( media_id
@@ -711,10 +1451,53 @@ pub mod faces {
          , media_faces.frontality_score
          , media_faces.visibility_score
          , media_faces.feature_clarity_score
+     FROM face_group_members
+      JOIN media_faces ON media_faces.id = face_group_members.face_id
+     WHERE face_group_members.face_group_id = ?
+       AND (
+               face_group_members.manual_anchor = 1
+            OR face_group_members.automatic_generation_id = (
+                   SELECT active_generation_id
+                     FROM face_group_generation_state
+                    WHERE id = 1
+               )
+            OR (
+                   face_group_members.automatic_generation_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)
+               )
+           )
+     ORDER BY media_faces.id
+    "#;
+    pub const SELECT_GROUP_REPRESENTATIVE_CANDIDATE_PAGE: &str = r#"
+    SELECT media_faces.id
+         , media_faces.crop_path
+         , media_faces.x
+         , media_faces.y
+         , media_faces.width
+         , media_faces.height
+         , media_faces.confidence
+         , media_faces.face_size_score
+         , media_faces.frontality_score
+         , media_faces.visibility_score
+         , media_faces.feature_clarity_score
       FROM face_group_members
       JOIN media_faces ON media_faces.id = face_group_members.face_id
      WHERE face_group_members.face_group_id = ?
+       AND media_faces.id > ?
+       AND (
+               face_group_members.manual_anchor = 1
+            OR face_group_members.automatic_generation_id = (
+                   SELECT active_generation_id
+                     FROM face_group_generation_state
+                    WHERE id = 1
+               )
+            OR (
+                   face_group_members.automatic_generation_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)
+               )
+           )
      ORDER BY media_faces.id
+     LIMIT ?
     "#;
     pub const SELECT_VISIBLE_GROUP_REPRESENTATIVE_CANDIDATES: &str = r#"
     SELECT media_faces.id
@@ -734,44 +1517,175 @@ pub mod faces {
      WHERE face_group_members.face_group_id = ?
        AND media_access.user_id = ?
        AND media_access.deleted_at IS NULL
+       AND (
+               face_group_members.manual_anchor = 1
+            OR face_group_members.automatic_generation_id = (
+                   SELECT active_generation_id
+                     FROM face_group_generation_state
+                    WHERE id = 1
+               )
+            OR (
+                   face_group_members.automatic_generation_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)
+               )
+           )
      ORDER BY media_faces.id
     "#;
     pub const SELECT_VISIBLE_STORED_REPRESENTATIVE_CROP: &str = r#"
     SELECT media_faces.crop_path
       FROM face_groups
-      JOIN media_faces ON media_faces.id = face_groups.representative_face_id
+      JOIN media_faces ON media_faces.id = COALESCE(
+             (
+                 SELECT face_id
+                   FROM face_group_representatives
+                  WHERE face_group_representatives.generation_id = (
+                            SELECT active_generation_id
+                              FROM face_group_generation_state
+                             WHERE id = 1
+                        )
+                    AND face_group_representatives.face_group_id = face_groups.id
+             ),
+             face_groups.representative_face_id
+         )
       JOIN media_access ON media_access.media_id = media_faces.media_id
      WHERE face_groups.id = ?
        AND media_access.user_id = ?
        AND media_access.deleted_at IS NULL
+       AND (
+               face_groups.manual_curated = 1
+            OR face_groups.automatic_generation_id = (
+                   SELECT active_generation_id
+                     FROM face_group_generation_state
+                    WHERE id = 1
+               )
+            OR (
+                   face_groups.automatic_generation_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)
+               )
+           )
     "#;
     pub const UPDATE_GROUP_REPRESENTATIVE_ID: &str =
         "UPDATE face_groups SET representative_face_id = ? WHERE id = ?";
+    pub const SELECT_NEXT_GROUP_ID: &str =
+        "SELECT id FROM face_groups WHERE id > ? ORDER BY id LIMIT 1";
     pub const SELECT_ALL_GROUP_IDS: &str = "SELECT id FROM face_groups ORDER BY id";
     pub const DELETE_MEDIA_FACES: &str = "DELETE FROM media_faces WHERE media_id = ?";
-    pub const CANCEL_RECOVERED_CANCELLING_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
+    pub const CANCEL_RECOVERED_CANCELLING_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, attempts = attempts + CASE WHEN status = 'submitting' THEN 1 ELSE 0 END, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
     pub const QUEUE_RECOVERED_CANCELLATION_SCOPE: &str = "INSERT OR IGNORE INTO llm_cancellation_scopes (scope, task) SELECT 'task', 'face_detection' WHERE EXISTS (SELECT 1 FROM face_grouping_runs WHERE status = 'cancelling')";
     pub const QUEUE_RECOVERED_CANCELLATIONS: &str = "INSERT OR IGNORE INTO llm_job_cancellations (job_id, task) SELECT id, task FROM llm_jobs WHERE task = 'face_detection' AND status IN ('queued', 'submitting', 'submitted') AND face_grouping_run_id IN (SELECT id FROM face_grouping_runs WHERE status = 'cancelling')";
     pub const FINALIZE_RECOVERED_CANCELLING_RUNS: &str = "UPDATE face_grouping_runs SET status = 'cancelled', completed_at = datetime('now'), error = NULL WHERE status = 'cancelling'";
     pub const REQUEST_CANCEL_RUNS: &str =
         "UPDATE face_grouping_runs SET status = 'cancelling' WHERE status = 'running'";
-    pub const CLEAN_RUNS: &str = "DELETE FROM face_grouping_runs";
+    pub const COUNT_ACTIVE_RUNS: &str =
+        "SELECT COUNT(*) FROM face_grouping_runs WHERE status IN ('running', 'cancelling')";
+    pub const CLEAN_JOBS: &str = "DELETE FROM llm_jobs WHERE task = 'face_detection'";
+    pub const CLEAN_GENERATION_STATE: &str = "DELETE FROM face_group_generation_state";
     pub const CLEAN_GROUPS: &str = "DELETE FROM face_groups";
+    pub const CLEAN_GENERATIONS: &str = "DELETE FROM face_group_generations";
+    pub const CLEAN_RUNS: &str = "DELETE FROM face_grouping_runs";
+    pub const CLEAN_MANUAL_STATE: &str = "DELETE FROM face_group_manual_state";
     pub const CLEAN_FACES: &str = "DELETE FROM media_faces";
     pub const CLEAN_RESULTS: &str = "DELETE FROM media_face_detection_results";
-    pub const CLEAN_JOBS: &str = "DELETE FROM llm_jobs WHERE task = 'face_detection'";
     pub const SELECT_INPUT_CORRELATION: &str = "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
+    pub const SELECT_PREPARATION_INPUTS: &str = "SELECT sequence, frame_timestamp_ms, storage_root, file_path, byte_size, content_hash FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
     pub const SELECT_INPUT_PATH: &str = "SELECT storage_root, file_path, byte_size, content_hash FROM llm_job_inputs WHERE job_id = ? AND sequence = ?";
     pub const SELECT_MEDIA_CROPS: &str = "SELECT crop_path FROM media_faces WHERE media_id = ?";
     pub const UPSERT_RESULT: &str = "INSERT INTO media_face_detection_results (media_id, model_type, model_version) VALUES (?, 'face_detection', ?) ON CONFLICT(media_id) DO UPDATE SET model_type = excluded.model_type, model_version = excluded.model_version, completed_at = datetime('now')";
-    pub const LIST_GROUPS: &str = "SELECT fg.id, COUNT(fgm.face_id), COUNT(DISTINCT mf.media_id) AS media_count FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id ORDER BY media_count DESC, fg.id ASC LIMIT ? OFFSET ?";
-    pub const COUNT_VISIBLE_GROUPS: &str = "SELECT COUNT(*) FROM (SELECT fg.id FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id)";
-    pub const SELECT_GROUP: &str = "SELECT fg.id, COUNT(fgm.face_id), COUNT(DISTINCT mf.media_id) FROM face_groups AS fg JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id JOIN media_faces AS mf ON mf.id = fgm.face_id JOIN media_access AS ma ON ma.media_id = mf.media_id WHERE fg.id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL GROUP BY fg.id";
-    pub const SELECT_GROUP_MEDIA: &str = "SELECT DISTINCT m.id, m.filename, m.original_filename, m.media_type, m.mime_type, mm.width, mm.height, m.file_size, mm.duration_seconds, mm.date_taken, mm.gps_latitude, mm.gps_longitude, mm.camera_make, mm.camera_model, mm.lens_make, mm.lens_model, mm.iso, mm.exposure_time, mm.f_number, mm.focal_length, mm.focal_length_35mm, mm.gps_altitude, mm.location_city, mm.location_state, mm.location_country, mm.video_codec, mm.keywords, m.created_at FROM media AS m JOIN media_faces AS mf ON mf.media_id = m.id JOIN face_group_members AS fgm ON fgm.face_id = mf.id JOIN media_access AS ma ON ma.media_id = m.id LEFT JOIN media_metadata AS mm ON mm.media_id = m.id WHERE fgm.face_group_id = ? AND ma.user_id = ? AND ma.deleted_at IS NULL ORDER BY m.id";
-    pub const SELECT_EXISTING_GROUPS: &str = "SELECT id FROM face_groups WHERE id IN (%s)";
-    pub const SELECT_MERGE_MEMBERS: &str =
-        "SELECT face_id FROM face_group_members WHERE face_group_id IN (%s)";
-    pub const UPDATE_MANUAL_GROUP: &str = "UPDATE face_groups SET manual_curated = 1 WHERE id = ?";
+    pub const LIST_GROUPS: &str = r#"
+    SELECT fg.id
+         , COUNT(DISTINCT fgm.face_id)
+         , COUNT(DISTINCT mf.media_id) AS media_count
+      FROM face_groups AS fg
+      JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id
+      JOIN media_faces AS mf ON mf.id = fgm.face_id
+      JOIN media_access AS ma ON ma.media_id = mf.media_id
+     WHERE ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND (fg.manual_curated = 1 OR fg.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fg.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+       AND (fgm.manual_anchor = 1 OR fgm.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fgm.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+     GROUP BY fg.id
+     ORDER BY media_count DESC
+            , fg.id ASC
+     LIMIT ? OFFSET ?
+    "#;
+    pub const COUNT_VISIBLE_GROUPS: &str = r#"
+    SELECT COUNT(*)
+      FROM (
+               SELECT fg.id
+                 FROM face_groups AS fg
+                 JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id
+                 JOIN media_faces AS mf ON mf.id = fgm.face_id
+                 JOIN media_access AS ma ON ma.media_id = mf.media_id
+                WHERE ma.user_id = ?
+                  AND ma.deleted_at IS NULL
+                  AND (fg.manual_curated = 1 OR fg.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fg.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+                  AND (fgm.manual_anchor = 1 OR fgm.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fgm.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+                GROUP BY fg.id
+           )
+    "#;
+    pub const SELECT_GROUP: &str = r#"
+    SELECT fg.id
+         , COUNT(DISTINCT fgm.face_id)
+         , COUNT(DISTINCT mf.media_id)
+      FROM face_groups AS fg
+      JOIN face_group_members AS fgm ON fgm.face_group_id = fg.id
+      JOIN media_faces AS mf ON mf.id = fgm.face_id
+      JOIN media_access AS ma ON ma.media_id = mf.media_id
+     WHERE fg.id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND (fg.manual_curated = 1 OR fg.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fg.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+       AND (fgm.manual_anchor = 1 OR fgm.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fgm.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+     GROUP BY fg.id
+    "#;
+    pub const SELECT_GROUP_MEDIA: &str = r#"
+    SELECT DISTINCT m.id
+         , m.filename
+         , m.original_filename
+         , m.media_type
+         , m.mime_type
+         , mm.width
+         , mm.height
+         , m.file_size
+         , mm.duration_seconds
+         , mm.date_taken
+         , mm.gps_latitude
+         , mm.gps_longitude
+         , mm.camera_make
+         , mm.camera_model
+         , mm.lens_make
+         , mm.lens_model
+         , mm.iso
+         , mm.exposure_time
+         , mm.f_number
+         , mm.focal_length
+         , mm.focal_length_35mm
+         , mm.gps_altitude
+         , mm.location_city
+         , mm.location_state
+         , mm.location_country
+         , mm.video_codec
+         , mm.keywords
+         , m.created_at
+      FROM media AS m
+      JOIN media_faces AS mf ON mf.media_id = m.id
+      JOIN face_group_members AS fgm ON fgm.face_id = mf.id
+      JOIN face_groups AS fg ON fg.id = fgm.face_group_id
+      JOIN media_access AS ma ON ma.media_id = m.id
+      LEFT JOIN media_metadata AS mm ON mm.media_id = m.id
+     WHERE fgm.face_group_id = ?
+       AND ma.user_id = ?
+       AND ma.deleted_at IS NULL
+       AND (fg.manual_curated = 1 OR fg.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fg.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+       AND (fgm.manual_anchor = 1 OR fgm.automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (fgm.automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))
+     ORDER BY m.id
+    "#;
+    pub const SELECT_EXISTING_GROUPS: &str = "SELECT id FROM face_groups WHERE id IN (%s) AND (manual_curated = 1 OR automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))";
+    pub const SELECT_MERGE_MEMBERS: &str = "SELECT DISTINCT face_id FROM face_group_members WHERE face_group_id IN (%s) AND (manual_anchor = 1 OR automatic_generation_id = (SELECT active_generation_id FROM face_group_generation_state WHERE id = 1) OR (automatic_generation_id IS NULL AND NOT EXISTS (SELECT 1 FROM face_group_generation_state WHERE id = 1)))";
+    pub const UPDATE_MANUAL_GROUP: &str =
+        "UPDATE face_groups SET manual_curated = 1, automatic_generation_id = NULL WHERE id = ?";
+    pub const DELETE_GENERATION_REPRESENTATIVES_FOR_GROUP: &str =
+        "DELETE FROM face_group_representatives WHERE face_group_id = ?";
     pub const DELETE_GROUP: &str = "DELETE FROM face_groups WHERE id = ?";
     pub const COUNT_GROUP_MEMBERS: &str =
         "SELECT COUNT(*) FROM face_group_members WHERE face_group_id = ?";
@@ -793,24 +1707,237 @@ pub mod faces {
 pub mod llm_callback {
     pub const SELECT_JOB: &str =
         "SELECT media_id, task, attempts, status FROM llm_jobs WHERE id = ?";
+    pub const SELECT_JOB_FOR_RESULT_RECEIPT: &str =
+        "SELECT media_id, task, attempts, status, state_version FROM llm_jobs WHERE id = ?";
     pub const SELECT_JOB_INPUT_CORRELATION: &str =
         "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
-    pub const MARK_COMPLETED: &str = "UPDATE llm_jobs SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
-    pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
-    pub const INSERT_RECEIVED_RESULT: &str =
-        "INSERT OR IGNORE INTO llm_job_results (job_id, payload) VALUES (?, ?)";
-    pub const MARK_UNACKNOWLEDGED_RESULT_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', attempts = ?, submitted_at = COALESCE(submitted_at, datetime('now')), claimed_at = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting') AND attempts + 1 = ?";
-    pub const MARK_RESULT_CORRELATION_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting', 'submitted')";
-    pub const SELECT_RESULT_CANDIDATES: &str = r#"
+    pub const SELECT_RESULT_RECEIPT_STATE: &str =
+        "SELECT attempt, job_version, state FROM llm_result_receipts WHERE job_id = ?";
+    pub const INSERT_RESULT_RECEIPT: &str = r#"
+        INSERT INTO llm_result_receipts (
+            job_id, attempt, job_version, media_id, task, result_status,
+            model_type, model_version, encoding, record_count, byte_size,
+            content_hash, journal_group_id, sqlite_reservation_id, inbox_path, receive_token, state,
+            result_product_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'receiving', 1)
+    "#;
+    pub const MARK_RESULT_RECEIPT_RECEIVED: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'received', received_at = datetime('now'), updated_at = datetime('now')
+         WHERE job_id = ? AND attempt = ? AND job_version = ? AND journal_group_id = ?
+           AND state = 'receiving' AND cancel_requested = 0
+    "#;
+    pub const SELECT_RESULT_RECEIPT_PROGRESS: &str = r#"
+        SELECT attempt, state, claim_token, next_record_sequence, next_byte_offset
+          FROM llm_result_receipts
+         WHERE job_id = ?
+    "#;
+    pub const INSERT_RESULT_STAGING_RECORD: &str = r#"
+        INSERT INTO llm_result_staging (
+            job_id, attempt, record_sequence, input_sequence, kind,
+            byte_offset, encoded_size, normalized_payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, attempt, record_sequence) DO UPDATE SET
+            input_sequence = excluded.input_sequence,
+            kind = excluded.kind,
+            byte_offset = excluded.byte_offset,
+            encoded_size = excluded.encoded_size,
+            normalized_payload = excluded.normalized_payload
+    "#;
+    pub const ADVANCE_RESULT_RECEIPT_PROGRESS: &str = r#"
+        UPDATE llm_result_receipts
+           SET next_record_sequence = ?, next_byte_offset = ?, updated_at = datetime('now')
+         WHERE job_id = ? AND attempt = ? AND state = 'processing' AND claim_token = ?
+           AND next_record_sequence = ? AND next_byte_offset = ?
+    "#;
+    pub const CLAIM_RESULT_RECEIPT: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'processing', claim_token = ?, updated_at = datetime('now')
+         WHERE job_id = ? AND state = 'received' AND claim_token IS NULL
+           AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+    "#;
+    pub const RELEASE_RESULT_RECEIPT_CLAIM: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'received', claim_token = NULL, updated_at = datetime('now')
+         WHERE job_id = ? AND state = 'processing' AND claim_token = ?
+    "#;
+    pub const RECOVER_RESULT_RECEIPT_CLAIMS: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'received', claim_token = NULL, updated_at = datetime('now')
+         WHERE state = 'processing' AND claim_token IS NOT NULL
+    "#;
+    pub const VERIFY_RESULT_RECEIPT_CLAIM: &str = r#"
+        SELECT 1 FROM llm_result_receipts
+         WHERE job_id = ? AND state = 'processing' AND claim_token = ?
+    "#;
+    pub const FINALIZE_RESULT_ARTIFACT_GROUP: &str = r#"
+        UPDATE file_operation_groups
+           SET product_target = NULL, state = 'cleanup_pending',
+               completion_outcome = 'published', version = version + 1,
+               recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups),
+               updated_at = datetime('now')
+         WHERE id = ? AND version = ? AND state = 'files_committed'
+           AND owner_kind = 'llm_result'
+           AND product_target = 'llm_result_face_crops' AND product_version = ?
+           AND EXISTS (
+                   SELECT 1 FROM llm_result_receipts
+                    WHERE job_id = file_operation_groups.owner_id
+                      AND state = 'processing' AND claim_token = file_operation_groups.claim_token
+                      AND result_product_version = file_operation_groups.product_version
+               )
+    "#;
+    pub const SELECT_RESULT_STAGING_CLEANUP: &str = r#"
+        SELECT r.job_id
+          FROM llm_result_receipts AS r
+         WHERE r.state = 'cleanup_pending'
+            OR (
+                   r.state IN ('file_cleanup_pending', 'cleaned', 'discarded', 'failed')
+               AND EXISTS (
+                       SELECT 1
+                         FROM data_dir_space_reservations AS s
+                        WHERE s.id = r.sqlite_reservation_id
+                          AND s.state = 'active'
+                   )
+               AND (
+                       r.state != 'file_cleanup_pending'
+                    OR EXISTS (
+                           SELECT 1
+                             FROM file_operation_groups AS g
+                            WHERE g.id = r.journal_group_id
+                              AND g.state IN ('cleaned', 'rolled_back')
+                       )
+                   )
+               AND NOT (
+                       r.state = 'discarded'
+                   AND EXISTS (
+                           SELECT 1
+                             FROM file_operation_groups AS rolled_back_group
+                            WHERE rolled_back_group.id = r.journal_group_id
+                              AND rolled_back_group.state = 'rolled_back'
+                       )
+                   )
+               )
+      ORDER BY r.updated_at, r.job_id
+         LIMIT ?
+    "#;
+    pub const SELECT_RESULT_RECEIPT_STATE_ONLY: &str =
+        "SELECT state FROM llm_result_receipts WHERE job_id = ?";
+    pub const DELETE_RESULT_STAGING_PAGE: &str = r#"
+        DELETE FROM llm_result_staging
+         WHERE rowid IN (
+                   SELECT rowid
+                     FROM (
+                           SELECT rowid, attempt, record_sequence,
+                                  SUM(encoded_size) OVER (
+                                      ORDER BY attempt, record_sequence
+                                  ) AS cumulative_bytes
+                             FROM llm_result_staging
+                            WHERE job_id = ?
+                          )
+                    WHERE cumulative_bytes <= 4194304
+                 ORDER BY attempt, record_sequence
+                    LIMIT ?
+               )
+    "#;
+    pub const COUNT_RESULT_STAGING: &str =
+        "SELECT COUNT(*) FROM llm_result_staging WHERE job_id = ?";
+    pub const RESULT_CLEANUP_IS_TERMINAL: &str = r#"
+        SELECT EXISTS (
+                   SELECT 1
+                     FROM llm_result_receipts AS r
+                     JOIN file_operation_groups AS g ON g.id = r.journal_group_id
+                    WHERE r.job_id = ?
+                      AND r.state IN ('cleaned', 'discarded', 'failed')
+                      AND g.state IN ('cleaned', 'rolled_back')
+                      AND NOT EXISTS (
+                              SELECT 1 FROM llm_result_staging AS staging
+                               WHERE staging.job_id = r.job_id
+                          )
+               )
+    "#;
+    pub const SELECT_RESULT_STAGING_PAGE: &str = r#"
+        SELECT record_sequence, input_sequence, kind, byte_offset, encoded_size, normalized_payload
+          FROM llm_result_staging
+         WHERE job_id = ? AND attempt = ? AND record_sequence > ?
+           AND EXISTS (
+                   SELECT 1 FROM llm_result_receipts
+                    WHERE llm_result_receipts.job_id = llm_result_staging.job_id
+                      AND state = 'processing' AND claim_token = ?
+               )
+      ORDER BY record_sequence
+         LIMIT ?
+    "#;
+    pub const MARK_RESULT_RECEIPT_FILE_CLEANUP_PENDING: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'file_cleanup_pending', updated_at = datetime('now')
+         WHERE job_id = ? AND state = 'cleanup_pending'
+    "#;
+    pub const MARK_RESULT_RECEIPT_CLEANED_AFTER_FILE: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'cleaned', updated_at = datetime('now')
+         WHERE job_id = ? AND state = 'file_cleanup_pending'
+           AND EXISTS (
+                   SELECT 1 FROM file_operation_groups
+                    WHERE id = llm_result_receipts.journal_group_id AND state = 'cleaned'
+               )
+    "#;
+    pub const DISCARD_RESULT_RECEIPT: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'discarded', cancel_requested = 1, claim_token = NULL,
+               last_error = ?, updated_at = datetime('now')
+         WHERE job_id = ? AND attempt = ?
+           AND (? IS NULL OR job_version = ?)
+           AND state IN ('receiving', 'received', 'processing')
+    "#;
+    pub const COMPLETE_RESULT_RECEIPT_GROUP: &str = r#"
+        UPDATE file_operation_groups
+           SET state = 'completed', completion_outcome = 'published', version = version + 1,
+               updated_at = datetime('now'), terminal_at = datetime('now')
+         WHERE id = ? AND version = ? AND state = 'files_committed'
+           AND product_target = 'llm_result_inbox'
+    "#;
+    pub const QUEUE_RESULT_RECEIPT_CLEANUP: &str = r#"
+        UPDATE file_operation_groups
+           SET product_target = NULL, state = 'cleanup_pending',
+               completion_outcome = 'discarded', version = version + 1,
+               recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups),
+               updated_at = datetime('now'), terminal_at = NULL
+         WHERE id = (SELECT journal_group_id FROM llm_result_receipts WHERE job_id = ?)
+           AND kind = 'llm_result_receive' AND product_target = 'llm_result_inbox'
+           AND state = 'completed'
+    "#;
+    pub const MARK_RESULT_RECEIPT_CLEANUP_PENDING: &str = r#"
+        UPDATE llm_result_receipts
+           SET state = 'cleanup_pending', claim_token = NULL, updated_at = datetime('now')
+         WHERE job_id = ? AND state IN ('received', 'processing')
+    "#;
+    pub const MARK_COMPLETED: &str = "UPDATE llm_jobs SET status = 'completed', state_version = state_version + 1, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
+    pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', state_version = state_version + 1, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ?";
+    pub const MARK_UNACKNOWLEDGED_RESULT_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', state_version = state_version + 1, attempts = ?, submitted_at = COALESCE(submitted_at, datetime('now')), claimed_at = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting') AND attempts + 1 = ?";
+    pub const MARK_RESULT_CORRELATION_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', state_version = state_version + 1, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status IN ('queued', 'submitting', 'submitted')";
+    pub const SELECT_JOURNAL_RESULT_CANDIDATES: &str = r#"
         SELECT job_id
-             , payload
-          FROM llm_job_results
-      ORDER BY received_at
+             , media_id
+             , task
+             , attempt
+             , result_status
+             , model_type
+             , model_version
+             , encoding
+             , record_count
+             , byte_size
+             , content_hash
+             , inbox_path
+             , next_record_sequence
+             , next_byte_offset
+             , result_product_version
+          FROM llm_result_receipts
+         WHERE state = 'received'
+      ORDER BY updated_at
              , job_id
          LIMIT ?
     "#;
-    pub const DELETE_RESULT: &str = "DELETE FROM llm_job_results WHERE job_id = ?";
-    pub const MARK_RECEIVED_RESULT_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted'";
+    pub const MARK_RECEIVED_RESULT_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', state_version = state_version + 1, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted'";
     pub const UPSERT_TEXT: &str = "INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, ?, ?, ?) ON CONFLICT(media_id, model_type) DO UPDATE SET model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_INPUT_TEXT: &str = "INSERT INTO media_text_inputs (media_id, model_type, sequence, frame_timestamp_ms, model_version, string) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(media_id, model_type, sequence) DO UPDATE SET frame_timestamp_ms = excluded.frame_timestamp_ms, model_version = excluded.model_version, string = excluded.string, created_at = datetime('now')";
     pub const UPSERT_AESTHETICS: &str = "INSERT INTO media_aesthetics (media_id, model_type, model_version, aesthetic_score, scenic_score, simplicity_score, landscape_score, technical_quality_score) VALUES (?, 'image_aesthetics', ?, ?, ?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET model_version = excluded.model_version, aesthetic_score = excluded.aesthetic_score, scenic_score = excluded.scenic_score, simplicity_score = excluded.simplicity_score, landscape_score = excluded.landscape_score, technical_quality_score = excluded.technical_quality_score, completed_at = datetime('now')";
@@ -901,7 +2028,6 @@ pub mod places {
 
     const SELECT_COVER: &str = r#"
     SELECT thumbnail_path
-         , file_path
       FROM candidates
      ORDER BY has_aesthetics DESC
             , cover_score DESC
@@ -1029,6 +2155,7 @@ pub mod media {
          , m.original_filename
          , m.media_type
          , mm.thumbnail_path
+         , mm.preview_path
       FROM media AS m
       JOIN media_access AS ma ON m.id = ma.media_id
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
@@ -1043,6 +2170,7 @@ pub mod media {
          , m.original_filename
          , m.media_type
          , mm.thumbnail_path
+         , mm.preview_path
       FROM media AS m
       JOIN media_access AS ma ON m.id = ma.media_id
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
@@ -1065,40 +2193,6 @@ pub mod media {
        AND mm.gps_longitude IS NOT NULL
     "#
     );
-
-    const SELECT_THUMBNAIL_BATCH: &str = r#"
-    SELECT m.id
-         , mm.thumbnail_path
-         , m.file_path
-         , m.media_type
-         , ma.user_id
-      FROM media AS m
-      JOIN media_access AS ma ON m.id = ma.media_id
-      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
-     WHERE ma.user_id = ?
-       AND ma.deleted_at IS NULL
-       AND m.id IN (%s)
-    "#;
-
-    const SELECT_PREVIEW_BATCH: &str = r#"
-    SELECT m.id
-         , m.file_path
-         , m.media_type
-         , m.mime_type
-      FROM media AS m
-      JOIN media_access AS ma ON m.id = ma.media_id
-     WHERE ma.user_id = ?
-       AND ma.deleted_at IS NULL
-       AND m.id IN (%s)
-    "#;
-
-    pub fn build_thumbnail_batch_query(count: usize) -> String {
-        SELECT_THUMBNAIL_BATCH.replace("%s", &placeholders(count))
-    }
-
-    pub fn build_preview_batch_query(count: usize) -> String {
-        SELECT_PREVIEW_BATCH.replace("%s", &placeholders(count))
-    }
 
     pub const UPDATE_CONTENT_HASH: &str = r#"
     UPDATE media
@@ -1225,13 +2319,49 @@ pub mod media_text {
 }
 
 pub mod metadata {
-    pub const SELECT_IMPORTED_MEDIA: &str =
-        "SELECT file_path, media_type, content_hash, original_filename, mime_type, file_size FROM media WHERE id = ? AND import_state = 'imported'";
+    pub const SELECT_IMPORTED_MEDIA: &str = r#"
+    SELECT media.file_path
+         , media.media_type
+         , media.content_hash
+         , media.original_filename
+         , media.mime_type
+         , COALESCE(media_metadata.artifact_version, 0)
+         , media_metadata.thumbnail_path
+         , media_metadata.preview_path
+      FROM media
+      LEFT JOIN media_metadata ON media_metadata.media_id = media.id
+     WHERE media.id = ?
+       AND media.import_state = 'imported'
+    "#;
     pub const DELETE_RTREE_FOR_MEDIA: &str = "DELETE FROM media_rtree WHERE media_id = ?";
+    pub const FINALIZE_ARTIFACT_GROUP: &str = r#"
+    UPDATE file_operation_groups
+       SET product_target = NULL
+         , state = 'cleanup_pending'
+         , completion_outcome = 'published'
+         , version = version + 1
+         , recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups)
+         , updated_at = datetime('now')
+         , terminal_at = NULL
+     WHERE id = ?
+       AND version = ?
+       AND state = 'files_committed'
+       AND owner_kind = 'metadata_generation'
+       AND product_target = 'metadata_artifacts'
+       AND product_version = ?
+       AND claim_token = ?
+       AND EXISTS (
+               SELECT 1
+                 FROM media_metadata_jobs
+                WHERE media_metadata_jobs.claim_token = file_operation_groups.claim_token
+                  AND media_metadata_jobs.status = 'processing'
+           )
+    "#;
     pub const INSERT_RTREE: &str = "INSERT INTO media_rtree (media_id, min_lat, max_lat, min_lon, max_lon) VALUES (?, ?, ?, ?, ?)";
     pub const UPSERT_GEOHASH: &str = "INSERT INTO media_metadata (media_id, geohash) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET geohash = excluded.geohash";
     pub const DELETE_AI_INPUTS_FOR_TASK: &str =
         "DELETE FROM media_ai_inputs WHERE media_id = ? AND task = ?";
+    pub const DELETE_AI_INPUTS_FOR_MEDIA: &str = "DELETE FROM media_ai_inputs WHERE media_id = ?";
     pub const INSERT_AI_INPUT: &str = "INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     pub const DELETE_SOURCES_FOR_MEDIA: &str =
         "DELETE FROM media_metadata_sources WHERE media_id = ?";
@@ -1341,11 +2471,13 @@ pub mod metadata {
       , duration_seconds = excluded.duration_seconds
     "#;
 
-    pub const UPDATE_THUMBNAIL: &str = r#"
-    INSERT INTO media_metadata (thumbnail_path, media_id)
-    VALUES (?, ?)
+    pub const UPDATE_ARTIFACT_GENERATION: &str = r#"
+    INSERT INTO media_metadata (thumbnail_path, preview_path, artifact_version, media_id)
+    VALUES (?, ?, ?, ?)
     ON CONFLICT(media_id) DO UPDATE SET
         thumbnail_path = excluded.thumbnail_path
+      , preview_path = excluded.preview_path
+      , artifact_version = excluded.artifact_version
     "#;
 }
 
@@ -1679,6 +2811,51 @@ pub mod users {
 }
 
 pub mod auth {
+    pub const PRUNE_ATTEMPT_BUCKETS: &str = r#"
+    DELETE FROM auth_attempt_buckets
+     WHERE bucket_key IN (
+           SELECT bucket_key
+             FROM auth_attempt_buckets
+            WHERE last_seen_at <= ?
+              AND (locked_until IS NULL OR locked_until <= ?)
+            ORDER BY last_seen_at, bucket_key
+            LIMIT 256
+     )
+    "#;
+
+    pub const COUNT_ATTEMPT_BUCKETS: &str = "SELECT COUNT(*) FROM auth_attempt_buckets";
+
+    pub const SELECT_ATTEMPT_BUCKET: &str = r#"
+    SELECT window_started_at
+         , last_seen_at
+         , attempts
+         , locked_until
+      FROM auth_attempt_buckets
+     WHERE bucket_key = ?
+    "#;
+
+    pub const UPSERT_ATTEMPT_BUCKET: &str = r#"
+    INSERT INTO auth_attempt_buckets (
+        bucket_key
+      , bucket_kind
+      , window_started_at
+      , last_seen_at
+      , attempts
+      , locked_until
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(bucket_key) DO UPDATE SET
+        bucket_kind = excluded.bucket_kind
+      , window_started_at = excluded.window_started_at
+      , last_seen_at = excluded.last_seen_at
+      , attempts = excluded.attempts
+      , locked_until = excluded.locked_until
+    "#;
+
+    pub const DELETE_ATTEMPT_BUCKETS: &str = r#"
+    DELETE FROM auth_attempt_buckets
+     WHERE bucket_key IN (?, ?)
+    "#;
+
     pub const SELECT_USER_BY_USERNAME: &str = r#"
     SELECT id
          , username
@@ -1918,27 +3095,6 @@ pub mod public {
 }
 
 pub mod trash {
-    const SELECT_THUMBNAIL_BATCH: &str = r#"
-    SELECT m.id
-         , mm.thumbnail_path
-         , m.file_path
-         , m.media_type
-         , ma.user_id
-      FROM media AS m
-      JOIN media_access AS ma ON m.id = ma.media_id
-      LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
-     WHERE ma.user_id = ?
-       AND ma.deleted_at IS NOT NULL
-       AND m.id IN (%s)
-    "#;
-
-    pub fn build_thumbnail_batch_query(count: usize) -> String {
-        let placeholders = std::iter::repeat_n("?", count)
-            .collect::<Vec<_>>()
-            .join(", ");
-        SELECT_THUMBNAIL_BATCH.replace("%s", &placeholders)
-    }
-
     pub const DELETE_EMPTY_FACE_GROUPS: &str = "DELETE FROM face_groups WHERE NOT EXISTS (SELECT 1 FROM face_group_members WHERE face_group_members.face_group_id = face_groups.id)";
     pub const SELECT_DELETED: &str = r#"
     SELECT m.id
@@ -1997,7 +3153,7 @@ pub mod trash {
     SELECT COUNT(*) FROM media_access WHERE media_id = ?
     "#;
 
-    pub const SELECT_ALL_DELETED: &str = r#"
+    pub const SELECT_ALL_DELETED_PAGE: &str = r#"
     SELECT m.id
          , m.file_path
          , mm.thumbnail_path
@@ -2006,9 +3162,11 @@ pub mod trash {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.user_id = ?
        AND ma.deleted_at IS NOT NULL
+     ORDER BY m.id
+     LIMIT ?
     "#;
 
-    pub const SELECT_OLD_DELETED: &str = r#"
+    pub const SELECT_OLD_DELETED_PAGE: &str = r#"
     SELECT m.id
          , m.file_path
          , mm.thumbnail_path
@@ -2018,6 +3176,8 @@ pub mod trash {
       LEFT JOIN media_metadata AS mm ON m.id = mm.media_id
      WHERE ma.deleted_at IS NOT NULL
        AND ma.deleted_at < ?
+     ORDER BY ma.deleted_at, m.id, ma.user_id
+     LIMIT ?
     "#;
 }
 
@@ -2083,14 +3243,14 @@ pub mod deduplicate {
     pub const DELETE_HASH_BANDS_FROM_OTHER_MODEL: &str = "DELETE FROM media_similarity_hash_bands WHERE media_id IN (SELECT media_id FROM media_similarity_index WHERE processing_status = 1 AND model_version != ?)";
     pub const DELETE_INDEXES_FROM_OTHER_MODEL: &str =
         "DELETE FROM media_similarity_index WHERE processing_status = 1 AND model_version != ?";
-    pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
-    pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
+    pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
+    pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
     pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";
-    pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
-    pub const REQUEUE_MISSING_INPUT_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', last_error = NULL, claimed_at = NULL, completed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND task = 'image_clustering' AND status = 'failed' AND last_error = 'missing prepared AI inputs' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = 'image_clustering')";
+    pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
+    pub const REQUEUE_MISSING_INPUT_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, last_error = NULL, claimed_at = NULL, completed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND task = 'image_clustering' AND status = 'failed' AND last_error = 'missing prepared AI inputs' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = 'image_clustering')";
     pub const SELECT_ACTIVE_RUNS: &str =
         "SELECT id, status FROM media_similarity_runs WHERE status IN ('running', 'cancelling')";
-    pub const CANCEL_UNSUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', completed_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting')";
+    pub const CANCEL_UNSUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, completed_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting')";
     pub const MARK_RUN_CANCELLED: &str = "UPDATE media_similarity_runs SET status = 'cancelled', completed_at = datetime('now') WHERE id = ?";
     pub const COUNT_PENDING_JOBS: &str = "SELECT COUNT(*) FROM llm_jobs WHERE deduplicate_run_id = ? AND status IN ('queued', 'submitting', 'submitted')";
     pub const COUNT_FAILED_JOBS: &str =
@@ -2132,6 +3292,13 @@ pub mod deduplicate {
     SELECT COALESCE(scheduled_for, started_at)
       FROM media_similarity_runs
      WHERE status = 'completed'
+     ORDER BY id DESC
+     LIMIT 1
+    "#;
+
+    pub const SELECT_LATEST_RUN_STATUS: &str = r#"
+    SELECT status
+      FROM media_similarity_runs
      ORDER BY id DESC
      LIMIT 1
     "#;
@@ -2272,23 +3439,6 @@ pub mod deduplicate {
      LIMIT ?
     "#;
 
-    pub const COUNT_DIRTY: &str = r#"
-    SELECT COUNT(*)
-      FROM media_similarity_dirty
-    "#;
-
-    pub const SELECT_CURRENT_INDEX_PAGE: &str = r#"
-    SELECT media_id
-         , embedding
-         , perceptual_hash
-         , capture_time_seconds
-     FROM media_similarity_index
-     WHERE media_id > ?
-       AND processing_status = 1
-     ORDER BY media_id
-     LIMIT ?
-    "#;
-
     pub const SELECT_CURRENT_INDEX_BY_MEDIA_ID: &str = r#"
     SELECT media_id
          , embedding
@@ -2305,25 +3455,29 @@ pub mod deduplicate {
      WHERE media_id = ?
     "#;
 
-    pub const SELECT_BAND_CANDIDATES: &str = r#"
-    SELECT DISTINCT candidate_index.media_id
-         , candidate_index.embedding
-         , candidate_index.perceptual_hash
-         , candidate_index.capture_time_seconds
-      FROM media_similarity_hash_bands AS source_band
-      JOIN media_similarity_hash_bands AS candidate_band
-        ON candidate_band.band_index = source_band.band_index
-       AND candidate_band.band_value = source_band.band_value
-      JOIN media_similarity_index AS candidate_index ON candidate_index.media_id = candidate_band.media_id
-     WHERE source_band.media_id = ?
-       AND candidate_index.media_id < ?
-       AND candidate_index.media_id > ?
-       AND candidate_index.processing_status = 1
-     ORDER BY candidate_index.media_id
+    pub const SELECT_BAND_CANDIDATE_PAGE: &str = r#"
+    SELECT candidate.media_id
+         , candidate.embedding
+         , candidate.perceptual_hash
+         , candidate.capture_time_seconds
+      FROM media_similarity_index AS candidate
+     WHERE candidate.media_id < ?
+       AND candidate.media_id > ?
+       AND candidate.processing_status = 1
+       AND EXISTS (
+            SELECT 1
+              FROM media_similarity_hash_bands AS source_band
+              JOIN media_similarity_hash_bands AS candidate_band
+                ON candidate_band.band_index = source_band.band_index
+               AND candidate_band.band_value = source_band.band_value
+             WHERE source_band.media_id = ?
+               AND candidate_band.media_id = candidate.media_id
+       )
+     ORDER BY candidate.media_id
      LIMIT ?
     "#;
 
-    pub const SELECT_TIME_CANDIDATES: &str = r#"
+    pub const SELECT_TIME_CANDIDATE_PAGE: &str = r#"
     SELECT media_id
          , embedding
          , perceptual_hash
@@ -2335,6 +3489,583 @@ pub mod deduplicate {
        AND processing_status = 1
      ORDER BY media_id
      LIMIT ?
+    "#;
+
+    pub const SELECT_FINALIZATION_CLEANUP: &str = r#"
+    SELECT run_id
+      FROM media_similarity_finalizations
+     WHERE phase = 'cleanup'
+     ORDER BY run_id
+     LIMIT 1
+    "#;
+
+    pub const SELECT_RETIRED_GENERATION: &str = r#"
+    SELECT id
+      FROM media_similarity_generations
+     WHERE status = 'retiring'
+    UNION ALL
+    SELECT -1
+     WHERE EXISTS (SELECT 1 FROM media_similarity_generation_state WHERE singleton = 1)
+       AND EXISTS (SELECT 1 FROM media_similarity_clusters WHERE generation_id IS NULL)
+     ORDER BY id
+     LIMIT 1
+    "#;
+
+    pub const SELECT_FINALIZATION_STATE: &str = r#"
+    SELECT generation_id
+         , phase
+         , source_media_id
+         , source_cursor
+         , candidate_kind
+         , candidate_cursor
+         , label_kind
+         , label_media_cursor
+         , label_edge_left_cursor
+         , label_edge_right_cursor
+         , label_pass_changed
+         , group_kind
+         , group_label_cursor
+         , group_member_cursor
+         , group_cluster_id
+         , completion_error
+         , dirty_cursor
+      FROM media_similarity_finalizations
+     WHERE run_id = ?
+    "#;
+
+    pub const SELECT_NEXT_INDEX_ID: &str = r#"
+    SELECT media_id
+      FROM media_similarity_index
+     WHERE media_id > ?
+       AND processing_status = 1
+     ORDER BY media_id
+     LIMIT 1
+    "#;
+
+    pub const SELECT_LABEL_INITIALIZATION_PAGE: &str = r#"
+    SELECT media_id
+      FROM media_similarity_index
+     WHERE media_id > ?
+       AND processing_status = 1
+     ORDER BY media_id
+     LIMIT ?
+    "#;
+
+    pub const SELECT_EDGE_PAGE: &str = r#"
+    SELECT left_media_id
+         , right_media_id
+      FROM media_similarity_edges
+     WHERE run_id = ?
+       AND kind = ?
+       AND (
+            left_media_id > ?
+         OR (left_media_id = ? AND right_media_id > ?)
+       )
+     ORDER BY left_media_id
+            , right_media_id
+     LIMIT ?
+    "#;
+
+    pub const SELECT_NEXT_COMPONENT: &str = r#"
+    SELECT component_label
+      FROM media_similarity_labels
+     WHERE run_id = ?
+       AND kind = ?
+       AND component_label > ?
+     GROUP BY component_label
+    HAVING COUNT(*) >= 2
+     ORDER BY component_label
+     LIMIT 1
+    "#;
+
+    pub const SELECT_COMPONENT_MEMBER_PAGE: &str = r#"
+    SELECT similarity_index.media_id
+         , similarity_index.embedding
+         , similarity_index.perceptual_hash
+         , similarity_index.capture_time_seconds
+      FROM media_similarity_labels AS labels
+      JOIN media_similarity_index AS similarity_index ON similarity_index.media_id = labels.media_id
+     WHERE labels.run_id = ?
+       AND labels.kind = ?
+       AND labels.component_label = ?
+       AND labels.media_id > ?
+     ORDER BY labels.media_id
+     LIMIT ?
+    "#;
+
+    pub const SELECT_COMPONENT_COUNT: &str = r#"
+    SELECT COUNT(*)
+      FROM media_similarity_labels
+     WHERE run_id = ?
+       AND kind = ?
+       AND component_label = ?
+    "#;
+
+    pub const SELECT_NEAR_COMPONENT_LABEL: &str = r#"
+    SELECT component_label
+      FROM media_similarity_labels
+     WHERE run_id = ?
+       AND kind = 'near_duplicate'
+       AND media_id = ?
+    "#;
+
+    pub const COUNT_COMPONENT_MEMBERS_OUTSIDE_NEAR_LABEL: &str = r#"
+    SELECT COUNT(*)
+      FROM media_similarity_labels AS burst_labels
+     WHERE burst_labels.run_id = ?
+       AND burst_labels.kind = 'burst'
+       AND burst_labels.component_label = ?
+       AND NOT EXISTS (
+            SELECT 1
+              FROM media_similarity_labels AS near_labels
+             WHERE near_labels.run_id = burst_labels.run_id
+               AND near_labels.kind = 'near_duplicate'
+               AND near_labels.component_label = ?
+               AND near_labels.media_id = burst_labels.media_id
+       )
+    "#;
+
+    pub const DELETE_FINALIZATION_EDGES_PAGE: &str = r#"
+    DELETE FROM media_similarity_edges
+     WHERE rowid IN (
+        SELECT rowid
+          FROM media_similarity_edges
+         WHERE run_id = ?
+         ORDER BY kind
+                , left_media_id
+                , right_media_id
+         LIMIT ?
+     )
+    "#;
+
+    pub const DELETE_FINALIZATION_LABELS_PAGE: &str = r#"
+    DELETE FROM media_similarity_labels
+     WHERE rowid IN (
+        SELECT rowid
+          FROM media_similarity_labels
+         WHERE run_id = ?
+         ORDER BY kind
+                , media_id
+         LIMIT ?
+     )
+    "#;
+
+    pub const DELETE_FINALIZATION_DIRTY_PAGE: &str = r#"
+    DELETE FROM media_similarity_finalization_dirty
+     WHERE rowid IN (
+        SELECT rowid
+          FROM media_similarity_finalization_dirty
+         WHERE run_id = ?
+         ORDER BY media_id
+         LIMIT ?
+     )
+    "#;
+
+    pub const CLEAR_FINALIZATION_DIRTY_PAGE: &str = r#"
+    DELETE FROM media_similarity_dirty
+     WHERE (media_id, marked_at) IN (
+        SELECT media_id
+             , marked_at
+          FROM media_similarity_finalization_dirty AS snapshot
+         WHERE snapshot.run_id = ?
+         ORDER BY snapshot.media_id
+         LIMIT ?
+     )
+    "#;
+
+    pub const DELETE_RETIRED_MEMBERS_PAGE: &str = r#"
+    DELETE FROM media_similarity_cluster_members
+     WHERE rowid IN (
+        SELECT members.rowid
+          FROM media_similarity_cluster_members AS members
+          JOIN media_similarity_clusters AS clusters ON clusters.id = members.cluster_id
+         WHERE COALESCE(clusters.generation_id, -1) = ?
+         ORDER BY members.cluster_id
+                , members.media_id
+         LIMIT ?
+     )
+    "#;
+
+    pub const DELETE_RETIRED_CLUSTERS_PAGE: &str = r#"
+    DELETE FROM media_similarity_clusters
+     WHERE id IN (
+        SELECT id
+          FROM media_similarity_clusters
+         WHERE COALESCE(generation_id, -1) = ?
+         ORDER BY id
+         LIMIT ?
+     )
+    "#;
+
+    pub const DELETE_RETIRED_GENERATION: &str = r#"
+    DELETE FROM media_similarity_generations
+     WHERE id = ?
+       AND status = 'retiring'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM media_similarity_clusters
+             WHERE generation_id = media_similarity_generations.id
+       )
+    "#;
+
+    pub const DELETE_FINALIZATION: &str = r#"
+    DELETE FROM media_similarity_finalizations
+     WHERE run_id = ?
+       AND phase = 'cleanup'
+       AND NOT EXISTS (SELECT 1 FROM media_similarity_edges WHERE run_id = ?)
+       AND NOT EXISTS (SELECT 1 FROM media_similarity_labels WHERE run_id = ?)
+       AND NOT EXISTS (SELECT 1 FROM media_similarity_finalization_dirty WHERE run_id = ?)
+    "#;
+
+    pub const INSERT_GENERATION: &str = r#"
+    INSERT INTO media_similarity_generations (
+        run_id
+      , status
+    ) VALUES (?, 'building')
+    "#;
+
+    pub const INSERT_FINALIZATION_DIRTY: &str = r#"
+    INSERT INTO media_similarity_finalization_dirty (
+        run_id
+      , media_id
+      , marked_at
+    ) VALUES (?, ?, ?)
+    "#;
+
+    pub const SELECT_FINALIZATION_DIRTY_SOURCE_PAGE: &str = r#"
+    SELECT media_id
+         , marked_at
+      FROM media_similarity_dirty
+     WHERE media_id > ?
+     ORDER BY media_id
+     LIMIT ?
+    "#;
+
+    pub const ADVANCE_FINALIZATION_DIRTY_CURSOR: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET dirty_cursor = ?
+     WHERE run_id = ?
+       AND phase = 'dirty_snapshot'
+    "#;
+
+    pub const FINISH_FINALIZATION_DIRTY_SNAPSHOT: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'comparison'
+         , source_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'dirty_snapshot'
+    "#;
+
+    pub const INSERT_FINALIZATION: &str = r#"
+    INSERT INTO media_similarity_finalizations (
+        run_id
+      , generation_id
+      , phase
+      , completion_error
+    ) VALUES (?, ?, 'dirty_snapshot', ?)
+    "#;
+
+    pub const START_COMPARISON_SOURCE: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET source_media_id = ?
+         , candidate_kind = 'near_duplicate'
+         , candidate_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'comparison'
+       AND source_media_id IS NULL
+    "#;
+
+    pub const FINISH_COMPARISONS: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'label_initialization'
+         , label_kind = 'near_duplicate'
+         , label_media_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'comparison'
+       AND source_media_id IS NULL
+    "#;
+
+    pub const INSERT_EDGE: &str = r#"
+    INSERT OR REPLACE INTO media_similarity_edges (
+        run_id
+      , kind
+      , left_media_id
+      , right_media_id
+      , cosine_similarity
+      , perceptual_hash_distance
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    "#;
+
+    pub const ADVANCE_COMPARISON_PAGE: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET candidate_cursor = ?
+     WHERE run_id = ?
+       AND phase = 'comparison'
+       AND source_media_id = ?
+       AND candidate_kind = ?
+       AND candidate_cursor < ?
+    "#;
+
+    pub const ADVANCE_COMPARISON_KIND: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET candidate_kind = 'burst'
+         , candidate_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'comparison'
+       AND source_media_id = ?
+       AND candidate_kind = 'near_duplicate'
+    "#;
+
+    pub const FINISH_COMPARISON_SOURCE: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET source_cursor = ?
+         , source_media_id = NULL
+         , candidate_kind = 'near_duplicate'
+         , candidate_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'comparison'
+       AND source_media_id = ?
+       AND candidate_kind = 'burst'
+    "#;
+
+    pub const INSERT_LABEL: &str = r#"
+    INSERT OR IGNORE INTO media_similarity_labels (
+        run_id
+      , kind
+      , media_id
+      , component_label
+    ) VALUES (?, ?, ?, ?)
+    "#;
+
+    pub const ADVANCE_LABEL_INITIALIZATION: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET label_media_cursor = ?
+     WHERE run_id = ?
+       AND phase = 'label_initialization'
+       AND label_kind = ?
+    "#;
+
+    pub const SWITCH_LABEL_INITIALIZATION_KIND: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET label_kind = 'burst'
+         , label_media_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'label_initialization'
+       AND label_kind = 'near_duplicate'
+    "#;
+
+    pub const FINISH_LABEL_INITIALIZATION: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'label_propagation'
+         , label_kind = 'near_duplicate'
+         , label_media_cursor = 0
+         , label_edge_left_cursor = 0
+         , label_edge_right_cursor = 0
+         , label_pass_changed = 0
+     WHERE run_id = ?
+       AND phase = 'label_initialization'
+       AND label_kind = 'burst'
+    "#;
+
+    pub const SELECT_LABEL: &str = r#"
+    SELECT component_label
+      FROM media_similarity_labels
+     WHERE run_id = ?
+       AND kind = ?
+       AND media_id = ?
+    "#;
+
+    pub const LOWER_LABEL: &str = r#"
+    UPDATE media_similarity_labels
+       SET component_label = ?
+     WHERE run_id = ?
+       AND kind = ?
+       AND media_id = ?
+       AND component_label > ?
+    "#;
+
+    pub const ADVANCE_LABEL_EDGE_PAGE: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET label_edge_left_cursor = ?
+         , label_edge_right_cursor = ?
+         , label_pass_changed = CASE WHEN label_pass_changed = 1 OR ? = 1 THEN 1 ELSE 0 END
+     WHERE run_id = ?
+       AND phase = 'label_propagation'
+       AND label_kind = ?
+    "#;
+
+    pub const RESTART_LABEL_PASS: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET label_edge_left_cursor = 0
+         , label_edge_right_cursor = 0
+         , label_pass_changed = 0
+     WHERE run_id = ?
+       AND phase = 'label_propagation'
+       AND label_kind = ?
+       AND label_pass_changed = 1
+    "#;
+
+    pub const SWITCH_LABEL_PROPAGATION_KIND: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET label_kind = 'burst'
+         , label_edge_left_cursor = 0
+         , label_edge_right_cursor = 0
+         , label_pass_changed = 0
+     WHERE run_id = ?
+       AND phase = 'label_propagation'
+       AND label_kind = 'near_duplicate'
+       AND label_pass_changed = 0
+    "#;
+
+    pub const FINISH_LABEL_PROPAGATION: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'grouping'
+         , group_kind = 'near_duplicate'
+         , group_label_cursor = 0
+         , group_member_cursor = 0
+         , group_cluster_id = NULL
+     WHERE run_id = ?
+       AND phase = 'label_propagation'
+       AND label_kind = 'burst'
+       AND label_pass_changed = 0
+    "#;
+
+    pub const INSERT_GENERATION_CLUSTER: &str = r#"
+    INSERT INTO media_similarity_clusters (
+        generation_id
+      , kind
+      , representative_media_id
+    ) VALUES (?, ?, ?)
+    "#;
+
+    pub const START_GROUP: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET group_label_cursor = ?
+         , group_cluster_id = ?
+         , group_member_cursor = 0
+     WHERE run_id = ?
+       AND phase = 'grouping'
+       AND group_kind = ?
+       AND group_label_cursor < ?
+       AND group_cluster_id IS NULL
+    "#;
+
+    pub const SKIP_GROUP: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET group_label_cursor = ?
+         , group_member_cursor = 0
+         , group_cluster_id = NULL
+     WHERE run_id = ?
+       AND phase = 'grouping'
+       AND group_kind = ?
+       AND group_cluster_id IS NULL
+    "#;
+
+    pub const INSERT_GENERATION_MEMBER: &str = r#"
+    INSERT OR REPLACE INTO media_similarity_cluster_members (
+        cluster_id
+      , media_id
+      , cosine_similarity
+      , perceptual_hash_distance
+    ) VALUES (?, ?, ?, ?)
+    "#;
+
+    pub const ADVANCE_GROUP_MEMBER_PAGE: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET group_member_cursor = ?
+     WHERE run_id = ?
+       AND phase = 'grouping'
+       AND group_cluster_id = ?
+       AND group_kind = ?
+    "#;
+
+    pub const FINISH_GROUP: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET group_label_cursor = ?
+         , group_member_cursor = 0
+         , group_cluster_id = NULL
+     WHERE run_id = ?
+       AND phase = 'grouping'
+       AND group_cluster_id = ?
+       AND group_kind = ?
+    "#;
+
+    pub const SWITCH_GROUP_KIND: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET group_kind = 'burst'
+         , group_label_cursor = 0
+         , group_member_cursor = 0
+         , group_cluster_id = NULL
+     WHERE run_id = ?
+       AND phase = 'grouping'
+       AND group_kind = 'near_duplicate'
+    "#;
+
+    pub const FINISH_GROUPING: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'publishing'
+     WHERE run_id = ?
+       AND phase = 'grouping'
+       AND group_kind = 'burst'
+       AND group_cluster_id IS NULL
+    "#;
+
+    pub const COUNT_GENERATION_CLUSTERS: &str = r#"
+    SELECT COUNT(*)
+      FROM media_similarity_clusters
+     WHERE generation_id = ?
+    "#;
+
+    pub const RETIRE_ACTIVE_GENERATION: &str = r#"
+    UPDATE media_similarity_generations
+       SET status = 'retiring'
+     WHERE id = (
+        SELECT active_generation_id
+          FROM media_similarity_generation_state
+         WHERE singleton = 1
+     )
+       AND id <> ?
+    "#;
+
+    pub const ACTIVATE_GENERATION: &str = r#"
+    UPDATE media_similarity_generations
+       SET status = 'active'
+         , published_at = datetime('now')
+     WHERE id = ?
+       AND status = 'building'
+    "#;
+
+    pub const SWITCH_ACTIVE_GENERATION: &str = r#"
+    INSERT INTO media_similarity_generation_state (
+        singleton
+      , active_generation_id
+    ) VALUES (1, ?)
+    ON CONFLICT(singleton) DO UPDATE
+       SET active_generation_id = excluded.active_generation_id
+    "#;
+
+    pub const ENTER_FINALIZATION_CLEANUP: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'cleanup'
+     WHERE run_id = ?
+       AND phase = 'publishing'
+    "#;
+
+    pub const CANCEL_BUILDING_GENERATION: &str = r#"
+    UPDATE media_similarity_generations
+       SET status = 'retiring'
+     WHERE id = (
+        SELECT generation_id
+          FROM media_similarity_finalizations
+         WHERE run_id = ?
+     )
+       AND status = 'building'
+    "#;
+
+    pub const CANCEL_FINALIZATION: &str = r#"
+    UPDATE media_similarity_finalizations
+       SET phase = 'cleanup'
+     WHERE run_id = ?
     "#;
 
     pub const INSERT_CLUSTER: &str = r#"
@@ -2353,44 +4084,21 @@ pub mod deduplicate {
     ) VALUES (?, ?, ?, ?)
     "#;
 
-    pub const INSERT_CLUSTERS_FROM_JSON: &str = r#"
-    INSERT INTO media_similarity_clusters (
-        id
-      , kind
-      , representative_media_id
-    )
-    SELECT json_extract(cluster.value, '$.id')
-         , json_extract(cluster.value, '$.kind')
-         , json_extract(cluster.value, '$.representativeMediaId')
-      FROM json_each(?) AS cluster
-     ORDER BY json_extract(cluster.value, '$.id')
-    "#;
-
-    pub const INSERT_CLUSTER_MEMBERS_FROM_JSON: &str = r#"
-    INSERT INTO media_similarity_cluster_members (
-        cluster_id
-      , media_id
-      , cosine_similarity
-      , perceptual_hash_distance
-    )
-    SELECT json_extract(cluster.value, '$.id')
-         , json_extract(member.value, '$.mediaId')
-         , json_extract(member.value, '$.cosineSimilarity')
-         , json_extract(member.value, '$.perceptualHashDistance')
-      FROM json_each(?) AS cluster
-      JOIN json_each(json_extract(cluster.value, '$.members')) AS member
-     ORDER BY json_extract(cluster.value, '$.id')
-            , json_extract(member.value, '$.mediaId')
-    "#;
-
     pub const SELECT_VISIBLE_CLUSTER_PAGE: &str = r#"
     WITH ordered_visible_members AS (
         SELECT members.cluster_id
              , members.media_id
           FROM media_similarity_cluster_members AS members
+          JOIN media_similarity_clusters AS clusters ON clusters.id = members.cluster_id
+          LEFT JOIN media_similarity_generation_state AS generation_state
+            ON generation_state.singleton = 1
           JOIN media_access ON media_access.media_id = members.media_id
          WHERE media_access.user_id = ?
            AND media_access.deleted_at IS NULL
+           AND (
+                generation_state.active_generation_id = clusters.generation_id
+             OR (generation_state.active_generation_id IS NULL AND clusters.generation_id IS NULL)
+           )
          GROUP BY members.cluster_id
                 , members.media_id
          ORDER BY members.cluster_id
@@ -2478,6 +4186,13 @@ pub mod deduplicate {
     }
 
     pub const CLEAN_CLUSTERS: &str = "DELETE FROM media_similarity_clusters";
+    pub const CLEAN_FINALIZATION_DIRTY: &str = "DELETE FROM media_similarity_finalization_dirty";
+    pub const CLEAN_EDGES: &str = "DELETE FROM media_similarity_edges";
+    pub const CLEAN_LABELS: &str = "DELETE FROM media_similarity_labels";
+    pub const CLEAN_FINALIZATIONS: &str = "DELETE FROM media_similarity_finalizations";
+    pub const CLEAN_GENERATION_STATE: &str = "DELETE FROM media_similarity_generation_state";
+    pub const CLEAN_GENERATIONS: &str = "DELETE FROM media_similarity_generations";
+    pub const CLEAN_JOBS: &str = "DELETE FROM llm_jobs WHERE task = 'image_clustering'";
     pub const CLEAN_BANDS: &str = "DELETE FROM media_similarity_hash_bands";
     pub const CLEAN_INDEX: &str = "DELETE FROM media_similarity_index";
     pub const CLEAN_DIRTY: &str = "DELETE FROM media_similarity_dirty";

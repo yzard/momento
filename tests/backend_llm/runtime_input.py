@@ -22,7 +22,8 @@ class FakeHandler:
 def descriptor(job_id, content, mime_type):
     return (
         '{"jobId":"%s","sequence":0,"byteSize":%d,'
-        '"contentHash":"%s","mimeType":"%s"}' % (job_id, len(content), hashlib.sha256(content).hexdigest(), mime_type)
+        '"contentHash":"%s","mimeType":"%s","inputFilename":"input-0"}'
+        % (job_id, len(content), hashlib.sha256(content).hexdigest(), mime_type)
     ).encode()
 
 
@@ -57,7 +58,7 @@ class RuntimeInputTests(unittest.TestCase):
         body = (
             b'{"jobId":"aa","sequence":0,"byteSize":1,"contentHash":"'
             + (b"0" * 64)
-            + b'","mimeType":"image/jpeg","path":"/etc/passwd"}'
+            + b'","mimeType":"image/jpeg","inputFilename":"input-0","path":"/etc/passwd"}'
         )
 
         with self.assertRaisesRegex(ValueError, "invalid fields"):

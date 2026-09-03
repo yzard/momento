@@ -12,7 +12,10 @@ data_dir = "{{SERVER_DATA_DIR}}"
 
 [scheduler]
 # The scheduler drains one task type at a time to keep its model runtime warm.
-poll_interval_seconds = {{SCHEDULER_POLL_INTERVAL_SECONDS}}
+# Unique Momento input payloads admitted to the durable content store are bounded separately
+# from the space retained for RAW normalization, inference results, and atomic temporary files.
+max_queue_bytes = {{SCHEDULER_MAX_QUEUE_BYTES}}
+working_space_reserve_bytes = {{SCHEDULER_WORKING_SPACE_RESERVE_BYTES}}
 idle_shutdown_seconds = {{SCHEDULER_IDLE_SHUTDOWN_SECONDS}}
 max_in_flight_jobs = {{SCHEDULER_MAX_IN_FLIGHT_JOBS}}
 runtime_max_attempts = {{SCHEDULER_RUNTIME_MAX_ATTEMPTS}}

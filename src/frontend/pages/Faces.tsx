@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertCircle, Check, ChevronLeft, Loader2, UsersRound } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -6,6 +6,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { facesApi, type FaceGroup } from '../api/faces'
 import type { Media } from '../api/types'
 import PageState from '../components/common/PageState'
+import { PageFrame, PageHeader } from '../components/layout/PageLayout'
 import PhotoGrid from '../components/timeline/PhotoGrid'
 import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import { useAuth } from '../hooks/useAuth'
@@ -83,7 +84,7 @@ function FaceGroupGrid({
   if (groups.length === 0) return null
 
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
       {groups.map((group) => (
         <FaceGroupCard
           key={group.faceGroupId}
@@ -235,22 +236,18 @@ function FaceGroupList() {
       ref={scrollContainerRef}
       className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent"
     >
-      <div className="container mx-auto max-w-[1800px] px-4 py-6 pb-28 sm:px-6 md:px-10 md:py-10 animate-fade-in">
-        <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">
-              Faces
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              People recognized across your library.
-            </p>
-          </div>
-          {user?.role === 'admin' && groupsQuery.data && (
-            <span className="text-sm font-medium text-muted-foreground">
-              {groups.length} groups loaded
-            </span>
-          )}
-        </div>
+      <PageFrame className="animate-fade-in pb-28">
+        <PageHeader
+          title="Faces"
+          description="People recognized across your library."
+          actions={
+            user?.role === 'admin' && groupsQuery.data ? (
+              <span className="text-sm font-medium text-muted-foreground">
+                {groups.length} groups loaded
+              </span>
+            ) : null
+          }
+        />
 
         <FaceGroupsStatus
           loading={groupsQuery.isLoading}
@@ -285,7 +282,7 @@ function FaceGroupList() {
             onMerge={handleMerge}
           />
         )}
-      </div>
+      </PageFrame>
     </div>
   )
 }
@@ -301,19 +298,7 @@ function FaceGroupCard({
   selectable: boolean
   onToggle: () => void
 }) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    facesApi
-      .getThumbnailURL({ faceGroupId: group.faceGroupId })
-      .then((url) => {
-        if (!cancelled) setThumbnailUrl(url)
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [group.faceGroupId])
+  const thumbnailUrl = facesApi.getThumbnailURL({ faceGroupId: group.faceGroupId })
 
   return (
     <div
@@ -380,7 +365,7 @@ function FaceGroupDetail({ faceGroupId }: { faceGroupId: number }) {
 
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-      <div className="container mx-auto max-w-[1800px] px-4 py-6 pb-20 sm:px-6 md:px-10 md:py-10 animate-fade-in">
+      <PageFrame className="animate-fade-in">
         <button
           type="button"
           onClick={() => navigate('/faces')}
@@ -414,15 +399,11 @@ function FaceGroupDetail({ faceGroupId }: { faceGroupId: number }) {
         ) : null}
         {groupQuery.data ? (
           <>
-            <div className="mb-8">
-              <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">
-                Face group
-              </h1>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {groupQuery.data.group.faceCount} recognized faces across{' '}
-                {groupQuery.data.media.length} media items.
-              </p>
-            </div>
+            <PageHeader
+              title="Face group"
+              description={`${groupQuery.data.group.faceCount} recognized faces across ${groupQuery.data.media.length} media items.`}
+              actions={null}
+            />
             {groupQuery.data.media.length > 0 ? (
               <PhotoGrid media={groupQuery.data.media} onPhotoClick={openMedia} selection={null} />
             ) : (
@@ -434,7 +415,7 @@ function FaceGroupDetail({ faceGroupId }: { faceGroupId: number }) {
             )}
           </>
         ) : null}
-      </div>
+      </PageFrame>
       <ManagedLightbox controller={lightbox} />
     </div>
   )

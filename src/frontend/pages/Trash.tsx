@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { trashApi, type TrashMedia } from '../api/trash'
-import { Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Loader2, RotateCcw, Trash2 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { trashBatchLoader } from '../utils/batcher'
+import { trashThumbnailUrlLoader } from '../utils/assetUrlLoader'
 import { invalidateMediaConsumers, queryKeys } from '../lib/queryKeys'
 import { useLazyImage } from '../hooks/useLazyImage'
 import ConfirmationDialog from '../components/common/ConfirmationDialog'
+import PageState from '../components/common/PageState'
+import { PageFrame, PageHeader } from '../components/layout/PageLayout'
 
 type TrashConfirmation = 'selected' | 'all' | null
 
@@ -68,12 +70,14 @@ function TrashToolbar({ actions, onDeleteRequest, onEmptyRequest }: TrashToolbar
     return (
       <div className="flex flex-wrap gap-2">
         <button
+          type="button"
           onClick={actions.deselectAll}
           className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground"
         >
           Deselect ({actions.selectedIds.size})
         </button>
         <button
+          type="button"
           onClick={actions.restore}
           disabled={actions.isProcessing}
           className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-bold uppercase tracking-wider text-primary-foreground disabled:opacity-50"
@@ -82,6 +86,7 @@ function TrashToolbar({ actions, onDeleteRequest, onEmptyRequest }: TrashToolbar
           Restore
         </button>
         <button
+          type="button"
           onClick={onDeleteRequest}
           disabled={actions.isProcessing}
           className="flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-bold uppercase tracking-wider text-destructive-foreground disabled:opacity-50"
@@ -95,12 +100,14 @@ function TrashToolbar({ actions, onDeleteRequest, onEmptyRequest }: TrashToolbar
   return (
     <div className="flex flex-wrap gap-2">
       <button
+        type="button"
         onClick={actions.selectAll}
         className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground"
       >
         Select All
       </button>
       <button
+        type="button"
         onClick={onEmptyRequest}
         disabled={actions.isProcessing}
         className="flex items-center gap-2 rounded-lg bg-destructive/10 px-4 py-2 text-sm font-bold uppercase tracking-wider text-destructive disabled:opacity-50"
@@ -122,49 +129,43 @@ export default function Trash() {
   const actions = useTrashActions(items)
   const [confirmation, setConfirmation] = useState<TrashConfirmation>(null)
 
-  if (isLoading) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <p className="text-destructive">Failed to load trash</p>
-      </div>
-    )
-  }
-
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-      <div className="max-w-7xl mx-auto animate-fade-in px-6 md:px-10 py-6 md:py-10">
-        <div className="mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <p className="mt-1 text-muted-foreground font-medium">
-              Items are automatically deleted after 30 days.
-            </p>
-          </div>
+      <PageFrame className="animate-fade-in">
+        <PageHeader
+          title="Trash"
+          description="Items are automatically deleted after 30 days."
+          actions={
+            !isLoading && !error && items.length > 0 ? (
+              <TrashToolbar
+                actions={actions}
+                onDeleteRequest={() => setConfirmation('selected')}
+                onEmptyRequest={() => setConfirmation('all')}
+              />
+            ) : null
+          }
+        />
 
-          {items.length > 0 && (
-            <TrashToolbar
-              actions={actions}
-              onDeleteRequest={() => setConfirmation('selected')}
-              onEmptyRequest={() => setConfirmation('all')}
-            />
-          )}
-        </div>
-
-        {items.length === 0 ? (
+        {isLoading ? (
+          <PageState
+            icon={<Loader2 className="h-9 w-9 animate-spin text-primary" />}
+            title="Loading Trash"
+            description="Retrieving recently deleted media..."
+          />
+        ) : error ? (
+          <PageState
+            icon={<AlertCircle className="h-9 w-9 text-destructive" />}
+            title="Unable to load Trash"
+            description="Try the request again. Deleted media has not changed."
+          />
+        ) : items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <Trash2 className="w-16 h-16 text-muted-foreground/30 mb-4" />
             <h2 className="text-xl font-semibold text-foreground mb-2">Trash is empty</h2>
             <p className="text-muted-foreground">Deleted items will appear here</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
             {items.map((item) => (
               <TrashItem
                 key={item.id}
@@ -184,7 +185,7 @@ export default function Trash() {
             The Trash operation failed. No unconfirmed changes were applied.
           </p>
         )}
-      </div>
+      </PageFrame>
       {confirmation && (
         <ConfirmationDialog
           title={
@@ -217,7 +218,7 @@ interface TrashItemProps {
 function TrashItem({ item, selected, onToggle, daysRemaining }: TrashItemProps) {
   const { targetRef: containerRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
     resourceId: item.id,
-    loader: trashBatchLoader,
+    loader: trashThumbnailUrlLoader,
     getCachedUrl: null,
     rootMargin: '400px',
   })

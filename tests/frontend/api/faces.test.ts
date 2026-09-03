@@ -9,11 +9,6 @@ import { facesApi } from '../../../src/frontend/api/faces'
 describe('facesApi', () => {
   beforeEach(() => {
     post.mockReset()
-    vi.stubGlobal('URL', {
-      createObjectURL: vi.fn((blob: Blob) => `blob:${blob.size}`),
-      revokeObjectURL: vi.fn(),
-    })
-    facesApi.clearThumbnailCache()
   })
 
   it('lists and loads face groups with typed requests', async () => {
@@ -41,42 +36,9 @@ describe('facesApi', () => {
     })
   })
 
-  it('requests representative thumbnails as blobs', async () => {
-    vi.mocked(URL.createObjectURL).mockReturnValue('blob:face-group-8')
-    post.mockResolvedValue({ data: new Blob(['thumbnail']) })
-
-    await expect(facesApi.getThumbnailURL({ faceGroupId: 8 })).resolves.toBe('blob:face-group-8')
-    expect(post).toHaveBeenCalledWith(
-      '/faces/thumbnails/get',
-      { faceGroupId: 8 },
-      { responseType: 'blob' }
-    )
-  })
-
-  it('rejects responses from a previous session', async () => {
-    let resolveThumbnail!: (value: { data: Blob }) => void
-    post.mockReturnValue(
-      new Promise((resolve) => {
-        resolveThumbnail = resolve
-      })
-    )
-    const pendingThumbnail = facesApi.getThumbnailURL({ faceGroupId: 9 })
-
-    facesApi.clearThumbnailCache()
-    resolveThumbnail({ data: new Blob(['stale']) })
-
-    await expect(pendingThumbnail).rejects.toThrow('Face thumbnail request was superseded')
-    expect(URL.createObjectURL).not.toHaveBeenCalled()
-  })
-
-  it('revokes object URLs when clearing the cache', async () => {
-    vi.mocked(URL.createObjectURL).mockReturnValue('blob:face-group-10')
-    post.mockResolvedValue({ data: new Blob(['thumbnail']) })
-
-    await facesApi.getThumbnailURL({ faceGroupId: 10 })
-    facesApi.clearThumbnailCache()
-
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:face-group-10')
+  it('builds the representative thumbnail binary URL', () => {
+    expect(facesApi.getThumbnailURL({ faceGroupId: 8 })).toBe('/api/v1/faces/groups/8/thumbnail')
+    expect(post).not.toHaveBeenCalled()
   })
 
   it('merges selected groups', async () => {

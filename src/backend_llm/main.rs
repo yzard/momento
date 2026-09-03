@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use momento_common::config_cli::{parse_config_command, ConfigCommand};
-use momento_common::logging::init_logging;
 use tracing::info;
 
 use llm_service::config::Config;
+use llm_service::logging::init_logging;
 use llm_service::provider::ServiceManager;
 use llm_service::routes::{serve, AppState};
 use llm_service::scheduler::Scheduler;
@@ -43,7 +43,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let _logging_guard = match init_logging(&config.server.data_dir, "llm-service", "info") {
+    let _logging_guard = match init_logging(&config.server.data_dir, "llm-service") {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("Failed to initialize logging: {error}");

@@ -1,15 +1,21 @@
 use std::str::FromStr;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use cron::Schedule;
 use tracing::{info, warn};
 
 use crate::config::{Config, ConfigManager};
-use crate::database::{fetch_one, queries, DbPool};
 use crate::error::{AppError, AppResult};
-use crate::processor::ai::operation::{start_feature, AiFeature, AiStartSource};
+use crate::executor::{CpuExecutorHandle, SqliteExecutorHandle};
+use crate::processor::ai::operation::AiFeature;
 use crate::processor::ai::transport::TransportHandle;
-use crate::processor::deduplicator::{latest_run, log_schedule_start};
+use crate::processor::deduplicator::log_schedule_start;
+use crate::runtime::{
+    DurableSourceId, SchedulerAdmissionKind, SchedulerHandle, SystemTimezoneSnapshot,
+};
+
+const CATCH_UP_CONTINUATION_OCCURRENCES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScheduledTask {
@@ -23,6 +29,16 @@ pub enum ScheduledTask {
 }
 
 impl ScheduledTask {
+    const ALL: [Self; 7] = [
+        Self::Ocr,
+        Self::ImageTagging,
+        Self::ImageAesthetics,
+        Self::ScreenshotDetection,
+        Self::DocumentDetection,
+        Self::Deduplicate,
+        Self::FaceDetection,
+    ];
+
     fn feature(self) -> AiFeature {
         match self {
             Self::Ocr => AiFeature::Ocr,
@@ -48,153 +64,244 @@ impl ScheduledTask {
     }
 }
 
+#[derive(Clone, Copy)]
+struct CronTimerState {
+    task: ScheduledTask,
+    next: DateTime<Utc>,
+}
+
 pub fn next_scheduled_at(
     cron_expression: &str,
     job_name: &str,
     after: DateTime<Utc>,
+    timezone: Tz,
 ) -> AppResult<DateTime<Utc>> {
     let schedule = Schedule::from_str(&format!("0 {cron_expression} *"))
         .map_err(|error| AppError::Validation(format!("invalid {job_name} cronjob: {error}")))?;
     schedule
-        .after(&after.with_timezone(&Local))
+        .after(&after.with_timezone(&timezone))
         .next()
         .map(|date| date.with_timezone(&Utc))
         .ok_or_else(|| AppError::Validation(format!("{job_name} cronjob has no next occurrence")))
 }
 
-pub async fn run_cronjobs(config_manager: ConfigManager, pool: DbPool, transport: TransportHandle) {
-    let config = config_manager.current();
-    let mut cronjobs = tokio::task::JoinSet::new();
-    for task in [
-        ScheduledTask::Ocr,
-        ScheduledTask::ImageTagging,
-        ScheduledTask::ImageAesthetics,
-        ScheduledTask::ScreenshotDetection,
-        ScheduledTask::DocumentDetection,
-        ScheduledTask::Deduplicate,
-        ScheduledTask::FaceDetection,
-    ] {
-        if !config.llm.enabled {
-            info!(task = task.name(), "Scheduled AI task is disabled");
-            continue;
-        }
-        let task_config_manager = config_manager.clone();
-        let task_pool = pool.clone();
-        let task_transport = transport.clone();
-        cronjobs.spawn(run_task_cronjob(
-            task_config_manager,
-            task_pool,
-            task_transport,
-            task,
-        ));
-    }
-
-    while let Some(cronjob) = cronjobs.join_next().await {
-        if let Err(error) = cronjob {
-            warn!("Cronjob task stopped unexpectedly: {error}");
-        }
-    }
-}
-
-async fn run_task_cronjob(
+pub async fn run_cronjobs(
     config_manager: ConfigManager,
-    pool: DbPool,
+    sqlite: SqliteExecutorHandle,
+    cpu: CpuExecutorHandle,
     transport: TransportHandle,
-    task: ScheduledTask,
+    scheduler: SchedulerHandle,
+    system_timezone: SystemTimezoneSnapshot,
 ) {
+    let timezone = system_timezone.timezone();
     let mut config_updates = config_manager.subscribe();
-    if task == ScheduledTask::Deduplicate {
+    if config_updates.borrow().llm.enabled {
         let deduplicate_cron = AiFeature::Deduplicate
             .cron_expression(&config_updates.borrow().llm)
             .to_string();
-        match run_startup_or_catch_up(&config_updates.borrow(), &pool, &deduplicate_cron) {
+        let startup = scheduler
+            .acquire_durable(
+                DurableSourceId::Maintenance,
+                SchedulerAdmissionKind::RecoveryHandoff,
+            )
+            .await;
+        let startup_result = match startup.map_err(AppError::Internal) {
+            Ok(_admission) => {
+                run_startup_or_catch_up(&sqlite, &cpu, &deduplicate_cron, timezone).await
+            }
+            Err(error) => Err(error),
+        };
+        match startup_result {
             Ok(queued) if queued > 0 => transport.wake_submissions(),
             Ok(_) => {}
             Err(error) => warn!("Deduplicate startup scheduling failed: {error}"),
         }
     }
 
+    let mut timers = match build_timer_states(&config_updates.borrow(), Utc::now(), timezone) {
+        Ok(timers) => timers,
+        Err(error) => {
+            warn!("AI schedule initialization failed: {error}");
+            Vec::new()
+        }
+    };
     loop {
-        let now = Utc::now();
-        let cron_expression = task
-            .feature()
-            .cron_expression(&config_updates.borrow().llm)
-            .to_string();
-        let next = match next_scheduled_at(&cron_expression, task.name(), now) {
-            Ok(next) => next,
-            Err(error) => {
-                warn!(task = task.name(), "Schedule evaluation failed: {error}");
+        if timers.is_empty() {
+            if config_updates.changed().await.is_err() {
                 return;
             }
-        };
-        let delay = (next - now)
+            timers = match build_timer_states(&config_updates.borrow(), Utc::now(), timezone) {
+                Ok(timers) => timers,
+                Err(error) => {
+                    warn!("AI schedule update failed: {error}");
+                    continue;
+                }
+            };
+            continue;
+        }
+
+        timers.sort_by_key(|timer| timer.next);
+        let next_due = timers[0].next;
+        let delay = (next_due - Utc::now())
             .to_std()
-            .unwrap_or_else(|_| std::time::Duration::from_secs(1));
-        let schedule_delay = tokio::time::sleep(delay);
-        tokio::pin!(schedule_delay);
+            .unwrap_or(std::time::Duration::ZERO);
         tokio::select! {
             config_changed = config_updates.changed() => {
                 if config_changed.is_err() {
                     return;
                 }
+                timers = match build_timer_states(&config_updates.borrow(), Utc::now(), timezone) {
+                    Ok(timers) => timers,
+                    Err(error) => {
+                        warn!("AI schedule update failed: {error}");
+                        Vec::new()
+                    }
+                };
                 continue;
             }
-            _ = &mut schedule_delay => {}
+            () = tokio::time::sleep(delay) => {}
         }
-        let scheduled_for = next.to_rfc3339();
-        if task == ScheduledTask::Deduplicate {
-            log_schedule_start(&scheduled_for);
-        }
-        match run_scheduled_occurrence(&config_updates.borrow(), &pool, task, &scheduled_for) {
-            Ok(queued) => {
-                if queued > 0 {
-                    transport.wake_submissions();
+
+        let now = Utc::now();
+        let config = config_updates.borrow().clone();
+        for timer in timers.iter_mut().filter(|timer| timer.next <= now) {
+            let scheduled_for = timer.next.to_rfc3339();
+            let admission = scheduler
+                .acquire_durable(
+                    DurableSourceId::Maintenance,
+                    SchedulerAdmissionKind::NewClaim,
+                )
+                .await;
+            match admission {
+                Ok(_admission) => {
+                    if timer.task == ScheduledTask::Deduplicate {
+                        log_schedule_start(&scheduled_for);
+                    }
+                    match run_scheduled_occurrence(
+                        config.as_ref(),
+                        &sqlite,
+                        timer.task,
+                        &scheduled_for,
+                    )
+                    .await
+                    {
+                        Ok(queued) => {
+                            if queued > 0 {
+                                transport.wake_submissions();
+                            }
+                            info!(task = timer.task.name(), queued, "Scheduled AI task queued");
+                        }
+                        Err(error) => {
+                            warn!(
+                                task = timer.task.name(),
+                                "Scheduled AI task failed: {error}"
+                            )
+                        }
+                    }
                 }
-                info!(task = task.name(), queued, "Scheduled AI task queued");
+                Err(error) => {
+                    warn!(task = timer.task.name(), error, "Scheduled AI task stopped");
+                    return;
+                }
             }
-            Err(error) => warn!(task = task.name(), "Scheduled AI task failed: {error}"),
+            let cron_expression = timer.task.feature().cron_expression(&config.llm);
+            match next_scheduled_at(cron_expression, timer.task.name(), timer.next, timezone) {
+                Ok(next) => timer.next = next,
+                Err(error) => {
+                    warn!(
+                        task = timer.task.name(),
+                        "Schedule evaluation failed: {error}"
+                    );
+                    timer.next = now + chrono::Duration::days(365 * 100);
+                }
+            }
         }
     }
 }
 
-pub fn run_scheduled_occurrence(
+fn build_timer_states(
     config: &Config,
-    pool: &DbPool,
+    after: DateTime<Utc>,
+    timezone: Tz,
+) -> AppResult<Vec<CronTimerState>> {
+    if !config.llm.enabled {
+        return Ok(Vec::new());
+    }
+    ScheduledTask::ALL
+        .into_iter()
+        .map(|task| {
+            next_scheduled_at(
+                task.feature().cron_expression(&config.llm),
+                task.name(),
+                after,
+                timezone,
+            )
+            .map(|next| CronTimerState { task, next })
+        })
+        .collect()
+}
+
+pub async fn run_scheduled_occurrence(
+    config: &Config,
+    sqlite: &SqliteExecutorHandle,
     task: ScheduledTask,
     scheduled_for: &str,
 ) -> AppResult<usize> {
     if !config.llm.enabled {
         return Ok(0);
     }
-    start_feature(
-        config,
-        pool,
-        task.feature(),
-        AiStartSource::Scheduled { scheduled_for },
-    )
+    Ok(sqlite
+        .start_ai_feature_durable(
+            task.feature(),
+            "scheduled".to_string(),
+            Some(scheduled_for.to_string()),
+        )
+        .await?)
 }
 
-fn run_startup_or_catch_up(
-    config: &Config,
-    pool: &DbPool,
+async fn run_startup_or_catch_up(
+    sqlite: &SqliteExecutorHandle,
+    cpu: &CpuExecutorHandle,
     deduplicate_cron: &str,
+    timezone: Tz,
 ) -> AppResult<usize> {
-    if latest_run(pool)?.is_some_and(|run| run.status == "interrupted" || run.status == "failed") {
-        return start_feature(
-            config,
-            pool,
-            AiFeature::Deduplicate,
-            AiStartSource::StartupRecovery,
-        );
+    let state = sqlite.load_deduplicate_schedule_state_durable().await?;
+    if state
+        .latest_run_status
+        .is_some_and(|status| status == "interrupted" || status == "failed")
+    {
+        return Ok(sqlite
+            .start_ai_feature_durable(AiFeature::Deduplicate, "startup".to_string(), None)
+            .await?);
     }
-    let last_scheduled = last_scheduled_for(pool)?;
+    let last_scheduled = state
+        .last_scheduled_for
+        .map(|value| {
+            crate::utils::datetime::parse_datetime(&value)
+                .ok_or_else(|| AppError::Internal(format!("invalid stored schedule: {value}")))
+        })
+        .transpose()?;
     let now = Utc::now();
     let trigger = if let Some(last_scheduled) = last_scheduled {
-        let mut occurrence = next_scheduled_at(deduplicate_cron, "deduplicate", last_scheduled)?;
+        let mut cursor = last_scheduled;
         let mut latest_due = None;
-        while occurrence <= now {
-            latest_due = Some(occurrence);
-            occurrence = next_scheduled_at(deduplicate_cron, "deduplicate", occurrence)?;
+        loop {
+            let page = cpu
+                .compute_cron_catch_up_page_durable(
+                    deduplicate_cron.to_string(),
+                    cursor,
+                    now,
+                    timezone,
+                    CATCH_UP_CONTINUATION_OCCURRENCES as u16,
+                )
+                .await?;
+            if let Some(page_latest) = page.latest_due {
+                latest_due = Some(page_latest);
+                cursor = page_latest;
+            }
+            if !page.continuation_required {
+                break;
+            }
         }
         let Some(latest_due) = latest_due else {
             return Ok(0);
@@ -204,25 +311,7 @@ fn run_startup_or_catch_up(
         ("startup", None)
     };
 
-    let source = match trigger {
-        ("scheduled", Some(ref scheduled_for)) => AiStartSource::Scheduled { scheduled_for },
-        _ => AiStartSource::StartupRecovery,
-    };
-    start_feature(config, pool, AiFeature::Deduplicate, source)
-}
-
-fn last_scheduled_for(pool: &DbPool) -> AppResult<Option<DateTime<Utc>>> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let scheduled_for = fetch_one(
-        &connection,
-        queries::deduplicate::SELECT_LAST_SCHEDULED_FOR,
-        &[],
-        |row| row.get::<_, String>(0),
-    )?;
-    scheduled_for
-        .map(|value| {
-            crate::utils::datetime::parse_datetime(&value)
-                .ok_or_else(|| AppError::Internal(format!("invalid stored schedule: {value}")))
-        })
-        .transpose()
+    Ok(sqlite
+        .start_ai_feature_durable(AiFeature::Deduplicate, trigger.0.to_string(), trigger.1)
+        .await?)
 }

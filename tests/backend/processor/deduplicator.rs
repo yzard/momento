@@ -1,11 +1,49 @@
 use momento_api::database::queries;
 use momento_api::processor::deduplicator::{
-    create_run, finalize_ready_runs, generate_clusters, latest_run, queue_clustering_jobs,
-    recover_interrupted_runs, request_cancel,
+    create_run as create_run_on_connection, latest_run as latest_run_on_connection,
+    queue_clustering_jobs as queue_clustering_jobs_on_connection,
+    request_cancel as request_cancel_on_connection, DeduplicateRunStatus,
 };
 use momento_api::utils::embedding::embedding_to_blob;
+use rusqlite::OptionalExtension;
 
 use crate::test_utils::{create_test_db, create_test_media};
+
+fn create_run(
+    pool: &momento_api::database::DbPool,
+    trigger: &str,
+    scheduled_for: Option<&str>,
+) -> momento_api::error::AppResult<i64> {
+    let connection = pool.get()?;
+    create_run_on_connection(&connection, trigger, scheduled_for)
+}
+
+fn latest_run(
+    pool: &momento_api::database::DbPool,
+) -> momento_api::error::AppResult<Option<DeduplicateRunStatus>> {
+    let connection = pool.get()?;
+    latest_run_on_connection(&connection)
+}
+
+fn request_cancel(pool: &momento_api::database::DbPool) -> momento_api::error::AppResult<bool> {
+    let connection = pool.get()?;
+    request_cancel_on_connection(&connection)
+}
+
+fn queue_clustering_jobs(
+    pool: &momento_api::database::DbPool,
+    run_id: i64,
+) -> momento_api::error::AppResult<usize> {
+    let connection = pool.get()?;
+    queue_clustering_jobs_on_connection(&connection, run_id)
+}
+
+async fn finalize_ready_runs(
+    pool: &momento_api::database::DbPool,
+) -> Result<(), momento_api::executor::ExecutorError> {
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    momento_api::processor::deduplicator::finalize_ready_runs(&executors).await
+}
 
 fn insert_similarity_index(
     pool: &momento_api::database::DbPool,
@@ -49,20 +87,24 @@ fn prepare_clustering_input(pool: &momento_api::database::DbPool, media_id: i64,
     connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'image_clustering', 0, 'image', 'previews', ?, ?, 'image/jpeg', 4, 'hash')", rusqlite::params![media_id, format!("ai/{filename}"), filename]).expect("prepared input");
 }
 
-#[test]
-fn scan_claim_is_persistent_and_exclusive() {
+#[tokio::test]
+async fn scan_claim_is_persistent_and_exclusive() {
     let pool = create_test_db();
     let run_id = create_run(&pool, "manual", None).expect("First claim should succeed");
 
     assert!(create_run(&pool, "manual", None).is_err());
     assert_eq!(latest_run(&pool).unwrap().unwrap().id, run_id);
 
-    recover_interrupted_runs(&pool).expect("Recovery should succeed");
+    crate::test_utils::test_executor_handles(pool.clone())
+        .sqlite
+        .recover_deduplicate_runs_durable()
+        .await
+        .expect("Recovery should succeed");
     assert_eq!(latest_run(&pool).unwrap().unwrap().status, "running");
 }
 
-#[test]
-fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
+#[tokio::test]
+async fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "clustering-input.jpg");
     prepare_clustering_input(&pool, media_id, "clustering.jpg");
@@ -92,7 +134,7 @@ fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
     connection.execute("UPDATE llm_jobs SET status = 'failed', last_error = 'missing prepared AI inputs' WHERE id = ?", [&job_id]).expect("failed job");
     drop(connection);
 
-    finalize_ready_runs(&pool).expect("repair run");
+    finalize_ready_runs(&pool).await.expect("repair run");
 
     let connection = pool.get().expect("connection");
     let repaired_status: String = connection
@@ -114,7 +156,7 @@ fn clustering_jobs_snapshot_inputs_and_repair_missing_input_failures() {
 }
 
 #[test]
-fn clustering_run_replaces_indexes_from_the_previous_model() {
+fn clustering_run_replaces_indexes_from_the_previous_model_without_hiding_the_visible_generation() {
     let pool = create_test_db();
     let stale_media_id = create_test_media(&pool, "stale-small.jpg");
     let current_media_id = create_test_media(&pool, "current-base.jpg");
@@ -175,11 +217,11 @@ fn clustering_run_replaces_indexes_from_the_previous_model() {
     assert_eq!(queued_media_id, stale_media_id);
     assert_eq!(remaining_models, vec!["dinov2-base"]);
     assert_eq!(stale_band_count, 0);
-    assert_eq!(cluster_count, 0);
+    assert_eq!(cluster_count, 1);
 }
 
-#[test]
-fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
+#[tokio::test]
+async fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "cancel.jpg");
     let run_id = create_run(&pool, "manual", None).expect("run");
@@ -187,7 +229,9 @@ fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
     connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('cancel-job', ?, ?, 'image_clustering', 'queued')", rusqlite::params![media_id, run_id]).expect("job");
     drop(connection);
     assert!(request_cancel(&pool).expect("cancel"));
-    finalize_ready_runs(&pool).expect("finalize cancellation");
+    finalize_ready_runs(&pool)
+        .await
+        .expect("finalize cancellation");
     let connection = pool.get().expect("connection");
     let run_status: String = connection
         .query_row(
@@ -207,8 +251,8 @@ fn cancelled_run_cancels_queued_jobs_without_finalizing_clusters() {
     assert_eq!(job_status, "cancelled");
 }
 
-#[test]
-fn failed_clustering_jobs_still_generate_groups_from_successful_indexes() {
+#[tokio::test]
+async fn failed_clustering_jobs_still_generate_groups_from_successful_indexes() {
     let pool = create_test_db();
     let first_media_id = create_test_media(&pool, "successful-a.jpg");
     let second_media_id = create_test_media(&pool, "successful-b.jpg");
@@ -219,7 +263,7 @@ fn failed_clustering_jobs_still_generate_groups_from_successful_indexes() {
     let connection = pool.get().expect("connection");
     connection.execute("INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) VALUES ('failed-job', ?, ?, 'image_clustering', 'failed')", rusqlite::params![failed_media_id, run_id]).expect("job");
     drop(connection);
-    finalize_ready_runs(&pool).expect("finalize failure");
+    finalize_ready_runs(&pool).await.expect("finalize failure");
 
     let run = latest_run(&pool).expect("latest").expect("run");
     assert_eq!(run.status, "completed");
@@ -326,16 +370,18 @@ fn run_progress_updates_all_page_counters_atomically() {
     assert_eq!(run.clusters_created, 2);
 }
 
-#[test]
-fn identical_near_duplicate_and_burst_sets_are_persisted_once() {
+#[tokio::test]
+async fn identical_near_duplicate_and_burst_sets_are_persisted_once() {
     let pool = create_test_db();
     let first = create_test_media(&pool, "first.jpg");
     let second = create_test_media(&pool, "second.jpg");
     insert_similarity_index(&pool, first, "dinov2-base", &[1.0, 0.0], 7, 1_000);
     insert_similarity_index(&pool, second, "dinov2-base", &[1.0, 0.0], 7, 1_005);
-    let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
+    create_run(&pool, "scheduled", None).expect("Failed to create run");
 
-    generate_clusters(&pool, run_id, None).expect("Failed to generate clusters");
+    finalize_ready_runs(&pool)
+        .await
+        .expect("Failed to generate clusters");
 
     let connection = pool.get().expect("Failed to get connection");
     let (cluster_count, kind, member_count): (i64, String, i64) = connection
@@ -356,8 +402,8 @@ fn identical_near_duplicate_and_burst_sets_are_persisted_once() {
     assert!(!request_cancel(&pool).expect("Completed replacement must reject cancellation"));
 }
 
-#[test]
-fn distinct_media_sets_remain_separate_after_canonicalization() {
+#[tokio::test]
+async fn distinct_media_sets_remain_separate_after_canonicalization() {
     let pool = create_test_db();
     let first = create_test_media(&pool, "first-set-a.jpg");
     let second = create_test_media(&pool, "first-set-b.jpg");
@@ -367,9 +413,11 @@ fn distinct_media_sets_remain_separate_after_canonicalization() {
     insert_similarity_index(&pool, second, "dinov2-base", &[1.0, 0.0], 7, 1_005);
     insert_similarity_index(&pool, third, "dinov2-base", &[0.0, 1.0], 8, 2_000);
     insert_similarity_index(&pool, fourth, "dinov2-base", &[0.0, 1.0], 8, 2_005);
-    let run_id = create_run(&pool, "scheduled", None).expect("Failed to create run");
+    create_run(&pool, "scheduled", None).expect("Failed to create run");
 
-    generate_clusters(&pool, run_id, None).expect("Failed to generate clusters");
+    finalize_ready_runs(&pool)
+        .await
+        .expect("Failed to generate clusters");
 
     let connection = pool.get().expect("Failed to get connection");
     let (cluster_count, member_count): (i64, i64) = connection
@@ -384,8 +432,140 @@ fn distinct_media_sets_remain_separate_after_canonicalization() {
     assert_eq!(latest_run(&pool).unwrap().unwrap().clusters_created, 2);
 }
 
-#[test]
-fn cancelled_generation_keeps_the_previous_complete_clusters() {
+#[tokio::test]
+async fn building_generation_is_invisible_and_resumes_from_durable_state() {
+    let pool = create_test_db();
+    let old_first = create_test_media(&pool, "old-visible-a.jpg");
+    let old_second = create_test_media(&pool, "old-visible-b.jpg");
+    let new_first = create_test_media(&pool, "new-generation-a.jpg");
+    let new_second = create_test_media(&pool, "new-generation-b.jpg");
+    insert_similarity_index(&pool, new_first, "dinov2-base", &[1.0, 0.0], 91, 5_000);
+    insert_similarity_index(&pool, new_second, "dinov2-base", &[1.0, 0.0], 91, 5_005);
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            queries::deduplicate::INSERT_CLUSTER,
+            rusqlite::params!["near_duplicate", old_first],
+        )
+        .expect("old cluster");
+    let old_cluster_id = connection.last_insert_rowid();
+    for media_id in [old_first, old_second] {
+        connection
+            .execute(
+                queries::deduplicate::INSERT_CLUSTER_MEMBER,
+                rusqlite::params![old_cluster_id, media_id, 1.0_f32, 0_u32],
+            )
+            .expect("old member");
+    }
+    drop(connection);
+    create_run(&pool, "manual", None).expect("run");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+
+    let first_step = executors
+        .sqlite
+        .load_deduplicate_finalization_work()
+        .await
+        .expect("initialize durable generation");
+    assert!(matches!(
+        first_step,
+        momento_api::processor::deduplicator::DeduplicateFinalizationWork::Progressed
+    ));
+    let connection = pool.get().expect("connection");
+    let active_generation: Option<i64> = connection
+        .query_row(
+            "SELECT active_generation_id FROM media_similarity_generation_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("active generation");
+    let building_generations: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_generations WHERE status = 'building'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("building generations");
+    let visible_old_members: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_cluster_members WHERE cluster_id = ?",
+            [old_cluster_id],
+            |row| row.get(0),
+        )
+        .expect("old members");
+    assert_eq!(active_generation, None);
+    assert_eq!(building_generations, 1);
+    assert_eq!(visible_old_members, 2);
+    drop(connection);
+
+    momento_api::processor::deduplicator::finalize_ready_runs(&executors)
+        .await
+        .expect("resume finalization");
+    let connection = pool.get().expect("connection");
+    let active_generation: i64 = connection
+        .query_row(
+            "SELECT active_generation_id FROM media_similarity_generation_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("active generation");
+    let old_cluster_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_clusters WHERE id = ?",
+            [old_cluster_id],
+            |row| row.get(0),
+        )
+        .expect("old cluster cleanup");
+    assert!(active_generation > 0);
+    assert_eq!(old_cluster_count, 0);
+}
+
+#[tokio::test]
+async fn grouping_pages_more_than_sixty_four_media_without_one_large_transaction() {
+    let pool = create_test_db();
+    for pair_index in 0_i64..33 {
+        for member_index in 0_i64..2 {
+            let media_id =
+                create_test_media(&pool, &format!("paged-{pair_index}-{member_index}.jpg"));
+            insert_similarity_index(
+                &pool,
+                media_id,
+                "dinov2-base",
+                &[1.0, 0.0],
+                pair_index,
+                pair_index * 100 + member_index,
+            );
+        }
+    }
+    create_run(&pool, "manual", None).expect("run");
+
+    finalize_ready_runs(&pool)
+        .await
+        .expect("paged finalization");
+
+    let run = latest_run(&pool).expect("latest run").expect("run");
+    let connection = pool.get().expect("connection");
+    let active_cluster_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_similarity_clusters AS clusters JOIN media_similarity_generation_state AS state ON state.active_generation_id = clusters.generation_id WHERE state.singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("active clusters");
+    let leftover_state_rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM media_similarity_finalizations) + (SELECT COUNT(*) FROM media_similarity_edges) + (SELECT COUNT(*) FROM media_similarity_labels)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("finalization cleanup");
+    assert_eq!(run.processed_media, 66);
+    assert_eq!(active_cluster_count, 33);
+    assert_eq!(leftover_state_rows, 0);
+}
+
+#[tokio::test]
+async fn cancelled_generation_keeps_the_previous_complete_clusters() {
     let pool = create_test_db();
     let first = create_test_media(&pool, "existing-a.jpg");
     let second = create_test_media(&pool, "existing-b.jpg");
@@ -418,7 +598,9 @@ fn cancelled_generation_keeps_the_previous_complete_clusters() {
         .expect("Failed to request cancellation");
     drop(connection);
 
-    generate_clusters(&pool, run_id, None).expect("Cancelled generation should stop cleanly");
+    finalize_ready_runs(&pool)
+        .await
+        .expect("Cancelled generation should stop cleanly");
 
     let connection = pool.get().expect("Failed to get connection");
     let remaining_cluster: (i64, String) = connection

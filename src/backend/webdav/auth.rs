@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use tracing::{error, warn};
 
 use crate::auth::AppState;
-use crate::database::{fetch_one, queries};
+use crate::database::operations::UserAuthIdentifier;
 
 #[derive(Clone)]
 pub struct WebDAVUser {
@@ -84,43 +84,30 @@ pub async fn basic_auth_middleware(
     if let Err(error) = state
         .authentication_protection
         .begin_password_attempt(&client_ip, username)
+        .await
     {
         return error.into_response();
     }
 
-    let conn = match state.pool.get() {
-        Ok(c) => c,
-        Err(e) => {
-            error!("WebDAV auth failed: database error: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-    };
-
-    let user_result: Option<(i64, String, String, i32)> = match fetch_one(
-        &conn,
-        queries::auth::SELECT_USER_BY_USERNAME,
-        &[&username],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i32>(5)?,
-            ))
-        },
-    ) {
+    let user_result = match state
+        .executors
+        .sqlite
+        .load_user_for_authentication_request(UserAuthIdentifier::Username(username.to_string()))
+        .await
+    {
         Ok(user) => user,
         Err(error) => {
             error!("WebDAV auth failed: database error: {}", error);
             return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
         }
     };
-    drop(conn);
     let verified = match state
         .authentication_protection
         .verify_password(
             password,
-            user_result.as_ref().map(|(_, _, hash, _)| hash.as_str()),
+            user_result
+                .as_ref()
+                .map(|user| user.hashed_password.as_str()),
         )
         .await
     {
@@ -128,7 +115,7 @@ pub async fn basic_auth_middleware(
         Err(error) => return error.into_response(),
     };
 
-    let Some((user_id, db_username, _, is_active)) = user_result else {
+    let Some(user) = user_result else {
         warn!(
             "WebDAV auth failed: unknown user {} from {}",
             username, client_ip
@@ -136,20 +123,24 @@ pub async fn basic_auth_middleware(
         return unauthorized_response(&config.webdav.realm);
     };
 
-    if is_active == 0 || !verified {
+    if !user.is_active || !verified {
         warn!(
             "WebDAV auth failed: invalid credentials for user {} from {}",
-            db_username, client_ip
+            user.username, client_ip
         );
         return unauthorized_response(&config.webdav.realm);
     }
-    state
+    if let Err(error) = state
         .authentication_protection
-        .record_password_success(&client_ip, username);
+        .record_password_success(&client_ip, username)
+        .await
+    {
+        return error.into_response();
+    }
 
     request.extensions_mut().insert(WebDAVUser {
-        id: user_id,
-        username: db_username,
+        id: user.id,
+        username: user.username,
     });
 
     next.run(request).await

@@ -1,10 +1,11 @@
 use momento_api::auth::cleanup_refresh_tokens;
 
-use crate::test_utils::{create_test_db, create_test_user};
+use crate::test_utils::{create_test_db, create_test_user, test_executor_handles};
 
-#[test]
-fn cleanup_deletes_expired_and_revoked_refresh_tokens_only() {
+#[tokio::test]
+async fn cleanup_deletes_expired_and_revoked_refresh_tokens_only() {
     let pool = create_test_db();
+    let executors = test_executor_handles(pool.clone());
     let user_id = create_test_user(&pool, "cleanup-user", "cleanup@example.com");
     let connection = pool.get().expect("database");
     for (token_hash, expires_at, revoked) in [
@@ -21,7 +22,12 @@ fn cleanup_deletes_expired_and_revoked_refresh_tokens_only() {
     }
     drop(connection);
 
-    assert_eq!(cleanup_refresh_tokens(&pool).expect("cleanup"), 2);
+    assert_eq!(
+        cleanup_refresh_tokens(&executors.sqlite)
+            .await
+            .expect("cleanup"),
+        2
+    );
     let remaining: Vec<String> = pool
         .get()
         .expect("database")

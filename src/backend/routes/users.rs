@@ -1,11 +1,14 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::State, response::Response, routing::post, Router};
 
 use crate::auth::{AppState, CurrentUser, RequireAdmin, RESERVED_ADMIN_USERNAME};
-use crate::database::{execute_query, fetch_all, fetch_one, insert_returning_id, queries};
+use crate::database::operations::{
+    CreateUser, CreateUserOutcome, DeleteUserOutcome, UpdateUser, UpdateUserOutcome, UserRecord,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     UserCreateRequest, UserDeleteRequest, UserListResponse, UserResponse, UserUpdateRequest,
 };
+use crate::routes::{render_json, render_message, CpuJson};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -16,33 +19,25 @@ pub fn router() -> Router<AppState> {
         .route("/user/delete", post(delete_user))
 }
 
-fn row_to_user_response(
-    id: i64,
-    username: String,
-    email: String,
-    role: String,
-    must_change_password: i32,
-    is_active: i32,
-    created_at: String,
-) -> UserResponse {
-    let is_reserved = username == RESERVED_ADMIN_USERNAME;
+fn user_response(record: UserRecord) -> UserResponse {
+    let is_reserved = record.username == RESERVED_ADMIN_USERNAME;
     UserResponse {
-        id,
-        username,
-        email,
-        role,
+        id: record.id,
+        username: record.username,
+        email: record.email,
+        role: record.role,
         is_reserved,
-        must_change_password: must_change_password != 0,
-        is_active: is_active != 0,
-        created_at,
+        must_change_password: record.must_change_password,
+        is_active: record.is_active,
+        created_at: record.created_at,
     }
 }
 
 async fn create_user(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(request): Json<UserCreateRequest>,
-) -> AppResult<Json<UserResponse>> {
+    CpuJson(request): CpuJson<UserCreateRequest>,
+) -> AppResult<Response> {
     if request.password.len() < 8 {
         return Err(AppError::BadRequest(
             "Password must be at least 8 characters".to_string(),
@@ -53,188 +48,110 @@ async fn create_user(
         .hash_password(&request.password)
         .await?;
 
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    // Check existing
-    let existing = fetch_one(
-        &conn,
-        queries::users::SELECT_ID_BY_CREDENTIALS,
-        &[&request.username, &request.email],
-        |row| row.get::<_, i64>(0),
-    )?;
-
-    if existing.is_some() {
-        return Err(AppError::BadRequest(
+    match state
+        .executors
+        .sqlite
+        .create_user_request(CreateUser {
+            username: request.username,
+            email: request.email,
+            password_hash: hashed,
+            role: request.role,
+        })
+        .await?
+    {
+        CreateUserOutcome::Duplicate => Err(AppError::BadRequest(
             "Username or email already exists".to_string(),
-        ));
+        )),
+        CreateUserOutcome::Created(user) => render_json(&state, user_response(user)).await,
     }
-
-    let user_id = insert_returning_id(
-        &conn,
-        queries::users::INSERT,
-        &[&request.username, &request.email, &hashed, &request.role],
-    )?;
-
-    let user = fetch_one(&conn, queries::users::SELECT_BY_ID, &[&user_id], |row| {
-        Ok(row_to_user_response(
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-        ))
-    })?
-    .ok_or_else(|| AppError::Internal("Failed to create user".to_string()))?;
-
-    Ok(Json(user))
 }
 
 async fn list_users(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-) -> AppResult<Json<UserListResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+) -> AppResult<Response> {
+    let users = state
+        .executors
+        .sqlite
+        .list_users_request()
+        .await?
+        .into_iter()
+        .map(user_response)
+        .collect();
 
-    let users = fetch_all(&conn, queries::users::SELECT_ALL, &[], |row| {
-        Ok(row_to_user_response(
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-        ))
-    })?;
-
-    Ok(Json(UserListResponse { users }))
+    render_json(&state, UserListResponse { users }).await
 }
 
-async fn get_user(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-) -> AppResult<Json<UserResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let mut user = fetch_one(
-        &conn,
-        queries::users::SELECT_BY_ID,
-        &[&current_user.id],
-        |row| {
-            Ok(row_to_user_response(
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        },
-    )?
-    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+async fn get_user(State(state): State<AppState>, current_user: CurrentUser) -> AppResult<Response> {
+    let mut user = user_response(
+        state
+            .executors
+            .sqlite
+            .load_user_record_request(current_user.id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?,
+    );
     user.must_change_password = current_user.must_change_password;
 
-    Ok(Json(user))
+    render_json(&state, user).await
 }
 
 async fn update_user(
     State(state): State<AppState>,
     RequireAdmin(admin): RequireAdmin,
-    Json(request): Json<UserUpdateRequest>,
-) -> AppResult<Json<UserResponse>> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
+    CpuJson(request): CpuJson<UserUpdateRequest>,
+) -> AppResult<Response> {
     let user_id = request.user_id;
-
-    let target_username = fetch_one(
-        &conn,
-        queries::users::SELECT_USERNAME_BY_ID,
-        &[&user_id],
-        |row| row.get::<_, String>(0),
-    )?
-    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    if user_id == admin.id && request.role.as_deref() == Some("user") {
-        return Err(AppError::BadRequest("Cannot demote yourself".to_string()));
-    }
-
-    if request.is_active == Some(false) && target_username == RESERVED_ADMIN_USERNAME {
-        return Err(AppError::Conflict(
-            "The reserved admin account cannot be deactivated".to_string(),
-        ));
-    }
-
-    if request.is_active == Some(false) && user_id == admin.id {
-        return Err(AppError::BadRequest(
+    match state
+        .executors
+        .sqlite
+        .update_user_request(UpdateUser {
+            administrator_id: admin.id,
+            user_id,
+            role: request.role,
+            is_active: request.is_active,
+        })
+        .await?
+    {
+        UpdateUserOutcome::NotFound => Err(AppError::NotFound("User not found".to_string())),
+        UpdateUserOutcome::CannotDemoteSelf => {
+            Err(AppError::BadRequest("Cannot demote yourself".to_string()))
+        }
+        UpdateUserOutcome::CannotDeactivateSelf => Err(AppError::BadRequest(
             "Cannot deactivate yourself".to_string(),
-        ));
+        )),
+        UpdateUserOutcome::CannotDeactivateReservedAdmin => Err(AppError::Conflict(
+            "The reserved admin account cannot be deactivated".to_string(),
+        )),
+        UpdateUserOutcome::Updated(user) => render_json(&state, user_response(user)).await,
     }
-    match (&request.role, request.is_active) {
-        (Some(role), Some(is_active)) => {
-            execute_query(
-                &conn,
-                queries::users::UPDATE_ROLE_ACTIVE,
-                &[role, &(if is_active { 1i32 } else { 0i32 }), &user_id],
-            )?;
-        }
-        (Some(role), None) => {
-            execute_query(&conn, queries::users::UPDATE_ROLE, &[role, &user_id])?;
-        }
-        (None, Some(is_active)) => {
-            execute_query(
-                &conn,
-                queries::users::UPDATE_ACTIVE,
-                &[&(if is_active { 1i32 } else { 0i32 }), &user_id],
-            )?;
-        }
-        (None, None) => {}
-    }
-
-    let user = fetch_one(&conn, queries::users::SELECT_BY_ID, &[&user_id], |row| {
-        Ok(row_to_user_response(
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-        ))
-    })?
-    .ok_or_else(|| AppError::Internal("Failed to update user".to_string()))?;
-
-    Ok(Json(user))
 }
 
 async fn delete_user(
     State(state): State<AppState>,
     RequireAdmin(admin): RequireAdmin,
-    Json(request): Json<UserDeleteRequest>,
-) -> AppResult<Json<serde_json::Value>> {
+    CpuJson(request): CpuJson<UserDeleteRequest>,
+) -> AppResult<Response> {
     if request.user_id == admin.id {
         return Err(AppError::BadRequest("Cannot delete yourself".to_string()));
     }
 
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let target_username = fetch_one(
-        &conn,
-        queries::users::SELECT_USERNAME_BY_ID,
-        &[&request.user_id],
-        |row| row.get::<_, String>(0),
-    )?
-    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    if target_username == RESERVED_ADMIN_USERNAME {
-        return Err(AppError::Conflict(
-            "The reserved admin account cannot be deleted".to_string(),
-        ));
+    match state
+        .executors
+        .sqlite
+        .delete_user_request(request.user_id)
+        .await?
+    {
+        DeleteUserOutcome::NotFound => {
+            return Err(AppError::NotFound("User not found".to_string()));
+        }
+        DeleteUserOutcome::CannotDeleteReservedAdmin => {
+            return Err(AppError::Conflict(
+                "The reserved admin account cannot be deleted".to_string(),
+            ));
+        }
+        DeleteUserOutcome::Deleted => {}
     }
 
-    execute_query(&conn, queries::users::DELETE, &[&request.user_id])?;
-
-    Ok(Json(
-        serde_json::json!({"message": "User deleted successfully"}),
-    ))
+    render_message(&state, "User deleted successfully").await
 }

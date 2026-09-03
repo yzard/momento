@@ -72,7 +72,7 @@ describe('Faces page', () => {
     mocks.getThumbnailURL.mockReset()
     mocks.mergeGroups.mockReset()
     mocks.lightbox.mockReset()
-    mocks.getThumbnailURL.mockResolvedValue('blob:face')
+    mocks.getThumbnailURL.mockReturnValue('blob:face')
     mocks.listGroups.mockResolvedValue({
       groups: [
         { faceGroupId: 5, faceCount: 4, mediaCount: 3 },
@@ -109,6 +109,12 @@ describe('Faces page', () => {
     expect(screen.getByText('3')).toBeTruthy()
     expect(screen.getByText('2')).toBeTruthy()
     expect(mocks.getThumbnailURL).toHaveBeenCalledWith({ faceGroupId: 5 })
+    const heading = screen.getByRole('heading', { name: 'Faces' })
+    expect(heading.closest('[data-page-frame="true"]')).toBeTruthy()
+    expect(
+      screen.getByRole('link', { name: 'Face group 5, 3 media' }).parentElement?.parentElement
+        ?.className
+    ).toContain('2xl:grid-cols-8')
   })
 
   it('lets administrators select and merge two groups', async () => {

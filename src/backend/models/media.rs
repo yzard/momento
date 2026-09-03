@@ -204,32 +204,6 @@ pub enum ThumbnailSize {
     Tiny,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThumbnailBatchRequest {
-    pub media_ids: Vec<i64>,
-    #[serde(default)]
-    pub size: ThumbnailSize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThumbnailBatchResponse {
-    pub thumbnails: std::collections::HashMap<i64, Option<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewBatchRequest {
-    pub ids: Vec<i64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewBatchResponse {
-    pub previews: std::collections::HashMap<i64, Option<String>>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineGroup {

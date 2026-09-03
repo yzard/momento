@@ -7,7 +7,7 @@ import stat
 
 MAX_DESCRIPTOR_BYTES = 64 * 1024
 MAX_INPUT_BYTES = 32 * 1024 * 1024 * 1024
-DESCRIPTOR_FIELDS = {"jobId", "sequence", "byteSize", "contentHash", "mimeType"}
+DESCRIPTOR_FIELDS = {"jobId", "sequence", "byteSize", "contentHash", "mimeType", "inputFilename"}
 
 
 def read_runtime_input(handler, input_root):
@@ -25,6 +25,7 @@ def read_runtime_input(handler, input_root):
     byte_size = descriptor["byteSize"]
     content_hash = descriptor["contentHash"]
     mime_type = descriptor["mimeType"]
+    input_filename = descriptor["inputFilename"]
     if (
         not isinstance(job_id, str)
         or not job_id
@@ -43,6 +44,9 @@ def read_runtime_input(handler, input_root):
         raise ValueError("contentHash must be 64 lowercase hexadecimal characters")
     if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
         raise ValueError("mimeType must be an image MIME type")
+    expected_filenames = {f"input-{sequence}", f"normalized-input-{sequence}.tiff"}
+    if not isinstance(input_filename, str) or input_filename not in expected_filenames:
+        raise ValueError("inputFilename does not match the input sequence")
 
     if not hasattr(os, "O_NOFOLLOW"):
         raise RuntimeError("runtime input access requires O_NOFOLLOW support")
@@ -52,7 +56,7 @@ def read_runtime_input(handler, input_root):
     try:
         job_fd = os.open(job_id, root_flags | no_follow, dir_fd=root_fd)
         try:
-            input_fd = os.open(f"input-{sequence}", os.O_RDONLY | no_follow, dir_fd=job_fd)
+            input_fd = os.open(input_filename, os.O_RDONLY | no_follow, dir_fd=job_fd)
         finally:
             os.close(job_fd)
     finally:

@@ -1,39 +1,15 @@
 use chrono::{DateTime, Utc};
-use filetime::{set_file_times, FileTime};
 use geohash::{encode, Coord};
-use std::fs;
 use std::path::Path;
 
 use crate::config::MediaProcessConfig;
-use crate::constants::paths;
-use crate::database::{queries, DbConn};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::processor::metadata::{
     apply_supplemental_metadata, extract_image_metadata, extract_video_metadata,
-    load_supplemental_metadata, normalize_gps_coordinates, reverse_geocoding::reverse_geocode,
-    supplemental_metadata_path, MediaMetadata, MetadataSource, MetadataSourceType,
+    load_supplemental_metadata_storage, normalize_gps_coordinates, MediaMetadata, MetadataSource,
+    MetadataSourceType,
 };
-use crate::utils::path::resolve_storage_path;
-
-#[derive(Clone, Copy)]
-pub struct SourceFileTimes {
-    pub accessed: FileTime,
-    pub modified: FileTime,
-}
-
-pub fn capture_file_times(source_path: &Path) -> std::io::Result<SourceFileTimes> {
-    let metadata = fs::metadata(source_path)?;
-    Ok(SourceFileTimes {
-        accessed: FileTime::from_last_access_time(&metadata),
-        modified: FileTime::from_last_modification_time(&metadata),
-    })
-}
-
-pub fn apply_file_times(
-    destination_path: &Path,
-    file_times: SourceFileTimes,
-) -> std::io::Result<()> {
-    set_file_times(destination_path, file_times.accessed, file_times.modified)
-}
+use crate::runtime::ExecutorHandles;
 
 pub fn build_original_filename(media_id: i64, source_path: &Path) -> String {
     let original_stem = source_path
@@ -56,62 +32,62 @@ pub struct CompleteMediaMetadata {
 }
 
 pub async fn generate_complete_metadata(
-    source_path: &Path,
+    executors: &ExecutorHandles,
+    storage_root: StorageRootId,
+    storage_path: &NormalizedStoragePath,
     media_type: &str,
     process_config: &MediaProcessConfig,
 ) -> Result<CompleteMediaMetadata, String> {
+    let source_path = Path::new(storage_path.relative_path());
     let mut extracted = if media_type == "image" {
-        extract_image_metadata(source_path, process_config).await?
+        extract_image_metadata(
+            executors,
+            source_path,
+            storage_root,
+            storage_path,
+            process_config,
+        )
+        .await?
     } else {
-        extract_video_metadata(source_path, process_config).await?
+        extract_video_metadata(
+            executors,
+            source_path,
+            storage_root,
+            storage_path,
+            process_config,
+        )
+        .await?
     };
 
-    if let Some(supplemental_metadata) = load_supplemental_metadata(source_path) {
+    if let Some(supplemental_metadata) =
+        load_supplemental_metadata_storage(executors, storage_root, storage_path).await?
+    {
         apply_supplemental_metadata(&mut extracted.metadata, &supplemental_metadata);
         extracted.sources.push(MetadataSource {
             source_type: MetadataSourceType::SupplementalSidecar,
-            payload: supplemental_metadata,
+            payload_json: supplemental_metadata.payload_json.clone(),
         });
     }
     let metadata = &mut extracted.metadata;
     normalize_gps_coordinates(metadata);
 
     if metadata.date_taken.is_none() {
-        metadata.date_taken = source_path
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(DateTime::<Utc>::from);
+        let (session, snapshot) = executors
+            .file_io
+            .open_storage_read_session_durable(storage_root, storage_path.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        executors
+            .file_io
+            .close_storage_session_durable(session)
+            .await
+            .map_err(|error| error.to_string())?;
+        metadata.date_taken = DateTime::<Utc>::from_timestamp(
+            snapshot.modified_seconds,
+            snapshot.modified_nanoseconds,
+        );
         if metadata.date_taken.is_none() {
             metadata.date_taken = Some(Utc::now());
-        }
-    }
-
-    if metadata.location_city.is_some()
-        && metadata.location_state.is_some()
-        && metadata.location_country.is_some()
-    {
-        return Ok(CompleteMediaMetadata {
-            metadata: extracted.metadata,
-            sources: extracted.sources,
-        });
-    }
-
-    let Some((latitude, longitude)) = metadata.gps_latitude.zip(metadata.gps_longitude) else {
-        return Ok(CompleteMediaMetadata {
-            metadata: extracted.metadata,
-            sources: extracted.sources,
-        });
-    };
-    if let Ok(Some(location)) = reverse_geocode(latitude, longitude) {
-        if metadata.location_city.is_none() {
-            metadata.location_city = Some(location.city);
-        }
-        if metadata.location_state.is_none() {
-            metadata.location_state = location.state;
-        }
-        if metadata.location_country.is_none() {
-            metadata.location_country = Some(location.country);
         }
     }
 
@@ -121,81 +97,7 @@ pub async fn generate_complete_metadata(
     })
 }
 
-pub fn delete_media_files(media_id: i64, file_path: &str, thumbnail_path: Option<&str>) {
-    let Ok(raw_file) = resolve_storage_path(&paths().originals, file_path) else {
-        tracing::warn!(file_path, "refusing to delete an invalid stored media path");
-        return;
-    };
-    if let Some(sidecar_path) = supplemental_metadata_path(&raw_file) {
-        let _ = fs::remove_file(sidecar_path);
-    }
-    if raw_file.exists() {
-        let _ = fs::remove_file(&raw_file);
-    }
-
-    if let Some(thumb_path) = thumbnail_path {
-        for root in [
-            &paths().thumbnails,
-            &paths().thumbnails_tiny,
-            &paths().thumbnails_places,
-        ] {
-            if let Ok(thumbnail_file) = resolve_storage_path(root, thumb_path) {
-                if thumbnail_file.exists() {
-                    let _ = fs::remove_file(thumbnail_file);
-                }
-            }
-        }
-    }
-
-    let original_stem = Path::new(file_path)
-        .file_stem()
-        .and_then(|stem| stem.to_str());
-    if let Some(original_stem) = original_stem {
-        let escaped_stem = glob::Pattern::escape(original_stem);
-        let preview_pattern = paths()
-            .previews
-            .join("*")
-            .join(format!("{escaped_stem}_preview.jpg"));
-        if let Some(preview_pattern) = preview_pattern.to_str() {
-            if let Ok(preview_paths) = glob::glob(preview_pattern) {
-                for preview_path in preview_paths.flatten() {
-                    let _ = fs::remove_file(preview_path);
-                }
-            }
-        }
-    }
-
-    let clustering_frame = paths()
-        .previews
-        .join("deduplicate")
-        .join(format!("{media_id}.jpg"));
-    if clustering_frame.exists() {
-        let _ = fs::remove_file(clustering_frame);
-    }
-
-    let _ = fs::remove_dir_all(paths().previews.join("faces").join(media_id.to_string()));
-    let _ = fs::remove_dir_all(paths().previews.join("ai").join(media_id.to_string()));
-}
-
 pub fn calculate_geohash(lat: f64, lon: f64) -> Option<String> {
     let coord = Coord { x: lon, y: lat };
     encode(coord, 7).ok()
-}
-
-pub fn insert_into_rtree(
-    conn: &DbConn,
-    media_id: i64,
-    lat: f64,
-    lon: f64,
-) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        queries::media::INSERT_RTREE,
-        rusqlite::params![media_id, lat, lat, lon, lon],
-    )?;
-    Ok(())
-}
-
-pub fn delete_from_rtree(conn: &DbConn, media_id: i64) -> Result<(), rusqlite::Error> {
-    conn.execute(queries::media::DELETE_RTREE, rusqlite::params![media_id])?;
-    Ok(())
 }

@@ -1,18 +1,18 @@
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use momento_common::llm::{CancelJobsRequest, JobInputDescriptor, JobManifest};
-use momento_common::rolling::{run_rolling_window, RollingWindowControl};
-use rusqlite::OptionalExtension;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use thiserror::Error;
 
 use crate::config::Config;
-use crate::constants::{
-    DOCUMENT_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE,
+use crate::database::operations::{
+    AcknowledgeLlmCancellation, FinishLlmSubmission, LlmSubmissionJob,
 };
-use crate::database::{queries, DbPool};
+use crate::executor::{CpuExecutorHandle, FileIoExecutorHandle, SqliteExecutorHandle};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
+use crate::io::StorageFileSession;
+use crate::runtime::{DurableSourceId, ExecutorHandles, SchedulerAdmissionKind, SchedulerHandle};
 
 pub mod input;
 pub mod operation;
@@ -24,138 +24,186 @@ use transport::{LlmConnection, PreparedSubmissionInput, SubmissionOutcome, Trans
 use self::input::AiInputStorage;
 
 const CANCELLATION_CHUNK_SIZE: usize = 1000;
+const TRANSPORT_RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+const WORKER_ERROR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
-pub async fn run(config: Arc<Config>, pool: DbPool, handle: TransportHandle) {
-    let interval =
-        std::time::Duration::from_secs(config.llm_submission_worker.poll_interval_seconds);
+pub async fn run(
+    config: Arc<Config>,
+    executors: ExecutorHandles,
+    handle: TransportHandle,
+    scheduler: SchedulerHandle,
+) {
+    let sqlite = executors.sqlite.clone();
+    if !config.llm.enabled {
+        return;
+    }
     loop {
-        if !config.llm.enabled {
-            tokio::time::sleep(interval).await;
-            continue;
-        }
-        let connection = match LlmConnection::connect(
-            &config.llm.server_address,
-            &config.llm.client_id,
-            &config.llm.api_key,
-            pool.clone(),
-        )
-        .await
+        let connection_result = match scheduler
+            .acquire_durable(
+                DurableSourceId::LlmSubmission,
+                SchedulerAdmissionKind::NewClaim,
+            )
+            .await
         {
+            Ok(_worker_permit) => {
+                LlmConnection::connect(
+                    &config.llm.server_address,
+                    &config.llm.client_id,
+                    &config.llm.api_key,
+                    sqlite.clone(),
+                    executors.file_io.clone(),
+                    scheduler.clone(),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let connection = match connection_result {
             Ok(connection) => connection,
             Err(error) => {
                 tracing::warn!("LLM WebSocket connection failed: {error}");
-                tokio::time::sleep(interval).await;
+                tokio::time::sleep(TRANSPORT_RECONNECT_DELAY).await;
                 continue;
             }
         };
         tracing::info!(client_id = config.llm.client_id, "LLM WebSocket connected");
-        let submission_config = Arc::clone(&config);
-        let submission_pool = pool.clone();
+        let submission_executors = executors.clone();
         let submission_connection = connection.clone();
         let submission_handle = handle.clone();
-        let submission_task = tokio::spawn(async move {
-            let mut poll = tokio::time::interval(interval);
+        let submission_scheduler = scheduler.clone();
+        let submission_loop = async move {
+            let mut observed_version = submission_handle.submission_work_version();
             loop {
-                tokio::select! {
-                    _ = submission_connection.closed() => return,
-                    _ = poll.tick() => {}
-                    _ = submission_handle.submission_notified() => {}
-                }
-                if let Err(error) =
-                    submit_cycle(&submission_config, &submission_pool, &submission_connection).await
+                let retry_delay = match submit_cycle(
+                    &submission_executors,
+                    &submission_connection,
+                    &submission_scheduler,
+                )
+                .await
                 {
-                    tracing::warn!("LLM submission cycle failed: {error}");
+                    Ok(()) => match submission_executors
+                        .sqlite
+                        .load_next_llm_submission_delay_durable()
+                        .await
+                    {
+                        Ok(delay) => delay,
+                        Err(error) => {
+                            tracing::warn!(
+                                "failed to load the next LLM submission retry deadline: {error}"
+                            );
+                            Some(WORKER_ERROR_RETRY_DELAY)
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!("LLM submission cycle failed: {error}");
+                        Some(WORKER_ERROR_RETRY_DELAY)
+                    }
+                };
+                let current_version = submission_handle.submission_work_version();
+                if current_version != observed_version {
+                    observed_version = current_version;
+                    continue;
+                }
+                match retry_delay {
+                    Some(delay) => tokio::select! {
+                        _ = submission_connection.closed() => return,
+                        version = submission_handle.wait_for_submission_work(observed_version) => {
+                            observed_version = version;
+                        }
+                        () = tokio::time::sleep(delay) => {}
+                    },
+                    None => tokio::select! {
+                        _ = submission_connection.closed() => return,
+                        version = submission_handle.wait_for_submission_work(observed_version) => {
+                            observed_version = version;
+                        }
+                    },
                 }
             }
-        });
-        let cancellation_pool = pool.clone();
+        };
+        let cancellation_sqlite = sqlite.clone();
         let cancellation_connection = connection.clone();
         let cancellation_handle = handle.clone();
-        let cancellation_task = tokio::spawn(async move {
-            let mut poll = tokio::time::interval(interval);
+        let cancellation_scheduler = scheduler.clone();
+        let cancellation_loop = async move {
+            let mut observed_version = cancellation_handle.cancellation_work_version();
             loop {
-                tokio::select! {
-                    _ = cancellation_connection.closed() => return,
-                    _ = poll.tick() => {}
-                    _ = cancellation_handle.cancellation_notified() => {}
-                }
-                if let Err(error) =
-                    deliver_pending_cancellations(&cancellation_pool, &cancellation_connection)
-                        .await
+                let delivery = match cancellation_scheduler
+                    .acquire_durable(
+                        DurableSourceId::LlmCancellation,
+                        SchedulerAdmissionKind::NewClaim,
+                    )
+                    .await
                 {
-                    tracing::warn!("LLM cancellation delivery failed: {error}");
+                    Ok(_worker_permit) => {
+                        deliver_pending_cancellations(
+                            &cancellation_sqlite,
+                            &cancellation_connection,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                let retry_after_failure = match delivery {
+                    Ok(delivered) => {
+                        if delivered > 0 {
+                            cancellation_handle.wake_submissions();
+                        }
+                        false
+                    }
+                    Err(error) => {
+                        tracing::warn!("LLM cancellation delivery failed: {error}");
+                        true
+                    }
+                };
+                let current_version = cancellation_handle.cancellation_work_version();
+                if current_version != observed_version {
+                    observed_version = current_version;
+                    continue;
+                }
+                if retry_after_failure {
+                    tokio::select! {
+                        _ = cancellation_connection.closed() => return,
+                        version = cancellation_handle.wait_for_cancellation_work(observed_version) => {
+                            observed_version = version;
+                        }
+                        () = tokio::time::sleep(WORKER_ERROR_RETRY_DELAY) => {}
+                    }
+                } else {
+                    tokio::select! {
+                        _ = cancellation_connection.closed() => return,
+                        version = cancellation_handle.wait_for_cancellation_work(observed_version) => {
+                            observed_version = version;
+                        }
+                    }
                 }
             }
-        });
-        connection.closed().await;
-        submission_task.abort();
-        cancellation_task.abort();
+        };
+        tokio::join!(submission_loop, cancellation_loop);
         tracing::warn!(
             client_id = config.llm.client_id,
             "LLM WebSocket disconnected"
         );
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(TRANSPORT_RECONNECT_DELAY).await;
     }
 }
 
-pub fn cancel_active_jobs(pool: &DbPool, task: Option<&str>) -> Result<usize, rusqlite::Error> {
-    let connection = pool
-        .get()
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let transaction = connection.unchecked_transaction()?;
-    let cancelled = if let Some(task) = task {
-        transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
-        transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
-        transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?
-    } else {
-        transaction.execute(queries::ai_jobs::QUEUE_ALL_CANCELLATION_SCOPE, [])?;
-        transaction.execute(queries::ai_jobs::QUEUE_ALL_CANCELLATIONS, [])?;
-        transaction.execute(queries::ai_jobs::CANCEL_ALL, [])?
-    };
-    transaction.commit()?;
-    Ok(cancelled)
-}
-
 pub async fn deliver_pending_cancellations(
-    pool: &DbPool,
+    sqlite: &SqliteExecutorHandle,
     connection: &LlmConnection,
 ) -> Result<usize, String> {
     let mut delivered = 0;
     loop {
-        let cancellation = {
-            let connection = pool.get().map_err(|error| error.to_string())?;
-            let scope = connection
-                .query_row(queries::ai_jobs::SELECT_CANCELLATION_SCOPE, [], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .optional()
-                .map_err(|error| error.to_string())?;
-            let Some((scope, task)) = scope else {
-                return Ok(delivered);
-            };
-            let job_ids = if scope == "all" {
-                connection
-                    .prepare(queries::ai_jobs::SELECT_ALL_CANCELLATIONS)
-                    .map_err(|error| error.to_string())?
-                    .query_map([CANCELLATION_CHUNK_SIZE as i64], |row| row.get(0))
-                    .map_err(|error| error.to_string())?
-                    .collect::<Result<Vec<String>, _>>()
-                    .map_err(|error| error.to_string())?
-            } else {
-                connection
-                    .prepare(queries::ai_jobs::SELECT_CANCELLATIONS_FOR_TASK)
-                    .map_err(|error| error.to_string())?
-                    .query_map(
-                        rusqlite::params![task, CANCELLATION_CHUNK_SIZE as i64],
-                        |row| row.get(0),
-                    )
-                    .map_err(|error| error.to_string())?
-                    .collect::<Result<Vec<String>, _>>()
-                    .map_err(|error| error.to_string())?
-            };
-            (scope, task, job_ids)
+        let Some(cancellation) = sqlite
+            .load_llm_cancellation_batch_durable(CANCELLATION_CHUNK_SIZE as u16)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(delivered);
         };
-        let (scope, task, job_ids) = cancellation;
+        let scope = cancellation.scope;
+        let task = cancellation.task;
+        let job_ids = cancellation.job_ids;
         let response = connection
             .cancel(CancelJobsRequest {
                 all: scope == "all",
@@ -171,183 +219,170 @@ pub async fn deliver_pending_cancellations(
         if response.requested_jobs != job_ids.len() {
             return Err("llm cancellation response count does not match request".to_string());
         }
-        let connection = pool.get().map_err(|error| error.to_string())?;
-        let transaction = connection
-            .unchecked_transaction()
+        sqlite
+            .acknowledge_llm_cancellation_durable(AcknowledgeLlmCancellation {
+                scope,
+                task,
+                job_ids: job_ids.clone(),
+            })
+            .await
             .map_err(|error| error.to_string())?;
-        for job_id in &job_ids {
-            transaction
-                .execute(queries::ai_jobs::DELETE_CANCELLATION, [job_id])
-                .map_err(|error| error.to_string())?;
-        }
-        let remaining: i64 = if scope == "all" {
-            transaction
-                .query_row(queries::ai_jobs::COUNT_ALL_CANCELLATIONS, [], |row| {
-                    row.get(0)
-                })
-                .map_err(|error| error.to_string())?
-        } else {
-            transaction
-                .query_row(
-                    queries::ai_jobs::COUNT_CANCELLATIONS_FOR_TASK,
-                    [&task],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?
-        };
-        if remaining == 0 {
-            if scope == "all" {
-                transaction
-                    .execute(queries::ai_jobs::DELETE_ALL_CANCELLATION_SCOPES, [])
-                    .map_err(|error| error.to_string())?;
-            } else {
-                transaction
-                    .execute(
-                        queries::ai_jobs::DELETE_CANCELLATION_SCOPE_FOR_TASK,
-                        [&task],
-                    )
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-        transaction.commit().map_err(|error| error.to_string())?;
         delivered += job_ids.len();
     }
 }
 
-pub fn queue_task(pool: &DbPool, task: &str, task_enabled: bool) -> Result<usize, rusqlite::Error> {
-    if !task_enabled {
-        return Ok(0);
-    }
-    let connection = pool
-        .get()
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let transaction = connection.unchecked_transaction()?;
-    let queued = if task == IMAGE_AESTHETICS_MODEL_TYPE {
-        transaction.execute(queries::ai_jobs::INSERT_AESTHETICS_ELIGIBLE, [])?
-    } else if task == SCREENSHOT_DETECTION_MODEL_TYPE {
-        transaction.execute(queries::ai_jobs::INSERT_SCREENSHOT_ELIGIBLE, [])?
-    } else if task == DOCUMENT_DETECTION_MODEL_TYPE {
-        transaction.execute(queries::ai_jobs::INSERT_DOCUMENT_ELIGIBLE, [])?
-    } else {
-        transaction.execute(
-            queries::ai_jobs::INSERT_ELIGIBLE,
-            rusqlite::params![task, task, task, task],
-        )?
-    };
-    transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
-    transaction.commit()?;
-    Ok(queued)
-}
-
 async fn submit_cycle(
-    config: &Config,
-    pool: &DbPool,
+    executors: &ExecutorHandles,
     connection: &LlmConnection,
+    scheduler: &SchedulerHandle,
 ) -> Result<(), String> {
-    reclaim_stale_claims(pool)?;
-    pool.get()
-        .map_err(|error| error.to_string())?
-        .execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])
-        .map_err(|error| error.to_string())?;
-    let first_error = Arc::new(tokio::sync::Mutex::new(None));
-    run_rolling_window(
-        NonZeroUsize::new(config.llm_submission_worker.max_async_submission_tasks)
-            .expect("validated LLM submission window"),
-        |capacity| claim_queued_jobs(pool, capacity),
-        |job| submit_claimed_job(pool, connection, job),
-        {
-            let first_error = Arc::clone(&first_error);
-            move |result| {
-                let first_error = Arc::clone(&first_error);
-                async move {
-                    let Err(error) = result else {
-                        return RollingWindowControl::Continue;
-                    };
-                    *first_error.lock().await = Some(error);
-                    RollingWindowControl::Stop
-                }
-            }
-        },
-    )
-    .await?;
-    if let Some(error) = first_error.lock().await.take() {
-        return Err(error);
+    {
+        let _worker_permit = scheduler
+            .acquire_durable(
+                DurableSourceId::LlmSubmission,
+                SchedulerAdmissionKind::NewClaim,
+            )
+            .await?;
+        executors
+            .sqlite
+            .prepare_llm_submission_cycle_durable()
+            .await
+            .map_err(|error| error.to_string())?;
     }
-    Ok(())
-}
-
-fn claim_queued_jobs(
-    pool: &DbPool,
-    capacity: usize,
-) -> Result<Vec<(String, i64, String, i64)>, String> {
-    let connection = pool.get().map_err(|error| error.to_string())?;
-    let jobs = connection
-        .prepare(queries::ai_jobs::SELECT_QUEUED)
-        .map_err(|error| error.to_string())?
-        .query_map([capacity as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    let mut claimed = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        if connection
-            .execute(queries::ai_jobs::CLAIM, [&job.0])
-            .map_err(|error| error.to_string())?
-            == 1
-        {
-            claimed.push(job);
+    let maximum_in_flight = scheduler.outbound_stream_capacity();
+    let mut in_flight = FuturesUnordered::new();
+    let mut first_error = None;
+    loop {
+        if first_error.is_none() && in_flight.len() < maximum_in_flight {
+            let capacity = maximum_in_flight - in_flight.len();
+            let jobs = {
+                let _worker_permit = scheduler
+                    .acquire_durable(
+                        DurableSourceId::LlmSubmission,
+                        SchedulerAdmissionKind::NewClaim,
+                    )
+                    .await?;
+                executors
+                    .sqlite
+                    .claim_llm_submission_jobs_durable(capacity as u16)
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
+            for job in jobs {
+                in_flight.push(submit_claimed_job(executors, connection, scheduler, job));
+            }
+        }
+        let Some(result) = in_flight.next().await else {
+            return first_error.map_or(Ok(()), Err);
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
         }
     }
-    Ok(claimed)
 }
 
 async fn submit_claimed_job(
-    pool: &DbPool,
+    executors: &ExecutorHandles,
     connection: &LlmConnection,
-    (job_id, media_id, task, attempts): (String, i64, String, i64),
+    scheduler: &SchedulerHandle,
+    job: LlmSubmissionJob,
 ) -> Result<(), String> {
+    let outbound_admission = scheduler.acquire_outbound_stream().await?;
+    let worker_permit = scheduler
+        .acquire_durable(
+            DurableSourceId::LlmSubmission,
+            SchedulerAdmissionKind::ExistingClaimCompletion,
+        )
+        .await?;
+    let _claim_registration = scheduler
+        .register_durable_claim(&worker_permit, job.job_id.clone())
+        .map_err(|error| format!("could not register LLM submission claim: {error}"))?;
     let started = Instant::now();
+    let job_id = job.job_id;
+    let media_id = job.media_id;
+    let task = job.task;
+    let attempts = job.attempts;
     let task_name = task.clone();
-    let inputs = load_inputs(pool, &job_id)?;
+    let inputs = executors
+        .sqlite
+        .load_llm_prepared_inputs_durable(job_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
     if inputs.is_empty() {
-        return mark_failed(pool, &job_id, "missing prepared AI inputs");
+        return finish_submission(
+            &executors.sqlite,
+            FinishLlmSubmission::Failed {
+                job_id,
+                error: "missing prepared AI inputs".to_string(),
+            },
+        )
+        .await;
     }
     let mut descriptors = Vec::new();
     let mut prepared_inputs = Vec::new();
     for input in inputs {
         let storage = match AiInputStorage::parse(&input.storage_root) {
             Ok(storage) => storage,
-            Err(error) => return mark_failed(pool, &job_id, &error),
+            Err(error) => {
+                return fail_submission(&executors.sqlite, &job_id, error.to_string()).await
+            }
         };
-        let input_path = match storage.resolve_existing(&input.file_path).await {
+        let input_path = match storage.normalized_path(&input.file_path) {
             Ok(input_path) => input_path,
-            Err(error) => return mark_failed(pool, &job_id, &error.to_string()),
+            Err(error) => {
+                return fail_submission(&executors.sqlite, &job_id, error.to_string()).await
+            }
         };
         let input_size = match u64::try_from(input.byte_size) {
             Ok(input_size) => input_size,
             Err(_) => {
-                return mark_failed(pool, &job_id, "prepared AI input has an invalid byte size")
+                return fail_submission(
+                    &executors.sqlite,
+                    &job_id,
+                    "prepared AI input has an invalid byte size".to_string(),
+                )
+                .await
             }
         };
         if input_size == 0 {
-            return mark_failed(pool, &job_id, "prepared AI input must not be empty");
+            return fail_submission(
+                &executors.sqlite,
+                &job_id,
+                "prepared AI input must not be empty".to_string(),
+            )
+            .await;
         }
-        let file = match open_verified_input(&input_path, input_size, &input.content_hash).await {
-            Ok(file) => file,
-            Err(error) => return mark_failed(pool, &job_id, &error),
+        let session = match open_verified_input(
+            &executors.file_io,
+            &executors.cpu,
+            storage.storage_root_id(),
+            input_path,
+            input_size,
+            &input.content_hash,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                return fail_submission(&executors.sqlite, &job_id, error.to_string()).await
+            }
         };
         let sequence = match u32::try_from(input.sequence) {
             Ok(sequence) => sequence,
-            Err(_) => return mark_failed(pool, &job_id, "prepared AI input sequence is invalid"),
+            Err(_) => {
+                return fail_submission(
+                    &executors.sqlite,
+                    &job_id,
+                    "prepared AI input sequence is invalid".to_string(),
+                )
+                .await
+            }
         };
-        prepared_inputs.push(PreparedSubmissionInput { sequence, file });
+        prepared_inputs.push(PreparedSubmissionInput {
+            sequence,
+            file_io: executors.file_io.clone(),
+            session,
+        });
         descriptors.push(JobInputDescriptor {
             sequence,
             filename: input.filename,
@@ -367,6 +402,7 @@ async fn submit_claimed_job(
         inputs: descriptors,
     };
     let admission_started = Instant::now();
+    drop(worker_permit);
     let response = connection.submit(manifest, prepared_inputs).await;
     tracing::debug!(
         job_id,
@@ -376,142 +412,187 @@ async fn submit_claimed_job(
         total_ms = started.elapsed().as_secs_f64() * 1000.0,
         "LLM job submission timing"
     );
-    let connection = pool.get().map_err(|error| error.to_string())?;
-    match response {
+    drop(outbound_admission);
+    let completion = match response {
         Ok(SubmissionOutcome::Acknowledged { status }) if status == "queued" => {
-            // The reader persists this transition before forwarding the acknowledgement so a
-            // result arriving in the next WebSocket frame cannot observe `submitting`.
+            FinishLlmSubmission::Submitted {
+                job_id,
+                attempt: attempts + 1,
+            }
         }
-        Ok(SubmissionOutcome::Acknowledged { status }) => mark_failed(
-            pool,
-            &job_id,
-            &format!("llm service acknowledged submission with status {status}"),
-        )?,
+        Ok(SubmissionOutcome::Acknowledged { status }) => FinishLlmSubmission::Failed {
+            job_id,
+            error: format!("llm service acknowledged submission with status {status}"),
+        },
+        Ok(SubmissionOutcome::Deferred {
+            retry_after,
+            required_bytes,
+            available_bytes,
+        }) => {
+            tracing::info!(
+                job_id,
+                required_bytes,
+                available_bytes,
+                retry_after_ms = retry_after.as_millis(),
+                "LLM submission deferred by remote queue capacity"
+            );
+            let retry_after_seconds = i64::try_from(retry_after.as_secs().max(1))
+                .map_err(|_| "LLM submission defer delay is too large".to_string())?;
+            FinishLlmSubmission::Deferred {
+                job_id,
+                retry_after_seconds,
+            }
+        }
         Ok(SubmissionOutcome::Rejected {
             retryable: true,
             error,
-        }) => retry_job(&connection, &job_id, &error)?,
+        }) => FinishLlmSubmission::Retry { job_id, error },
         Ok(SubmissionOutcome::Rejected {
             retryable: false,
             error,
-        }) => mark_failed(pool, &job_id, &error)?,
+        }) => FinishLlmSubmission::Failed { job_id, error },
         Err(error) => {
-            connection
-                .execute(queries::ai_jobs::REQUEUE_AMBIGUOUS, [&job_id])
-                .map_err(|database_error| database_error.to_string())?;
             tracing::warn!(job_id, error, "LLM submission outcome was not acknowledged");
+            FinishLlmSubmission::RequeueAmbiguous { job_id }
         }
-    }
-    Ok(())
+    };
+    let _worker_permit = scheduler
+        .acquire_durable(
+            DurableSourceId::LlmSubmission,
+            SchedulerAdmissionKind::ExistingClaimCompletion,
+        )
+        .await?;
+    finish_submission(&executors.sqlite, completion).await
 }
 
 pub async fn verify_prepared_input(
-    path: &std::path::Path,
+    file_io: &FileIoExecutorHandle,
+    cpu: &CpuExecutorHandle,
+    storage_root: StorageRootId,
+    path: NormalizedStoragePath,
     expected_size: u64,
     expected_hash: &str,
-) -> Result<(), String> {
-    open_verified_input(path, expected_size, expected_hash)
+) -> Result<(), PreparedInputError> {
+    let session = open_verified_input(
+        file_io,
+        cpu,
+        storage_root,
+        path,
+        expected_size,
+        expected_hash,
+    )
+    .await?;
+    file_io
+        .close_storage_session_durable(session)
         .await
-        .map(|_| ())
+        .map_err(|error| PreparedInputError::Executor(error.to_string()))
+}
+
+#[derive(Debug, Error)]
+pub enum PreparedInputError {
+    #[error("prepared AI input no longer matches its durable descriptor")]
+    Changed,
+    #[error("prepared AI input executor failed: {0}")]
+    Executor(String),
+    #[error("prepared AI input state is invalid: {0}")]
+    InvalidState(&'static str),
 }
 
 pub async fn open_verified_input(
-    path: &std::path::Path,
+    file_io: &FileIoExecutorHandle,
+    cpu: &CpuExecutorHandle,
+    storage_root: StorageRootId,
+    path: NormalizedStoragePath,
     expected_size: u64,
     expected_hash: &str,
-) -> Result<tokio::fs::File, String> {
-    let mut file = tokio::fs::File::open(path)
+) -> Result<StorageFileSession, PreparedInputError> {
+    let (opened_session, snapshot) = file_io
+        .open_storage_read_session_durable(storage_root, path)
         .await
-        .map_err(|error| error.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut byte_count = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let bytes_read = file
-            .read(&mut buffer)
+        .map_err(|error| PreparedInputError::Executor(error.to_string()))?;
+    if snapshot.byte_size != expected_size {
+        drop(opened_session);
+        return Err(PreparedInputError::Changed);
+    }
+    let mut file = Some(opened_session);
+    let mut hasher = Some(
+        cpu.start_sha256_session_durable()
             .await
-            .map_err(|error| error.to_string())?;
-        if bytes_read == 0 {
+            .map_err(|error| PreparedInputError::Executor(error.to_string()))?,
+    );
+    let mut byte_count = 0_u64;
+    loop {
+        let (returned_file, bytes) = file_io
+            .read_storage_session_durable(
+                file.take().ok_or(PreparedInputError::InvalidState(
+                    "file session is unavailable",
+                ))?,
+                crate::runtime::FILE_IO_CHUNK_BYTES as usize,
+            )
+            .await
+            .map_err(|error| PreparedInputError::Executor(error.to_string()))?;
+        file = Some(returned_file);
+        if bytes.is_empty() {
             break;
         }
         byte_count = byte_count
-            .checked_add(bytes_read as u64)
-            .ok_or_else(|| "prepared AI input is too large".to_string())?;
+            .checked_add(bytes.len() as u64)
+            .ok_or(PreparedInputError::InvalidState("byte count overflowed"))?;
         if byte_count > expected_size {
-            return Err("prepared AI input no longer matches its durable descriptor".to_string());
+            return Err(PreparedInputError::Changed);
         }
-        hasher.update(&buffer[..bytes_read]);
+        let (returned_hasher, _) = cpu
+            .update_sha256_session_durable(
+                hasher.take().ok_or(PreparedInputError::InvalidState(
+                    "hash session is unavailable",
+                ))?,
+                bytes,
+            )
+            .await
+            .map_err(|error| PreparedInputError::Executor(error.to_string()))?;
+        hasher = Some(returned_hasher);
     }
-    if byte_count != expected_size || format!("{:x}", hasher.finalize()) != expected_hash {
-        return Err("prepared AI input no longer matches its durable descriptor".to_string());
-    }
-    file.seek(std::io::SeekFrom::Start(0))
+    let actual_hash = cpu
+        .finish_sha256_session_durable(hasher.take().ok_or(PreparedInputError::InvalidState(
+            "hash session is unavailable",
+        ))?)
         .await
-        .map_err(|error| error.to_string())?;
-    Ok(file)
-}
-
-struct PreparedInput {
-    sequence: i64,
-    storage_root: String,
-    file_path: String,
-    filename: String,
-    mime_type: String,
-    byte_size: i64,
-    content_hash: String,
-    input_kind: String,
-    frame_timestamp_ms: Option<i64>,
-}
-
-fn load_inputs(pool: &DbPool, job_id: &str) -> Result<Vec<PreparedInput>, String> {
-    let connection = pool.get().map_err(|error| error.to_string())?;
-    let inputs = connection
-        .prepare(queries::ai_jobs::SELECT_INPUTS)
-        .map_err(|error| error.to_string())?
-        .query_map([job_id], |row| {
-            Ok(PreparedInput {
-                sequence: row.get(0)?,
-                storage_root: row.get(1)?,
-                file_path: row.get(2)?,
-                filename: row.get(3)?,
-                mime_type: row.get(4)?,
-                byte_size: row.get(5)?,
-                content_hash: row.get(6)?,
-                input_kind: row.get(7)?,
-                frame_timestamp_ms: row.get(8)?,
-            })
-        })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    Ok(inputs)
-}
-
-fn reclaim_stale_claims(pool: &DbPool) -> Result<(), String> {
-    pool.get()
-        .map_err(|error| error.to_string())?
-        .execute(queries::ai_jobs::RECLAIM_STALE, [])
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn retry_job(connection: &rusqlite::Connection, job_id: &str, error: &str) -> Result<(), String> {
-    connection
-        .execute(
-            queries::ai_jobs::RETRY_OR_FAIL,
-            rusqlite::params![error, job_id],
+        .map_err(|error| PreparedInputError::Executor(error.to_string()))?;
+    if byte_count != expected_size || actual_hash != expected_hash {
+        return Err(PreparedInputError::Changed);
+    }
+    file_io
+        .seek_storage_read_session_durable(
+            file.take().ok_or(PreparedInputError::InvalidState(
+                "file session is unavailable",
+            ))?,
+            0,
         )
-        .map_err(|error| error.to_string())?;
-    Ok(())
+        .await
+        .map_err(|error| PreparedInputError::Executor(error.to_string()))
 }
 
-fn mark_failed(pool: &DbPool, job_id: &str, error: &str) -> Result<(), String> {
-    pool.get()
-        .map_err(|error| error.to_string())?
-        .execute(
-            queries::ai_jobs::MARK_FAILED,
-            rusqlite::params![error, job_id],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
+async fn fail_submission(
+    sqlite: &SqliteExecutorHandle,
+    job_id: &str,
+    error: String,
+) -> Result<(), String> {
+    finish_submission(
+        sqlite,
+        FinishLlmSubmission::Failed {
+            job_id: job_id.to_string(),
+            error,
+        },
+    )
+    .await
+}
+
+async fn finish_submission(
+    sqlite: &SqliteExecutorHandle,
+    completion: FinishLlmSubmission,
+) -> Result<(), String> {
+    sqlite
+        .finish_llm_submission_durable(completion)
+        .await
+        .map_err(|error| error.to_string())
 }

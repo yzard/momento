@@ -1,10 +1,10 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::State, response::Response, routing::post, Router};
 
 use crate::auth::{AppState, RequireAdmin};
-use crate::database::queries;
-use crate::error::AppResult;
+use crate::database::operations::ResetMetadataOutcome;
+use crate::error::{AppError, AppResult};
 use crate::models::{MetadataActionResponse, MetadataRequest, MetadataStatusResponse};
-use crate::processor::metadata_worker;
+use crate::routes::{render_json, CpuJson};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -16,21 +16,35 @@ pub fn router() -> Router<AppState> {
 async fn generate(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<MetadataRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    let queued_jobs = metadata_worker::queue_incomplete(&state.pool)? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Metadata generation queued".to_string(),
-        queued_jobs,
-    }))
+    CpuJson(_request): CpuJson<MetadataRequest>,
+) -> AppResult<Response> {
+    let queued_jobs = state
+        .executors
+        .sqlite
+        .queue_incomplete_metadata_request()
+        .await? as i64;
+    state.scheduler.wake_metadata();
+    render_json(
+        &state,
+        MetadataActionResponse {
+            message: "Metadata generation queued".to_string(),
+            queued_jobs,
+        },
+    )
+    .await
 }
 
 async fn status(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<MetadataRequest>,
-) -> AppResult<Json<MetadataStatusResponse>> {
-    let counts = metadata_worker::status_counts(&state.pool)?;
+    CpuJson(_request): CpuJson<MetadataRequest>,
+) -> AppResult<Response> {
+    let job_status = state
+        .executors
+        .sqlite
+        .load_metadata_job_status_request()
+        .await?;
+    let counts = job_status.counts;
     let count_for = |status: &str| {
         counts
             .iter()
@@ -38,11 +52,6 @@ async fn status(
             .map(|(_, count)| *count)
             .unwrap_or(0)
     };
-    let connection = state.pool.get()?;
-    let errors = connection
-        .prepare(queries::metadata_jobs::SELECT_FAILURES)?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
     let queued_jobs = count_for("queued");
     let processing_jobs = count_for("processing");
     let failed_jobs = count_for("failed");
@@ -55,27 +64,52 @@ async fn status(
     } else {
         "idle"
     };
-    Ok(Json(MetadataStatusResponse {
-        status: status.to_string(),
-        queued_jobs,
-        processing_jobs,
-        completed_jobs: count_for("completed"),
-        failed_jobs,
-        errors,
-        face_groups: None,
-    }))
+    render_json(
+        &state,
+        MetadataStatusResponse {
+            status: status.to_string(),
+            queued_jobs,
+            processing_jobs,
+            completed_jobs: count_for("completed"),
+            failed_jobs,
+            errors: job_status.errors,
+            face_groups: None,
+        },
+    )
+    .await
 }
 
 async fn reset(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
-    Json(_request): Json<MetadataRequest>,
-) -> AppResult<Json<MetadataActionResponse>> {
-    metadata_worker::reset_all(&state.pool)?;
-    let connection = state.pool.get()?;
-    let queued_jobs = connection.execute(queries::metadata_jobs::QUEUE_INCOMPLETE, [])? as i64;
-    Ok(Json(MetadataActionResponse {
-        message: "Metadata and AI data reset".to_string(),
-        queued_jobs,
-    }))
+    CpuJson(_request): CpuJson<MetadataRequest>,
+) -> AppResult<Response> {
+    let cleanup_group_id = format!("metadata-reset-{}", uuid::Uuid::new_v4().simple());
+    match state
+        .executors
+        .sqlite
+        .reset_metadata_request(cleanup_group_id)
+        .await?
+    {
+        ResetMetadataOutcome::Reset { .. } => state.scheduler.wake_journal_recovery(),
+        ResetMetadataOutcome::PathConflict => {
+            return Err(AppError::Conflict(
+                "metadata reset conflicts with active file work".to_string(),
+            ));
+        }
+    }
+    state.scheduler.wake_metadata();
+    let queued_jobs = state
+        .executors
+        .sqlite
+        .queue_incomplete_metadata_request()
+        .await? as i64;
+    render_json(
+        &state,
+        MetadataActionResponse {
+            message: "Metadata and AI data reset".to_string(),
+            queued_jobs,
+        },
+    )
+    .await
 }

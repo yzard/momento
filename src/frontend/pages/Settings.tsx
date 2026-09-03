@@ -2,6 +2,7 @@ import { AlertTriangle, Monitor, Moon, Palette, ShieldCheck, Sun } from 'lucide-
 
 import PasswordChangeForm from '../components/auth/PasswordChangeForm'
 import AndroidAppDownloadLink from '../components/layout/AndroidAppDownloadLink'
+import { PageFrame, PageHeader } from '../components/layout/PageLayout'
 import { useAuth } from '../hooks/useAuth'
 import { useTheme } from '../hooks/useTheme'
 import type { ThemePreference } from '../lib/theme'
@@ -17,7 +18,7 @@ function AppearanceSettings() {
   const { preference, setPreference } = useTheme()
   return (
     <section
-      className="mb-8 overflow-hidden rounded-xl border border-border bg-card shadow-sm"
+      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
       aria-labelledby="appearance-title"
     >
       <div className="flex items-center gap-4 border-b border-border bg-muted/30 px-8 py-6">
@@ -130,41 +131,40 @@ export default function Settings() {
   const { user } = useAuth()
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-      <div className="mx-auto max-w-7xl px-6 py-8 md:px-10 animate-fade-in">
-        <div className="mx-auto max-w-4xl">
-          <header className="mb-10">
-            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground">
-              Account Settings
-            </h1>
-            <p className="mt-1 font-medium text-muted-foreground">
-              Manage your security and preferences.
-            </p>
-          </header>
-          <AppearanceSettings />
-          <section
-            className="mb-8 overflow-hidden rounded-xl border border-border bg-card shadow-sm"
-            aria-labelledby="android-app-title"
-          >
-            <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
-              <div className="max-w-xl">
-                <h2
-                  id="android-app-title"
-                  className="font-display text-xl font-semibold text-foreground"
-                >
-                  Android app
-                </h2>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                  Install the release APK provided by this Momento server. Android may ask you to
-                  allow installs from your browser.
-                </p>
+      <PageFrame className="animate-fade-in">
+        <PageHeader
+          title="Account Settings"
+          description="Manage your security and preferences."
+          actions={null}
+        />
+        <div className="grid items-start gap-8 xl:grid-cols-2">
+          <div className="space-y-8">
+            <AppearanceSettings />
+            <section
+              className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
+              aria-labelledby="android-app-title"
+            >
+              <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
+                <div className="max-w-xl">
+                  <h2
+                    id="android-app-title"
+                    className="font-display text-xl font-semibold text-foreground"
+                  >
+                    Android app
+                  </h2>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                    Install the release APK provided by this Momento server. Android may ask you to
+                    allow installs from your browser.
+                  </p>
+                </div>
+                <AndroidAppDownloadLink compact={false} />
               </div>
-              <AndroidAppDownloadLink compact={false} />
-            </div>
-          </section>
+            </section>
+          </div>
           <SecuritySettings mustChangePassword={Boolean(user?.mustChangePassword)} />
-          <LocationAttribution />
         </div>
-      </div>
+        <LocationAttribution />
+      </PageFrame>
     </div>
   )
 }

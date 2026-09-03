@@ -1,156 +1,142 @@
-use axum::{extract::State, routing::post, Json, Router};
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine,
+use axum::{
+    extract::{Extension, Path, State},
+    http::HeaderMap,
+    response::Response,
+    routing::{get, post},
+    Router,
 };
-use serde::{Deserialize, Serialize};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
 use crate::auth::{AppState, CurrentUser};
-use crate::constants::paths;
-use crate::database::{fetch_all, fetch_one, queries};
+use crate::database::operations::{PlaceIdentityQuery, PlaceMediaQuery, PlacePageQuery};
 use crate::error::{AppError, AppResult};
-use crate::models::{
-    map_media_response, PlaceGetRequest, PlaceGetResponse, PlaceSummary, PlaceThumbnailRequest,
-    PlaceThumbnailResponse, PlacesListRequest, PlacesListResponse,
+use crate::executor::PlaceIdentityDto;
+use crate::io::file::StorageRootId;
+use crate::models::{PlaceGetRequest, PlaceGetResponse, PlacesListRequest, PlacesListResponse};
+use crate::routes::{
+    file_stream::{serve_file, ContentDisposition, FileResponseOptions},
+    render_json, CpuJson,
 };
-use crate::utils::path::resolve_existing_storage_path;
+use crate::runtime::HttpRequestAdmission;
 
 const MAX_PAGE_LIMIT: i64 = 200;
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PlaceIdentity {
-    city: String,
-    state: Option<String>,
-    country: String,
-}
-
-struct PlaceRow {
-    city: String,
-    state: Option<String>,
-    country: String,
-    media_count: i64,
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/places/list", post(list_places))
         .route("/places/get", post(get_place))
-        .route("/places/thumbnail", post(get_place_thumbnail))
+        .route("/places/:place_id/thumbnail", get(get_place_thumbnail))
 }
 
 async fn get_place_thumbnail(
     State(state): State<AppState>,
+    Extension(admission): Extension<HttpRequestAdmission>,
     current_user: CurrentUser,
-    Json(request): Json<PlaceThumbnailRequest>,
-) -> AppResult<Json<PlaceThumbnailResponse>> {
-    let identity = decode_place_id(&request.place_id)?;
-    let connection = state.pool.get()?;
-    let cover_query = queries::places::select_cover_query();
-    let cover = fetch_one(
-        &connection,
-        &cover_query,
-        &[
-            &current_user.id,
-            &identity.city,
-            &identity.state,
-            &identity.country,
-        ],
-        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
-    )?
-    .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
-    drop(connection);
-    let thumbnail_relative = super::media::thumbnail_relative_path(cover.0.as_deref(), &cover.1);
-    let Some(thumbnail_path) = thumbnail_relative.to_str() else {
-        return Ok(Json(PlaceThumbnailResponse { thumbnail: None }));
-    };
-    let Ok(thumbnail_path) =
-        resolve_existing_storage_path(&paths().thumbnails_places, thumbnail_path).await
+    Path(place_id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let identity = state.executors.cpu.decode_place_identity(place_id).await?;
+    let cover = state
+        .executors
+        .sqlite
+        .load_place_cover_request(identity_query(current_user.id, identity))
+        .await?
+        .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
+    let Some(thumbnail_path) =
+        super::media::thumbnail_relative_path(cover.thumbnail_path.as_deref())
     else {
-        return Ok(Json(PlaceThumbnailResponse { thumbnail: None }));
+        return Err(AppError::NotFound("Place thumbnail not found".to_string()));
     };
-    let thumbnail = match tokio::fs::read(thumbnail_path).await {
-        Ok(bytes) => Some(format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    Ok(Json(PlaceThumbnailResponse { thumbnail }))
+    serve_file(
+        &state.executors.file_io,
+        StorageRootId::PlaceThumbnails,
+        thumbnail_path,
+        FileResponseOptions {
+            admission: &admission,
+            content_type: "image/jpeg",
+            headers: &headers,
+            filename: None,
+            allow_ranges: false,
+            content_disposition: ContentDisposition::Inline,
+            cache_control: "private",
+            head_only: false,
+        },
+    )
+    .await
 }
 
 async fn list_places(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<PlacesListRequest>,
-) -> AppResult<Json<PlacesListResponse>> {
+    CpuJson(request): CpuJson<PlacesListRequest>,
+) -> AppResult<Response> {
     validate_limit(request.limit)?;
     let offset = decode_cursor(request.cursor.as_deref())?;
-    let connection = state.pool.get()?;
-    let query = queries::places::select_page_query();
-    let mut rows = fetch_all(
-        &connection,
-        &query,
-        &[&current_user.id, &(request.limit + 1), &offset],
-        map_place_row,
-    )?;
+    let mut rows = state
+        .executors
+        .sqlite
+        .load_places_page_request(PlacePageQuery {
+            user_id: current_user.id,
+            limit: request.limit,
+            offset,
+        })
+        .await?;
     let has_more = rows.len() > request.limit as usize;
     rows.truncate(request.limit as usize);
-    let places = rows
-        .into_iter()
-        .map(place_summary)
-        .collect::<AppResult<Vec<_>>>()?;
+    let places = state.executors.cpu.build_place_summaries(rows).await?;
     let next_cursor = has_more.then(|| encode_cursor(offset + request.limit));
-    Ok(Json(PlacesListResponse {
-        places,
-        next_cursor,
-        has_more,
-    }))
+    render_json(
+        &state,
+        PlacesListResponse {
+            places,
+            next_cursor,
+            has_more,
+        },
+    )
+    .await
 }
 
 async fn get_place(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(request): Json<PlaceGetRequest>,
-) -> AppResult<Json<PlaceGetResponse>> {
+    CpuJson(request): CpuJson<PlaceGetRequest>,
+) -> AppResult<Response> {
     validate_limit(request.limit)?;
-    let identity = decode_place_id(&request.place_id)?;
+    let identity = state
+        .executors
+        .cpu
+        .decode_place_identity(request.place_id)
+        .await?;
     let offset = decode_cursor(request.cursor.as_deref())?;
-    let connection = state.pool.get()?;
-    let summary_query = queries::places::select_summary_query();
-    let place = fetch_one(
-        &connection,
-        &summary_query,
-        &[
-            &current_user.id,
-            &identity.city,
-            &identity.state,
-            &identity.country,
-        ],
-        map_place_row,
-    )?
-    .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
-    let place = place_summary(place)?;
-    let mut media = fetch_all(
-        &connection,
-        queries::places::SELECT_MEDIA_PAGE,
-        &[
-            &current_user.id,
-            &identity.city,
-            &identity.state,
-            &identity.country,
-            &(request.limit + 1),
-            &offset,
-        ],
-        map_media_response,
-    )?;
-    let has_more = media.len() > request.limit as usize;
-    media.truncate(request.limit as usize);
+    let page = state
+        .executors
+        .sqlite
+        .load_place_media_page_request(PlaceMediaQuery {
+            identity: identity_query(current_user.id, identity),
+            limit: request.limit,
+            offset,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
+    let place = state
+        .executors
+        .cpu
+        .build_place_summaries(vec![page.place])
+        .await?
+        .pop()
+        .ok_or_else(|| AppError::Internal("CPU returned no place summary".to_string()))?;
+    let has_more = page.has_more;
     let next_cursor = has_more.then(|| encode_cursor(offset + request.limit));
-    Ok(Json(PlaceGetResponse {
-        place,
-        media,
-        next_cursor,
-        has_more,
-    }))
+    render_json(
+        &state,
+        PlaceGetResponse {
+            place,
+            media: page.media,
+            next_cursor,
+            has_more,
+        },
+    )
+    .await
 }
 
 fn validate_limit(limit: i64) -> AppResult<()> {
@@ -162,45 +148,13 @@ fn validate_limit(limit: i64) -> AppResult<()> {
     Ok(())
 }
 
-fn map_place_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaceRow> {
-    Ok(PlaceRow {
-        city: row.get(0)?,
-        state: row.get(1)?,
-        country: row.get(2)?,
-        media_count: row.get(3)?,
-    })
-}
-
-fn place_summary(row: PlaceRow) -> AppResult<PlaceSummary> {
-    let identity = PlaceIdentity {
-        city: row.city,
-        state: row.state,
-        country: row.country,
-    };
-    let place_id = encode_place_id(&identity)?;
-    Ok(PlaceSummary {
-        place_id,
+fn identity_query(user_id: i64, identity: PlaceIdentityDto) -> PlaceIdentityQuery {
+    PlaceIdentityQuery {
+        user_id,
         city: identity.city,
         state: identity.state,
         country: identity.country,
-        media_count: row.media_count,
-    })
-}
-
-fn encode_place_id(identity: &PlaceIdentity) -> AppResult<String> {
-    Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(identity)?))
-}
-
-fn decode_place_id(place_id: &str) -> AppResult<PlaceIdentity> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(place_id)
-        .map_err(|_| AppError::Validation("placeId is invalid".to_string()))?;
-    let identity: PlaceIdentity = serde_json::from_slice(&bytes)
-        .map_err(|_| AppError::Validation("placeId is invalid".to_string()))?;
-    if identity.city.trim().is_empty() || identity.country.trim().is_empty() {
-        return Err(AppError::Validation("placeId is invalid".to_string()));
     }
-    Ok(identity)
 }
 
 fn encode_cursor(offset: i64) -> String {

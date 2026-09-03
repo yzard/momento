@@ -4,22 +4,38 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Media } from '../../../../src/frontend/api/types'
 
 const mocks = vi.hoisted(() => ({
-  getCachedThumbnailURL: vi.fn(),
   getFileStreamURL: vi.fn(),
+  loadThumbnail: vi.fn(),
 }))
 
 vi.mock('../../../../src/frontend/api/media', () => ({
   mediaApi: {
-    getCachedThumbnailURL: mocks.getCachedThumbnailURL,
     getFileStreamURL: mocks.getFileStreamURL,
   },
 }))
 
-vi.mock('../../../../src/frontend/utils/batcher', () => ({
-  batchLoader: { load: vi.fn() },
+vi.mock('../../../../src/frontend/utils/assetUrlLoader', () => ({
+  thumbnailUrlLoader: { load: mocks.loadThumbnail },
 }))
 
 import PhotoGrid from '../../../../src/frontend/components/timeline/PhotoGrid'
+
+class VisibleIntersectionObserver implements IntersectionObserver {
+  readonly root = null
+  readonly rootMargin = '0px'
+  readonly thresholds = [0]
+
+  constructor(callback: IntersectionObserverCallback) {
+    queueMicrotask(() => callback([{ isIntersecting: true } as IntersectionObserverEntry], this))
+  }
+
+  disconnect(): void {}
+  observe(): void {}
+  takeRecords(): IntersectionObserverEntry[] {
+    return []
+  }
+  unobserve(): void {}
+}
 
 const video = {
   id: 5,
@@ -32,9 +48,9 @@ const video = {
 describe('PhotoGrid', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-    mocks.getCachedThumbnailURL.mockReset()
+    vi.stubGlobal('IntersectionObserver', VisibleIntersectionObserver)
     mocks.getFileStreamURL.mockReset()
-    mocks.getCachedThumbnailURL.mockReturnValue('/thumbnail/5')
+    mocks.loadThumbnail.mockReset().mockResolvedValue('/api/v1/media/5/thumbnail')
     mocks.getFileStreamURL.mockResolvedValue('/stream/5?ticket=signed')
   })
 
@@ -44,6 +60,10 @@ describe('PhotoGrid', () => {
 
   it('requests a stream ticket only after the hover preview delay', async () => {
     const view = render(<PhotoGrid media={[video]} onPhotoClick={vi.fn()} selection={null} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
     const thumbnail = view.getByRole('img', { name: 'preview.mp4' })
 
     fireEvent.mouseEnter(thumbnail.parentElement as HTMLElement)

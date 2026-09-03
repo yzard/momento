@@ -266,8 +266,10 @@ the default secrets and persist the complete data directory.
 
 ## Data
 
-Momento and llm-service share one data root. llm-service writes logs beside Momento under
-`/data/logs`, while its queue and runtime cache remain under `/data/llm`:
+The playground mounts one data root into both containers for convenience. Production deployments
+may place Momento and llm-service on separate machines with unrelated storage. llm-service never
+opens a Momento path: it receives source bytes over the authenticated WebSocket and stores its own
+queue, cache, temporary files, and logs below its configured `/data` volume. The playground layout is:
 
 ```text
 /data/
@@ -310,6 +312,18 @@ Momento validates the complete prospective configuration, atomically updates the
 `config.toml` while preserving comments and unrelated values, and reschedules the affected cron
 loop immediately without a service restart.
 
+Momento API uses one scheduler thread, a fixed two-thread network runtime, and three bounded FIFO
+executor domains configured by `[thread_pool].cpu_workers`, `[thread_pool].io_workers`, and
+`[thread_pool].sqlite_workers`. HTTP/WebDAV orchestration stays on the network runtime; parsing,
+hashing, encoding, and supervised media tools use CPU workers; filesystem and log operations use I/O
+workers; and SQL uses SQLite workers. Metadata, LLM submission, and LLM result workers drain their
+durable queues and then wait for versioned work signals; they have no poll-interval settings. WebDAV
+and Android backup imports are event-driven, while local import starts only from an administrator
+request. There are no per-feature concurrency settings.
+r2d2 separately owns SQLite connections and its connection-maintenance thread. Each SQL operation is
+still executed by a configured SQLite executor worker after checking out a connection; r2d2 does not
+form another business-work queue.
+
 GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
 snapshot embedded in the Momento API binary. No external geocoding service or runtime network
 request is used. GeoNames data is provided under CC BY 4.0; attribution and source checksums are
@@ -347,12 +361,18 @@ hosted inference API.
 
 ### Input preparation and scheduling
 
-Momento prepares every AI input itself. For a photo it sends a prepared image; for a video it
-currently sends a prepared representative frame. Screenshot and document detection use a separate
-orientation-correct, aspect-preserving photo preview with a maximum 2048-pixel edge and never
-accept videos. Each request contains the raw input bytes and its descriptor, while the transport
-preserves multiple ordered inputs for future preparation strategies. `llm-service` does not need
-access to Momento's filesystem.
+Momento owns every AI input reference. Photo jobs stream the immutable full-resolution canonical
+original; video-capable jobs stream one shared lossless full-resolution representative frame.
+Screenshot and document detection remain photo-only. UI thumbnails and browser previews are never
+AI inputs. Each request contains ordered descriptors, and llm-service asks Momento to transmit only
+content hashes it does not already hold. Identical inputs for concurrent task types are hard-linked
+into their job directories, so a large original is stored once in the llm-service mounted volume.
+Camera RAW inputs (including DNG, CR2/CR3, NEF/NRW, ARW, RW2, ORF, RAF, PEF, SRW, and generic RAW)
+are decoded at full resolution by LibRaw inside llm-service; the resulting TIFF is cached by source
+content hash and shared across AI task types. Neither service uses a shared filesystem or `/tmp` for
+runtime task data. The Momento API image includes ImageMagick's LibRaw module as a separate dependency
+so metadata generation and browser thumbnails use the same original RAW files without an encoded-file
+size cutoff.
 
 `llm-service` keeps only one AI model loaded at a time. Jobs are grouped by type, and the scheduler
 keeps a bounded rolling window for one task until its queue is exhausted. It then unloads that
@@ -365,10 +385,18 @@ scheduler do not apply model-specific concurrency limits.
 ### Durable execution
 
 Accepted jobs are streamed into a durable disk queue before Momento receives an acknowledgement.
+The queue keeps a content-addressed source store and links each job to it; a durable receipt from
+Momento removes the job and removes cached source/RAW-normalized data when the final job reference is
+gone.
 The scheduler keeps bounded job metadata in memory and sends only validated descriptors to the
 active same-container model process. The model opens inputs from `queue/processing`; image bytes
-are never retransmitted over the local HTTP boundary. Queue job count is not configured, so
-operators must monitor disk capacity.
+are never retransmitted over the local HTTP boundary. `[scheduler].max_queue_bytes` limits unique
+source bytes retained by the durable queue, while `working_space_reserve_bytes` preserves filesystem
+headroom for RAW normalization, inference results, queue metadata, and logs. If capacity is full,
+llm-service defers admission before any payload bytes are sent and Momento retries the same queued
+job without consuming an attempt. Inputs larger than the configured queue budget are rejected
+permanently. Operators should still monitor disk usage because model output, normalized RAW data,
+metadata, and logs are not source bytes counted by `max_queue_bytes`.
 
 AI cancellation is durable across machines. Momento records an all-task or task-specific scope
 plus exact job IDs in an outbox and retries until llm-service acknowledges it. Matching inference

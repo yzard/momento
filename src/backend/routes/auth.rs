@@ -1,12 +1,11 @@
 use axum::{
     extract::{ConnectInfo, State},
     http::{header::AUTHORIZATION, header::SET_COOKIE, HeaderMap},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::post,
-    Json, Router,
+    Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rusqlite::{OptionalExtension, TransactionBehavior};
 use std::net::SocketAddr;
 
 use crate::auth::{
@@ -15,10 +14,12 @@ use crate::auth::{
     hash_refresh_token, refresh_token_cookie, AppState, CurrentUser, TEMPORARY_ADMIN_PASSWORD,
     TEMPORARY_ADMIN_USERNAME,
 };
-use crate::config::Config;
-use crate::database::{execute_query, fetch_one, insert_returning_id, queries, DbConn};
+use crate::database::operations::{
+    InsertRefreshToken, ReplacePassword, RotateRefreshToken, UserAuthIdentifier,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::{ChangePasswordRequest, LogoutRequest, RefreshTokenRequest, TokenResponse};
+use crate::routes::{render_json, render_message, CpuJson};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -35,10 +36,9 @@ async fn login(
     State(state): State<AppState>,
     peer_address: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-) -> AppResult<Json<TokenResponse>> {
-    Ok(Json(
-        authenticate(&state, &headers, peer_address.map(|peer| peer.0)).await?,
-    ))
+) -> AppResult<Response> {
+    let response = authenticate(&state, &headers, peer_address.map(|peer| peer.0)).await?;
+    render_json(&state, response).await
 }
 
 async fn create_browser_session(
@@ -47,11 +47,7 @@ async fn create_browser_session(
     headers: HeaderMap,
 ) -> AppResult<Response> {
     let tokens = authenticate(&state, &headers, peer_address.map(|peer| peer.0)).await?;
-    session_response(
-        serde_json::json!({"message": "Authenticated successfully"}),
-        &tokens,
-        &state.config.current(),
-    )
+    session_response(&state, "Authenticated successfully", &tokens).await
 }
 
 async fn authenticate(
@@ -84,9 +80,8 @@ async fn authenticate(
         .client_source(headers, peer_address);
     state
         .authentication_protection
-        .begin_password_attempt(&client_source, username)?;
-
-    let connection = state.pool.get().map_err(AppError::Pool)?;
+        .begin_password_attempt(&client_source, username)
+        .await?;
 
     let temporary_admin_reset = (username == TEMPORARY_ADMIN_USERNAME
         && password == TEMPORARY_ADMIN_PASSWORD)
@@ -94,13 +89,21 @@ async fn authenticate(
         .flatten();
     let temporary_admin_login = temporary_admin_reset.is_some();
     let user = if let Some((admin_id, _)) = &temporary_admin_reset {
-        load_user_for_auth(&connection, queries::auth::SELECT_USER_BY_ID, admin_id)?
+        state
+            .executors
+            .sqlite
+            .load_user_for_authentication_request(UserAuthIdentifier::Id(*admin_id))
+            .await
+            .map_err(AppError::from)?
     } else {
-        load_user_for_auth(
-            &connection,
-            queries::auth::SELECT_USER_BY_USERNAME,
-            &username,
-        )?
+        state
+            .executors
+            .sqlite
+            .load_user_for_authentication_request(UserAuthIdentifier::Username(
+                username.to_string(),
+            ))
+            .await
+            .map_err(AppError::from)?
     };
     let verified = state
         .authentication_protection
@@ -112,7 +115,7 @@ async fn authenticate(
         )
         .await?;
     let user = user.filter(|user| {
-        user.is_active != 0
+        user.is_active
             && if temporary_admin_login {
                 user.role == "admin"
             } else {
@@ -124,7 +127,8 @@ async fn authenticate(
     };
     state
         .authentication_protection
-        .record_password_success(&client_source, username);
+        .record_password_success(&client_source, username)
+        .await?;
 
     let config = state.config.current();
     let access_token = create_access_token(
@@ -139,45 +143,27 @@ async fn authenticate(
     let (raw_refresh, token_hash, expires_at) = create_refresh_token(user.id, &config);
 
     if !temporary_admin_login {
-        insert_returning_id(
-            &connection,
-            queries::auth::INSERT_REFRESH_TOKEN,
-            &[&token_hash, &user.id, &expires_at.to_rfc3339()],
-        )?;
+        state
+            .executors
+            .sqlite
+            .insert_refresh_token_request(InsertRefreshToken {
+                token_hash,
+                user_id: user.id,
+                expires_at: expires_at.to_rfc3339(),
+            })
+            .await
+            .map_err(AppError::from)?;
     }
 
     Ok(TokenResponse::new(access_token, raw_refresh))
 }
 
-fn load_user_for_auth(
-    connection: &DbConn,
-    query: &str,
-    identifier: &dyn rusqlite::ToSql,
-) -> AppResult<Option<UserAuthRow>> {
-    fetch_one(connection, query, &[identifier], |row| {
-        Ok(UserAuthRow {
-            id: row.get(0)?,
-            username: row.get(1)?,
-            role: row.get(3)?,
-            hashed_password: row.get(4)?,
-            is_active: row.get(5)?,
-        })
-    })
-}
-
-struct UserAuthRow {
-    id: i64,
-    username: String,
-    role: String,
-    hashed_password: String,
-    is_active: i32,
-}
-
 async fn refresh(
     State(state): State<AppState>,
-    Json(request): Json<RefreshTokenRequest>,
-) -> AppResult<Json<TokenResponse>> {
-    Ok(Json(rotate_refresh_token(&state, &request.refresh_token)?))
+    CpuJson(request): CpuJson<RefreshTokenRequest>,
+) -> AppResult<Response> {
+    let response = rotate_refresh_token(&state, &request.refresh_token).await?;
+    render_json(&state, response).await
 }
 
 async fn refresh_browser_session(
@@ -186,41 +172,27 @@ async fn refresh_browser_session(
 ) -> AppResult<Response> {
     let refresh_token = refresh_token_cookie(&headers)
         .ok_or_else(|| AppError::Authentication("Refresh session is required".to_string()))?;
-    let tokens = rotate_refresh_token(&state, &refresh_token)?;
-    session_response(
-        serde_json::json!({"message": "Session refreshed successfully"}),
-        &tokens,
-        &state.config.current(),
-    )
+    let tokens = rotate_refresh_token(&state, &refresh_token).await?;
+    session_response(&state, "Session refreshed successfully", &tokens).await
 }
 
-fn rotate_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<TokenResponse> {
+async fn rotate_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<TokenResponse> {
     let token_hash = hash_refresh_token(refresh_token);
-    let mut connection = state.pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = chrono::Utc::now().to_rfc3339();
-    let token_row = transaction
-        .query_row(
-            queries::auth::VALIDATE_REFRESH_TOKEN,
-            rusqlite::params![token_hash, now],
-            |row| {
-                Ok(RefreshTokenRow {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    username: row.get(4)?,
-                    role: row.get(5)?,
-                    is_active: row.get(6)?,
-                })
-            },
-        )
-        .optional()?
-        .ok_or_else(|| AppError::Authentication("Invalid refresh token".to_string()))?;
-
-    if token_row.is_active == 0 {
-        return Err(AppError::Authentication("User is inactive".to_string()));
-    }
-
     let config = state.config.current();
+    let (raw_refresh, new_token_hash, expires_at) = create_refresh_token(0, &config);
+    let token_row = state
+        .executors
+        .sqlite
+        .rotate_refresh_token_request(RotateRefreshToken {
+            current_token_hash: token_hash,
+            replacement_token_hash: new_token_hash,
+            replacement_expires_at: expires_at.to_rfc3339(),
+            now,
+        })
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::Authentication("Invalid refresh token".to_string()))?;
     let access_token = create_access_token(
         token_row.user_id,
         &token_row.username,
@@ -228,48 +200,16 @@ fn rotate_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<Toke
         &config,
         None,
     )?;
-    let (raw_refresh, new_token_hash, expires_at) =
-        create_refresh_token(token_row.user_id, &config);
-
-    let consumed = transaction.execute(
-        queries::auth::REVOKE_REFRESH_TOKEN,
-        rusqlite::params![token_row.id, now],
-    )?;
-    if consumed != 1 {
-        return Err(AppError::Authentication(
-            "Invalid refresh token".to_string(),
-        ));
-    }
-    transaction.execute(
-        queries::auth::INSERT_REFRESH_TOKEN,
-        rusqlite::params![new_token_hash, token_row.user_id, expires_at.to_rfc3339()],
-    )?;
-    transaction.execute(
-        queries::auth::DELETE_REVOKED_TOKEN,
-        rusqlite::params![token_row.id],
-    )?;
-    transaction.commit()?;
-
     Ok(TokenResponse::new(access_token, raw_refresh))
-}
-
-struct RefreshTokenRow {
-    id: i64,
-    user_id: i64,
-    username: String,
-    role: String,
-    is_active: i32,
 }
 
 async fn logout(
     State(state): State<AppState>,
-    Json(request): Json<LogoutRequest>,
-) -> AppResult<Json<serde_json::Value>> {
-    revoke_refresh_token(&state, &request.refresh_token)?;
+    CpuJson(request): CpuJson<LogoutRequest>,
+) -> AppResult<Response> {
+    revoke_refresh_token(&state, &request.refresh_token).await?;
 
-    Ok(Json(
-        serde_json::json!({"message": "Logged out successfully"}),
-    ))
+    render_message(&state, "Logged out successfully").await
 }
 
 async fn delete_browser_session(
@@ -277,20 +217,19 @@ async fn delete_browser_session(
     headers: HeaderMap,
 ) -> AppResult<Response> {
     if let Some(refresh_token) = refresh_token_cookie(&headers) {
-        revoke_refresh_token(&state, &refresh_token)?;
+        revoke_refresh_token(&state, &refresh_token).await?;
     }
-    cleared_session_response(serde_json::json!({"message": "Logged out successfully"}))
+    cleared_session_response(&state, "Logged out successfully").await
 }
 
-fn revoke_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<()> {
+async fn revoke_refresh_token(state: &AppState, refresh_token: &str) -> AppResult<()> {
     let token_hash = hash_refresh_token(refresh_token);
-    let connection = state.pool.get().map_err(AppError::Pool)?;
-    execute_query(
-        &connection,
-        queries::auth::DELETE_REFRESH_TOKEN_BY_HASH,
-        &[&token_hash],
-    )?;
-    Ok(())
+    state
+        .executors
+        .sqlite
+        .revoke_refresh_token_request(token_hash)
+        .await
+        .map_err(AppError::from)
 }
 
 async fn change_password(
@@ -298,7 +237,7 @@ async fn change_password(
     peer_address: Option<ConnectInfo<SocketAddr>>,
     current_user: CurrentUser,
     headers: HeaderMap,
-    Json(request): Json<ChangePasswordRequest>,
+    CpuJson(request): CpuJson<ChangePasswordRequest>,
 ) -> AppResult<Response> {
     if request.new_password.len() < 8 {
         return Err(AppError::BadRequest(
@@ -306,14 +245,12 @@ async fn change_password(
         ));
     }
 
-    let mut connection = state.pool.get().map_err(AppError::Pool)?;
-    let user = connection
-        .query_row(
-            queries::auth::SELECT_PASSWORD_HASH,
-            [current_user.id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
+    let user = state
+        .executors
+        .sqlite
+        .load_password_hash_request(current_user.id)
+        .await
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
     let temporary_admin_password = state
         .admin_password_reset
@@ -326,7 +263,8 @@ async fn change_password(
         .client_source(&headers, peer_address.map(|peer| peer.0));
     state
         .authentication_protection
-        .begin_password_attempt(&client_source, &password_identity)?;
+        .begin_password_attempt(&client_source, &password_identity)
+        .await?;
     let verified = state
         .authentication_protection
         .verify_password(
@@ -341,36 +279,39 @@ async fn change_password(
     }
     state
         .authentication_protection
-        .record_password_success(&client_source, &password_identity);
+        .record_password_success(&client_source, &password_identity)
+        .await?;
     let new_hash = state
         .authentication_protection
         .hash_password(&request.new_password)
         .await?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let changed = transaction.execute(
-        queries::auth::UPDATE_PASSWORD_AND_RESET_FLAG_IF_UNCHANGED,
-        rusqlite::params![new_hash, current_user.id, user],
-    )?;
-    if changed != 1 {
+    let changed = state
+        .executors
+        .sqlite
+        .replace_password_request(ReplacePassword {
+            user_id: current_user.id,
+            expected_hash: user,
+            replacement_hash: new_hash,
+        })
+        .await
+        .map_err(AppError::from)?;
+    if !changed {
         return Err(AppError::Conflict(
             "Password changed concurrently; retry with the current password".to_string(),
         ));
     }
-    transaction.execute(queries::auth::DELETE_ALL_USER_TOKENS, [current_user.id])?;
-    transaction.commit()?;
     state.admin_password_reset.complete(current_user.id);
 
-    cleared_session_response(serde_json::json!({
-        "message": "Password changed successfully"
-    }))
+    cleared_session_response(&state, "Password changed successfully").await
 }
 
-fn session_response(
-    body: serde_json::Value,
+async fn session_response(
+    state: &AppState,
+    message: &str,
     tokens: &TokenResponse,
-    config: &Config,
 ) -> AppResult<Response> {
-    let mut response = Json(body).into_response();
+    let config = state.config.current();
+    let mut response = render_message(state, message).await?;
     response.headers_mut().append(
         SET_COOKIE,
         create_access_token_cookie(
@@ -388,8 +329,8 @@ fn session_response(
     Ok(response)
 }
 
-fn cleared_session_response(body: serde_json::Value) -> AppResult<Response> {
-    let mut response = Json(body).into_response();
+async fn cleared_session_response(state: &AppState, message: &str) -> AppResult<Response> {
+    let mut response = render_message(state, message).await?;
     response
         .headers_mut()
         .append(SET_COOKIE, clear_access_token_cookie());

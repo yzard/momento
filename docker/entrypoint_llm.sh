@@ -11,7 +11,7 @@ if [ -n "${TZ:-}" ]; then
 fi
 
 umask "$UMASK"
-mkdir -p /data/llm/cache/triton /data/llm/queue /data/logs
+mkdir -p /data/llm/cache/triton /data/llm/queue /data/llm/tmp /data/logs
 cp -a /opt/triton-cache/. /data/llm/cache/triton/
 chown "$PUID:$PGID" /data
 chown -R "$PUID:$PGID" /data/llm /data/logs

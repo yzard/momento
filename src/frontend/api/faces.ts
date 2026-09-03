@@ -39,17 +39,6 @@ export interface FaceGroupsMergeResponse {
   group: FaceGroup
 }
 
-const thumbnailURLCache = new Map<number, string>()
-const pendingThumbnailRequests = new Map<number, Promise<string>>()
-let thumbnailCacheGeneration = 0
-
-function clearThumbnailCache(): void {
-  thumbnailCacheGeneration += 1
-  thumbnailURLCache.forEach((thumbnailURL) => URL.revokeObjectURL(thumbnailURL))
-  thumbnailURLCache.clear()
-  pendingThumbnailRequests.clear()
-}
-
 export const facesApi = {
   listGroups: async (request: FaceGroupsListRequest): Promise<FaceGroupsListResponse> => {
     const response = await apiClient.post<FaceGroupsListResponse>('/faces/groups/list', request)
@@ -61,41 +50,15 @@ export const facesApi = {
     return response.data
   },
 
-  getThumbnailURL: async (request: FaceThumbnailRequest): Promise<string> => {
-    const cachedURL = thumbnailURLCache.get(request.faceGroupId)
-    if (cachedURL) return cachedURL
-
-    const pendingRequest = pendingThumbnailRequests.get(request.faceGroupId)
-    if (pendingRequest) return pendingRequest
-
-    const requestGeneration = thumbnailCacheGeneration
-    const thumbnailRequest = (async () => {
-      const response = await apiClient.post<Blob>('/faces/thumbnails/get', request, {
-        responseType: 'blob',
-      })
-      if (requestGeneration !== thumbnailCacheGeneration) {
-        throw new Error('Face thumbnail request was superseded')
-      }
-      const thumbnailURL = URL.createObjectURL(response.data)
-      thumbnailURLCache.set(request.faceGroupId, thumbnailURL)
-      return thumbnailURL
-    })()
-
-    pendingThumbnailRequests.set(request.faceGroupId, thumbnailRequest)
-    try {
-      return await thumbnailRequest
-    } finally {
-      if (pendingThumbnailRequests.get(request.faceGroupId) === thumbnailRequest) {
-        pendingThumbnailRequests.delete(request.faceGroupId)
-      }
+  getThumbnailURL: (request: FaceThumbnailRequest): string => {
+    if (!Number.isSafeInteger(request.faceGroupId) || request.faceGroupId <= 0) {
+      throw new Error('faceGroupId must be a positive safe integer')
     }
+    return `/api/v1/faces/groups/${request.faceGroupId}/thumbnail`
   },
 
   mergeGroups: async (request: FaceGroupsMergeRequest): Promise<FaceGroupsMergeResponse> => {
     const response = await apiClient.post<FaceGroupsMergeResponse>('/faces/groups/merge', request)
-    clearThumbnailCache()
     return response.data
   },
-
-  clearThumbnailCache,
 }

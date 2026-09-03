@@ -20,8 +20,8 @@ vi.mock('../../../src/frontend/api/trash', () => ({
   },
 }))
 
-vi.mock('../../../src/frontend/utils/batcher', () => ({
-  trashBatchLoader: { load: mocks.loadThumbnail },
+vi.mock('../../../src/frontend/utils/assetUrlLoader', () => ({
+  trashThumbnailUrlLoader: { load: mocks.loadThumbnail },
 }))
 
 import Trash from '../../../src/frontend/pages/Trash'
@@ -88,6 +88,8 @@ describe('Trash page', () => {
     })
     renderTrash()
 
+    const heading = screen.getByRole('heading', { name: 'Trash' })
+    expect(heading.closest('[data-page-frame="true"]')?.className).toContain('w-full')
     await user.click(await screen.findByText('trash.jpg'))
     await user.click(screen.getByRole('button', { name: 'Delete Forever' }))
     expect(mocks.permanentlyDelete).not.toHaveBeenCalled()

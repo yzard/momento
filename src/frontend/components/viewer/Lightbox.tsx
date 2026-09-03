@@ -142,35 +142,11 @@ function useImageZoom(mediaId: number | undefined) {
 }
 
 function useDisplayedMedia(currentMedia: Media | undefined) {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [isPreviewLoading, setIsPreviewLoading] = useState(true)
   const videoRef = useRef<HTMLVideoElement>(null)
   const videoResumeTimeRef = useRef(0)
   const isVideo = currentMedia?.mediaType === 'video'
   const stream = useMediaStreamURL(isVideo ? currentMedia.id : null, Boolean(isVideo))
-
-  useEffect(() => {
-    let active = true
-    setPreviewUrl(null)
-    setIsPreviewLoading(Boolean(currentMedia && !isVideo))
-    if (!currentMedia || isVideo)
-      return () => {
-        active = false
-      }
-    void mediaApi
-      .getPreviewBatch([currentMedia.id])
-      .then((batch) => {
-        if (!active) return
-        setPreviewUrl(batch.get(currentMedia.id) ?? null)
-        setIsPreviewLoading(false)
-      })
-      .catch(() => {
-        if (active) setIsPreviewLoading(false)
-      })
-    return () => {
-      active = false
-    }
-  }, [currentMedia, isVideo])
+  const previewUrl = currentMedia && !isVideo ? mediaApi.getPreviewURL(currentMedia.id) : null
 
   const handleVideoError = () => {
     videoResumeTimeRef.current = videoRef.current?.currentTime ?? 0
@@ -185,7 +161,7 @@ function useDisplayedMedia(currentMedia: Media | undefined) {
   return {
     isVideo,
     displayedUrl: isVideo ? stream.streamURL : previewUrl,
-    isLoading: isVideo ? stream.isStreamLoading : isPreviewLoading,
+    isLoading: isVideo ? stream.isStreamLoading : false,
     videoRef,
     handleVideoError,
     restoreVideoTime,

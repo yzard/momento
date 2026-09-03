@@ -3,12 +3,11 @@ mod settings;
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use momento_common::config_file::{replace_config, write_new_config};
+use momento_common::config_file::write_new_config;
 use tokio::sync::{watch, Mutex};
 use tokio_tungstenite::tungstenite::http::uri::Authority;
 use toml_edit::{value, DocumentMut};
@@ -44,9 +43,6 @@ pub struct ServerConfig {
     /// Maximum body accepted by buffered API extractors such as JSON.
     #[serde(default = "defaults::server_api_request_body_max_bytes")]
     pub api_request_body_max_bytes: usize,
-    /// Maximum POST body bytes retained by request logging before omission.
-    #[serde(default = "defaults::server_request_log_body_max_bytes")]
-    pub request_log_body_max_bytes: usize,
 }
 
 impl Default for ServerConfig {
@@ -59,16 +55,15 @@ impl Default for ServerConfig {
             data_dir: defaults::server_data_dir(),
             static_dir: defaults::server_static_dir(),
             api_request_body_max_bytes: defaults::SERVER_API_REQUEST_BODY_MAX_BYTES,
-            request_log_body_max_bytes: defaults::SERVER_REQUEST_LOG_BODY_MAX_BYTES,
         }
     }
 }
 
 impl ServerConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.api_request_body_max_bytes == 0 || self.request_log_body_max_bytes == 0 {
+        if self.api_request_body_max_bytes == 0 {
             return Err(std::io::Error::other(
-                "server API request and request-log body limits must be positive",
+                "server API request body limit must be positive",
             ));
         }
         Ok(())
@@ -96,8 +91,6 @@ pub struct SecurityConfig {
     pub password_attempts_per_source: u32,
     #[serde(default = "defaults::password_lockout_seconds")]
     pub password_lockout_seconds: u64,
-    #[serde(default = "defaults::password_hash_max_concurrent")]
-    pub password_hash_max_concurrent: usize,
     #[serde(default = "defaults::trusted_proxy_ip_addresses")]
     pub trusted_proxy_ip_addresses: Vec<IpAddr>,
     #[serde(default = "defaults::refresh_token_cleanup_interval_seconds")]
@@ -116,7 +109,6 @@ impl Default for SecurityConfig {
             password_attempts_per_identity: defaults::PASSWORD_ATTEMPTS_PER_IDENTITY,
             password_attempts_per_source: defaults::PASSWORD_ATTEMPTS_PER_SOURCE,
             password_lockout_seconds: defaults::PASSWORD_LOCKOUT_SECONDS,
-            password_hash_max_concurrent: defaults::PASSWORD_HASH_MAX_CONCURRENT,
             trusted_proxy_ip_addresses: defaults::trusted_proxy_ip_addresses(),
             refresh_token_cleanup_interval_seconds:
                 defaults::REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS,
@@ -147,7 +139,6 @@ impl SecurityConfig {
             || self.password_attempts_per_identity == 0
             || self.password_attempts_per_source == 0
             || self.password_lockout_seconds == 0
-            || self.password_hash_max_concurrent == 0
             || self.refresh_token_cleanup_interval_seconds == 0
         {
             return Err(std::io::Error::other(
@@ -167,14 +158,8 @@ pub struct WebDAVConfig {
     pub realm: String,
     #[serde(default = "defaults::webdav_max_upload_bytes")]
     pub max_upload_bytes: u64,
-    #[serde(default = "defaults::webdav_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
-    #[serde(default = "defaults::webdav_poll_interval_seconds")]
-    pub poll_interval_seconds: u64,
     #[serde(default = "defaults::webdav_stable_file_age_seconds")]
     pub stable_file_age_seconds: u64,
-    #[serde(default = "defaults::webdav_max_concurrent_processing")]
-    pub max_concurrent_processing: usize,
 }
 
 impl Default for WebDAVConfig {
@@ -183,10 +168,7 @@ impl Default for WebDAVConfig {
             mount_path: defaults::webdav_mount_path(),
             realm: defaults::webdav_realm(),
             max_upload_bytes: defaults::WEBDAV_MAX_UPLOAD_BYTES,
-            max_concurrent_requests: defaults::WEBDAV_MAX_CONCURRENT_REQUESTS,
-            poll_interval_seconds: defaults::WEBDAV_POLL_INTERVAL_SECONDS,
             stable_file_age_seconds: defaults::WEBDAV_STABLE_FILE_AGE_SECONDS,
-            max_concurrent_processing: defaults::WEBDAV_MAX_CONCURRENT_PROCESSING,
         }
     }
 }
@@ -196,16 +178,6 @@ impl WebDAVConfig {
         if self.max_upload_bytes == 0 {
             return Err(std::io::Error::other(
                 "webdav max_upload_bytes must be positive",
-            ));
-        }
-        if self.max_concurrent_requests == 0 || self.max_concurrent_requests > u32::MAX as usize {
-            return Err(std::io::Error::other(
-                "webdav max_concurrent_requests must be within 1..=u32::MAX",
-            ));
-        }
-        if self.poll_interval_seconds == 0 || self.max_concurrent_processing == 0 {
-            return Err(std::io::Error::other(
-                "webdav poll interval and max concurrent processing must be positive",
             ));
         }
         let mount_segment = self.mount_path.strip_prefix('/').unwrap_or_default();
@@ -232,14 +204,8 @@ pub struct BackupConfig {
     pub max_upload_bytes: u64,
     #[serde(default = "defaults::backup_max_chunk_bytes")]
     pub max_chunk_bytes: u64,
-    #[serde(default = "defaults::backup_max_active_uploads_per_user")]
-    pub max_active_uploads_per_user: usize,
     #[serde(default = "defaults::backup_session_expiry_hours")]
     pub session_expiry_hours: u64,
-    #[serde(default = "defaults::backup_worker_poll_interval_seconds")]
-    pub worker_poll_interval_seconds: u64,
-    #[serde(default = "defaults::backup_worker_concurrency")]
-    pub worker_concurrency: usize,
 }
 
 impl Default for BackupConfig {
@@ -247,10 +213,7 @@ impl Default for BackupConfig {
         Self {
             max_upload_bytes: defaults::BACKUP_MAX_UPLOAD_BYTES,
             max_chunk_bytes: defaults::BACKUP_MAX_CHUNK_BYTES,
-            max_active_uploads_per_user: defaults::BACKUP_MAX_ACTIVE_UPLOADS_PER_USER,
             session_expiry_hours: defaults::BACKUP_SESSION_EXPIRY_HOURS,
-            worker_poll_interval_seconds: defaults::BACKUP_WORKER_POLL_INTERVAL_SECONDS,
-            worker_concurrency: defaults::BACKUP_WORKER_CONCURRENCY,
         }
     }
 }
@@ -265,13 +228,9 @@ impl BackupConfig {
                 "backup upload and chunk limits must be positive and chunk must not exceed upload",
             ));
         }
-        if self.max_active_uploads_per_user == 0
-            || self.session_expiry_hours == 0
-            || self.worker_poll_interval_seconds == 0
-            || self.worker_concurrency == 0
-        {
+        if self.session_expiry_hours == 0 {
             return Err(std::io::Error::other(
-                "backup active uploads, expiry, worker poll interval, and concurrency must be positive",
+                "backup session expiry must be positive",
             ));
         }
         Ok(())
@@ -287,8 +246,6 @@ pub struct MetadataConfig {
     pub thumbnails_tiny_size: u32,
     #[serde(default = "defaults::thumbnails_quality")]
     pub thumbnails_quality: u8,
-    #[serde(default = "defaults::thumbnails_video_frame_quality")]
-    pub thumbnails_video_frame_quality: u8,
 }
 
 impl Default for MetadataConfig {
@@ -297,7 +254,6 @@ impl Default for MetadataConfig {
             thumbnails_max_size: defaults::fallback::THUMBNAILS_MAX_SIZE,
             thumbnails_tiny_size: defaults::fallback::THUMBNAILS_TINY_SIZE,
             thumbnails_quality: defaults::fallback::THUMBNAILS_QUALITY,
-            thumbnails_video_frame_quality: defaults::fallback::THUMBNAILS_VIDEO_FRAME_QUALITY,
         }
     }
 }
@@ -313,14 +269,6 @@ pub struct MediaProcessConfig {
     pub maximum_normalized_image_output_bytes: usize,
     #[serde(default = "defaults::media_process_maximum_decoded_image_pixels")]
     pub maximum_decoded_image_pixels: u64,
-    #[serde(default = "defaults::imagemagick_memory_limit_mebibytes")]
-    pub imagemagick_memory_limit_mebibytes: u64,
-    #[serde(default = "defaults::imagemagick_map_limit_mebibytes")]
-    pub imagemagick_map_limit_mebibytes: u64,
-    #[serde(default = "defaults::imagemagick_disk_limit_mebibytes")]
-    pub imagemagick_disk_limit_mebibytes: u64,
-    #[serde(default = "defaults::imagemagick_maximum_threads")]
-    pub imagemagick_maximum_threads: usize,
 }
 
 impl Default for MediaProcessConfig {
@@ -331,10 +279,6 @@ impl Default for MediaProcessConfig {
             maximum_normalized_image_output_bytes:
                 defaults::MEDIA_PROCESS_MAXIMUM_NORMALIZED_IMAGE_OUTPUT_BYTES,
             maximum_decoded_image_pixels: defaults::MEDIA_PROCESS_MAXIMUM_DECODED_IMAGE_PIXELS,
-            imagemagick_memory_limit_mebibytes: defaults::IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES,
-            imagemagick_map_limit_mebibytes: defaults::IMAGEMAGICK_MAP_LIMIT_MEBIBYTES,
-            imagemagick_disk_limit_mebibytes: defaults::IMAGEMAGICK_DISK_LIMIT_MEBIBYTES,
-            imagemagick_maximum_threads: defaults::IMAGEMAGICK_MAXIMUM_THREADS,
         }
     }
 }
@@ -345,61 +289,17 @@ impl MediaProcessConfig {
             || self.maximum_metadata_output_bytes == 0
             || self.maximum_normalized_image_output_bytes == 0
             || self.maximum_decoded_image_pixels == 0
-            || self.imagemagick_memory_limit_mebibytes == 0
-            || self.imagemagick_map_limit_mebibytes == 0
-            || self.imagemagick_disk_limit_mebibytes == 0
-            || self.imagemagick_maximum_threads == 0
         {
             return Err(std::io::Error::other(
                 "media_process limits must all be positive",
             ));
         }
-        if self.imagemagick_memory_limit_mebibytes > self.imagemagick_map_limit_mebibytes
-            || self.imagemagick_map_limit_mebibytes > self.imagemagick_disk_limit_mebibytes
-        {
+        if self.maximum_metadata_output_bytes > 4 * 1024 * 1024 {
             return Err(std::io::Error::other(
-                "media_process ImageMagick memory limit must not exceed map, and map must not exceed disk",
+                "media_process maximum_metadata_output_bytes must not exceed 4194304",
             ));
         }
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegenerateConfig {
-    #[serde(default = "defaults::fallback::regenerate_num_cpus")]
-    pub num_cpus: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MetadataWorkerConfig {
-    #[serde(default = "defaults::metadata_worker_poll_interval_seconds")]
-    pub poll_interval_seconds: u64,
-    #[serde(default = "defaults::fallback::metadata_worker_concurrency")]
-    pub concurrency: usize,
-    #[serde(default = "defaults::metadata_worker_lease_seconds")]
-    pub lease_seconds: u64,
-    #[serde(default = "defaults::metadata_worker_max_attempts")]
-    pub max_attempts: u32,
-}
-
-impl Default for MetadataWorkerConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_seconds: defaults::METADATA_WORKER_POLL_INTERVAL_SECONDS,
-            concurrency: defaults::fallback::metadata_worker_concurrency(),
-            lease_seconds: defaults::METADATA_WORKER_LEASE_SECONDS,
-            max_attempts: defaults::METADATA_WORKER_MAX_ATTEMPTS,
-        }
-    }
-}
-
-impl Default for RegenerateConfig {
-    fn default() -> Self {
-        Self {
-            num_cpus: defaults::fallback::regenerate_num_cpus(),
-        }
     }
 }
 
@@ -450,59 +350,27 @@ impl Default for LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LlmSubmissionWorkerConfig {
-    #[serde(default = "defaults::llm_submission_poll_interval_seconds")]
-    pub poll_interval_seconds: u64,
-    #[serde(default = "defaults::llm_submission_max_async_submission_tasks")]
-    pub max_async_submission_tasks: usize,
+pub struct ThreadPoolConfig {
+    pub cpu_workers: usize,
+    pub io_workers: usize,
+    pub sqlite_workers: usize,
 }
 
-impl Default for LlmSubmissionWorkerConfig {
+impl Default for ThreadPoolConfig {
     fn default() -> Self {
         Self {
-            poll_interval_seconds: defaults::LLM_SUBMISSION_POLL_INTERVAL_SECONDS,
-            max_async_submission_tasks: defaults::LLM_SUBMISSION_MAX_ASYNC_SUBMISSION_TASKS,
+            cpu_workers: defaults::THREAD_POOL_CPU_WORKERS,
+            io_workers: defaults::THREAD_POOL_IO_WORKERS,
+            sqlite_workers: defaults::THREAD_POOL_SQLITE_WORKERS,
         }
     }
 }
 
-impl LlmSubmissionWorkerConfig {
+impl ThreadPoolConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.poll_interval_seconds == 0 || self.max_async_submission_tasks == 0 {
-            return Err(std::io::Error::other(
-                "llm submission poll interval and maximum asynchronous submission tasks must be positive",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LlmResultWorkerConfig {
-    #[serde(default = "defaults::llm_result_poll_interval_seconds")]
-    pub poll_interval_seconds: u64,
-    #[serde(default = "defaults::llm_result_concurrency")]
-    pub concurrency: usize,
-}
-
-impl Default for LlmResultWorkerConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_seconds: defaults::LLM_RESULT_POLL_INTERVAL_SECONDS,
-            concurrency: defaults::LLM_RESULT_CONCURRENCY,
-        }
-    }
-}
-
-impl LlmResultWorkerConfig {
-    fn validate(&self) -> std::io::Result<()> {
-        if self.poll_interval_seconds == 0 || self.concurrency == 0 {
-            return Err(std::io::Error::other(
-                "llm result poll interval and concurrency must be positive",
-            ));
-        }
-        Ok(())
+        crate::runtime::RuntimeSizing::validate_worker_counts(self)
+            .map(|_| ())
+            .map_err(std::io::Error::other)
     }
 }
 
@@ -633,13 +501,7 @@ pub struct Config {
     #[serde(default)]
     pub media_process: MediaProcessConfig,
     #[serde(default)]
-    pub regenerate: RegenerateConfig,
-    #[serde(default)]
-    pub metadata_worker: MetadataWorkerConfig,
-    #[serde(default)]
-    pub llm_submission_worker: LlmSubmissionWorkerConfig,
-    #[serde(default)]
-    pub llm_result_worker: LlmResultWorkerConfig,
+    pub thread_pool: ThreadPoolConfig,
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
@@ -648,18 +510,30 @@ pub struct Config {
 
 #[derive(Clone)]
 pub struct ConfigManager {
-    config_path: Arc<PathBuf>,
     config_sender: watch::Sender<Arc<Config>>,
     update_lock: Arc<Mutex<()>>,
+    config_identity: Arc<Mutex<crate::runtime::ConfigFileIdentity>>,
+    cpu: crate::executor::CpuExecutorHandle,
+    file_io: crate::executor::FileIoExecutorHandle,
+    scheduler: crate::runtime::SchedulerHandle,
+}
+
+#[derive(Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub identity: crate::runtime::ConfigFileIdentity,
 }
 
 impl ConfigManager {
-    pub fn new(config_path: PathBuf, config: Config) -> Self {
-        let (config_sender, _) = watch::channel(Arc::new(config));
+    pub fn new(loaded: LoadedConfig, executors: &crate::runtime::ExecutorHandles) -> Self {
+        let (config_sender, _) = watch::channel(Arc::new(loaded.config));
         Self {
-            config_path: Arc::new(config_path),
             config_sender,
             update_lock: Arc::new(Mutex::new(())),
+            config_identity: Arc::new(Mutex::new(loaded.identity)),
+            cpu: executors.cpu.clone(),
+            file_io: executors.file_io.clone(),
+            scheduler: executors.scheduler.clone(),
         }
     }
 
@@ -683,35 +557,85 @@ impl ConfigManager {
             .join(" ");
         validate_ai_cron_expression(feature_name, &cron_expression)?;
         let _update_guard = self.update_lock.lock().await;
-        let config_path = Arc::clone(&self.config_path);
-        let saved_expression = cron_expression.clone();
-        let updated_config = tokio::task::spawn_blocking(move || {
-            update_llm_cron_config(
-                &config_path,
+        let identity = self.config_identity.lock().await.clone();
+        let contents = self
+            .file_io
+            .read_config_durable(identity.clone())
+            .await
+            .map_err(executor_io_error)?;
+        let (updated_contents, updated_config) = self
+            .cpu
+            .prepare_llm_cron_update_durable(
+                identity.clone(),
+                contents,
                 config_field_name,
                 feature_name,
-                &saved_expression,
+                cron_expression.clone(),
             )
-        })
-        .await
-        .map_err(|error| std::io::Error::other(format!("config update task failed: {error}")))??;
+            .await
+            .map_err(executor_io_error)?;
+        let updated_identity = self
+            .file_io
+            .replace_config_durable(identity, updated_contents)
+            .await
+            .map_err(executor_io_error)?;
+        *self.config_identity.lock().await = updated_identity;
         self.config_sender.send_replace(Arc::new(updated_config));
+        self.scheduler
+            .signal_control(crate::runtime::SchedulerControlSource::ConfigChanged);
         Ok(cron_expression)
     }
+
+    pub async fn consume_admin_password_reset(&self) -> std::io::Result<bool> {
+        if !self.current().server.reset_admin_password {
+            return Ok(false);
+        }
+        let _update_guard = self.update_lock.lock().await;
+        if !self.current().server.reset_admin_password {
+            return Ok(false);
+        }
+        let identity = self.config_identity.lock().await.clone();
+        let contents = self
+            .file_io
+            .read_config_durable(identity.clone())
+            .await
+            .map_err(executor_io_error)?;
+        let (updated_contents, updated_config) = self
+            .cpu
+            .prepare_admin_password_reset_update_durable(identity.clone(), contents)
+            .await
+            .map_err(executor_io_error)?;
+        let updated_identity = self
+            .file_io
+            .replace_config_durable(identity, updated_contents)
+            .await
+            .map_err(executor_io_error)?;
+        *self.config_identity.lock().await = updated_identity;
+        self.config_sender.send_replace(Arc::new(updated_config));
+        self.scheduler
+            .signal_control(crate::runtime::SchedulerControlSource::ConfigChanged);
+        Ok(true)
+    }
+}
+
+fn executor_io_error(error: crate::executor::ExecutorError) -> std::io::Error {
+    std::io::Error::other(error.to_string())
 }
 
 /// Reads and parses the config file. A missing or malformed file is an error: silently
 /// falling back to defaults would start the server against the wrong data directory.
 pub fn load_config(config_path: &Path) -> std::io::Result<Config> {
-    if !config_path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("config file not found: {}", config_path.display()),
-        ));
-    }
+    load_config_with_identity(config_path).map(|loaded| loaded.config)
+}
 
-    let content = fs::read_to_string(config_path)?;
-    parse_config_contents(config_path, &content)
+pub fn load_config_with_identity(config_path: &Path) -> std::io::Result<LoadedConfig> {
+    let config_file = crate::runtime::config_bootstrap::read_existing_config(config_path)?;
+    let config =
+        parse_config_contents(&config_file.identity.canonical_path, &config_file.contents)?;
+    Ok(LoadedConfig {
+        config,
+        identity: config_file.identity,
+    })
 }
 
 fn parse_config_contents(config_path: &Path, content: &str) -> std::io::Result<Config> {
@@ -741,10 +665,9 @@ fn parse_config_contents(config_path: &Path, content: &str) -> std::io::Result<C
     config.webdav.validate()?;
     config.backup.validate()?;
     config.media_process.validate()?;
+    config.thread_pool.validate()?;
     config.llm.validate()?;
     config.face_group.validate()?;
-    config.llm_submission_worker.validate()?;
-    config.llm_result_worker.validate()?;
     Ok(config)
 }
 
@@ -870,14 +793,14 @@ pub fn validate_ai_cron_expression(
         .map_err(|error| std::io::Error::other(format!("invalid {feature_name} cronjob: {error}")))
 }
 
-fn update_llm_cron_config(
+pub(crate) fn prepare_llm_cron_update(
     config_path: &Path,
+    contents: &str,
     config_field_name: &str,
     feature_name: &str,
     cron_expression: &str,
-) -> std::io::Result<Config> {
+) -> std::io::Result<(String, Config)> {
     validate_ai_cron_expression(feature_name, cron_expression)?;
-    let contents = fs::read_to_string(config_path)?;
     let mut document = contents.parse::<DocumentMut>().map_err(|error| {
         std::io::Error::other(format!(
             "invalid config at {}: {error}",
@@ -894,19 +817,13 @@ fn update_llm_cron_config(
     llm[config_field_name] = value(cron_expression);
     let updated_contents = document.to_string();
     let updated_config = parse_config_contents(config_path, &updated_contents)?;
-    replace_config(config_path, &updated_contents)?;
-    Ok(updated_config)
+    Ok((updated_contents, updated_config))
 }
 
-pub fn consume_admin_password_reset(
+pub(crate) fn prepare_admin_password_reset_update(
     config_path: &Path,
-    config: &mut Config,
-) -> std::io::Result<bool> {
-    if !config.server.reset_admin_password {
-        return Ok(false);
-    }
-
-    let contents = fs::read_to_string(config_path)?;
+    contents: &str,
+) -> std::io::Result<(String, Config)> {
     let mut document = contents.parse::<DocumentMut>().map_err(|error| {
         std::io::Error::other(format!(
             "invalid config at {}: {error}",
@@ -918,7 +835,7 @@ pub fn consume_admin_password_reset(
         .and_then(toml_edit::Item::as_table_mut)
         .ok_or_else(|| std::io::Error::other("config server section is missing"))?;
     server["reset_admin_password"] = value(false);
-    replace_config(config_path, &document.to_string())?;
-    config.server.reset_admin_password = false;
-    Ok(true)
+    let updated_contents = document.to_string();
+    let updated_config = parse_config_contents(config_path, &updated_contents)?;
+    Ok((updated_contents, updated_config))
 }

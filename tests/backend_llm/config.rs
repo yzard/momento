@@ -6,6 +6,23 @@ use llm_service::config::{
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
 
+const LOCAL_SCHEDULER_CONFIGURATION: &str = "[scheduler]\nmax_queue_bytes = 1048576\nworking_space_reserve_bytes = 1048576\nmax_in_flight_jobs = 1\n";
+
+#[test]
+fn llm_container_places_runtime_temporary_files_on_its_data_volume() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dockerfile =
+        std::fs::read_to_string(repository.join("docker/Dockerfile.llm")).expect("LLM Dockerfile");
+    let entrypoint = std::fs::read_to_string(repository.join("docker/entrypoint_llm.sh"))
+        .expect("LLM entrypoint");
+    assert!(dockerfile.contains("TMPDIR=/data/llm/tmp"));
+    assert!(dockerfile.contains("TEMP=/data/llm/tmp"));
+    assert!(dockerfile.contains("TMP=/data/llm/tmp"));
+    assert!(dockerfile.contains("libraw-bin"));
+    assert!(dockerfile.contains("command -v dcraw_emu"));
+    assert!(entrypoint.contains("/data/llm/tmp"));
+}
+
 #[test]
 fn release_version_matches_the_llm_service_package() {
     let release_version = include_str!("../../src/backend/version.txt").trim();
@@ -16,7 +33,7 @@ fn release_version_matches_the_llm_service_package() {
 
 fn local_ocr_configuration(extra: &str) -> String {
     format!(
-        "[server]\napi_key = \"test-key\"\n\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n{extra}"
+        "[server]\napi_key = \"test-key\"\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n{extra}"
     )
 }
 
@@ -131,7 +148,7 @@ fn requires_the_shared_websocket_api_key() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "[server]\n\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
+        "[server]\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
     )
     .expect("Failed to write config fixture");
 
@@ -144,7 +161,7 @@ fn server_data_dir_derives_runtime_directories() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "[server]\napi_key = \"test-key\"\ndata_dir = \"/srv/momento\"\n\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
+        "[server]\napi_key = \"test-key\"\ndata_dir = \"/srv/momento\"\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
     )
     .expect("Failed to write config fixture");
 
@@ -174,7 +191,7 @@ fn rejects_configurable_queue_directory() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "[server]\napi_key = \"test-key\"\nqueue_dir = \"/separate/queue\"\n\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
+        "[server]\napi_key = \"test-key\"\nqueue_dir = \"/separate/queue\"\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
     )
     .expect("Failed to write config fixture");
 
@@ -217,6 +234,8 @@ fn loads_playground_toml_configuration() {
     let ocr = config.service_for("ocr").unwrap();
 
     assert_eq!(config.scheduler.max_in_flight_jobs, 128);
+    assert_eq!(config.scheduler.max_queue_bytes, 53_687_091_200);
+    assert_eq!(config.scheduler.working_space_reserve_bytes, 10_737_418_240);
     assert_eq!(config.server.data_dir, std::path::Path::new("/data"));
     assert_eq!(
         config.server.queue_dir(),
@@ -291,13 +310,72 @@ fn rejects_non_positive_scheduler_configuration() {
     let mut file = NamedTempFile::new().expect("Failed to create config fixture");
     write!(
         file,
-        "{}\n[scheduler]\nmax_in_flight_jobs = 0\n",
-        local_ocr_configuration("")
+        "{}",
+        local_ocr_configuration("").replace("max_in_flight_jobs = 1", "max_in_flight_jobs = 0")
     )
     .expect("Failed to write config fixture");
 
     let error = Config::load(file.path()).expect_err("zero in-flight window must be rejected");
     assert!(error.to_string().contains("max in-flight jobs"));
+}
+
+#[test]
+fn requires_explicit_queue_capacity_configuration() {
+    for missing_line in [
+        "max_queue_bytes = 1048576\n",
+        "working_space_reserve_bytes = 1048576\n",
+    ] {
+        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        write!(
+            file,
+            "{}",
+            local_ocr_configuration("").replace(missing_line, "")
+        )
+        .expect("Failed to write config fixture");
+
+        let error = Config::load(file.path()).expect_err("queue capacity must be explicit");
+        assert!(error.to_string().contains("missing field"), "{error}");
+    }
+}
+
+#[test]
+fn rejects_invalid_queue_capacity_configuration() {
+    for (field, value) in [
+        ("max_queue_bytes", "0"),
+        ("working_space_reserve_bytes", "0"),
+        ("max_queue_bytes", "18446744073709551615"),
+    ] {
+        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let configured = local_ocr_configuration("")
+            .replace(&format!("{field} = 1048576"), &format!("{field} = {value}"));
+        write!(file, "{configured}").expect("Failed to write config fixture");
+
+        let error = Config::load(file.path()).expect_err("invalid queue capacity must fail");
+        assert!(
+            error.to_string().contains("queue") || error.to_string().contains("working-space"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_removed_scheduler_poll_interval() {
+    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    write!(
+        file,
+        "{}",
+        local_ocr_configuration("").replace(
+            "max_in_flight_jobs = 1",
+            "max_in_flight_jobs = 1\npoll_interval_seconds = 5",
+        )
+    )
+    .expect("Failed to write config fixture");
+
+    let error = Config::load(file.path()).expect_err("poll interval has been removed");
+    assert!(
+        error.to_string().contains("poll_interval_seconds"),
+        "{error}"
+    );
 }
 
 #[test]

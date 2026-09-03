@@ -1,5 +1,4 @@
 import { apiClient } from './client'
-import { thumbnailResponseMap, type ThumbnailSize } from './media'
 
 export interface TrashMedia {
   id: number
@@ -32,15 +31,11 @@ export const trashApi = {
     return response.data
   },
 
-  getThumbnailBatch: async (
-    mediaIds: number[],
-    size: ThumbnailSize
-  ): Promise<Map<number, string>> => {
-    const response = await apiClient.post<{ thumbnails: Record<string, string | null> }>(
-      '/trash/thumbnails/get',
-      { mediaIds, size }
-    )
-    return thumbnailResponseMap(response.data.thumbnails)
+  getThumbnailURL: (mediaId: number): string => {
+    if (!Number.isSafeInteger(mediaId) || mediaId <= 0) {
+      throw new Error('mediaId must be a positive safe integer')
+    }
+    return `/api/v1/trash/${mediaId}/thumbnail/tiny`
   },
 
   restore: async (mediaIds: number[]): Promise<TrashResponse> => {

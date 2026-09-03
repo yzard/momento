@@ -4,8 +4,6 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  clearMediaCache: vi.fn(),
-  clearFaceCache: vi.fn(),
   clearQueryCache: vi.fn(),
   login: vi.fn(),
   getMe: vi.fn(),
@@ -19,18 +17,6 @@ vi.mock('../../../src/frontend/api/auth', () => ({
     getMe: mocks.getMe,
     changePassword: mocks.changePassword,
     logout: mocks.logout,
-  },
-}))
-
-vi.mock('../../../src/frontend/api/media', () => ({
-  mediaApi: {
-    clearCache: mocks.clearMediaCache,
-  },
-}))
-
-vi.mock('../../../src/frontend/api/faces', () => ({
-  facesApi: {
-    clearThumbnailCache: mocks.clearFaceCache,
   },
 }))
 
@@ -120,8 +106,6 @@ describe('AuthProvider', () => {
       expect(screen.getByText('/login')).toBeTruthy()
     })
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
-    expect(mocks.clearMediaCache).toHaveBeenCalledOnce()
-    expect(mocks.clearFaceCache).toHaveBeenCalledOnce()
   })
 
   it('ends the current session immediately after a password change', async () => {
@@ -145,8 +129,6 @@ describe('AuthProvider', () => {
     })
     expect(mocks.changePassword).toHaveBeenCalledWith('old-password', 'new-password')
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
-    expect(mocks.clearMediaCache).toHaveBeenCalledOnce()
-    expect(mocks.clearFaceCache).toHaveBeenCalledOnce()
   })
 
   it('does not restore a bootstrap user after logout', async () => {
@@ -202,7 +184,5 @@ describe('AuthProvider', () => {
     await waitFor(() => expect(mocks.getMe).toHaveBeenCalledTimes(2))
     expect(mocks.logout).toHaveBeenCalledOnce()
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
-    expect(mocks.clearMediaCache).toHaveBeenCalledOnce()
-    expect(mocks.clearFaceCache).toHaveBeenCalledOnce()
   })
 })

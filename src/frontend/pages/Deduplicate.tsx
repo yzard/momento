@@ -5,13 +5,14 @@ import { duplicatesApi, type DuplicateGroup } from '../api/duplicates'
 import { mediaApi } from '../api/media'
 import type { Media } from '../api/types'
 import PageState from '../components/common/PageState'
+import { PageFrame, PageHeader } from '../components/layout/PageLayout'
 import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import ConfirmationDialog from '../components/common/ConfirmationDialog'
 import { useAuth } from '../hooks/useAuth'
 import { useInfiniteScroll } from '../hooks/useInfiniteScroll'
 import { cn } from '../lib/utils'
 import { invalidateMediaConsumers, queryKeys } from '../lib/queryKeys'
-import { batchLoader } from '../utils/batcher'
+import { thumbnailUrlLoader } from '../utils/assetUrlLoader'
 import { useLazyImage } from '../hooks/useLazyImage'
 import { useLightbox } from '../hooks/useLightbox'
 
@@ -266,7 +267,12 @@ export default function Deduplicate() {
       ref={scrollContainerRef}
       className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent"
     >
-      <div className="container max-w-[1800px] mx-auto px-4 py-6 sm:px-6 md:px-10 md:py-10 animate-fade-in pb-28">
+      <PageFrame className="animate-fade-in pb-28">
+        <PageHeader
+          title="Deduplicate"
+          description="Review similar media and keep the versions you want."
+          actions={null}
+        />
         {!groupsQuery.isLoading && !groupsQuery.isError && totals && (
           <DeduplicateTotals totalGroups={totals.totalGroups} totalMedia={totals.totalMedia} />
         )}
@@ -308,7 +314,7 @@ export default function Deduplicate() {
             onMoveToTrash={() => setShowTrashConfirmation(true)}
           />
         )}
-      </div>
+      </PageFrame>
       <ManagedLightbox controller={lightbox} />
       {showTrashConfirmation && (
         <ConfirmationDialog
@@ -364,7 +370,7 @@ function DuplicateGroupSection({
           </span>
         )}
       </div>
-      <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 sm:p-4 md:grid-cols-4 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 sm:p-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
         {sortedItems.map((media) => (
           <DuplicateMediaCard
             key={media.id}
@@ -389,8 +395,8 @@ interface DuplicateMediaCardProps {
 function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateMediaCardProps) {
   const { targetRef: cardRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLDivElement, number>({
     resourceId: media.id,
-    loader: batchLoader,
-    getCachedUrl: (mediaId) => mediaApi.getCachedThumbnailURL(mediaId, 'normal'),
+    loader: thumbnailUrlLoader,
+    getCachedUrl: null,
     rootMargin: '400px',
   })
 

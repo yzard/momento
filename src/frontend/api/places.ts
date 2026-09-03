@@ -44,10 +44,6 @@ export const placesApi = {
     return response.data
   },
 
-  getThumbnail: async (placeId: string): Promise<string | null> => {
-    const response = await apiClient.post<{ thumbnail: string | null }>('/places/thumbnail', {
-      placeId,
-    })
-    return response.data.thumbnail
-  },
+  getThumbnail: async (placeId: string): Promise<string> =>
+    `/api/v1/places/${encodeURIComponent(placeId)}/thumbnail`,
 }

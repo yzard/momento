@@ -1,3 +1,4 @@
+mod admin;
 mod ai;
 mod albums;
 mod auth;

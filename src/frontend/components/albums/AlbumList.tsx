@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { mediaApi } from '../../api/media'
 import { useAlbums, useCreateAlbum, useDeleteAlbum } from '../../hooks/useAlbums'
 import AlbumCard from './AlbumCard'
 import { Plus, FolderPlus, Loader2 } from 'lucide-react'
 import type { Album } from '../../api/types'
 import ConfirmationDialog from '../common/ConfirmationDialog'
+import { PageHeader } from '../layout/PageLayout'
 
 interface AlbumListProps {
   onAlbumClick: (album: Album) => void
@@ -100,7 +101,7 @@ function AlbumCollection({
     )
   }
   return (
-    <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 sm:gap-8 md:grid-cols-4 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 sm:gap-8 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
       {albums.map((album) => (
         <AlbumCard
           key={album.id}
@@ -121,35 +122,16 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [pendingDeleteAlbumId, setPendingDeleteAlbumId] = useState<number | null>(null)
   const [newAlbumName, setNewAlbumName] = useState('')
-  const [coverUrls, setCoverUrls] = useState<Map<number, string>>(new Map())
-  const coverIdsKey = [...new Set(albums?.flatMap((album) => album.thumbnailMediaIds) ?? [])].join(
-    ','
+  const coverUrls = useMemo(
+    () =>
+      new Map<number, string>(
+        (albums?.flatMap((album) => album.thumbnailMediaIds) ?? []).map((mediaId) => [
+          mediaId,
+          mediaApi.getThumbnailURL(mediaId, 'normal'),
+        ])
+      ),
+    [albums]
   )
-
-  useEffect(() => {
-    const coverIds = coverIdsKey ? coverIdsKey.split(',').map(Number) : []
-    if (coverIds.length === 0) {
-      setCoverUrls(new Map())
-      return
-    }
-
-    let cancelled = false
-    mediaApi
-      .getThumbnailBatch(coverIds, 'normal')
-      .then((thumbnails) => {
-        if (cancelled) return
-        setCoverUrls(
-          new Map([...thumbnails].filter((entry): entry is [number, string] => entry[1] !== null))
-        )
-      })
-      .catch((error: unknown) => {
-        console.error('Failed to load album covers:', error)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [coverIdsKey])
 
   const handleCreate = async () => {
     if (!newAlbumName.trim()) return
@@ -180,21 +162,21 @@ export default function AlbumList({ onAlbumClick }: AlbumListProps) {
   }
 
   return (
-    <div className="animate-fade-in py-8">
-      <div className="flex justify-between items-center mb-10 pb-6 border-b border-border/50">
-        <div>
-          <p className="text-muted-foreground mt-2 font-light text-lg">
-            Organize your favorite moments
-          </p>
-        </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="bg-foreground text-background px-6 py-2.5 hover:bg-foreground/90 transition-all rounded-lg shadow-md hover:shadow-lg flex items-center gap-2 font-bold uppercase tracking-wider text-xs"
-        >
-          <Plus className="w-4 h-4" strokeWidth={3} />
-          Create Album
-        </button>
-      </div>
+    <div className="animate-fade-in">
+      <PageHeader
+        title="Albums"
+        description="Organize your favorite moments."
+        actions={
+          <button
+            type="button"
+            onClick={() => setShowCreateModal(true)}
+            className="flex min-h-11 items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-semibold text-background shadow-sm transition-[background-color,transform] hover:bg-foreground/90 active:scale-[0.98]"
+          >
+            <Plus className="h-4 w-4" strokeWidth={2} />
+            Create Album
+          </button>
+        }
+      />
 
       <AlbumCollection
         albums={albums ?? []}

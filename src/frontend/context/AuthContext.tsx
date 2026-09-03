@@ -12,8 +12,6 @@ import {
 import { useNavigate, type NavigateFunction } from 'react-router-dom'
 import { authApi, type User } from '../api/auth'
 import { setAuthenticationFailureHandler } from '../api/client'
-import { facesApi } from '../api/faces'
-import { mediaApi } from '../api/media'
 import { queryClient } from '../lib/queryClient'
 
 interface AuthContextType {
@@ -103,8 +101,6 @@ function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
     setIsLoading(false)
     queryClient.clear()
-    mediaApi.clearCache()
-    facesApi.clearThumbnailCache()
   }, [])
 
   useEffect(() => {

@@ -20,6 +20,7 @@ mkdir -p \
     /data/logs \
     /data/originals \
     /data/previews \
+    /data/tmp \
     /data/thumbnails \
     /data/thumbnails_tiny \
     /data/trash \

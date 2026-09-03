@@ -10,10 +10,9 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         template["server"]["api_request_body_max_bytes"].as_integer(),
         Some(runtime_defaults.server.api_request_body_max_bytes as i64)
     );
-    assert_eq!(
-        template["server"]["request_log_body_max_bytes"].as_integer(),
-        Some(runtime_defaults.server.request_log_body_max_bytes as i64)
-    );
+    assert!(template["server"]
+        .get("request_log_body_max_bytes")
+        .is_none());
     assert_eq!(
         template["security"]["media_access_ticket_expire_hours"].as_integer(),
         Some(runtime_defaults.security.media_access_ticket_expire_hours)
@@ -99,23 +98,20 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         );
     }
     assert_eq!(
-        template["llm_submission_worker"]["max_async_submission_tasks"].as_integer(),
-        Some(
-            runtime_defaults
-                .llm_submission_worker
-                .max_async_submission_tasks as i64
-        )
+        template["thread_pool"]["cpu_workers"].as_integer(),
+        Some(runtime_defaults.thread_pool.cpu_workers as i64)
     );
-    assert!(template["llm_submission_worker"]
-        .get("max_in_flight")
-        .is_none());
     assert_eq!(
-        template["llm_result_worker"]["concurrency"].as_integer(),
-        Some(runtime_defaults.llm_result_worker.concurrency as i64)
+        template["thread_pool"]["io_workers"].as_integer(),
+        Some(runtime_defaults.thread_pool.io_workers as i64)
     );
-    assert!(template["llm_result_worker"]
-        .get("cpu_processing_concurrency")
-        .is_none());
+    assert_eq!(
+        template["thread_pool"]["sqlite_workers"].as_integer(),
+        Some(runtime_defaults.thread_pool.sqlite_workers as i64)
+    );
+    assert!(template.get("metadata_worker").is_none());
+    assert!(template.get("llm_submission_worker").is_none());
+    assert!(template.get("llm_result_worker").is_none());
     assert_eq!(
         template["llm"]["screenshot_detection_cron"].as_str(),
         Some("0 6 * * *")

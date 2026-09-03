@@ -28,14 +28,13 @@ vi.mock('../../../src/frontend/hooks/useAuth', () => ({
   useAuth: () => ({ user: { id: 7, username: 'viewer', role: mocks.role } }),
 }))
 
-vi.mock('../../../src/frontend/utils/batcher', () => ({
-  batchLoader: { load: mocks.loadThumbnail },
+vi.mock('../../../src/frontend/utils/assetUrlLoader', () => ({
+  thumbnailUrlLoader: { load: mocks.loadThumbnail },
 }))
 
 vi.mock('../../../src/frontend/api/media', () => ({
   mediaApi: {
     delete: mocks.deleteMedia,
-    getCachedThumbnailURL: () => null,
   },
 }))
 
@@ -151,7 +150,8 @@ describe('Deduplicate page', () => {
     expect(await screen.findByText('No duplicate groups')).toBeTruthy()
     expect(screen.getByText('Total 0 Similar Groups')).toBeTruthy()
     expect(screen.getByText('Total 0 Media')).toBeTruthy()
-    expect(screen.queryByRole('heading', { name: 'Deduplicate' })).toBeNull()
+    const heading = screen.getByRole('heading', { name: 'Deduplicate' })
+    expect(heading.closest('[data-page-frame="true"]')?.className).toContain('w-full')
     expect(screen.queryByText('Start scan')).toBeNull()
   })
 

@@ -40,27 +40,28 @@ class TimelineScreenTest {
     }
 
     @Test
-    fun appendsWhenScrollApproachesEnd() {
-        assertTrue(shouldAppendTimeline(8, 10, hasOlder = true, appending = false))
-        assertFalse(shouldAppendTimeline(8, 10, hasOlder = true, appending = true))
-        assertFalse(shouldAppendTimeline(8, 10, hasOlder = false, appending = false))
-        assertFalse(shouldAppendTimeline(-1, 0, hasOlder = true, appending = false))
+    fun prefetchDistanceKeepsAtLeastThreeViewportsReady() {
+        assertEquals(24, timelinePrefetchDistance(1))
+        assertEquals(30, timelinePrefetchDistance(10))
+        assertEquals(0, timelinePrefetchDistance(0))
     }
 
     @Test
-    fun prependsOnlyWhenUserScrollsTowardTheStart() {
-        assertTrue(
-            shouldPrependTimeline(
-                firstVisibleItemIndex = 2,
-                hasNewer = true,
-                prepending = false,
-                scrollingTowardStart = true,
-            ),
-        )
-        assertFalse(shouldPrependTimeline(2, hasNewer = true, prepending = true, scrollingTowardStart = true))
-        assertFalse(shouldPrependTimeline(2, hasNewer = false, prepending = false, scrollingTowardStart = true))
-        assertFalse(shouldPrependTimeline(2, hasNewer = true, prepending = false, scrollingTowardStart = false))
-        assertFalse(shouldPrependTimeline(3, hasNewer = true, prepending = false, scrollingTowardStart = true))
+    fun appendsBeforeTheLastThreeViewportsAreConsumed() {
+        assertTrue(shouldAppendTimeline(69, 100, 10, hasOlder = true, loading = false))
+        assertFalse(shouldAppendTimeline(68, 100, 10, hasOlder = true, loading = false))
+        assertFalse(shouldAppendTimeline(69, 100, 10, hasOlder = true, loading = true))
+        assertFalse(shouldAppendTimeline(69, 100, 10, hasOlder = false, loading = false))
+        assertFalse(shouldAppendTimeline(-1, 0, 0, hasOlder = true, loading = false))
+    }
+
+    @Test
+    fun prependsBeforeTheFirstThreeViewportsAreConsumed() {
+        assertTrue(shouldPrependTimeline(30, 10, hasNewer = true, loading = false))
+        assertFalse(shouldPrependTimeline(31, 10, hasNewer = true, loading = false))
+        assertFalse(shouldPrependTimeline(30, 10, hasNewer = true, loading = true))
+        assertFalse(shouldPrependTimeline(30, 10, hasNewer = false, loading = false))
+        assertFalse(shouldPrependTimeline(-1, 0, hasNewer = true, loading = false))
     }
 
     @Test

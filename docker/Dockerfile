@@ -21,7 +21,7 @@ COPY src/common ./src/common
 
 RUN CARGO_TARGET_DIR=/app/build/backend/target cargo build --release --manifest-path /app/src/backend/Cargo.toml && mkdir -p /app/dist/backend && cp /app/build/backend/target/release/momento-api /app/dist/backend/momento-api
 
-FROM alpine:latest
+FROM alpine:latest AS runtime-base
 
 ARG SOURCE_REPOSITORY=https://github.com/yzard/momento
 
@@ -34,6 +34,7 @@ RUN apk add --no-cache \
     ffmpeg \
     imagemagick \
     imagemagick-heic \
+    imagemagick-raw \
     imagemagick-tiff \
     imagemagick-webp \
     exiftool \
@@ -43,9 +44,11 @@ RUN apk add --no-cache \
 
 COPY docker/imagemagick-policy.xml /etc/ImageMagick-7/policy.xml
 
-RUN for format in AVIF GIF HEIC QOI TIFF WEBP; do \
+RUN for format in AVIF DNG GIF HEIC QOI TIFF WEBP; do \
         magick -list format | awk -v required_format="$format" '($1 == required_format || $1 == required_format"*") && $3 ~ /r/ { found = 1 } END { exit !found }'; \
     done
+
+FROM runtime-base
 
 COPY --from=backend-builder /app/dist/backend/momento-api /app/momento-api
 COPY --from=frontend-builder /app/dist/frontend ./static
@@ -64,7 +67,10 @@ ENV PUID=1000 \
     PGID=1000 \
     UMASK=022 \
     TZ=UTC \
-    RUST_BACKTRACE=full
+    RUST_BACKTRACE=full \
+    TMPDIR=/data/tmp \
+    TEMP=/data/tmp \
+    TMP=/data/tmp
 
 EXPOSE 8000
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Marker } from 'react-leaflet'
 import { DivIcon } from 'leaflet'
-import { tinyBatchLoader } from '../../utils/batcher'
+import { tinyThumbnailUrlLoader } from '../../utils/assetUrlLoader'
 import { clusterIconSize, createClusterIconElement } from './clusterIcon'
 
 interface ClusterMarkerProps {
@@ -30,7 +30,7 @@ export default function ClusterMarker({
     let cancelled = false
     const loadThumbnail = async () => {
       try {
-        const url = await tinyBatchLoader.load(representativeId)
+        const url = await tinyThumbnailUrlLoader.load(representativeId)
         if (!cancelled && url) setThumbnailUrl(url)
       } catch (error) {
         console.error('Failed to load cluster thumbnail:', error)

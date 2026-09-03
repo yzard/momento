@@ -597,7 +597,6 @@ pub struct LocalProvider {
     runtime: RuntimeSpec,
     child: Arc<Mutex<Child>>,
     process_id: u32,
-    input_root: PathBuf,
 }
 
 impl Drop for LocalProvider {
@@ -646,7 +645,6 @@ impl LocalProvider {
             runtime: runtime.clone(),
             child: Arc::new(Mutex::new(child)),
             process_id,
-            input_root,
         };
         if let Err(error) = runtime.wait_until_ready().await {
             if let Err(shutdown_error) = runtime.shutdown().await {
@@ -703,29 +701,28 @@ impl LocalProvider {
     }
 }
 
-fn runtime_input_path(input_root: &Path, input: &InferenceInput) -> PathBuf {
-    input_root
-        .join(&input.job_id)
-        .join(format!("input-{}", input.sequence))
-}
-
 fn runtime_input_descriptor(input: &InferenceInput) -> serde_json::Value {
+    let input_filename = input
+        .path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .expect("scheduler-owned runtime input filename");
     json!({
         "jobId": input.job_id,
         "sequence": input.sequence,
         "byteSize": input.byte_size,
         "contentHash": input.content_hash,
         "mimeType": input.mime_type,
+        "inputFilename": input_filename,
     })
 }
 
 impl LocalProvider {
     async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let input_path = runtime_input_path(&self.input_root, input);
-        let image_url = reqwest::Url::from_file_path(&input_path).map_err(|_| {
+        let image_url = reqwest::Url::from_file_path(&input.path).map_err(|_| {
             ServiceError::Configuration(format!(
                 "OCR runtime input path is invalid: {}",
-                input_path.display()
+                input.path.display()
             ))
         })?;
         let request = json!({

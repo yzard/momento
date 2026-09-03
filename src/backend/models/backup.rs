@@ -34,7 +34,7 @@ pub struct BackupDeviceRegisterResponse {
     pub registered: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupUploadResponse {
     pub upload_id: String,

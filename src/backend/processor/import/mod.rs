@@ -1,49 +1,448 @@
 use futures::stream::{self, StreamExt};
 use rusqlite::OptionalExtension;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use std::sync::Arc;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::constants::{
-    image_mime_type, paths, video_mime_type, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS,
-};
-use crate::database::{execute_query, fetch_one, queries, DbPool};
+use crate::constants::{image_mime_type, video_mime_type, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
+use crate::database::queries;
 use crate::error::{AppError, AppResult};
-use crate::processor::media_processor::{
-    apply_file_times, build_original_filename, capture_file_times,
+use crate::executor::process::bounded_error_detail;
+use crate::executor::{ExecutorErrorKind, SqliteExecutorHandle, StorageDirectoryEntryKind};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
+use crate::io::file::{PathClaimMode, PathClaimScope};
+use crate::io::journal::{
+    FileEntryAction, FileEntryPlan, FileOperationPlan, FilePathClaimPlan, JournalCheckpointOutcome,
+    JournalSpaceReservationPlan, PrepareJournalOutcome,
 };
-use crate::processor::metadata::{
-    supplemental_metadata_candidates, supplemental_metadata_path as find_supplemental_metadata_path,
-};
-use crate::utils::hash::calculate_file_hash;
-use crate::utils::process::bounded_error_detail;
+use crate::io::{StorageFileSession, StorageFileSnapshot};
+use crate::processor::media_processor::build_original_filename;
+use crate::processor::metadata::supplemental_metadata_candidates;
+use crate::runtime::{DurableAdmission, DurableSourceId, SchedulerAdmissionKind};
 
-static CONTENT_HASH_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
+#[derive(Debug, Clone)]
+pub(crate) struct ExistingMedia {
+    pub(crate) id: i64,
+    pub(crate) file_path: String,
+    pub(crate) import_state: String,
+}
 
-struct ExistingMedia {
-    id: i64,
-    file_path: String,
-    import_state: String,
+#[derive(Debug, Clone)]
+pub(crate) enum ImportContentHashClaimOutcome {
+    Acquired,
+    Busy,
+    Existing(ExistingMedia),
+}
+
+#[derive(Debug)]
+pub enum ImportStagedFileOutcome {
+    Completed(i64),
+    Deferred(Box<PreparedStagedImport>),
+}
+
+impl ImportStagedFileOutcome {
+    pub fn completed_media_id(self) -> Option<i64> {
+        match self {
+            Self::Completed(media_id) => Some(media_id),
+            Self::Deferred(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedStagedImport {
+    source: StagedImportFile,
+    source_session: StorageFileSession,
+    source_snapshot: StorageFileSnapshot,
+    import_source: ImportSource,
+    user_id: i64,
+    cleanup: StagedImportCleanup,
+    media_type: &'static str,
+    original_filename: String,
+    mime_type: String,
+    source_size: u64,
+    source_modified_seconds: Option<i64>,
+    content_hash: String,
+    supplemental_metadata: Option<PreparedSupplementalMetadata>,
+}
+
+#[derive(Debug)]
+struct PreparedSupplementalMetadata {
+    path: NormalizedStoragePath,
+    snapshot: StorageFileSnapshot,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StagedImportFile {
+    pub storage_root: StorageRootId,
+    pub path: NormalizedStoragePath,
+}
+
+impl StagedImportFile {
+    pub fn new(storage_root: StorageRootId, path: NormalizedStoragePath) -> AppResult<Self> {
+        validate_staged_import_root(storage_root)?;
+        Ok(Self { storage_root, path })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StagedImportCleanup {
+    pub source: bool,
+    pub supplemental_metadata: bool,
 }
 
 struct WebDavImportCandidate {
-    source_path: PathBuf,
-    supplemental_metadata_path: Option<PathBuf>,
+    source: StagedImportFile,
     ready_file_path: String,
     supplemental_ready_file_path: Option<String>,
 }
 
-enum ImportTarget {
+pub(crate) enum ImportTarget {
     New {
         media_id: i64,
         temporary_relative_path: PathBuf,
     },
     Existing(ExistingMedia),
+}
+
+#[derive(Debug)]
+pub(crate) struct AllocateImportMedia {
+    pub user_id: i64,
+    pub temporary_filename: String,
+    pub original_filename: String,
+    pub temporary_relative_path: String,
+    pub media_type: String,
+    pub mime_type: String,
+    pub source_size: i64,
+    pub content_hash: String,
+    pub source_modified_seconds: Option<i64>,
+    pub import_source: ImportSource,
+}
+
+#[derive(Debug)]
+pub(crate) struct FinalizeImportMedia {
+    pub media_id: i64,
+    pub user_id: i64,
+    pub final_filename: String,
+    pub final_relative_path: String,
+    pub product_group_id: String,
+    pub product_group_version: i64,
+    pub claim_token: String,
+    pub source_cleanup: Option<FileOperationPlan>,
+}
+
+struct CommittedImportProduct {
+    group_id: String,
+    version: i64,
+}
+
+struct ImportProductPublication<'a> {
+    source: StorageFileSession,
+    temporary_path: NormalizedStoragePath,
+    destination_path: NormalizedStoragePath,
+    source_snapshot: StorageFileSnapshot,
+    media_id: i64,
+    claim_token: &'a str,
+    content_hash: [u8; 32],
+    supplemental_metadata: Option<&'a PreparedSupplementalMetadata>,
+}
+
+#[derive(Debug)]
+pub(crate) struct AbsorbExistingMediaDatabase {
+    pub media_id: i64,
+    pub user_id: i64,
+    pub source_modified_seconds: Option<i64>,
+    pub request_metadata_rerun: bool,
+    pub source_cleanup: Option<FileOperationPlan>,
+}
+
+#[derive(Debug)]
+pub(crate) struct InterruptedImport {
+    pub media_id: i64,
+}
+
+#[derive(Debug)]
+pub(crate) struct WebdavReadyFile {
+    pub user_id: i64,
+    pub username: String,
+    pub file_path: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct UpdateWebdavReadyPaths {
+    pub user_id: i64,
+    pub remove: Vec<String>,
+    pub add: Vec<String>,
+}
+
+pub(crate) fn set_import_job_total_on_connection(
+    connection: &rusqlite::Connection,
+    job_id: i64,
+    total_files: i64,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(
+            queries::import::SET_JOB_TOTAL,
+            rusqlite::params![total_files, job_id],
+        )
+        .map(|updated| updated == 1)
+}
+
+pub(crate) fn record_import_progress_on_connection(
+    connection: &rusqlite::Connection,
+    job_id: i64,
+    success: bool,
+    error_message: &str,
+) -> rusqlite::Result<bool> {
+    let transaction = connection.unchecked_transaction()?;
+    let updated = transaction.execute(
+        queries::import::UPDATE_JOB_PROGRESS,
+        rusqlite::params![success, success, error_message, error_message, job_id],
+    )?;
+    if updated == 1 && !success && !error_message.is_empty() {
+        transaction.execute(
+            queries::import::INSERT_JOB_ERROR,
+            rusqlite::params![job_id, error_message],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(updated == 1)
+}
+
+pub(crate) fn complete_import_job_on_connection(
+    connection: &rusqlite::Connection,
+    job_id: i64,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(queries::import::COMPLETE_JOB, [job_id])
+        .map(|updated| updated == 1)
+}
+
+pub(crate) fn allocate_import_media_on_connection(
+    connection: &rusqlite::Connection,
+    request: AllocateImportMedia,
+) -> rusqlite::Result<ImportTarget> {
+    let rows = connection.execute(
+        queries::import::INSERT_IMPORTING_MEDIA,
+        rusqlite::params![
+            request.user_id,
+            request.temporary_filename,
+            request.original_filename,
+            request.temporary_relative_path,
+            request.media_type,
+            request.mime_type,
+            request.source_size,
+            request.content_hash,
+            request.source_modified_seconds,
+            request.import_source.as_str(),
+        ],
+    )?;
+    if rows == 0 {
+        return select_existing_media(connection, &request.content_hash)?.map_or_else(
+            || Err(rusqlite::Error::InvalidQuery),
+            |existing| Ok(ImportTarget::Existing(existing)),
+        );
+    }
+    if rows != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(ImportTarget::New {
+        media_id: connection.last_insert_rowid(),
+        temporary_relative_path: PathBuf::from(request.temporary_relative_path),
+    })
+}
+
+pub(crate) fn finalize_import_media_on_connection(
+    connection: &rusqlite::Connection,
+    request: FinalizeImportMedia,
+) -> rusqlite::Result<bool> {
+    let transaction = connection.unchecked_transaction()?;
+    if transaction.execute(
+        r#"
+        UPDATE file_operation_groups
+           SET product_target = NULL
+             , state = 'cleanup_pending'
+             , completion_outcome = 'published'
+             , version = version + 1
+             , recovery_order = (
+                   SELECT COALESCE(MAX(recovery_order), 0) + 1
+                     FROM file_operation_groups
+               )
+             , updated_at = datetime('now')
+             , terminal_at = NULL
+         WHERE id = ?
+           AND version = ?
+           AND state = 'files_committed'
+           AND owner_kind = 'import'
+           AND owner_id = CAST(? AS TEXT)
+           AND product_target = 'import_media'
+           AND product_version = 1
+           AND claim_token = ?
+           AND EXISTS (
+                   SELECT 1
+                     FROM import_content_hash_claims
+                    WHERE import_content_hash_claims.claim_token = file_operation_groups.claim_token
+               )
+        "#,
+        rusqlite::params![
+            request.product_group_id,
+            request.product_group_version,
+            request.media_id,
+            request.claim_token,
+        ],
+    )? != 1
+    {
+        transaction.rollback()?;
+        return Ok(false);
+    }
+    let changed = transaction.execute(
+        queries::import::MARK_IMPORTED,
+        rusqlite::params![
+            request.final_filename,
+            request.final_relative_path,
+            request.media_id,
+        ],
+    )?;
+    if changed != 1 {
+        transaction.rollback()?;
+        return Ok(false);
+    }
+    transaction.execute(
+        queries::access::INSERT_MEDIA_ACCESS,
+        rusqlite::params![request.media_id, request.user_id, 2],
+    )?;
+    transaction.execute(queries::metadata_jobs::INSERT_QUEUED, [request.media_id])?;
+    if let Some(source_cleanup) = request.source_cleanup {
+        if crate::io::journal::prepare_committed_cleanup(&transaction, source_cleanup)?
+            == PrepareJournalOutcome::PathConflict
+        {
+            transaction.rollback()?;
+            return Ok(false);
+        }
+    }
+    transaction.commit()?;
+    Ok(true)
+}
+
+pub(crate) fn mark_import_media_failed_on_connection(
+    connection: &rusqlite::Connection,
+    media_id: i64,
+    error: &str,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(
+            queries::import::MARK_FAILED,
+            rusqlite::params![error, media_id],
+        )
+        .map(|updated| updated == 1)
+}
+
+pub(crate) fn absorb_existing_media_on_connection(
+    connection: &rusqlite::Connection,
+    request: AbsorbExistingMediaDatabase,
+) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    if let Some(modified_seconds) = request.source_modified_seconds {
+        transaction.execute(
+            queries::import::UPDATE_EARLIER_CREATED_AT,
+            rusqlite::params![modified_seconds, request.media_id, modified_seconds],
+        )?;
+    }
+    transaction.execute(
+        queries::access::INSERT_MEDIA_ACCESS,
+        rusqlite::params![request.media_id, request.user_id, 2],
+    )?;
+    transaction.execute(
+        queries::access::RESTORE_MEDIA_ACCESS,
+        rusqlite::params![request.media_id, request.user_id],
+    )?;
+    if request.request_metadata_rerun {
+        transaction.execute(queries::metadata_jobs::REQUEST_RERUN, [request.media_id])?;
+    }
+    if let Some(source_cleanup) = request.source_cleanup {
+        if crate::io::journal::prepare_committed_cleanup(&transaction, source_cleanup)?
+            == PrepareJournalOutcome::PathConflict
+        {
+            return Err(rusqlite::Error::StatementChangedRows(0));
+        }
+    }
+    transaction.commit()
+}
+
+pub(crate) fn recover_interrupted_import_page_on_connection(
+    connection: &rusqlite::Connection,
+    after_media_id: i64,
+    limit: u16,
+) -> rusqlite::Result<Vec<InterruptedImport>> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(queries::import::RECORD_INTERRUPTED_JOB_ERRORS, [])?;
+    transaction.execute(queries::import::FAIL_INTERRUPTED_JOBS, [])?;
+    let imports = transaction
+        .prepare(queries::import::SELECT_INTERRUPTED_PAGE)?
+        .query_map(rusqlite::params![after_media_id, limit], |row| {
+            Ok(InterruptedImport {
+                media_id: row.get(0)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    transaction.commit()?;
+    Ok(imports)
+}
+
+pub(crate) fn load_webdav_ready_page_on_connection(
+    connection: &rusqlite::Connection,
+    after_user_id: i64,
+    after_file_path: &str,
+    limit: u16,
+) -> rusqlite::Result<Vec<WebdavReadyFile>> {
+    connection
+        .prepare(queries::webdav_ready::SELECT_IMPORT_PAGE)?
+        .query_map(
+            rusqlite::params![after_user_id, after_user_id, after_file_path, limit],
+            |row| {
+                Ok(WebdavReadyFile {
+                    user_id: row.get(0)?,
+                    username: row.get(1)?,
+                    file_path: row.get(2)?,
+                })
+            },
+        )?
+        .collect()
+}
+
+pub(crate) fn webdav_file_is_ready_on_connection(
+    connection: &rusqlite::Connection,
+    user_id: i64,
+    file_path: &str,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        queries::webdav_ready::EXISTS,
+        rusqlite::params![user_id, file_path],
+        |row| row.get(0),
+    )
+}
+
+pub(crate) fn update_webdav_ready_paths_on_connection(
+    connection: &rusqlite::Connection,
+    request: UpdateWebdavReadyPaths,
+) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    for path in request.remove {
+        transaction.execute(
+            queries::webdav_ready::DELETE,
+            rusqlite::params![request.user_id, path],
+        )?;
+    }
+    for path in request.add {
+        transaction.execute(
+            queries::webdav_ready::UPSERT,
+            rusqlite::params![request.user_id, path],
+        )?;
+    }
+    transaction.commit()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,13 +453,25 @@ pub enum ImportSource {
 }
 
 impl ImportSource {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Webdav => "webdav",
             Self::MobileBackup => "mobile_backup",
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CreateImportJobOutcome {
+    AlreadyRunning,
+    Created(i64),
+}
+
+#[derive(Debug)]
+pub struct ImportStatusSnapshot {
+    pub job: ImportJob,
+    pub total_media: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -78,25 +489,31 @@ pub struct ImportJob {
 #[derive(Clone)]
 pub struct ImportSettings {
     pub user_id: i64,
-    pub pool: DbPool,
-    pub concurrency: usize,
+    pub executors: crate::runtime::ExecutorHandles,
+    pub scheduler: crate::runtime::SchedulerHandle,
 }
 
-pub fn create_import_job(pool: &DbPool, source: ImportSource) -> AppResult<i64> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    connection
-        .execute(queries::import::INSERT_JOB, [source.as_str()])
-        .map_err(|error| match error {
-            rusqlite::Error::SqliteFailure(_, _) => {
-                AppError::Conflict("Import already in progress".to_string())
-            }
-            other => AppError::Database(other),
-        })?;
-    Ok(connection.last_insert_rowid())
+pub(crate) fn create_import_job_on_connection(
+    connection: &rusqlite::Connection,
+    source: ImportSource,
+) -> rusqlite::Result<CreateImportJobOutcome> {
+    match connection.execute(queries::import::INSERT_JOB, [source.as_str()]) {
+        Ok(_) => Ok(CreateImportJobOutcome::Created(
+            connection.last_insert_rowid(),
+        )),
+        Err(rusqlite::Error::SqliteFailure(database_error, _))
+            if database_error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Ok(CreateImportJobOutcome::AlreadyRunning)
+        }
+        Err(error) => Err(error),
+    }
 }
 
-pub fn get_import_status(pool: &DbPool, source: ImportSource) -> AppResult<ImportJob> {
-    let connection = pool.get().map_err(AppError::Pool)?;
+pub(crate) fn get_import_status_on_connection(
+    connection: &rusqlite::Connection,
+    source: ImportSource,
+) -> rusqlite::Result<ImportStatusSnapshot> {
     let job_row = connection
         .query_row(
             queries::import::SELECT_LATEST_JOB_FOR_SOURCE,
@@ -120,111 +537,163 @@ pub fn get_import_status(pool: &DbPool, source: ImportSource) -> AppResult<Impor
         )
         .optional()?;
     let Some((job_id, mut job, last_error)) = job_row else {
-        return Ok(ImportJob {
-            status: "idle".to_string(),
-            total_files: 0,
-            processed_files: 0,
-            successful_imports: 0,
-            failed_imports: 0,
-            started_at: None,
-            completed_at: None,
-            errors: Vec::new(),
+        return Ok(ImportStatusSnapshot {
+            job: ImportJob {
+                status: "idle".to_string(),
+                total_files: 0,
+                processed_files: 0,
+                successful_imports: 0,
+                failed_imports: 0,
+                started_at: None,
+                completed_at: None,
+                errors: Vec::new(),
+            },
+            total_media: connection.query_row(
+                queries::import::COUNT_IMPORTED_MEDIA,
+                [],
+                |row| row.get(0),
+            )?,
         });
     };
-    job.errors = connection
-        .prepare(queries::import::SELECT_JOB_ERRORS)?
-        .query_map([job_id], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut statement = connection.prepare(queries::import::SELECT_JOB_ERRORS)?;
+    let mut rows = statement.query([job_id])?;
+    let mut error_bytes = 0usize;
+    while let Some(row) = rows.next()? {
+        if job.errors.len() == 4096 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "import errors exceed 4096 rows".to_string(),
+            ));
+        }
+        let error = row.get::<_, String>(0)?;
+        error_bytes = error_bytes.checked_add(error.len()).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName("import error size overflow".to_string())
+        })?;
+        if error_bytes > 1024 * 1024 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "import errors exceed one mebibyte".to_string(),
+            ));
+        }
+        job.errors.push(error);
+    }
     if job.errors.is_empty() {
         job.errors.extend(last_error);
     }
-    Ok(job)
+    let total_media =
+        connection.query_row(queries::import::COUNT_IMPORTED_MEDIA, [], |row| row.get(0))?;
+    Ok(ImportStatusSnapshot { job, total_media })
 }
 
 pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
-    if let Err(error) = recover_import_claims(&paths().imports) {
-        warn!("local import claim recovery failed: {error}");
+    let Ok(initial_worker) = settings
+        .scheduler
+        .acquire_durable(
+            DurableSourceId::LocalImport,
+            SchedulerAdmissionKind::NewClaim,
+        )
+        .await
+    else {
+        return;
+    };
+    let source_files = match collect_import_files(&settings.executors, StorageRootId::Imports).await
+    {
+        Ok(source_files) => source_files,
+        Err(error) => {
+            warn!(error = %error, "local import scan failed");
+            let _ = settings
+                .executors
+                .sqlite
+                .complete_import_job_durable(job_id)
+                .await;
+            return;
+        }
+    };
+    if let Err(error) = settings
+        .executors
+        .sqlite
+        .set_import_job_total_durable(job_id, source_files.len() as i64)
+        .await
+    {
+        warn!(job_id, error = %error, "failed to persist local import total");
     }
-    let source_files = collect_import_files(&paths().imports);
-    if let Ok(connection) = settings.pool.get() {
-        let _ = connection.execute(
-            queries::import::SET_JOB_TOTAL,
-            rusqlite::params![source_files.len() as i64, job_id],
-        );
-    }
+    drop(initial_worker);
 
-    let concurrency = settings
-        .concurrency
-        .max(1)
-        .min(settings.pool.max_size() as usize);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let concurrency = settings.scheduler.durable_capacity();
     let mut imports = stream::iter(source_files)
-        .map(|source_path| {
+        .map(|staged_source| {
             let settings = settings.clone();
-            let semaphore = Arc::clone(&semaphore);
             async move {
-                let permit = semaphore.acquire().await;
-                if permit.is_err() {
+                let worker_permit = settings
+                    .scheduler
+                    .acquire_durable(
+                        DurableSourceId::LocalImport,
+                        SchedulerAdmissionKind::NewClaim,
+                    )
+                    .await;
+                if worker_permit.is_err() {
                     let detail = format!(
                         "local import worker stopped before processing {}",
-                        source_path.display()
+                        staged_source.path.relative_path()
                     );
-                    warn!(path = %source_path.display(), error = %detail, "Local import failed");
-                    update_import_progress(&settings.pool, job_id, false, Some(detail));
+                    warn!(path = %staged_source.path.relative_path(), error = %detail, "Local import failed");
+                    update_import_progress(&settings.executors.sqlite, job_id, false, Some(detail)).await;
                     return;
                 }
-                let source_supplemental_metadata_path =
-                    find_supplemental_metadata_path(&source_path);
-                let claimed_path = match claim_source(
-                    &source_path,
-                    source_supplemental_metadata_path.as_deref(),
-                )
-                .await
-                {
-                    Ok(claimed_path) => claimed_path,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-                    Err(error) => {
-                        let detail = format!(
-                            "failed to claim local import source {}: {error}",
-                            source_path.display()
-                        );
-                        warn!(path = %source_path.display(), error = %error, "Local import failed");
-                        update_import_progress(&settings.pool, job_id, false, Some(detail));
-                        return;
-                    }
-                };
-                let import_result = import_staged_file(
-                    &claimed_path,
+                let mut worker_permit = worker_permit.expect("worker permit was checked");
+                let source_label = staged_source.path.relative_path().to_string();
+                let mut attempt = import_staged_file(
+                    staged_source,
                     ImportSource::Local,
                     settings.user_id,
-                    &settings.pool,
-                    true,
+                    &settings.executors,
+                    StagedImportCleanup {
+                        source: true,
+                        supplemental_metadata: true,
+                    },
+                    &worker_permit,
                 )
                 .await;
+                let import_result = loop {
+                    match attempt {
+                        Ok(ImportStagedFileOutcome::Deferred(prepared)) => {
+                            drop(worker_permit);
+                            tokio::task::yield_now().await;
+                            worker_permit = match settings
+                                .scheduler
+                                .acquire_durable(
+                                    DurableSourceId::LocalImport,
+                                    SchedulerAdmissionKind::ExistingClaimCompletion,
+                                )
+                                .await
+                            {
+                                Ok(worker_permit) => worker_permit,
+                                Err(error) => {
+                                    break Err(AppError::Unavailable(error));
+                                }
+                            };
+                            attempt = resume_staged_file_import(
+                                *prepared,
+                                &settings.executors,
+                                &worker_permit,
+                            )
+                            .await;
+                        }
+                        Ok(ImportStagedFileOutcome::Completed(media_id)) => break Ok(media_id),
+                        Err(error) => break Err(error),
+                    }
+                };
                 match import_result {
                     Ok(_) => {
-                        if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
-                            if error.kind() != std::io::ErrorKind::NotFound {
-                                warn!(path = %source_path.display(), "local imported file cleanup failed: {error}");
-                            }
-                        }
-                        let _ = remove_claim_directory(&claimed_path).await;
-                        update_import_progress(&settings.pool, job_id, true, None);
+                        settings.scheduler.wake_metadata();
+                        update_import_progress(&settings.executors.sqlite, job_id, true, None).await;
                     }
                     Err(error) => {
-                        let restore_error = restore_claim(&claimed_path, &source_path).await.err();
-                        let mut detail = format!(
+                        let detail = format!(
                             "local import failed for {}: {error}",
-                            source_path.display()
+                            source_label
                         );
-                        if let Some(restore_error) = restore_error {
-                            detail.push_str(&format!(
-                                "; failed to restore the claimed source for retry: {restore_error}"
-                            ));
-                        }
                         let detail = bounded_error_detail(&detail);
-                        warn!(path = %source_path.display(), error = %detail, "Local import failed");
-                        update_import_progress(&settings.pool, job_id, false, Some(detail));
+                        warn!(path = %source_label, error = %detail, "Local import failed");
+                        update_import_progress(&settings.executors.sqlite, job_id, false, Some(detail)).await;
                     }
                 }
             }
@@ -233,13 +702,18 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
 
     while imports.next().await.is_some() {}
 
-    if let Ok(connection) = settings.pool.get() {
-        let _ = connection.execute(queries::import::COMPLETE_JOB, [job_id]);
+    if let Err(error) = settings
+        .executors
+        .sqlite
+        .complete_import_job_durable(job_id)
+        .await
+    {
+        warn!(job_id, error = %error, "failed to complete local import job");
     }
 }
 
-fn update_import_progress(
-    pool: &DbPool,
+async fn update_import_progress(
+    sqlite: &SqliteExecutorHandle,
     job_id: i64,
     success: bool,
     error_message: Option<String>,
@@ -247,52 +721,25 @@ fn update_import_progress(
     let error_message = error_message
         .map(|error| bounded_error_detail(&error))
         .unwrap_or_default();
-    let Ok(connection) = pool.get() else {
-        warn!(
-            job_id,
-            "failed to acquire a database connection for import progress"
-        );
-        return;
-    };
-    let result = (|| -> rusqlite::Result<()> {
-        let transaction = connection.unchecked_transaction()?;
-        let updated = transaction.execute(
-            queries::import::UPDATE_JOB_PROGRESS,
-            rusqlite::params![success, success, &error_message, &error_message, job_id],
-        )?;
-        if updated == 1 && !success && !error_message.is_empty() {
-            transaction.execute(
-                queries::import::INSERT_JOB_ERROR,
-                rusqlite::params![job_id, &error_message],
-            )?;
-        }
-        transaction.commit()
-    })();
-    if let Err(error) = result {
+    if let Err(error) = sqlite
+        .record_import_progress_durable(job_id, success, error_message)
+        .await
+    {
         warn!(job_id, error = %error, "failed to persist import progress");
     }
 }
 
 /// Imports one completed on-disk file after its source-specific claim and preparation.
 pub async fn import_staged_file(
-    source_path: &Path,
+    source: StagedImportFile,
     import_source: ImportSource,
     user_id: i64,
-    pool: &DbPool,
-    delete_source: bool,
-) -> AppResult<i64> {
-    let source_metadata = tokio::fs::metadata(source_path).await.map_err(|error| {
-        import_io_error(
-            &format!("read source metadata from {}", source_path.display()),
-            error,
-        )
-    })?;
-    if !source_metadata.is_file() {
-        return Err(AppError::BadRequest(format!(
-            "import source is not a file: {}",
-            source_path.display()
-        )));
-    }
+    executors: &crate::runtime::ExecutorHandles,
+    cleanup: StagedImportCleanup,
+    admission: &DurableAdmission,
+) -> AppResult<ImportStagedFileOutcome> {
+    validate_staged_import_root(source.storage_root)?;
+    let source_path = Path::new(source.path.relative_path());
     let media_type = media_type(source_path).ok_or_else(|| {
         AppError::BadRequest(format!("unsupported media file: {}", source_path.display()))
     })?;
@@ -310,259 +757,1177 @@ pub async fn import_staged_file(
         AppError::BadRequest(format!("unsupported media file: {}", source_path.display()))
     })?
     .to_string();
-    let source_modified_seconds = source_metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64);
-    let content_hash = calculate_file_hash(source_path).await.map_err(|error| {
-        import_io_error(
-            &format!("calculate SHA-256 for {}", source_path.display()),
-            error,
-        )
-    })?;
-    let content_hash_lock = content_hash_lock(&content_hash);
-    let _content_hash_guard = content_hash_lock.lock().await;
-
-    let existing_media = {
-        let connection = pool.get()?;
-        select_existing_media(&connection, &content_hash)?
-    };
-    if let Some(existing_media) = existing_media {
-        return absorb_existing_media(
-            source_path,
-            existing_media,
+    let (source_session, source_snapshot, content_hash) =
+        open_and_hash_staged_file(executors, &source).await?;
+    let supplemental_metadata = read_staged_supplemental_metadata(executors, &source).await?;
+    let source_modified_seconds = Some(source_snapshot.modified_seconds);
+    attempt_prepared_staged_import(
+        PreparedStagedImport {
+            source,
+            source_session,
+            source_snapshot,
+            import_source,
             user_id,
-            pool,
-            delete_source,
+            cleanup,
+            media_type,
+            original_filename,
+            mime_type,
+            source_size: source_snapshot.byte_size,
             source_modified_seconds,
-        )
-        .await;
-    }
+            content_hash,
+            supplemental_metadata,
+        },
+        executors,
+        admission,
+    )
+    .await
+}
 
-    let import_target = {
-        let connection = pool.get()?;
-        let temporary_filename = format!(".importing-{}", uuid::Uuid::new_v4());
-        let temporary_relative_path = PathBuf::from(".importing").join(&temporary_filename);
-        let rows = connection.execute(
-            queries::import::INSERT_IMPORTING_MEDIA,
-            rusqlite::params![
-                user_id,
-                temporary_filename,
-                &original_filename,
-                temporary_relative_path.to_string_lossy(),
-                media_type,
-                mime_type,
-                source_metadata.len() as i64,
-                &content_hash,
-                source_modified_seconds,
-                import_source.as_str(),
-            ],
-        )?;
-        if rows == 0 {
-            let existing_media =
-                select_existing_media(&connection, &content_hash)?.ok_or_else(|| {
-                    AppError::Conflict(
-                        "content hash conflict did not identify existing media".to_string(),
-                    )
-                })?;
-            ImportTarget::Existing(existing_media)
-        } else if rows == 1 {
-            ImportTarget::New {
-                media_id: connection.last_insert_rowid(),
-                temporary_relative_path,
-            }
-        } else {
-            return Err(AppError::Internal(
-                "failed to allocate media ID".to_string(),
+pub async fn resume_staged_file_import(
+    prepared: PreparedStagedImport,
+    executors: &crate::runtime::ExecutorHandles,
+    admission: &DurableAdmission,
+) -> AppResult<ImportStagedFileOutcome> {
+    attempt_prepared_staged_import(prepared, executors, admission).await
+}
+
+fn validate_staged_import_root(storage_root: StorageRootId) -> AppResult<()> {
+    if matches!(
+        storage_root,
+        StorageRootId::Imports | StorageRootId::WebDav | StorageRootId::Backups
+    ) {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "staged import source must be below Imports, WebDav, or Backups".to_string(),
+        ))
+    }
+}
+
+fn staged_source_cleanup_plan(
+    source: &StagedImportFile,
+    source_snapshot: StorageFileSnapshot,
+    supplemental_metadata: Option<&PreparedSupplementalMetadata>,
+    cleanup_source: bool,
+    owner_id: String,
+) -> FileOperationPlan {
+    let group_id = format!("import-source-cleanup-{}", uuid::Uuid::new_v4());
+    let mut entries = Vec::new();
+    let mut claims = Vec::new();
+    if cleanup_source {
+        entries.push(FileEntryPlan {
+            action: FileEntryAction::Cleanup,
+            storage_root: source.storage_root,
+            source_path: Some(source.path.clone()),
+            temporary_path: None,
+            destination_path: None,
+            tombstone_path: None,
+            expected_size: Some(source_snapshot.byte_size),
+            expected_sha256: None,
+            expected_version: Some(source_snapshot.identity_version()),
+        });
+        claims.push(FilePathClaimPlan {
+            storage_root: source.storage_root,
+            path: source.path.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "staged_import_source".to_string(),
+            expected_version: Some(source_snapshot.identity_version()),
+        });
+    }
+    if let Some(supplemental_metadata) = supplemental_metadata {
+        entries.push(FileEntryPlan {
+            action: FileEntryAction::Cleanup,
+            storage_root: source.storage_root,
+            source_path: Some(supplemental_metadata.path.clone()),
+            temporary_path: None,
+            destination_path: None,
+            tombstone_path: None,
+            expected_size: Some(supplemental_metadata.snapshot.byte_size),
+            expected_sha256: None,
+            expected_version: Some(supplemental_metadata.snapshot.identity_version()),
+        });
+        claims.push(FilePathClaimPlan {
+            storage_root: source.storage_root,
+            path: supplemental_metadata.path.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "staged_import_sidecar".to_string(),
+            expected_version: Some(supplemental_metadata.snapshot.identity_version()),
+        });
+    }
+    FileOperationPlan {
+        group_id,
+        kind: "import_source_cleanup".to_string(),
+        owner_kind: "import".to_string(),
+        owner_id,
+        claim_token: None,
+        product_target: None,
+        product_version: None,
+        entries,
+        claims,
+        space_reservation: None,
+    }
+}
+
+async fn open_and_hash_staged_file(
+    executors: &crate::runtime::ExecutorHandles,
+    source: &StagedImportFile,
+) -> AppResult<(StorageFileSession, StorageFileSnapshot, String)> {
+    let (opened_file, snapshot) = executors
+        .file_io
+        .open_storage_read_session_durable(source.storage_root, source.path.clone())
+        .await?;
+    let mut file = Some(opened_file);
+    let mut hasher = Some(executors.cpu.start_sha256_session_durable().await?);
+    let mut byte_count = 0_u64;
+    loop {
+        let (returned_file, bytes) = executors
+            .file_io
+            .read_storage_session_durable(
+                file.take().ok_or_else(|| {
+                    AppError::Internal("import source session is unavailable".to_string())
+                })?,
+                crate::runtime::FILE_IO_CHUNK_BYTES as usize,
+            )
+            .await?;
+        file = Some(returned_file);
+        if bytes.is_empty() {
+            break;
+        }
+        byte_count = byte_count
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| AppError::ResourceLimit("import source is too large".to_string()))?;
+        if byte_count > snapshot.byte_size {
+            return Err(AppError::Conflict(
+                "import source changed while hashing".to_string(),
             ));
         }
+        let (returned_hasher, _) = executors
+            .cpu
+            .update_sha256_session_durable(
+                hasher.take().ok_or_else(|| {
+                    AppError::Internal("import hash session is unavailable".to_string())
+                })?,
+                bytes,
+            )
+            .await?;
+        hasher = Some(returned_hasher);
+    }
+    if byte_count != snapshot.byte_size {
+        return Err(AppError::Conflict(
+            "import source changed while hashing".to_string(),
+        ));
+    }
+    let content_hash =
+        executors
+            .cpu
+            .finish_sha256_session_durable(hasher.take().ok_or_else(|| {
+                AppError::Internal("import hash session is unavailable".to_string())
+            })?)
+            .await?;
+    let file = executors
+        .file_io
+        .seek_storage_read_session_durable(
+            file.take().ok_or_else(|| {
+                AppError::Internal("import source session is unavailable".to_string())
+            })?,
+            0,
+        )
+        .await?;
+    Ok((file, snapshot, content_hash))
+}
+
+async fn read_staged_supplemental_metadata(
+    executors: &crate::runtime::ExecutorHandles,
+    source: &StagedImportFile,
+) -> AppResult<Option<PreparedSupplementalMetadata>> {
+    const MAX_SUPPLEMENTAL_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+    for candidate in supplemental_metadata_candidates(Path::new(source.path.relative_path())) {
+        let Some(relative) = candidate.to_str() else {
+            continue;
+        };
+        let path = NormalizedStoragePath::parse(relative)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        let (session, snapshot) = match executors
+            .file_io
+            .open_storage_read_session_durable(source.storage_root, path.clone())
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) if error.kind == ExecutorErrorKind::FileNotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if snapshot.byte_size > MAX_SUPPLEMENTAL_METADATA_BYTES {
+            executors
+                .file_io
+                .close_storage_session_durable(session)
+                .await?;
+            return Err(AppError::ResourceLimit(format!(
+                "supplemental metadata exceeds {MAX_SUPPLEMENTAL_METADATA_BYTES} bytes"
+            )));
+        }
+        let mut session = Some(session);
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(snapshot.byte_size as usize)
+            .map_err(|_| {
+                AppError::ResourceLimit("supplemental metadata allocation failed".to_string())
+            })?;
+        loop {
+            let remaining = snapshot.byte_size.saturating_sub(bytes.len() as u64);
+            if remaining == 0 {
+                break;
+            }
+            let maximum_bytes = usize::try_from(remaining.min(crate::runtime::FILE_IO_CHUNK_BYTES))
+                .map_err(|_| {
+                    AppError::ResourceLimit("supplemental metadata size overflow".to_string())
+                })?;
+            let (returned_session, chunk) = executors
+                .file_io
+                .read_storage_session_durable(
+                    session.take().ok_or_else(|| {
+                        AppError::Internal(
+                            "supplemental metadata session is unavailable".to_string(),
+                        )
+                    })?,
+                    maximum_bytes,
+                )
+                .await?;
+            session = Some(returned_session);
+            if chunk.is_empty() {
+                return Err(AppError::Conflict(
+                    "supplemental metadata changed while reading".to_string(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let (returned_session, trailing) = executors
+            .file_io
+            .read_storage_session_durable(
+                session.take().ok_or_else(|| {
+                    AppError::Internal("supplemental metadata session is unavailable".to_string())
+                })?,
+                1,
+            )
+            .await?;
+        if !trailing.is_empty() {
+            return Err(AppError::Conflict(
+                "supplemental metadata changed while reading".to_string(),
+            ));
+        }
+        executors
+            .file_io
+            .close_storage_session_durable(returned_session)
+            .await?;
+        return Ok(Some(PreparedSupplementalMetadata {
+            path,
+            snapshot,
+            bytes,
+        }));
+    }
+    Ok(None)
+}
+
+fn canonical_supplemental_metadata_relative_path(
+    original_path: &NormalizedStoragePath,
+) -> AppResult<NormalizedStoragePath> {
+    NormalizedStoragePath::parse(&format!(
+        "{}.supplemental-metadata.json",
+        original_path.relative_path()
+    ))
+    .map_err(|error| AppError::Validation(error.to_string()))
+}
+
+fn decode_content_hash(value: &str) -> AppResult<[u8; 32]> {
+    if value.len() != 64 || !value.is_ascii() {
+        return Err(AppError::Internal(
+            "import content hash is not a SHA-256 digest".to_string(),
+        ));
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, output) in decoded.iter_mut().enumerate() {
+        let offset = index * 2;
+        *output = u8::from_str_radix(&value[offset..offset + 2], 16).map_err(|_| {
+            AppError::Internal("import content hash is not hexadecimal".to_string())
+        })?;
+    }
+    Ok(decoded)
+}
+
+async fn publish_supplemental_metadata(
+    executors: &crate::runtime::ExecutorHandles,
+    destination_path: NormalizedStoragePath,
+    supplemental_metadata: &PreparedSupplementalMetadata,
+) -> AppResult<()> {
+    let existing_snapshot = match executors
+        .file_io
+        .open_storage_read_session_durable(StorageRootId::Originals, destination_path.clone())
+        .await
+    {
+        Ok((session, snapshot)) => {
+            executors
+                .file_io
+                .close_storage_session_durable(session)
+                .await?;
+            Some(snapshot)
+        }
+        Err(error) if error.kind == ExecutorErrorKind::FileNotFound => None,
+        Err(error) => return Err(error.into()),
     };
+    let group_id = format!("import-sidecar-{}", uuid::Uuid::new_v4());
+    let temporary_path =
+        NormalizedStoragePath::parse(&format!(".importing/sidecar-{}", uuid::Uuid::new_v4()))
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+    let tombstone_path = existing_snapshot
+        .map(|_| {
+            NormalizedStoragePath::parse(&format!(
+                ".importing/replaced-sidecar-{}",
+                uuid::Uuid::new_v4()
+            ))
+            .map_err(|error| AppError::Internal(error.to_string()))
+        })
+        .transpose()?;
+    let mut entries = Vec::new();
+    let mut claims = vec![
+        FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: temporary_path.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "temporary_sidecar".to_string(),
+            expected_version: None,
+        },
+        FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: destination_path.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "canonical_sidecar".to_string(),
+            expected_version: existing_snapshot.map(|snapshot| snapshot.identity_version()),
+        },
+    ];
+    if let (Some(snapshot), Some(tombstone_path)) = (existing_snapshot, tombstone_path.as_ref()) {
+        entries.push(FileEntryPlan {
+            action: FileEntryAction::Move,
+            storage_root: StorageRootId::Originals,
+            source_path: Some(destination_path.clone()),
+            temporary_path: None,
+            destination_path: Some(tombstone_path.clone()),
+            tombstone_path: None,
+            expected_size: Some(snapshot.byte_size),
+            expected_sha256: None,
+            expected_version: Some(snapshot.identity_version()),
+        });
+        claims.push(FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: tombstone_path.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "replaced_sidecar".to_string(),
+            expected_version: None,
+        });
+    }
+    entries.push(FileEntryPlan {
+        action: FileEntryAction::Publish,
+        storage_root: StorageRootId::Originals,
+        source_path: None,
+        temporary_path: Some(temporary_path.clone()),
+        destination_path: Some(destination_path),
+        tombstone_path: None,
+        expected_size: Some(supplemental_metadata.snapshot.byte_size),
+        expected_sha256: None,
+        expected_version: None,
+    });
+    if let (Some(snapshot), Some(tombstone_path)) = (existing_snapshot, tombstone_path) {
+        entries.push(FileEntryPlan {
+            action: FileEntryAction::Cleanup,
+            storage_root: StorageRootId::Originals,
+            source_path: Some(tombstone_path),
+            temporary_path: None,
+            destination_path: None,
+            tombstone_path: None,
+            expected_size: Some(snapshot.byte_size),
+            expected_sha256: None,
+            expected_version: Some(snapshot.identity_version()),
+        });
+    }
+    let reservation_bytes = supplemental_metadata
+        .snapshot
+        .byte_size
+        .checked_add(4096)
+        .ok_or_else(|| AppError::ResourceLimit("sidecar reservation overflow".to_string()))?;
+    let reservation = executors
+        .file_io
+        .reserve_journal_space(group_id.clone(), reservation_bytes)
+        .map_err(|error| AppError::ResourceLimit(error.to_string()))?
+        .into_result()
+        .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
+    let plan = FileOperationPlan {
+        group_id: group_id.clone(),
+        kind: "import_sidecar_publication".to_string(),
+        owner_kind: "import".to_string(),
+        owner_id: group_id.clone(),
+        claim_token: None,
+        product_target: None,
+        product_version: None,
+        entries,
+        claims,
+        space_reservation: Some(
+            JournalSpaceReservationPlan::new(reservation)
+                .map_err(|error| AppError::ResourceLimit(error.to_string()))?,
+        ),
+    };
+    if executors
+        .sqlite
+        .prepare_file_operation_durable(plan)
+        .await?
+        == PrepareJournalOutcome::PathConflict
+    {
+        return Err(AppError::Conflict(
+            "supplemental metadata paths are owned by another operation".to_string(),
+        ));
+    }
+    let result = publish_supplemental_metadata_group(
+        executors,
+        &group_id,
+        temporary_path,
+        supplemental_metadata.bytes.clone(),
+        existing_snapshot.is_some(),
+    )
+    .await;
+    if result.is_err() {
+        if let Ok(Some(status)) = executors
+            .sqlite
+            .load_file_operation_cancellation_status_durable(group_id.clone())
+            .await
+        {
+            let _ = crate::io::recovery::cancel_generic_file_operation(
+                executors,
+                group_id,
+                status.version,
+            )
+            .await;
+        }
+    }
+    result
+}
+
+async fn publish_supplemental_metadata_group(
+    executors: &crate::runtime::ExecutorHandles,
+    group_id: &str,
+    temporary_path: NormalizedStoragePath,
+    bytes: Vec<u8>,
+    replaces_existing: bool,
+) -> AppResult<()> {
+    let session = executors
+        .file_io
+        .open_storage_write_session_durable(StorageRootId::Originals, temporary_path, 0)
+        .await?;
+    let expected_bytes = bytes.len();
+    let (session, written) = executors
+        .file_io
+        .write_storage_session_durable(session, bytes)
+        .await?;
+    if written != expected_bytes {
+        return Err(AppError::Internal(
+            "supplemental metadata write was partial".to_string(),
+        ));
+    }
+    executors
+        .file_io
+        .commit_storage_session_durable(session)
+        .await?;
+    let publication_entries = if replaces_existing { 2_u16 } else { 1_u16 };
+    let ticket = executors
+        .file_io
+        .reserve_journal_mutation(group_id, 2)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    let grant = executors
+        .sqlite
+        .begin_file_operation_publication_durable(&ticket, 1)
+        .await?
+        .ok_or_else(|| AppError::Conflict("sidecar publication changed".to_string()))?;
+    let mut lease =
+        crate::io::recovery::acquire_verified_journal_mutation(executors, ticket, grant).await?;
+    let mut version = 2_i64;
+    for sequence in 0..publication_entries {
+        if replaces_existing && sequence == 0 {
+            executors
+                .file_io
+                .rename_journal_entry_durable(&mut lease, sequence)
+                .await?;
+        } else {
+            executors
+                .file_io
+                .publish_journal_entry_durable(&mut lease, sequence)
+                .await?;
+        }
+        let checkpoint = executors
+            .sqlite
+            .record_file_entry_published_durable(group_id.to_string(), version, sequence)
+            .await?
+            .ok_or_else(|| AppError::Conflict("sidecar checkpoint changed".to_string()))?;
+        version = checkpoint.version;
+        if sequence + 1 == publication_entries && !checkpoint.phase_complete {
+            return Err(AppError::Internal(
+                "sidecar publication did not complete".to_string(),
+            ));
+        }
+    }
+    drop(lease);
+    if executors
+        .sqlite
+        .complete_no_product_file_operation_durable(group_id.to_string(), version)
+        .await?
+        != (JournalCheckpointOutcome::Advanced {
+            version: version + 1,
+        })
+    {
+        return Err(AppError::Conflict(
+            "sidecar publication changed before completion".to_string(),
+        ));
+    }
+    if replaces_existing {
+        executors.scheduler.wake_journal_recovery();
+    }
+    Ok(())
+}
+
+async fn copy_staged_source_to_original(
+    executors: &crate::runtime::ExecutorHandles,
+    source: StorageFileSession,
+    destination_path: NormalizedStoragePath,
+) -> AppResult<()> {
+    let mut source = Some(source);
+    let mut destination = Some(
+        executors
+            .file_io
+            .open_storage_write_session_durable(StorageRootId::Originals, destination_path, 0)
+            .await?,
+    );
+    loop {
+        let (returned_source, bytes) = executors
+            .file_io
+            .read_storage_session_durable(
+                source.take().ok_or_else(|| {
+                    AppError::Internal("import source session is unavailable".to_string())
+                })?,
+                crate::runtime::FILE_IO_CHUNK_BYTES as usize,
+            )
+            .await?;
+        source = Some(returned_source);
+        if bytes.is_empty() {
+            break;
+        }
+        let expected = bytes.len();
+        let (returned_destination, written) = executors
+            .file_io
+            .write_storage_session_durable(
+                destination.take().ok_or_else(|| {
+                    AppError::Internal("import destination session is unavailable".to_string())
+                })?,
+                bytes,
+            )
+            .await?;
+        destination = Some(returned_destination);
+        if written != expected {
+            return Err(AppError::Internal(
+                "import destination accepted a partial chunk".to_string(),
+            ));
+        }
+    }
+    executors
+        .file_io
+        .close_storage_session_durable(source.take().ok_or_else(|| {
+            AppError::Internal("import source session is unavailable".to_string())
+        })?)
+        .await?;
+    executors
+        .file_io
+        .commit_storage_session_durable(destination.take().ok_or_else(|| {
+            AppError::Internal("import destination session is unavailable".to_string())
+        })?)
+        .await?;
+    Ok(())
+}
+
+async fn publish_import_original(
+    executors: &crate::runtime::ExecutorHandles,
+    publication: ImportProductPublication<'_>,
+) -> AppResult<CommittedImportProduct> {
+    let ImportProductPublication {
+        source,
+        temporary_path,
+        destination_path,
+        source_snapshot,
+        media_id,
+        claim_token,
+        content_hash,
+        supplemental_metadata,
+    } = publication;
+    let group_id = format!("import-{media_id}-{}", uuid::Uuid::new_v4());
+    let supplemental_size = supplemental_metadata
+        .map(|metadata| metadata.snapshot.byte_size)
+        .unwrap_or(0);
+    let reservation_bytes = source_snapshot
+        .byte_size
+        .checked_add(supplemental_size)
+        .and_then(|size| size.checked_add(8192))
+        .ok_or_else(|| AppError::ResourceLimit("import reservation size overflow".to_string()))?;
+    let reservation = executors
+        .file_io
+        .reserve_journal_space(group_id.clone(), reservation_bytes)
+        .map_err(|error| AppError::ResourceLimit(error.to_string()))?
+        .into_result()
+        .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
+    let reservation = JournalSpaceReservationPlan::new(reservation)
+        .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
+    let supplemental_hash = match supplemental_metadata {
+        Some(metadata) => Some(executors.cpu.sha256_durable(metadata.bytes.clone()).await?),
+        None => None,
+    };
+    let supplemental_paths = supplemental_metadata
+        .map(|_| {
+            let destination = canonical_supplemental_metadata_relative_path(&destination_path)?;
+            let temporary = NormalizedStoragePath::parse(&format!(
+                ".importing/sidecar-{}",
+                uuid::Uuid::new_v4()
+            ))
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+            Ok::<_, AppError>((temporary, destination))
+        })
+        .transpose()?;
+    let mut entries = vec![FileEntryPlan {
+        action: FileEntryAction::Publish,
+        storage_root: StorageRootId::Originals,
+        source_path: None,
+        temporary_path: Some(temporary_path.clone()),
+        destination_path: Some(destination_path.clone()),
+        tombstone_path: None,
+        expected_size: Some(source_snapshot.byte_size),
+        expected_sha256: Some(content_hash),
+        expected_version: None,
+    }];
+    let mut claims = vec![
+        FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: temporary_path.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "temporary_original".to_string(),
+            expected_version: None,
+        },
+        FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: destination_path,
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "canonical_original".to_string(),
+            expected_version: None,
+        },
+    ];
+    if let (Some(metadata), Some((temporary, destination))) =
+        (supplemental_metadata, supplemental_paths.as_ref())
+    {
+        entries.push(FileEntryPlan {
+            action: FileEntryAction::Publish,
+            storage_root: StorageRootId::Originals,
+            source_path: None,
+            temporary_path: Some(temporary.clone()),
+            destination_path: Some(destination.clone()),
+            tombstone_path: None,
+            expected_size: Some(metadata.snapshot.byte_size),
+            expected_sha256: supplemental_hash,
+            expected_version: None,
+        });
+        claims.push(FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: temporary.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "temporary_sidecar".to_string(),
+            expected_version: None,
+        });
+        claims.push(FilePathClaimPlan {
+            storage_root: StorageRootId::Originals,
+            path: destination.clone(),
+            mode: PathClaimMode::Write,
+            scope: PathClaimScope::Exact,
+            role: "canonical_sidecar".to_string(),
+            expected_version: None,
+        });
+    }
+    let plan = FileOperationPlan {
+        group_id: group_id.clone(),
+        kind: "import_media_publication".to_string(),
+        owner_kind: "import".to_string(),
+        owner_id: media_id.to_string(),
+        claim_token: Some(claim_token.to_string()),
+        product_target: Some("import_media".to_string()),
+        product_version: Some(1),
+        entries,
+        claims,
+        space_reservation: Some(reservation),
+    };
+    if executors
+        .sqlite
+        .prepare_file_operation_durable(plan)
+        .await?
+        == PrepareJournalOutcome::PathConflict
+    {
+        return Err(AppError::Conflict(
+            "import original paths are owned by another operation".to_string(),
+        ));
+    }
+
+    let result = async {
+        copy_staged_source_to_original(executors, source, temporary_path.clone()).await?;
+        executors
+            .file_io
+            .set_storage_modified_time_durable(
+                StorageRootId::Originals,
+                temporary_path,
+                source_snapshot.modified_seconds,
+                source_snapshot.modified_nanoseconds,
+            )
+            .await?;
+        if let (Some(metadata), Some((temporary, _))) =
+            (supplemental_metadata, supplemental_paths.as_ref())
+        {
+            let session = executors
+                .file_io
+                .open_storage_write_session_durable(StorageRootId::Originals, temporary.clone(), 0)
+                .await?;
+            let expected = metadata.bytes.len();
+            let (session, written) = executors
+                .file_io
+                .write_storage_session_durable(session, metadata.bytes.clone())
+                .await?;
+            if written != expected {
+                return Err(AppError::Internal(
+                    "supplemental metadata write was partial".to_string(),
+                ));
+            }
+            executors
+                .file_io
+                .commit_storage_session_durable(session)
+                .await?;
+        }
+        let ticket = executors
+            .file_io
+            .reserve_journal_mutation(&group_id, 2)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        let grant = executors
+            .sqlite
+            .begin_file_operation_publication_durable(&ticket, 1)
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict("import publication changed before it began".to_string())
+            })?;
+        let mut lease =
+            crate::io::recovery::acquire_verified_journal_mutation(executors, ticket, grant)
+                .await?;
+        let mut version = 2_i64;
+        let mut checkpoint = None;
+        for sequence in 0..if supplemental_metadata.is_some() {
+            2_u16
+        } else {
+            1_u16
+        } {
+            executors
+                .file_io
+                .publish_journal_entry_durable(&mut lease, sequence)
+                .await?;
+            let current = executors
+                .sqlite
+                .record_file_entry_published_durable(group_id.clone(), version, sequence)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict("import publication changed before checkpoint".to_string())
+                })?;
+            version = current.version;
+            checkpoint = Some(current);
+        }
+        drop(lease);
+        let checkpoint = checkpoint.ok_or_else(|| {
+            AppError::Internal("import product has no publication entries".to_string())
+        })?;
+        if !checkpoint.phase_complete {
+            return Err(AppError::Internal(
+                "import product publication did not complete".to_string(),
+            ));
+        }
+        Ok(CommittedImportProduct {
+            group_id: group_id.clone(),
+            version: checkpoint.version,
+        })
+    }
+    .await;
+    if result.is_err() {
+        if let Ok(Some(status)) = executors
+            .sqlite
+            .load_file_operation_cancellation_status_durable(group_id.clone())
+            .await
+        {
+            let _ = crate::io::recovery::cancel_generic_file_operation(
+                executors,
+                group_id,
+                status.version,
+            )
+            .await;
+        }
+    }
+    result
+}
+
+async fn attempt_prepared_staged_import(
+    prepared: PreparedStagedImport,
+    executors: &crate::runtime::ExecutorHandles,
+    admission: &DurableAdmission,
+) -> AppResult<ImportStagedFileOutcome> {
+    let PreparedStagedImport {
+        source,
+        source_session,
+        source_snapshot,
+        import_source,
+        user_id,
+        cleanup,
+        media_type,
+        original_filename,
+        mime_type,
+        source_size,
+        source_modified_seconds,
+        content_hash,
+        supplemental_metadata,
+    } = prepared;
+    let mut source_session = Some(source_session);
+    let sqlite = &executors.sqlite;
+    let source_path = Path::new(source.path.relative_path());
+    let claim_token = uuid::Uuid::new_v4().to_string();
+    let claim_guard = match sqlite
+        .acquire_import_content_hash_claim_durable(
+            content_hash.clone(),
+            claim_token.clone(),
+            import_source,
+        )
+        .await?
+    {
+        ImportContentHashClaimOutcome::Acquired => ImportContentHashClaimGuard::new(
+            sqlite.clone(),
+            content_hash.clone(),
+            claim_token.clone(),
+        ),
+        ImportContentHashClaimOutcome::Existing(existing_media) => {
+            executors
+                .file_io
+                .close_storage_session_durable(source_session.take().ok_or_else(|| {
+                    AppError::Internal("import source session is unavailable".to_string())
+                })?)
+                .await?;
+            return absorb_existing_media(
+                ExistingStagedImport {
+                    source: &source,
+                    source_snapshot,
+                    supplemental_metadata: supplemental_metadata.as_ref(),
+                    existing_media,
+                    user_id,
+                    cleanup,
+                    source_modified_seconds,
+                },
+                executors,
+            )
+            .await
+            .map(ImportStagedFileOutcome::Completed);
+        }
+        ImportContentHashClaimOutcome::Busy => {
+            return Ok(ImportStagedFileOutcome::Deferred(Box::new(
+                PreparedStagedImport {
+                    source,
+                    source_session: source_session.take().ok_or_else(|| {
+                        AppError::Internal("import source session is unavailable".to_string())
+                    })?,
+                    source_snapshot,
+                    import_source,
+                    user_id,
+                    cleanup,
+                    media_type,
+                    original_filename,
+                    mime_type,
+                    source_size,
+                    source_modified_seconds,
+                    content_hash,
+                    supplemental_metadata,
+                },
+            )))
+        }
+    };
+    let _claim_registration = executors
+        .scheduler
+        .register_durable_claim(admission, claim_token.clone())
+        .map_err(AppError::Internal)?;
+    let content_hash_bytes = decode_content_hash(&content_hash)?;
+
+    let temporary_filename = format!(".importing-{}", uuid::Uuid::new_v4());
+    let temporary_relative_path = PathBuf::from(".importing").join(&temporary_filename);
+    let import_target = sqlite
+        .allocate_import_media_durable(AllocateImportMedia {
+            user_id,
+            temporary_filename,
+            original_filename,
+            temporary_relative_path: temporary_relative_path.to_string_lossy().into_owned(),
+            media_type: media_type.to_string(),
+            mime_type,
+            source_size: i64::try_from(source_size).map_err(|_| {
+                AppError::ResourceLimit(
+                    "import source size exceeds SQLite integer range".to_string(),
+                )
+            })?,
+            content_hash: content_hash.clone(),
+            source_modified_seconds,
+            import_source,
+        })
+        .await?;
     let (media_id, temporary_relative_path) = match import_target {
         ImportTarget::New {
             media_id,
             temporary_relative_path,
         } => (media_id, temporary_relative_path),
         ImportTarget::Existing(existing_media) => {
-            return absorb_existing_media(
-                source_path,
-                existing_media,
-                user_id,
-                pool,
-                delete_source,
-                source_modified_seconds,
+            executors
+                .file_io
+                .close_storage_session_durable(source_session.take().ok_or_else(|| {
+                    AppError::Internal("import source session is unavailable".to_string())
+                })?)
+                .await?;
+            let result = absorb_existing_media(
+                ExistingStagedImport {
+                    source: &source,
+                    source_snapshot,
+                    supplemental_metadata: supplemental_metadata.as_ref(),
+                    existing_media,
+                    user_id,
+                    cleanup,
+                    source_modified_seconds,
+                },
+                executors,
             )
-            .await;
+            .await
+            .map(ImportStagedFileOutcome::Completed);
+            claim_guard.release().await?;
+            return result;
         }
     };
 
     let final_filename = build_original_filename(media_id, source_path);
     let final_relative_path = PathBuf::from(&final_filename);
-    let temporary_path = paths().originals.join(&temporary_relative_path);
-    let final_path = paths().originals.join(&final_relative_path);
-    let source_supplemental_metadata_path = find_supplemental_metadata_path(source_path);
-    let final_supplemental_metadata_path = canonical_supplemental_metadata_path(&final_path);
-    let source_file_times = capture_file_times(source_path).map_err(|error| {
-        import_io_error(
-            &format!("read source timestamps from {}", source_path.display()),
-            error,
-        )
-    })?;
+    let temporary_storage_path =
+        NormalizedStoragePath::parse(&temporary_relative_path.to_string_lossy())
+            .map_err(|error| AppError::Internal(error.to_string()))?;
 
     let result = async {
-        let temporary_parent = temporary_path.parent().ok_or_else(|| {
-            AppError::Internal("temporary original path has no parent".to_string())
-        })?;
-        tokio::fs::create_dir_all(temporary_parent)
-            .await
-            .map_err(|error| {
-                import_io_error(
-                    &format!(
-                        "create temporary import directory {}",
-                        temporary_parent.display()
-                    ),
-                    error,
+        let final_storage_path =
+            NormalizedStoragePath::parse(&final_relative_path.to_string_lossy())
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+        let committed_product = publish_import_original(
+            executors,
+            ImportProductPublication {
+                source: source_session.take().ok_or_else(|| {
+                    AppError::Internal("import source session is unavailable".to_string())
+                })?,
+                temporary_path: temporary_storage_path.clone(),
+                destination_path: final_storage_path.clone(),
+                source_snapshot,
+                media_id,
+                claim_token: &claim_token,
+                content_hash: content_hash_bytes,
+                supplemental_metadata: supplemental_metadata.as_ref(),
+            },
+        )
+        .await?;
+
+        let product_group_id = committed_product.group_id.clone();
+        let product_group_version = committed_product.version;
+        let finalized = sqlite
+            .finalize_import_media_durable(FinalizeImportMedia {
+                media_id,
+                user_id,
+                final_filename: final_filename.clone(),
+                final_relative_path: final_relative_path.to_string_lossy().into_owned(),
+                product_group_id: committed_product.group_id,
+                product_group_version,
+                claim_token: claim_token.clone(),
+                source_cleanup: (cleanup.source
+                    || (cleanup.supplemental_metadata && supplemental_metadata.is_some()))
+                .then(|| {
+                    staged_source_cleanup_plan(
+                        &source,
+                        source_snapshot,
+                        cleanup
+                            .supplemental_metadata
+                            .then_some(supplemental_metadata.as_ref())
+                            .flatten(),
+                        cleanup.source,
+                        media_id.to_string(),
+                    )
+                }),
+            })
+            .await;
+        let finalized = match finalized {
+            Ok(finalized) => finalized,
+            Err(error) => {
+                if let Err(cancel_error) = crate::io::recovery::cancel_generic_file_operation(
+                    executors,
+                    product_group_id.clone(),
+                    product_group_version,
                 )
-            })?;
-        if let Some(source_supplemental_metadata_path) = &source_supplemental_metadata_path {
-            tokio::fs::copy(
-                source_supplemental_metadata_path,
-                &final_supplemental_metadata_path,
+                .await
+                {
+                    tracing::warn!(
+                        media_id,
+                        error = %cancel_error,
+                        "Failed to schedule import product rollback after database error"
+                    );
+                }
+                return Err(error.into());
+            }
+        };
+        if !finalized {
+            if let Err(cancel_error) = crate::io::recovery::cancel_generic_file_operation(
+                executors,
+                product_group_id,
+                product_group_version,
             )
             .await
-            .map_err(|error| {
-                import_io_error(
-                    &format!(
-                        "copy supplemental metadata {} to {}",
-                        source_supplemental_metadata_path.display(),
-                        final_supplemental_metadata_path.display()
-                    ),
-                    error,
-                )
-            })?;
-        }
-        if delete_source {
-            tokio::fs::rename(source_path, &final_path)
-                .await
-                .map_err(|error| {
-                    import_io_error(
-                        &format!(
-                            "move imported source {} to {}",
-                            source_path.display(),
-                            final_path.display()
-                        ),
-                        error,
-                    )
-                })?;
-        } else {
-            tokio::fs::copy(source_path, &temporary_path)
-                .await
-                .map_err(|error| {
-                    import_io_error(
-                        &format!(
-                            "copy imported source {} to {}",
-                            source_path.display(),
-                            temporary_path.display()
-                        ),
-                        error,
-                    )
-                })?;
-            apply_file_times(&temporary_path, source_file_times).map_err(|error| {
-                import_io_error(
-                    &format!("apply source timestamps to {}", temporary_path.display()),
-                    error,
-                )
-            })?;
-            tokio::fs::rename(&temporary_path, &final_path)
-                .await
-                .map_err(|error| {
-                    import_io_error(
-                        &format!(
-                            "publish imported original {} as {}",
-                            temporary_path.display(),
-                            final_path.display()
-                        ),
-                        error,
-                    )
-                })?;
-        }
-
-        let connection = pool.get()?;
-        let transaction = connection.unchecked_transaction()?;
-        let changed = transaction.execute(
-            queries::import::MARK_IMPORTED,
-            rusqlite::params![
-                &final_filename,
-                final_relative_path.to_string_lossy(),
-                media_id,
-            ],
-        )?;
-        if changed != 1 {
+            {
+                tracing::warn!(
+                    media_id,
+                    error = %cancel_error,
+                    "Failed to schedule changed import product rollback"
+                );
+            }
             return Err(AppError::Conflict(format!(
                 "media {media_id} is no longer importing"
             )));
         }
-        transaction.execute(
-            queries::access::INSERT_MEDIA_ACCESS,
-            rusqlite::params![media_id, user_id, 2],
-        )?;
-        transaction.execute(queries::metadata_jobs::INSERT_QUEUED, [media_id])?;
-        transaction.commit()?;
+        executors.scheduler.wake_journal_recovery();
         Ok(media_id)
     }
     .await;
 
     if let Err(error) = result {
-        let _ = tokio::fs::remove_file(&temporary_path).await;
-        if final_path.is_file() {
-            if delete_source {
-                let _ = tokio::fs::rename(&final_path, source_path).await;
-            } else {
-                let _ = tokio::fs::remove_file(&final_path).await;
-            }
-        }
-        let _ = tokio::fs::remove_file(&final_supplemental_metadata_path).await;
-        let connection = pool.get()?;
-        let _ = execute_query(
-            &connection,
-            queries::import::MARK_FAILED,
-            &[&error.to_string(), &media_id],
-        );
+        let _ = sqlite
+            .mark_import_media_failed_durable(media_id, bounded_error_detail(&error.to_string()))
+            .await;
         return Err(error);
     }
-    if let Some(source_supplemental_metadata_path) = source_supplemental_metadata_path {
-        if let Err(error) = tokio::fs::remove_file(&source_supplemental_metadata_path).await {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(path = %source_supplemental_metadata_path.display(), "imported sidecar cleanup failed: {error}");
-            }
+    claim_guard.release().await?;
+    if cleanup.source || (cleanup.supplemental_metadata && supplemental_metadata.is_some()) {
+        executors.scheduler.wake_journal_recovery();
+    }
+    Ok(ImportStagedFileOutcome::Completed(media_id))
+}
+
+struct ImportContentHashClaimGuard {
+    sqlite: SqliteExecutorHandle,
+    content_hash: String,
+    claim_token: String,
+    released: bool,
+}
+
+impl ImportContentHashClaimGuard {
+    fn new(sqlite: SqliteExecutorHandle, content_hash: String, claim_token: String) -> Self {
+        Self {
+            sqlite,
+            content_hash,
+            claim_token,
+            released: false,
         }
     }
-    Ok(media_id)
-}
 
-fn import_io_error(operation: &str, error: std::io::Error) -> AppError {
-    AppError::Internal(format!("failed to {operation}: {error}"))
-}
-
-fn content_hash_lock(content_hash: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let locks = CONTENT_HASH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut locks = locks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(content_hash).and_then(Weak::upgrade) {
-        return lock;
+    async fn release(mut self) -> AppResult<()> {
+        if !self
+            .sqlite
+            .release_import_content_hash_claim_durable(
+                self.content_hash.clone(),
+                self.claim_token.clone(),
+            )
+            .await?
+        {
+            return Err(AppError::Conflict(
+                "import content-hash claim changed before release".to_string(),
+            ));
+        }
+        self.released = true;
+        Ok(())
     }
+}
 
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.insert(content_hash.to_string(), Arc::downgrade(&lock));
-    lock
+impl Drop for ImportContentHashClaimGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Err(error) = self.sqlite.release_import_content_hash_claim_eventually(
+            self.content_hash.clone(),
+            self.claim_token.clone(),
+        ) {
+            tracing::warn!(error = %error, "failed to enqueue import content-hash claim release");
+        }
+    }
+}
+
+pub(crate) fn acquire_content_hash_claim_on_connection(
+    connection: &mut rusqlite::Connection,
+    content_hash: &str,
+    claim_token: &str,
+    source: ImportSource,
+) -> rusqlite::Result<ImportContentHashClaimOutcome> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if let Some(existing) = select_existing_media(&transaction, content_hash)? {
+        transaction.rollback()?;
+        return Ok(if existing.import_state == "imported" {
+            ImportContentHashClaimOutcome::Existing(existing)
+        } else {
+            ImportContentHashClaimOutcome::Busy
+        });
+    }
+    let inserted = transaction.execute(
+        queries::import::INSERT_CONTENT_HASH_CLAIM,
+        rusqlite::params![content_hash, claim_token, source.as_str()],
+    )?;
+    transaction.commit()?;
+    Ok(if inserted == 1 {
+        ImportContentHashClaimOutcome::Acquired
+    } else {
+        ImportContentHashClaimOutcome::Busy
+    })
+}
+
+pub(crate) fn release_content_hash_claim_on_connection(
+    connection: &rusqlite::Connection,
+    content_hash: &str,
+    claim_token: &str,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(
+            queries::import::RELEASE_CONTENT_HASH_CLAIM,
+            rusqlite::params![content_hash, claim_token],
+        )
+        .map(|changed| changed == 1)
+}
+
+pub(crate) fn recover_content_hash_claims_on_connection(
+    connection: &rusqlite::Connection,
+) -> rusqlite::Result<usize> {
+    connection.execute(queries::import::RECOVER_CONTENT_HASH_CLAIMS, [])
 }
 
 fn select_existing_media(
     connection: &rusqlite::Connection,
     content_hash: &str,
-) -> AppResult<Option<ExistingMedia>> {
+) -> rusqlite::Result<Option<ExistingMedia>> {
     connection
         .query_row(
             queries::import::SELECT_BY_CONTENT_HASH,
@@ -576,17 +1941,31 @@ fn select_existing_media(
             },
         )
         .optional()
-        .map_err(AppError::Database)
+}
+
+struct ExistingStagedImport<'a> {
+    source: &'a StagedImportFile,
+    source_snapshot: StorageFileSnapshot,
+    supplemental_metadata: Option<&'a PreparedSupplementalMetadata>,
+    existing_media: ExistingMedia,
+    user_id: i64,
+    cleanup: StagedImportCleanup,
+    source_modified_seconds: Option<i64>,
 }
 
 async fn absorb_existing_media(
-    source_path: &Path,
-    existing_media: ExistingMedia,
-    user_id: i64,
-    pool: &DbPool,
-    delete_source: bool,
-    source_modified_seconds: Option<i64>,
+    import: ExistingStagedImport<'_>,
+    executors: &crate::runtime::ExecutorHandles,
 ) -> AppResult<i64> {
+    let ExistingStagedImport {
+        source,
+        source_snapshot,
+        supplemental_metadata,
+        existing_media,
+        user_id,
+        cleanup,
+        source_modified_seconds,
+    } = import;
     if existing_media.import_state != "imported" {
         return Err(AppError::Conflict(format!(
             "matching media {} is still {}",
@@ -594,547 +1973,355 @@ async fn absorb_existing_media(
         )));
     }
 
-    let existing_original_path = crate::utils::path::resolve_existing_storage_path(
-        &paths().originals,
-        &existing_media.file_path,
-    )
-    .await
-    .map_err(|_| {
-        AppError::Conflict(format!(
-            "matching media {} has no canonical original",
-            existing_media.id
-        ))
-    })?;
-    if !existing_original_path.is_file() {
-        return Err(AppError::Conflict(format!(
-            "matching media {} has no canonical original",
-            existing_media.id
-        )));
+    let existing_original_path =
+        NormalizedStoragePath::parse(&existing_media.file_path).map_err(|_| {
+            AppError::Conflict(format!(
+                "matching media {} has an invalid canonical original path",
+                existing_media.id
+            ))
+        })?;
+    let (existing_original_session, _) = executors
+        .file_io
+        .open_storage_read_session_durable(StorageRootId::Originals, existing_original_path.clone())
+        .await
+        .map_err(|_| {
+            AppError::Conflict(format!(
+                "matching media {} has no canonical original",
+                existing_media.id
+            ))
+        })?;
+    executors
+        .file_io
+        .close_storage_session_durable(existing_original_session)
+        .await?;
+
+    let sqlite = &executors.sqlite;
+    if let Some(supplemental_metadata) = supplemental_metadata {
+        publish_supplemental_metadata(
+            executors,
+            canonical_supplemental_metadata_relative_path(&existing_original_path)?,
+            supplemental_metadata,
+        )
+        .await?;
     }
 
-    let source_sidecar_path = find_supplemental_metadata_path(source_path);
-    let destination_sidecar_path = canonical_supplemental_metadata_path(&existing_original_path);
-    let pending_sidecar_path =
-        destination_sidecar_path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
-    if let Some(source_sidecar_path) = &source_sidecar_path {
-        tokio::fs::copy(source_sidecar_path, &pending_sidecar_path).await?;
-    }
-
-    let database_result = (|| -> AppResult<()> {
-        let connection = pool.get()?;
-        let transaction = connection.unchecked_transaction()?;
-        if let Some(modified_seconds) = source_modified_seconds {
-            transaction.execute(
-                queries::import::UPDATE_EARLIER_CREATED_AT,
-                rusqlite::params![modified_seconds, existing_media.id, modified_seconds],
-            )?;
-        }
-        transaction.execute(
-            queries::access::INSERT_MEDIA_ACCESS,
-            rusqlite::params![existing_media.id, user_id, 2],
-        )?;
-        transaction.execute(
-            queries::access::RESTORE_MEDIA_ACCESS,
-            rusqlite::params![existing_media.id, user_id],
-        )?;
-        if source_sidecar_path.is_some() {
-            transaction.execute(queries::metadata_jobs::REQUEST_RERUN, [existing_media.id])?;
-        }
-        transaction.commit()?;
-        Ok(())
-    })();
-
-    if let Err(error) = database_result {
-        let _ = std::fs::remove_file(&pending_sidecar_path);
-        return Err(error);
-    }
-    if source_sidecar_path.is_some() {
-        if let Err(error) = std::fs::rename(&pending_sidecar_path, &destination_sidecar_path) {
-            let _ = std::fs::remove_file(&pending_sidecar_path);
-            return Err(AppError::Io(error));
-        }
-        let connection = pool.get()?;
-        connection.execute(queries::metadata_jobs::REQUEST_RERUN, [existing_media.id])?;
-    }
-    if let Some(source_sidecar_path) = source_sidecar_path {
-        if let Err(error) = tokio::fs::remove_file(&source_sidecar_path).await {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(path = %source_sidecar_path.display(), "absorbed sidecar cleanup failed: {error}");
-            }
-        }
-    }
-    if delete_source {
-        if let Err(error) = tokio::fs::remove_file(source_path).await {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(path = %source_path.display(), "duplicate import source cleanup failed: {error}");
-            }
-        }
+    sqlite
+        .absorb_existing_media_durable(AbsorbExistingMediaDatabase {
+            media_id: existing_media.id,
+            user_id,
+            source_modified_seconds,
+            request_metadata_rerun: supplemental_metadata.is_some(),
+            source_cleanup: (cleanup.source
+                || (cleanup.supplemental_metadata && supplemental_metadata.is_some()))
+            .then(|| {
+                staged_source_cleanup_plan(
+                    source,
+                    source_snapshot,
+                    cleanup
+                        .supplemental_metadata
+                        .then_some(supplemental_metadata)
+                        .flatten(),
+                    cleanup.source,
+                    existing_media.id.to_string(),
+                )
+            }),
+        })
+        .await?;
+    if cleanup.source || (cleanup.supplemental_metadata && supplemental_metadata.is_some()) {
+        executors.scheduler.wake_journal_recovery();
     }
     tracing::info!(
         media_id = existing_media.id,
-        content_path = %source_path.display(),
+        content_path = %source.path.relative_path(),
         "absorbed duplicate import into existing media"
     );
     Ok(existing_media.id)
 }
 
-fn canonical_supplemental_metadata_path(media_path: &Path) -> PathBuf {
-    let media_filename = media_path
-        .file_name()
-        .and_then(|filename| filename.to_str())
-        .unwrap_or_default();
-    media_path.with_file_name(format!("{media_filename}.supplemental-metadata.json"))
-}
-
-pub fn recover_interrupted_imports(pool: &DbPool) -> AppResult<()> {
-    let connection = pool.get()?;
-    let recovery_transaction = connection.unchecked_transaction()?;
-    recovery_transaction.execute(queries::import::RECORD_INTERRUPTED_JOB_ERRORS, [])?;
-    recovery_transaction.execute(queries::import::FAIL_INTERRUPTED_JOBS, [])?;
-    recovery_transaction.commit()?;
-    let interrupted_imports = connection
-        .prepare(queries::import::SELECT_INTERRUPTED)?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    for (media_id, temporary_file_path, original_filename, user_id) in interrupted_imports {
-        let final_filename = build_original_filename(media_id, Path::new(&original_filename));
-        let final_relative_path = PathBuf::from(&final_filename);
-        let final_path = paths().originals.join(&final_relative_path);
-        let temporary_path = paths().originals.join(temporary_file_path);
-        if final_path.is_file() {
-            let transaction = connection.unchecked_transaction()?;
-            transaction.execute(
-                queries::import::MARK_IMPORTED,
-                rusqlite::params![
-                    final_filename,
-                    final_relative_path.to_string_lossy(),
-                    media_id
-                ],
-            )?;
-            transaction.execute(
-                queries::access::INSERT_MEDIA_ACCESS,
-                rusqlite::params![media_id, user_id, 2],
-            )?;
-            transaction.execute(queries::metadata_jobs::INSERT_QUEUED, [media_id])?;
-            transaction.commit()?;
-            let _ = std::fs::remove_file(&temporary_path);
-        } else {
-            let _ = std::fs::remove_file(&temporary_path);
-            let _ = std::fs::remove_file(canonical_supplemental_metadata_path(&final_path));
-            connection.execute(
-                queries::import::MARK_FAILED,
-                rusqlite::params!["original file was not finalized", media_id],
-            )?;
+pub async fn recover_interrupted_imports(
+    executors: &crate::runtime::ExecutorHandles,
+) -> AppResult<()> {
+    let sqlite = &executors.sqlite;
+    let mut after_media_id = 0_i64;
+    loop {
+        let interrupted_imports = sqlite
+            .recover_interrupted_import_page_durable(after_media_id, 256)
+            .await?;
+        if interrupted_imports.is_empty() {
+            return Ok(());
+        }
+        for interrupted in interrupted_imports {
+            let media_id = interrupted.media_id;
+            after_media_id = media_id;
+            let _ = sqlite
+                .mark_import_media_failed_durable(
+                    media_id,
+                    "import product was not atomically finalized".to_string(),
+                )
+                .await?;
         }
     }
-    Ok(())
-}
-
-pub fn recover_import_claims(root: &Path) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if path.file_name().is_some_and(|name| name == ".processing") {
-            restore_webdav_claim_directory(&path)?;
-            continue;
-        }
-        recover_import_claims(&path)?;
-    }
-    Ok(())
-}
-
-fn restore_webdav_claim_directory(processing_directory: &Path) -> std::io::Result<()> {
-    let source_directory = processing_directory
-        .parent()
-        .ok_or_else(|| std::io::Error::other("WebDAV processing directory has no parent"))?;
-    for claim_entry in std::fs::read_dir(processing_directory)? {
-        let claim_entry = claim_entry?;
-        let claim_directory = claim_entry.path();
-        if !claim_directory.is_dir() {
-            continue;
-        }
-        let claim_paths = std::fs::read_dir(&claim_directory)?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
-        let can_restore_original_paths = claim_paths.iter().all(|path| {
-            path.file_name()
-                .is_some_and(|filename| !source_directory.join(filename).exists())
-        });
-        if can_restore_original_paths {
-            for path in claim_paths {
-                let filename = path
-                    .file_name()
-                    .ok_or_else(|| std::io::Error::other("claimed path has no filename"))?;
-                std::fs::rename(&path, source_directory.join(filename))?;
-            }
-            std::fs::remove_dir(&claim_directory)?;
-        } else {
-            let _ = expose_claim_directory(source_directory, &claim_directory)?;
-        }
-    }
-    if std::fs::read_dir(processing_directory)?.next().is_none() {
-        std::fs::remove_dir(processing_directory)?;
-    }
-    Ok(())
-}
-
-fn expose_claim_directory(
-    source_directory: &Path,
-    claim_directory: &Path,
-) -> std::io::Result<PathBuf> {
-    let claim_name = claim_directory
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("claim");
-    let mut recovered_directory = source_directory.join(format!("recovered-{claim_name}"));
-    let mut suffix = 1;
-    while recovered_directory.exists() {
-        recovered_directory = source_directory.join(format!("recovered-{claim_name}-{suffix}"));
-        suffix += 1;
-    }
-    std::fs::rename(claim_directory, &recovered_directory)?;
-    Ok(recovered_directory)
-}
-
-async fn expose_claim_for_retry(claimed_path: &Path) -> std::io::Result<PathBuf> {
-    let claim_directory = claimed_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("claimed source has no parent"))?;
-    let processing_directory = claim_directory
-        .parent()
-        .ok_or_else(|| std::io::Error::other("claimed source has no processing directory"))?;
-    let source_directory = processing_directory
-        .parent()
-        .ok_or_else(|| std::io::Error::other("claimed source has no source directory"))?;
-    let recovered_directory = expose_claim_directory(source_directory, claim_directory)?;
-    if std::fs::read_dir(processing_directory)?.next().is_none() {
-        tokio::fs::remove_dir(processing_directory).await?;
-    }
-    let filename = claimed_path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("claimed source has no filename"))?;
-    Ok(recovered_directory.join(filename))
 }
 
 pub async fn start_webdav_import_job(
     config: Arc<Config>,
-    pool: DbPool,
+    executors: crate::runtime::ExecutorHandles,
     webdav_request_gate: crate::webdav::WebDAVRequestGate,
+    scheduler: crate::runtime::SchedulerHandle,
 ) {
-    let poll_interval = std::time::Duration::from_secs(config.webdav.poll_interval_seconds);
-    let mut poll = tokio::time::interval(poll_interval);
-    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        poll.tick().await;
-        run_webdav_import_cycle(&config, &pool, &webdav_request_gate).await;
+        run_webdav_import_cycle(&config, &executors, &webdav_request_gate, &scheduler).await;
+        scheduler.webdav_import_notified().await;
     }
 }
 
 pub async fn run_webdav_import_cycle(
     config: &Config,
-    pool: &DbPool,
+    executors: &crate::runtime::ExecutorHandles,
     webdav_request_gate: &crate::webdav::WebDAVRequestGate,
+    scheduler: &crate::runtime::SchedulerHandle,
 ) {
-    let Ok(entries) = std::fs::read_dir(&paths().webdav) else {
-        return;
-    };
-    let mut pending_imports = Vec::new();
-    for entry in entries.flatten() {
-        let user_directory = entry.path();
-        let Some(username) = user_directory.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(user_id) = lookup_user_id(pool, username) else {
-            continue;
-        };
-        let ready_file_paths = match select_ready_webdav_files(pool, user_id) {
-            Some(ready_file_paths) => ready_file_paths,
-            None => continue,
-        };
-        pending_imports.extend(
-            collect_ready_webdav_files(
-                &user_directory,
-                ready_file_paths,
-                config.webdav.stable_file_age_seconds,
-            )
-            .into_iter()
-            .map(|candidate| (candidate, user_id, user_directory.clone())),
-        );
-    }
-    if pending_imports.is_empty() {
-        return;
-    }
-    let Ok(job_id) = create_import_job(pool, ImportSource::Webdav) else {
-        return;
-    };
-    let Ok(upload_barrier) = Arc::clone(webdav_request_gate)
-        .acquire_many_owned(config.webdav.max_concurrent_requests as u32)
+    let sqlite = &executors.sqlite;
+    let Ok(cycle_worker) = scheduler
+        .acquire_durable(
+            DurableSourceId::WebDavImport,
+            SchedulerAdmissionKind::NewClaim,
+        )
         .await
     else {
         return;
     };
-    let mut claimed_imports = Vec::with_capacity(pending_imports.len());
-    let mut claim_errors = Vec::new();
-    for (candidate, user_id, user_directory) in pending_imports {
-        let source_path = candidate.source_path;
-        if !is_stable_webdav_file(&source_path, config.webdav.stable_file_age_seconds) {
-            continue;
+    let mut ready_by_user = BTreeMap::<(i64, String), Vec<String>>::new();
+    let mut after_user_id = 0_i64;
+    let mut after_file_path = String::new();
+    loop {
+        let page = match sqlite
+            .load_webdav_ready_page_durable(after_user_id, after_file_path.clone(), 256)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                warn!(error = %error, "failed to load WebDAV ready files");
+                return;
+            }
+        };
+        if page.is_empty() {
+            break;
         }
-        if !webdav_file_is_ready(pool, user_id, &candidate.ready_file_path) {
-            continue;
+        let page_is_full = page.len() == 256;
+        for ready in page {
+            after_user_id = ready.user_id;
+            after_file_path.clone_from(&ready.file_path);
+            ready_by_user
+                .entry((ready.user_id, ready.username))
+                .or_default()
+                .push(ready.file_path);
         }
-        match claim_source(
-            &source_path,
-            candidate.supplemental_metadata_path.as_deref(),
+        if !page_is_full {
+            break;
+        }
+    }
+    let mut pending_imports = Vec::new();
+    for ((user_id, username), ready_file_paths) in ready_by_user {
+        match collect_ready_webdav_files(
+            executors,
+            &username,
+            ready_file_paths,
+            config.webdav.stable_file_age_seconds,
         )
         .await
         {
-            Ok(claimed_path) => claimed_imports.push((
-                source_path,
-                claimed_path,
-                user_id,
-                user_directory,
-                candidate.ready_file_path,
-                candidate.supplemental_ready_file_path,
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => claim_errors.push(format!(
-                "failed to claim WebDAV import source {}: {error}",
-                source_path.display()
-            )),
+            Ok(candidates) => {
+                pending_imports.extend(candidates.into_iter().map(|candidate| (candidate, user_id)))
+            }
+            Err(error) => {
+                warn!(user = %username, error = %error, "failed to inspect WebDAV ready files")
+            }
         }
     }
+    if pending_imports.is_empty() {
+        return;
+    }
+    let job_id = match sqlite.create_import_job_durable(ImportSource::Webdav).await {
+        Ok(CreateImportJobOutcome::Created(job_id)) => job_id,
+        Ok(CreateImportJobOutcome::AlreadyRunning) => return,
+        Err(error) => {
+            warn!(error = %error, "failed to create WebDAV import job");
+            return;
+        }
+    };
+    let upload_barrier = Arc::clone(webdav_request_gate).write_owned().await;
+    let mut claimed_imports = Vec::with_capacity(pending_imports.len());
+    for (candidate, user_id) in pending_imports {
+        if !staged_file_is_stable(
+            executors,
+            &candidate.source,
+            config.webdav.stable_file_age_seconds,
+        )
+        .await
+        .unwrap_or(false)
+        {
+            continue;
+        }
+        if !sqlite
+            .check_webdav_ready_durable(user_id, candidate.ready_file_path.clone())
+            .await
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        claimed_imports.push((
+            candidate.source,
+            user_id,
+            candidate.ready_file_path,
+            candidate.supplemental_ready_file_path,
+        ));
+    }
     drop(upload_barrier);
-    if let Ok(connection) = pool.get() {
-        let _ = connection.execute(
-            queries::import::SET_WEBDAV_JOB_TOTAL,
-            rusqlite::params![(claimed_imports.len() + claim_errors.len()) as i64, job_id],
-        );
-    }
-    for error in claim_errors {
-        update_import_progress(pool, job_id, false, Some(error));
-    }
-    let semaphore = Arc::new(Semaphore::new(
-        config.webdav.max_concurrent_processing.max(1),
-    ));
-    let mut tasks = JoinSet::new();
-    for (
-        source_path,
-        claimed_path,
-        user_id,
-        user_directory,
-        ready_file_path,
-        supplemental_ready_file_path,
-    ) in claimed_imports
+    drop(cycle_worker);
+    if let Err(error) = sqlite
+        .set_import_job_total_durable(job_id, claimed_imports.len() as i64)
+        .await
     {
-        let pool = pool.clone();
-        let semaphore = Arc::clone(&semaphore);
-        tasks.spawn(async move {
-                let Ok(_permit) = semaphore.acquire().await else {
+        warn!(job_id, error = %error, "failed to persist WebDAV import total");
+    }
+    stream::iter(claimed_imports)
+        .for_each_concurrent(
+            scheduler.durable_capacity(),
+            |(staged_source, user_id, ready_file_path, supplemental_ready_file_path)| async move {
+                let Ok(mut worker_permit) = scheduler
+                    .acquire_durable(
+                        DurableSourceId::WebDavImport,
+                        SchedulerAdmissionKind::ExistingClaimCompletion,
+                    )
+                    .await
+                else {
                     return;
                 };
-                if let Err(error) = import_staged_file(&claimed_path, ImportSource::Webdav, user_id, &pool, true).await {
+                let source_label = staged_source.path.relative_path().to_string();
+                let mut attempt = import_staged_file(
+                    staged_source,
+                    ImportSource::Webdav,
+                    user_id,
+                    executors,
+                    StagedImportCleanup {
+                        source: true,
+                        supplemental_metadata: true,
+                    },
+                    &worker_permit,
+                )
+                .await;
+                let import_result = loop {
+                    match attempt {
+                        Ok(ImportStagedFileOutcome::Deferred(prepared)) => {
+                            drop(worker_permit);
+                            tokio::task::yield_now().await;
+                            worker_permit = match scheduler
+                                .acquire_durable(
+                                    DurableSourceId::WebDavImport,
+                                    SchedulerAdmissionKind::ExistingClaimCompletion,
+                                )
+                                .await
+                            {
+                                Ok(worker_permit) => worker_permit,
+                                Err(error) => break Err(AppError::Unavailable(error)),
+                            };
+                            attempt =
+                                resume_staged_file_import(*prepared, executors, &worker_permit)
+                                    .await;
+                        }
+                        Ok(ImportStagedFileOutcome::Completed(media_id)) => break Ok(media_id),
+                        Err(error) => break Err(error),
+                    }
+                };
+                if let Err(error) = import_result {
                     let detail = bounded_error_detail(&format!(
                         "WebDAV import failed for {}: {error}",
-                        source_path.display()
+                        source_label
                     ));
-                    warn!(path = %source_path.display(), error = %detail, "WebDAV import failed");
-                    if let Ok(recovered_path) = expose_claim_for_retry(&claimed_path).await {
-                        if !update_recovered_ready_paths(
-                            &pool,
-                            user_id,
-                            &user_directory,
-                            &ready_file_path,
-                            supplemental_ready_file_path.as_deref(),
-                            &recovered_path,
-                        ) {
-                            let supplemental_source_path = supplemental_ready_file_path
-                                .as_deref()
-                                .map(|path| user_directory.join(path));
-                            if let Err(restore_error) = restore_recovered_ready_files(
-                                &recovered_path,
-                                &source_path,
-                                supplemental_source_path.as_deref(),
-                            ) {
-                                warn!(path = %recovered_path.display(), "WebDAV retry readiness recovery failed: {restore_error}");
-                            }
-                        }
-                    }
-                    update_import_progress(&pool, job_id, false, Some(detail));
+                    warn!(path = %source_label, error = %detail, "WebDAV import failed");
+                    update_import_progress(sqlite, job_id, false, Some(detail)).await;
                 } else {
-                    if let Err(error) = tokio::fs::remove_file(&claimed_path).await {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            warn!(path = %source_path.display(), "WebDAV imported file cleanup failed: {error}");
-                        }
-                    }
-                    let _ = remove_claim_directory(&claimed_path).await;
                     delete_ready_paths(
-                        &pool,
+                        sqlite,
                         user_id,
                         &ready_file_path,
                         supplemental_ready_file_path.as_deref(),
-                    );
-                    update_import_progress(&pool, job_id, true, None);
+                    )
+                    .await;
+                    update_import_progress(sqlite, job_id, true, None).await;
+                    scheduler.wake_metadata();
                 }
-            });
-    }
-    while tasks.join_next().await.is_some() {}
-    if let Ok(connection) = pool.get() {
-        let _ = connection.execute(queries::import::COMPLETE_JOB, [job_id]);
-    }
-}
-
-async fn claim_source(
-    source_path: &Path,
-    source_supplemental_metadata_path: Option<&Path>,
-) -> Result<PathBuf, std::io::Error> {
-    let parent = source_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("import source has no parent"))?;
-    let filename = source_path
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("import source has no filename"))?;
-    let claim_directory = parent
-        .join(".processing")
-        .join(uuid::Uuid::new_v4().to_string());
-    tokio::fs::create_dir_all(&claim_directory).await?;
-    let claimed_path = claim_directory.join(filename);
-    tokio::fs::rename(source_path, &claimed_path).await?;
-    if let Some(source_supplemental_metadata_path) = source_supplemental_metadata_path {
-        let claimed_supplemental_metadata_path = source_supplemental_metadata_path
-            .file_name()
-            .map(|filename| claim_directory.join(filename))
-            .ok_or_else(|| std::io::Error::other("supplemental metadata has no filename"))?;
-        if let Err(error) = tokio::fs::rename(
-            source_supplemental_metadata_path,
-            &claimed_supplemental_metadata_path,
+            },
         )
-        .await
-        {
-            let _ = tokio::fs::rename(&claimed_path, source_path).await;
-            let _ = tokio::fs::remove_dir(&claim_directory).await;
-            return Err(error);
-        }
+        .await;
+    if let Err(error) = sqlite.complete_import_job_durable(job_id).await {
+        warn!(job_id, error = %error, "failed to complete WebDAV import job");
     }
-    Ok(claimed_path)
 }
 
-async fn restore_claim(claimed_path: &Path, source_path: &Path) -> Result<(), std::io::Error> {
-    tokio::fs::rename(claimed_path, source_path).await?;
-    if let Some(claimed_supplemental_metadata_path) = find_supplemental_metadata_path(claimed_path)
-    {
-        let restored_supplemental_metadata_path = source_path
-            .parent()
-            .zip(claimed_supplemental_metadata_path.file_name())
-            .map(|(parent, filename)| parent.join(filename))
-            .ok_or_else(|| std::io::Error::other("supplemental metadata has no filename"))?;
-        tokio::fs::rename(
-            claimed_supplemental_metadata_path,
-            restored_supplemental_metadata_path,
-        )
-        .await?;
-    }
-    remove_claim_directory(claimed_path).await
-}
-
-async fn remove_claim_directory(claimed_path: &Path) -> Result<(), std::io::Error> {
-    let Some(claim_directory) = claimed_path.parent() else {
-        return Ok(());
-    };
-    tokio::fs::remove_dir(claim_directory).await
-}
-
-fn collect_import_files(root: &Path) -> Vec<PathBuf> {
+async fn collect_import_files(
+    executors: &crate::runtime::ExecutorHandles,
+    storage_root: StorageRootId,
+) -> AppResult<Vec<StagedImportFile>> {
+    validate_staged_import_root(storage_root)?;
+    let mut directories = VecDeque::from([None]);
     let mut source_files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return source_files;
-    };
-    collect_supported_files(entries, &mut source_files);
-    source_files
-}
-
-fn collect_supported_files(entries: std::fs::ReadDir, source_files: &mut Vec<PathBuf>) {
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with('.'))
-        {
-            continue;
-        }
-        if path.is_dir() {
-            if let Ok(children) = std::fs::read_dir(path) {
-                collect_supported_files(children, source_files);
+    while let Some(directory) = directories.pop_front() {
+        let mut session = Some(
+            executors
+                .file_io
+                .open_storage_directory_session_durable(storage_root, directory.clone())
+                .await?,
+        );
+        loop {
+            let (returned_session, entries, finished) = executors
+                .file_io
+                .read_storage_directory_session_durable(session.take().ok_or_else(|| {
+                    AppError::Internal("import directory session is unavailable".to_string())
+                })?)
+                .await?;
+            session = Some(returned_session);
+            for entry in entries {
+                if entry.name.starts_with('.') {
+                    continue;
+                }
+                let relative = directory.as_ref().map_or_else(
+                    || entry.name.clone(),
+                    |parent| format!("{}/{}", parent.relative_path(), entry.name),
+                );
+                let path = NormalizedStoragePath::parse(&relative)
+                    .map_err(|error| AppError::Validation(error.to_string()))?;
+                match entry.kind {
+                    StorageDirectoryEntryKind::Directory => directories.push_back(Some(path)),
+                    StorageDirectoryEntryKind::File
+                        if media_type(Path::new(&relative)).is_some() =>
+                    {
+                        source_files.push(StagedImportFile { storage_root, path });
+                    }
+                    StorageDirectoryEntryKind::File => {}
+                }
             }
-        } else if path.is_file() && media_type(&path).is_some() {
-            source_files.push(path);
+            if finished {
+                executors
+                    .file_io
+                    .close_storage_session_durable(session.take().ok_or_else(|| {
+                        AppError::Internal("import directory session is unavailable".to_string())
+                    })?)
+                    .await?;
+                break;
+            }
         }
     }
+    Ok(source_files)
 }
 
-fn lookup_user_id(pool: &DbPool, username: &str) -> Option<i64> {
-    let connection = pool.get().ok()?;
-    fetch_one(
-        &connection,
-        queries::users::SELECT_ID_BY_CREDENTIALS,
-        &[&username, &username],
-        |row| row.get(0),
-    )
-    .ok()
-    .flatten()
-}
-
-fn select_ready_webdav_files(pool: &DbPool, user_id: i64) -> Option<Vec<String>> {
-    let connection = pool.get().ok()?;
-    let mut statement = connection
-        .prepare(queries::webdav_ready::SELECT_FOR_USER)
-        .ok()?;
-    let ready_file_paths = statement
-        .query_map([user_id], |row| row.get(0))
-        .ok()?
-        .collect::<Result<Vec<_>, _>>()
-        .ok();
-    ready_file_paths
-}
-
-fn webdav_file_is_ready(pool: &DbPool, user_id: i64, ready_file_path: &str) -> bool {
-    pool.get()
-        .ok()
-        .and_then(|connection| {
-            connection
-                .query_row(
-                    queries::webdav_ready::EXISTS,
-                    rusqlite::params![user_id, ready_file_path],
-                    |row| row.get::<_, bool>(0),
-                )
-                .ok()
-        })
-        .unwrap_or(false)
-}
-
-fn collect_ready_webdav_files(
-    user_directory: &Path,
+async fn collect_ready_webdav_files(
+    executors: &crate::runtime::ExecutorHandles,
+    username: &str,
     ready_file_paths: Vec<String>,
     stable_age_seconds: u64,
-) -> Vec<WebDavImportCandidate> {
+) -> AppResult<Vec<WebDavImportCandidate>> {
     let mut candidates = Vec::new();
     let ready_file_path_set = ready_file_paths.iter().cloned().collect::<HashSet<_>>();
     for ready_file_path in ready_file_paths {
@@ -1149,33 +2336,33 @@ fn collect_ready_webdav_files(
         {
             continue;
         }
-        let path = user_directory.join(relative_path);
-        if !is_stable_webdav_file(&path, stable_age_seconds) || media_type(&path).is_none() {
+        if media_type(relative_path).is_none() {
             continue;
         }
-        let supplemental_metadata = supplemental_metadata_candidates(&path)
+        let path = NormalizedStoragePath::parse(&format!("{username}/{ready_file_path}"))
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        let source = StagedImportFile {
+            storage_root: StorageRootId::WebDav,
+            path,
+        };
+        if !staged_file_is_stable(executors, &source, stable_age_seconds).await? {
+            continue;
+        }
+        let supplemental_ready_file_path = supplemental_metadata_candidates(relative_path)
             .into_iter()
-            .filter(|candidate_path| candidate_path.is_file())
             .find_map(|candidate_path| {
-                let relative_candidate_path = candidate_path
-                    .strip_prefix(user_directory)
-                    .ok()?
-                    .to_str()?
-                    .to_string();
+                let relative_candidate_path = candidate_path.to_str()?.to_string();
                 ready_file_path_set
                     .contains(&relative_candidate_path)
-                    .then_some((candidate_path, relative_candidate_path))
+                    .then_some(relative_candidate_path)
             });
-        let (supplemental_metadata_path, supplemental_ready_file_path) =
-            supplemental_metadata.unzip();
         candidates.push(WebDavImportCandidate {
-            source_path: path,
-            supplemental_metadata_path,
+            source,
             ready_file_path,
             supplemental_ready_file_path,
         });
     }
-    candidates
+    Ok(candidates)
 }
 
 fn safe_webdav_relative_path(path: &Path) -> bool {
@@ -1185,143 +2372,50 @@ fn safe_webdav_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
-fn delete_ready_paths(
-    pool: &DbPool,
+async fn delete_ready_paths(
+    sqlite: &SqliteExecutorHandle,
     user_id: i64,
     ready_file_path: &str,
     supplemental_ready_file_path: Option<&str>,
 ) {
-    let Ok(connection) = pool.get() else {
-        return;
-    };
-    let Ok(transaction) = connection.unchecked_transaction() else {
-        return;
-    };
-    if transaction
-        .execute(
-            queries::webdav_ready::DELETE,
-            rusqlite::params![user_id, ready_file_path],
-        )
-        .is_err()
+    let mut remove = vec![ready_file_path.to_string()];
+    remove.extend(supplemental_ready_file_path.map(str::to_string));
+    if let Err(error) = sqlite
+        .update_webdav_ready_paths_durable(UpdateWebdavReadyPaths {
+            user_id,
+            remove,
+            add: Vec::new(),
+        })
+        .await
     {
-        return;
-    }
-    if let Some(supplemental_ready_file_path) = supplemental_ready_file_path {
-        if transaction
-            .execute(
-                queries::webdav_ready::DELETE,
-                rusqlite::params![user_id, supplemental_ready_file_path],
-            )
-            .is_err()
-        {
-            return;
-        }
-    }
-    if let Err(error) = transaction.commit() {
         warn!("failed to remove imported WebDAV readiness: {error}");
     }
 }
 
-fn update_recovered_ready_paths(
-    pool: &DbPool,
-    user_id: i64,
-    user_directory: &Path,
-    ready_file_path: &str,
-    supplemental_ready_file_path: Option<&str>,
-    recovered_path: &Path,
-) -> bool {
-    let Some(recovered_ready_file_path) = recovered_path
-        .strip_prefix(user_directory)
-        .ok()
-        .and_then(|path| path.to_str())
-    else {
-        return false;
-    };
-    let recovered_supplemental_path = find_supplemental_metadata_path(recovered_path);
-    let recovered_supplemental_ready_file_path = recovered_supplemental_path
-        .as_deref()
-        .and_then(|path| path.strip_prefix(user_directory).ok())
-        .and_then(|path| path.to_str());
-    let Ok(connection) = pool.get() else {
-        return false;
-    };
-    let Ok(transaction) = connection.unchecked_transaction() else {
-        return false;
-    };
-    if transaction
-        .execute(
-            queries::webdav_ready::DELETE,
-            rusqlite::params![user_id, ready_file_path],
-        )
-        .and_then(|_| {
-            transaction.execute(
-                queries::webdav_ready::UPSERT,
-                rusqlite::params![user_id, recovered_ready_file_path],
-            )
-        })
-        .is_err()
+async fn staged_file_is_stable(
+    executors: &crate::runtime::ExecutorHandles,
+    source: &StagedImportFile,
+    stable_age_seconds: u64,
+) -> AppResult<bool> {
+    let (session, snapshot) = match executors
+        .file_io
+        .open_storage_read_session_durable(source.storage_root, source.path.clone())
+        .await
     {
-        return false;
-    }
-    if let Some(supplemental_ready_file_path) = supplemental_ready_file_path {
-        if transaction
-            .execute(
-                queries::webdav_ready::DELETE,
-                rusqlite::params![user_id, supplemental_ready_file_path],
-            )
-            .is_err()
-        {
-            return false;
-        }
-    }
-    if let Some(recovered_supplemental_ready_file_path) = recovered_supplemental_ready_file_path {
-        if transaction
-            .execute(
-                queries::webdav_ready::UPSERT,
-                rusqlite::params![user_id, recovered_supplemental_ready_file_path],
-            )
-            .is_err()
-        {
-            return false;
-        }
-    }
-    transaction.commit().is_ok()
-}
-
-fn restore_recovered_ready_files(
-    recovered_path: &Path,
-    source_path: &Path,
-    supplemental_source_path: Option<&Path>,
-) -> std::io::Result<()> {
-    if source_path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "WebDAV source path was replaced before retry recovery",
-        ));
-    }
-    let recovered_supplemental_path = find_supplemental_metadata_path(recovered_path);
-    std::fs::rename(recovered_path, source_path)?;
-    if let Some(supplemental_source_path) = supplemental_source_path {
-        if let Some(recovered_supplemental_path) = recovered_supplemental_path {
-            std::fs::rename(recovered_supplemental_path, supplemental_source_path)?;
-        }
-    }
-    let recovered_directory = recovered_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("recovered source has no parent"))?;
-    if std::fs::read_dir(recovered_directory)?.next().is_none() {
-        std::fs::remove_dir(recovered_directory)?;
-    }
-    Ok(())
-}
-
-fn is_stable_webdav_file(path: &Path, stable_age_seconds: u64) -> bool {
-    let minimum_age = std::time::Duration::from_secs(stable_age_seconds);
-    path.metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-        .is_some_and(|age| age >= minimum_age)
+        Ok(opened) => opened,
+        Err(error) if error.kind == ExecutorErrorKind::FileNotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    executors
+        .file_io
+        .close_storage_session_durable(session)
+        .await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| AppError::Internal(error.to_string()))?
+        .as_secs();
+    let modified = u64::try_from(snapshot.modified_seconds).unwrap_or(0);
+    Ok(now.saturating_sub(modified) >= stable_age_seconds)
 }
 
 fn media_type(source_path: &Path) -> Option<&'static str> {

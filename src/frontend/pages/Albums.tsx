@@ -4,6 +4,7 @@ import AlbumView from '../components/albums/AlbumView'
 import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import type { Album, Media } from '../api/types'
 import { useLightbox } from '../hooks/useLightbox'
+import { PageFrame } from '../components/layout/PageLayout'
 
 export default function Albums() {
   const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null)
@@ -22,7 +23,7 @@ export default function Albums() {
 
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-      <div className="container max-w-[1800px] mx-auto p-6 md:p-10 animate-fade-in pb-20">
+      <PageFrame className="animate-fade-in">
         {selectedAlbumId ? (
           <AlbumView
             albumId={selectedAlbumId}
@@ -32,7 +33,7 @@ export default function Albums() {
         ) : (
           <AlbumList onAlbumClick={handleAlbumClick} />
         )}
-      </div>
+      </PageFrame>
       <ManagedLightbox controller={lightbox} />
     </div>
   )

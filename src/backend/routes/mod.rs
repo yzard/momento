@@ -1,11 +1,13 @@
+mod admin;
 mod ai;
 mod albums;
 mod auth;
 mod backup;
 mod client;
+mod control_json;
 mod duplicates;
 mod faces;
-mod file_stream;
+pub(crate) mod file_stream;
 #[path = "import/mod.rs"]
 mod imports;
 mod map;
@@ -20,10 +22,12 @@ mod users;
 use crate::auth::AppState;
 use axum::Router;
 
+pub(crate) use control_json::{render_json, render_message, CpuJson};
 pub use trash::cleanup_expired_trash;
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
+        .merge(admin::router())
         .merge(auth::router())
         .merge(client::router())
         .merge(backup::router())
@@ -32,8 +36,6 @@ pub fn api_router() -> Router<AppState> {
         .merge(faces::router())
         .merge(users::router())
         .merge(media::router())
-        .merge(media::thumbnail_router())
-        .merge(media::preview_router())
         .merge(albums::router())
         .merge(map::router())
         .merge(places::router())

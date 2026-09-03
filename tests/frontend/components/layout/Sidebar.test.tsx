@@ -90,9 +90,15 @@ describe('Sidebar', () => {
 
     const trashLink = screen.getByRole('link', { name: 'Trash' })
     const adminLink = screen.getByRole('link', { name: 'Admin' })
+    const navigation = screen.getByRole('navigation')
+    const adminAnchor = navigation.querySelector('[data-navigation-anchor="bottom"]')
     expect(
       trashLink.compareDocumentPosition(adminLink) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
+    expect(navigation.className).toContain('flex-col')
+    expect(adminAnchor?.className).toContain('mt-auto')
+    expect(adminAnchor).toBe(navigation.lastElementChild)
+    expect(navigation.nextElementSibling?.className).toContain('border-t')
     expect(
       adminLink.compareDocumentPosition(
         screen.getByRole('link', { name: 'Open account settings' })
@@ -107,6 +113,10 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: 'User Management' }).getAttribute('href')).toBe(
       '/admin/users'
     )
+    expect(
+      screen.getByRole('link', { name: 'Import' }).compareDocumentPosition(adminLink) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 
   it('shows screenshot and document timeline children', () => {

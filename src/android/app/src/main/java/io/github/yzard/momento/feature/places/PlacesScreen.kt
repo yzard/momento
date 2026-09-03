@@ -65,7 +65,6 @@ import io.github.yzard.momento.feature.media.failCursorPage
 import io.github.yzard.momento.feature.media.shouldLoadMoreMedia
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.filter
-import java.util.Base64
 
 fun placeGridColumns(widthDp: Int): Int = when {
     widthDp < 360 -> 1
@@ -73,17 +72,6 @@ fun placeGridColumns(widthDp: Int): Int = when {
     widthDp < 840 -> 3
     widthDp < 1200 -> 4
     else -> 5
-}
-
-fun decodePlaceThumbnail(dataUrl: String?): ByteArray? {
-    if (dataUrl == null) return null
-    val separator = dataUrl.indexOf(',')
-    if (separator <= 0 || !dataUrl.substring(0, separator).endsWith(";base64")) return null
-    return try {
-        Base64.getDecoder().decode(dataUrl.substring(separator + 1))
-    } catch (_: IllegalArgumentException) {
-        null
-    }
 }
 
 fun placeRegion(place: Place): String = listOfNotNull(place.state, place.country).joinToString(", ")
@@ -209,7 +197,7 @@ private fun PlaceTiles(
 private fun PlaceTile(place: Place, repository: MomentoRepository, select: () -> Unit) {
     val thumbnail by produceState<ByteArray?>(null, place.placeId) {
         value = when (val requestResult = runRequest { repository.placeThumbnail(place.placeId) }) {
-            is RequestResult.Success -> decodePlaceThumbnail(requestResult.response)
+            is RequestResult.Success -> requestResult.response
             is RequestResult.Failure -> null
         }
     }

@@ -22,7 +22,6 @@ pub fn default_config_template() -> &'static str {
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
-    #[serde(default)]
     pub scheduler: SchedulerConfig,
     #[serde(default)]
     pub service: Vec<ServiceConfig>,
@@ -44,8 +43,8 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
-    #[serde(default = "defaults::scheduler_poll_interval_seconds")]
-    pub poll_interval_seconds: u64,
+    pub max_queue_bytes: u64,
+    pub working_space_reserve_bytes: u64,
     #[serde(default = "defaults::scheduler_idle_shutdown_seconds")]
     pub idle_shutdown_seconds: u64,
     #[serde(default = "defaults::scheduler_max_in_flight_jobs")]
@@ -65,7 +64,8 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            poll_interval_seconds: defaults::SCHEDULER_POLL_INTERVAL_SECONDS,
+            max_queue_bytes: defaults::SCHEDULER_MAX_QUEUE_BYTES,
+            working_space_reserve_bytes: defaults::SCHEDULER_WORKING_SPACE_RESERVE_BYTES,
             idle_shutdown_seconds: defaults::SCHEDULER_IDLE_SHUTDOWN_SECONDS,
             max_in_flight_jobs: defaults::SCHEDULER_MAX_IN_FLIGHT_JOBS,
             runtime_max_attempts: defaults::SCHEDULER_RUNTIME_MAX_ATTEMPTS,
@@ -202,16 +202,29 @@ impl Config {
                 "server.api_key must not be empty".to_string(),
             ));
         }
-        if self.scheduler.poll_interval_seconds == 0
-            || self.scheduler.idle_shutdown_seconds == 0
+        if self.scheduler.idle_shutdown_seconds == 0
             || self.scheduler.max_in_flight_jobs == 0
             || self.scheduler.runtime_max_attempts == 0
         {
             return Err(ServiceError::Configuration(
-                "scheduler poll interval, idle shutdown timeout, max in-flight jobs, and runtime attempts must be positive"
+                "scheduler idle shutdown timeout, max in-flight jobs, and runtime attempts must be positive"
                     .to_string(),
             ));
         }
+        if self.scheduler.max_queue_bytes == 0 || self.scheduler.working_space_reserve_bytes == 0 {
+            return Err(ServiceError::Configuration(
+                "scheduler max queue bytes and working-space reserve bytes must be positive"
+                    .to_string(),
+            ));
+        }
+        self.scheduler
+            .max_queue_bytes
+            .checked_add(self.scheduler.working_space_reserve_bytes)
+            .ok_or_else(|| {
+                ServiceError::Configuration(
+                    "scheduler queue and working-space budgets overflow u64".to_string(),
+                )
+            })?;
         if self
             .scheduler
             .result_delivery_acknowledgement_timeout_seconds

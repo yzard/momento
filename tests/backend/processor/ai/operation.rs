@@ -1,8 +1,5 @@
-use momento_api::config::Config;
 use momento_api::database::DbPool;
-use momento_api::processor::ai::operation::{
-    start_all_features, start_feature, AiFeature, AiStartSource,
-};
+use momento_api::processor::ai::operation::AiFeature;
 
 use crate::test_utils::{create_test_db, create_test_media};
 
@@ -22,17 +19,19 @@ fn prepare_input(pool: &DbPool, media_id: i64, task: &str) {
         .expect("prepared AI input");
 }
 
-#[test]
-fn a_scheduled_feature_starts_while_another_feature_is_submitted() {
+#[tokio::test]
+async fn a_scheduled_feature_starts_while_another_feature_is_submitted() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "independent-features.jpg");
     prepare_input(&pool, media_id, "ocr");
     prepare_input(&pool, media_id, "image_tagging");
-    let mut config = Config::default();
-    config.llm.enabled = true;
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
 
     assert_eq!(
-        start_feature(&config, &pool, AiFeature::Ocr, AiStartSource::Manual)
+        executors
+            .sqlite
+            .start_ai_feature_request(AiFeature::Ocr, "manual".to_string(), None)
+            .await
             .expect("manual OCR start"),
         1
     );
@@ -45,15 +44,15 @@ fn a_scheduled_feature_starts_while_another_feature_is_submitted() {
         .expect("submitted OCR job");
 
     assert_eq!(
-        start_feature(
-            &config,
-            &pool,
-            AiFeature::ImageTagging,
-            AiStartSource::Scheduled {
-                scheduled_for: "2026-08-25T12:00:00Z",
-            },
-        )
-        .expect("scheduled tagging start"),
+        executors
+            .sqlite
+            .start_ai_feature_durable(
+                AiFeature::ImageTagging,
+                "scheduled".to_string(),
+                Some("2026-08-25T12:00:00Z".to_string()),
+            )
+            .await
+            .expect("scheduled tagging start"),
         1
     );
 
@@ -77,19 +76,15 @@ fn a_scheduled_feature_starts_while_another_feature_is_submitted() {
     );
 }
 
-#[test]
-fn deduplicate_manual_and_scheduled_starts_share_the_operation() {
-    let mut config = Config::default();
-    config.llm.enabled = true;
-
+#[tokio::test]
+async fn deduplicate_manual_and_scheduled_starts_share_the_operation() {
     let manual_pool = create_test_db();
-    start_feature(
-        &config,
-        &manual_pool,
-        AiFeature::Deduplicate,
-        AiStartSource::Manual,
-    )
-    .expect("manual deduplicate start");
+    let manual_executors = crate::test_utils::test_executor_handles(manual_pool.clone());
+    manual_executors
+        .sqlite
+        .start_ai_feature_request(AiFeature::Deduplicate, "manual".to_string(), None)
+        .await
+        .expect("manual deduplicate start");
     let manual_trigger: (String, Option<String>) = manual_pool
         .get()
         .expect("database connection")
@@ -102,15 +97,16 @@ fn deduplicate_manual_and_scheduled_starts_share_the_operation() {
     assert_eq!(manual_trigger, ("manual".to_string(), None));
 
     let scheduled_pool = create_test_db();
-    start_feature(
-        &config,
-        &scheduled_pool,
-        AiFeature::Deduplicate,
-        AiStartSource::Scheduled {
-            scheduled_for: "2026-08-25T13:00:00Z",
-        },
-    )
-    .expect("scheduled deduplicate start");
+    let scheduled_executors = crate::test_utils::test_executor_handles(scheduled_pool.clone());
+    scheduled_executors
+        .sqlite
+        .start_ai_feature_durable(
+            AiFeature::Deduplicate,
+            "scheduled".to_string(),
+            Some("2026-08-25T13:00:00Z".to_string()),
+        )
+        .await
+        .expect("scheduled deduplicate start");
     let scheduled_trigger: (String, Option<String>) = scheduled_pool
         .get()
         .expect("database connection")
@@ -129,8 +125,8 @@ fn deduplicate_manual_and_scheduled_starts_share_the_operation() {
     );
 }
 
-#[test]
-fn an_active_deduplicate_run_does_not_block_other_features() {
+#[tokio::test]
+async fn an_active_deduplicate_run_does_not_block_other_features() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "global-start.jpg");
     prepare_input(&pool, media_id, "ocr");
@@ -142,13 +138,16 @@ fn an_active_deduplicate_run_does_not_block_other_features() {
             [],
         )
         .expect("active deduplicate run");
-    let mut config = Config::default();
-    config.llm.enabled = true;
-
-    assert_eq!(
-        start_all_features(&config, &pool, AiStartSource::Manual).expect("global start"),
-        2
-    );
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    let mut queued = 0;
+    for feature in AiFeature::ALL {
+        queued += executors
+            .sqlite
+            .start_ai_feature_request(feature, "manual".to_string(), None)
+            .await
+            .expect("feature start");
+    }
+    assert_eq!(queued, 2);
     let queued_tasks: i64 = pool
         .get()
         .expect("database connection")
@@ -159,24 +158,31 @@ fn an_active_deduplicate_run_does_not_block_other_features() {
     assert_eq!(queued_tasks, 2);
 }
 
-#[test]
-fn one_start_failure_does_not_prevent_or_hide_other_queued_features() {
+#[tokio::test]
+async fn one_start_failure_does_not_prevent_or_hide_other_queued_features() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "partially-independent-start.jpg");
     prepare_input(&pool, media_id, "ocr");
     prepare_input(&pool, media_id, "image_aesthetics");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
     pool.get()
         .expect("database connection")
         .execute("DROP TABLE media_aesthetics", [])
         .expect("break only image aesthetics persistence");
-    let mut config = Config::default();
-    config.llm.enabled = true;
-
     assert_eq!(
-        start_all_features(&config, &pool, AiStartSource::Manual)
+        executors
+            .sqlite
+            .start_ai_feature_request(AiFeature::Ocr, "manual".to_string(), None)
+            .await
             .expect("OCR remains independently startable"),
         1
     );
+    let error = executors
+        .sqlite
+        .start_ai_feature_request(AiFeature::ImageAesthetics, "manual".to_string(), None)
+        .await
+        .expect_err("broken feature must fail independently");
+    assert!(error.to_string().contains("media_aesthetics"));
     let ocr_status: String = pool
         .get()
         .expect("database connection")
@@ -189,15 +195,13 @@ fn one_start_failure_does_not_prevent_or_hide_other_queued_features() {
     assert_eq!(ocr_status, "queued");
 }
 
-#[test]
-fn globally_disabled_llm_rejects_every_feature_start() {
-    let config = Config::default();
+#[tokio::test]
+async fn invalid_scheduled_start_is_rejected_before_sqlite_dispatch() {
     let pool = create_test_db();
-
-    let error = start_feature(&config, &pool, AiFeature::Ocr, AiStartSource::Manual)
-        .expect_err("globally disabled LLM must reject OCR");
-    assert_eq!(
-        error.to_string(),
-        "Validation error: ocr is unavailable because LLM is disabled"
-    );
+    let error = crate::test_utils::test_executor_handles(pool)
+        .sqlite
+        .start_ai_feature_durable(AiFeature::Ocr, "scheduled".to_string(), None)
+        .await
+        .expect_err("scheduled starts require their occurrence");
+    assert!(error.to_string().contains("AI start source is invalid"));
 }

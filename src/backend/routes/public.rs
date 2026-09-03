@@ -1,9 +1,9 @@
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Extension, Path, State},
     http::{header, HeaderMap, HeaderValue},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
 use chrono::{DateTime, Utc};
 use std::net::SocketAddr;
@@ -11,13 +11,20 @@ use std::net::SocketAddr;
 use crate::auth::{
     create_share_session_token, decode_share_session_token, share_token_hash, AppState,
 };
-use crate::constants::paths;
-use crate::database::{execute_query, fetch_all, fetch_one, queries, DbConn};
+use crate::database::operations::{
+    ActiveShareRecord, PublicFileAccessOutcome, PublicShareContent, PublicSharedMediaQuery,
+    PublicThumbnailAccessOutcome,
+};
 use crate::error::{AppError, AppResult};
-use crate::models::{map_media_response, ShareVerifyRequest, ShareVerifyResponse};
-use crate::utils::path::resolve_existing_storage_path;
+use crate::executor::{
+    PublicAlbumContentResponse, PublicAlbumSummaryResponse, PublicMediaContentResponse,
+};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
+use crate::models::{ShareVerifyRequest, ShareVerifyResponse};
+use crate::routes::{render_json, CpuJson};
+use crate::runtime::HttpRequestAdmission;
 
-use super::file_stream::{serve_file, ContentDisposition};
+use super::file_stream::{serve_file, ContentDisposition, FileResponseOptions};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -35,21 +42,12 @@ pub fn router() -> Router<AppState> {
 
 const SHARE_SESSION_COOKIE_NAME: &str = "momento_share_session";
 
-struct ShareRow {
-    id: i64,
-    media_id: Option<i64>,
-    album_id: Option<i64>,
-    password_hash: Option<String>,
-    expires_at: Option<String>,
-}
-
-fn validate_share_access(
-    conn: &DbConn,
+async fn validate_share_access(
     token: &str,
     headers: &HeaderMap,
     state: &AppState,
-) -> AppResult<ShareRow> {
-    let share = load_active_share(conn, token)?;
+) -> AppResult<ActiveShareRecord> {
+    let share = load_active_share(state, token).await?;
     if share.password_hash.is_none() {
         return Ok(share);
     }
@@ -68,17 +66,13 @@ fn validate_share_access(
     Ok(share)
 }
 
-fn load_active_share(conn: &DbConn, token: &str) -> AppResult<ShareRow> {
-    let share = fetch_one(conn, queries::share::SELECT_BY_TOKEN, &[&token], |row| {
-        Ok(ShareRow {
-            id: row.get(0)?,
-            media_id: row.get(1)?,
-            album_id: row.get(2)?,
-            password_hash: row.get(3)?,
-            expires_at: row.get(4)?,
-        })
-    })?
-    .ok_or_else(|| AppError::NotFound("Share link not found".to_string()))?;
+async fn load_active_share(state: &AppState, token: &str) -> AppResult<ActiveShareRecord> {
+    let share = state
+        .executors
+        .sqlite
+        .load_active_share_request(token.to_string())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Share link not found".to_string()))?;
 
     if let Some(expires_at) = &share.expires_at {
         let expires_at = DateTime::parse_from_rfc3339(expires_at)
@@ -91,97 +85,53 @@ fn load_active_share(conn: &DbConn, token: &str) -> AppResult<ShareRow> {
     Ok(share)
 }
 
-struct AlbumBasic {
-    id: i64,
-    name: String,
-    description: Option<String>,
-}
-
-fn require_media_in_share(connection: &DbConn, share: &ShareRow, media_id: i64) -> AppResult<()> {
-    if share
-        .media_id
-        .is_some_and(|shared_media_id| shared_media_id != media_id)
-    {
-        return Err(AppError::Authorization("Media not in share".to_string()));
-    }
-
-    let Some(album_id) = share.album_id else {
-        return Ok(());
-    };
-    let media_is_in_album = fetch_one(
-        connection,
-        queries::public::CHECK_ALBUM_MEDIA,
-        &[&album_id, &media_id],
-        |row| row.get::<_, i32>(0),
-    )?;
-    if media_is_in_album.is_none() {
-        return Err(AppError::Authorization(
-            "Media not in shared album".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 async fn get_shared_content(
     State(state): State<AppState>,
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_access(&conn, &token, &headers, &state)?;
-
-    // Increment view count
-    let _ = execute_query(&conn, queries::share::INCREMENT_VIEW_COUNT, &[&share.id]);
-
-    if let Some(media_id) = share.media_id {
-        let media = fetch_one(
-            &conn,
-            queries::media::SELECT_BY_ID,
-            &[&media_id],
-            map_media_response,
-        )?
-        .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
-
-        return Ok(public_json_response(serde_json::json!({
-            "type": "media",
-            "media": media
-        })));
+    let share = validate_share_access(&token, &headers, &state).await?;
+    match state
+        .executors
+        .sqlite
+        .load_public_share_content_request(share)
+        .await?
+    {
+        PublicShareContent::Media(media) => {
+            public_json_response(
+                &state,
+                PublicMediaContentResponse {
+                    content_type: "media".to_string(),
+                    media: *media,
+                },
+            )
+            .await
+        }
+        PublicShareContent::Album {
+            id,
+            name,
+            description,
+            media,
+        } => {
+            public_json_response(
+                &state,
+                PublicAlbumContentResponse {
+                    content_type: "album".to_string(),
+                    album: PublicAlbumSummaryResponse {
+                        id,
+                        name,
+                        description,
+                    },
+                    media,
+                },
+            )
+            .await
+        }
+        PublicShareContent::NotFound => {
+            Err(AppError::NotFound("Shared content not found".to_string()))
+        }
+        PublicShareContent::Invalid => Err(AppError::Internal("Invalid share link".to_string())),
     }
-
-    if let Some(album_id) = share.album_id {
-        let album = fetch_one(
-            &conn,
-            queries::public::SELECT_ALBUM_BASIC,
-            &[&album_id],
-            |row| {
-                Ok(AlbumBasic {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                })
-            },
-        )?
-        .ok_or_else(|| AppError::NotFound("Album not found".to_string()))?;
-
-        let media = fetch_all(
-            &conn,
-            queries::public::SELECT_ALBUM_MEDIA,
-            &[&album_id],
-            map_media_response,
-        )?;
-
-        return Ok(public_json_response(serde_json::json!({
-            "type": "album",
-            "album": {
-                "id": album.id,
-                "name": album.name,
-                "description": album.description
-            },
-            "media": media
-        })));
-    }
-
-    Err(AppError::Internal("Invalid share link".to_string()))
 }
 
 async fn verify_share_password(
@@ -189,14 +139,12 @@ async fn verify_share_password(
     peer_address: Option<ConnectInfo<SocketAddr>>,
     Path(token): Path<String>,
     headers: HeaderMap,
-    Json(request): Json<ShareVerifyRequest>,
+    CpuJson(request): CpuJson<ShareVerifyRequest>,
 ) -> AppResult<Response> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-
-    let share = load_active_share(&conn, &token)?;
+    let share = load_active_share(&state, &token).await?;
 
     let Some(password_hash) = share.password_hash else {
-        return share_verify_response(true, "No password required", None);
+        return share_verify_response(&state, true, "No password required", None).await;
     };
 
     let password_identity = format!("share:{}", share_token_hash(&token));
@@ -205,17 +153,19 @@ async fn verify_share_password(
         .client_source(&headers, peer_address.map(|peer| peer.0));
     state
         .authentication_protection
-        .begin_password_attempt(&client_source, &password_identity)?;
+        .begin_password_attempt(&client_source, &password_identity)
+        .await?;
     if !state
         .authentication_protection
         .verify_password(&request.password, Some(&password_hash))
         .await?
     {
-        return share_verify_response(false, "Invalid password", None);
+        return share_verify_response(&state, false, "Invalid password", None).await;
     }
     state
         .authentication_protection
-        .record_password_success(&client_source, &password_identity);
+        .record_password_success(&client_source, &password_identity)
+        .await?;
 
     let share_expiration = parse_share_expiration(share.expires_at.as_deref())?;
     let config = state.config.current();
@@ -225,82 +175,96 @@ async fn verify_share_password(
     let cookie = format!(
         "{SHARE_SESSION_COOKIE_NAME}={session_token}; Path=/api/v1/public/share/{token}; Max-Age={maximum_age}; HttpOnly; Secure; SameSite=Strict"
     );
-    share_verify_response(true, "Password correct", Some(&cookie))
+    share_verify_response(&state, true, "Password correct", Some(&cookie)).await
 }
 
 async fn get_shared_media_file(
     State(state): State<AppState>,
+    Extension(admission): Extension<HttpRequestAdmission>,
     Path((token, media_id)): Path<(String, i64)>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_access(&conn, &token, &headers, &state)?;
-    require_media_in_share(&conn, &share, media_id)?;
+    let share = validate_share_access(&token, &headers, &state).await?;
+    let media = match state
+        .executors
+        .sqlite
+        .load_public_shared_file_request(PublicSharedMediaQuery { share, media_id })
+        .await?
+    {
+        PublicFileAccessOutcome::NotInShare => {
+            return Err(AppError::Authorization("Media not in share".to_string()));
+        }
+        PublicFileAccessOutcome::NotFound => {
+            return Err(AppError::NotFound("Media not found".to_string()));
+        }
+        PublicFileAccessOutcome::Found(media) => media,
+    };
 
-    let media = fetch_one(
-        &conn,
-        queries::public::SELECT_MEDIA_FILE_INFO,
-        &[&media_id],
-        |row| {
-            Ok(FileInfo {
-                file_path: row.get(0)?,
-                mime_type: row.get(1)?,
-                original_filename: row.get(2)?,
-            })
-        },
-    )?
-    .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
-
-    let full_path = resolve_existing_storage_path(&paths().originals, &media.file_path).await?;
+    let relative_path = NormalizedStoragePath::parse(&media.file_path)
+        .map_err(|_| AppError::NotFound("Media file path is invalid".to_string()))?;
 
     serve_file(
-        full_path,
-        &media
-            .mime_type
-            .unwrap_or_else(|| "application/octet-stream".to_string()),
-        &headers,
-        Some(&media.original_filename),
-        true,
-        ContentDisposition::Attachment,
+        &state.executors.file_io,
+        StorageRootId::Originals,
+        relative_path,
+        FileResponseOptions {
+            admission: &admission,
+            content_type: &media
+                .mime_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            headers: &headers,
+            filename: Some(&media.original_filename),
+            allow_ranges: true,
+            content_disposition: ContentDisposition::Attachment,
+            cache_control: "private",
+            head_only: false,
+        },
     )
     .await
 }
 
-struct FileInfo {
-    file_path: String,
-    mime_type: Option<String>,
-    original_filename: String,
-}
-
 async fn get_shared_thumbnail(
     State(state): State<AppState>,
+    Extension(admission): Extension<HttpRequestAdmission>,
     Path((token, media_id)): Path<(String, i64)>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let conn = state.pool.get().map_err(AppError::Pool)?;
-    let share = validate_share_access(&conn, &token, &headers, &state)?;
-    require_media_in_share(&conn, &share, media_id)?;
+    let share = validate_share_access(&token, &headers, &state).await?;
+    let thumbnail_path = match state
+        .executors
+        .sqlite
+        .load_public_shared_thumbnail_request(PublicSharedMediaQuery { share, media_id })
+        .await?
+    {
+        PublicThumbnailAccessOutcome::NotInShare => {
+            return Err(AppError::Authorization("Media not in share".to_string()));
+        }
+        PublicThumbnailAccessOutcome::NotFound => {
+            return Err(AppError::NotFound("Media not found".to_string()));
+        }
+        PublicThumbnailAccessOutcome::Unavailable => {
+            return Err(AppError::NotFound("Thumbnail not available".to_string()));
+        }
+        PublicThumbnailAccessOutcome::Found(path) => path,
+    };
 
-    let thumbnail_path: Option<String> = fetch_one(
-        &conn,
-        queries::public::SELECT_MEDIA_THUMBNAIL,
-        &[&media_id],
-        |row| row.get(0),
-    )?
-    .ok_or_else(|| AppError::NotFound("Media not found".to_string()))?;
-
-    let thumbnail_path =
-        thumbnail_path.ok_or_else(|| AppError::NotFound("Thumbnail not available".to_string()))?;
-
-    let full_path = resolve_existing_storage_path(&paths().thumbnails, &thumbnail_path).await?;
+    let relative_path = NormalizedStoragePath::parse(&thumbnail_path)
+        .map_err(|_| AppError::NotFound("Thumbnail path is invalid".to_string()))?;
 
     serve_file(
-        full_path,
-        "image/jpeg",
-        &headers,
-        None,
-        false,
-        ContentDisposition::Inline,
+        &state.executors.file_io,
+        StorageRootId::Thumbnails,
+        relative_path,
+        FileResponseOptions {
+            admission: &admission,
+            content_type: "image/jpeg",
+            headers: &headers,
+            filename: None,
+            allow_ranges: false,
+            content_disposition: ContentDisposition::Inline,
+            cache_control: "private",
+            head_only: false,
+        },
     )
     .await
 }
@@ -325,16 +289,20 @@ fn cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
         .find_map(|(name, value)| (name == cookie_name).then(|| value.to_string()))
 }
 
-fn share_verify_response(
+async fn share_verify_response(
+    state: &AppState,
     valid: bool,
     message: &str,
     set_cookie: Option<&str>,
 ) -> AppResult<Response> {
-    let mut response = Json(ShareVerifyResponse {
-        valid,
-        message: message.to_string(),
-    })
-    .into_response();
+    let mut response = render_json(
+        state,
+        ShareVerifyResponse {
+            valid,
+            message: message.to_string(),
+        },
+    )
+    .await?;
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -346,10 +314,16 @@ fn share_verify_response(
     Ok(response)
 }
 
-fn public_json_response(body: serde_json::Value) -> Response {
-    let mut response = Json(body).into_response();
+async fn public_json_response<ResponseDto>(
+    state: &AppState,
+    body: ResponseDto,
+) -> AppResult<Response>
+where
+    ResponseDto: Into<crate::executor::ControlResponse>,
+{
+    let mut response = render_json(state, body).await?;
     response
         .headers_mut()
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    response
+    Ok(response)
 }

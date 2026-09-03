@@ -1,12 +1,18 @@
 use axum::{
+    body::Body,
+    http::header,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::json;
 use thiserror::Error;
 
+use crate::executor::{CpuExecutorHandle, ErrorResponse};
+
 const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal server error";
+const FALLBACK_INTERNAL_ERROR_JSON: &str = r#"{"detail":"Internal server error"}"#;
+
+#[derive(Clone, Debug)]
+struct PendingErrorResponse(ErrorResponse);
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -34,6 +40,12 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    #[error("Payload too large: {0}")]
+    PayloadTooLarge(String),
+
+    #[error("Unprocessable entity: {0}")]
+    UnprocessableEntity(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -43,8 +55,14 @@ pub enum AppError {
     #[error("Database is busy")]
     DatabaseBusy,
 
+    #[error("Service unavailable: {0}")]
+    Unavailable(String),
+
     #[error("Too many authentication attempts; retry after {retry_after_seconds} seconds")]
     RateLimited { retry_after_seconds: u64 },
+
+    #[error("Resource limit reached: {0}")]
+    ResourceLimit(String),
 
     #[error("Pool error: {0}")]
     Pool(#[from] r2d2::Error),
@@ -63,11 +81,11 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         if matches!(&self, AppError::DatabaseBusy) {
             tracing::warn!("Database is busy; request should be retried");
-            let mut response = (
+            let mut response = pending_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "detail": "Database is busy; retry shortly" })),
-            )
-                .into_response();
+                "Database is busy; retry shortly".to_string(),
+                None,
+            );
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
@@ -83,11 +101,11 @@ impl IntoResponse for AppError {
                 "Password authentication request was rate limited"
             );
             let retry_after = retry_after_seconds.to_string();
-            let mut response = (
+            let mut response = pending_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({ "detail": "Too many authentication attempts; retry later" })),
-            )
-                .into_response();
+                "Too many authentication attempts; retry later".to_string(),
+                None,
+            );
             if let Ok(header_value) = axum::http::HeaderValue::from_str(&retry_after) {
                 response
                     .headers_mut()
@@ -108,10 +126,22 @@ impl IntoResponse for AppError {
             AppError::Validation(message) => (StatusCode::BAD_REQUEST, message.clone(), None),
             AppError::Conflict(message) => (StatusCode::CONFLICT, message.clone(), None),
             AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone(), None),
+            AppError::PayloadTooLarge(message) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, message.clone(), None)
+            }
+            AppError::UnprocessableEntity(message) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, message.clone(), None)
+            }
             AppError::Internal(message) => internal_server_error("Internal", message),
             AppError::Database(error) => internal_server_error("Database", error),
             AppError::DatabaseBusy => unreachable!(),
+            AppError::Unavailable(message) => {
+                (StatusCode::SERVICE_UNAVAILABLE, message.clone(), None)
+            }
             AppError::RateLimited { .. } => unreachable!(),
+            AppError::ResourceLimit(message) => {
+                (StatusCode::TOO_MANY_REQUESTS, message.clone(), None)
+            }
             AppError::Pool(error) => internal_server_error("Connection pool", error),
             AppError::Jwt(error) => {
                 tracing::error!("JWT error: {}", error);
@@ -128,12 +158,52 @@ impl IntoResponse for AppError {
             }
         };
 
-        let response_body = match error_code {
-            Some(error_code) => Json(json!({ "detail": message, "code": error_code })),
-            None => Json(json!({ "detail": message })),
-        };
-        (status, response_body).into_response()
+        let close_connection = matches!(self, AppError::Unavailable(_));
+        let mut response = pending_error_response(status, message, error_code);
+        if close_connection {
+            response.headers_mut().insert(
+                axum::http::header::CONNECTION,
+                axum::http::HeaderValue::from_static("close"),
+            );
+        }
+        response
     }
+}
+
+fn pending_error_response(
+    status: StatusCode,
+    detail: String,
+    code: Option<&'static str>,
+) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = status;
+    response
+        .extensions_mut()
+        .insert(PendingErrorResponse(ErrorResponse { detail, code }));
+    response
+}
+
+pub async fn render_pending_error_response(
+    cpu: &CpuExecutorHandle,
+    mut response: Response,
+) -> Response {
+    let Some(pending) = response.extensions_mut().remove::<PendingErrorResponse>() else {
+        return response;
+    };
+    let bytes = match cpu.serialize_control_response(pending.0.into()).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "Could not serialize an HTTP error response");
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            FALLBACK_INTERNAL_ERROR_JSON.as_bytes().to_vec()
+        }
+    };
+    *response.body_mut() = Body::from(bytes);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 fn internal_server_error(
@@ -160,6 +230,38 @@ impl From<rusqlite::Error> for AppError {
                 Self::DatabaseBusy
             }
             _ => Self::Database(error),
+        }
+    }
+}
+
+impl From<crate::executor::ExecutorError> for AppError {
+    fn from(error: crate::executor::ExecutorError) -> Self {
+        use crate::executor::ExecutorErrorKind;
+
+        match error.kind {
+            ExecutorErrorKind::Overloaded => {
+                Self::Unavailable("The server is at capacity; retry shortly".to_string())
+            }
+            ExecutorErrorKind::ShuttingDown => {
+                Self::Unavailable("The server is shutting down".to_string())
+            }
+            ExecutorErrorKind::InvalidInput => Self::Validation(error.detail),
+            ExecutorErrorKind::BadRequest => Self::BadRequest(error.detail),
+            ExecutorErrorKind::Conflict => Self::Conflict(error.detail),
+            ExecutorErrorKind::NotFound => Self::NotFound(error.detail),
+            ExecutorErrorKind::DatabaseBusy | ExecutorErrorKind::DatabaseTimeout => {
+                Self::DatabaseBusy
+            }
+            ExecutorErrorKind::WorkerPanic
+            | ExecutorErrorKind::DatabasePermanent
+            | ExecutorErrorKind::Database
+            | ExecutorErrorKind::FileNotFound
+            | ExecutorErrorKind::FilePermission
+            | ExecutorErrorKind::FileConflict
+            | ExecutorErrorKind::FileInvalidData
+            | ExecutorErrorKind::FileTransient
+            | ExecutorErrorKind::FileSystem
+            | ExecutorErrorKind::Internal => Self::Internal(error.to_string()),
         }
     }
 }

@@ -1,376 +1,505 @@
 use chrono::DateTime;
-use filetime::{set_file_mtime, FileTime};
 use futures::{stream, StreamExt};
-use rusqlite::OptionalExtension;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 
-use crate::config::Config;
-use crate::constants::paths;
-use crate::database::{queries, DbPool};
+use crate::database::operations::{
+    BackupProcessingAsset, BackupProcessingTransition, BackupProcessingTransitionOutcome,
+    BackupRecoveryPageQuery, ClaimedBackupAsset, StoreBackupContentHash,
+};
 use crate::error::{AppError, AppResult};
-use crate::processor::import::{import_staged_file, ImportSource};
-use crate::utils::hash::calculate_file_hash;
-use crate::utils::path::resolve_storage_path;
+use crate::executor::{ExecutorErrorKind, Sha256Session, SqliteExecutorHandle};
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
+use crate::processor::import::{
+    import_staged_file, ImportSource, StagedImportCleanup, StagedImportFile,
+};
+use crate::runtime::{DurableSourceId, ExecutorHandles, SchedulerAdmissionKind, SchedulerHandle};
 
-struct ClaimedAsset {
-    id: i64,
-    user_id: i64,
-    staged_path: String,
-    source_modified_at: String,
-    expected_content_hash: String,
-    metadata_json: String,
-}
+const BACKUP_RECOVERY_PAGE_SIZE: u16 = 256;
 
-struct ProcessingAsset {
-    id: i64,
-    user_id: i64,
-    staged_path: String,
-    content_hash: Option<String>,
-}
-
-pub async fn run(config: Arc<Config>, pool: DbPool) {
-    if let Err(error) = recover(&pool).await {
-        tracing::warn!("backup recovery failed: {error}");
+pub async fn run(executors: ExecutorHandles) {
+    let scheduler = executors.scheduler.clone();
+    let sqlite = executors.sqlite.clone();
+    match scheduler
+        .acquire_durable(
+            DurableSourceId::BackupImport,
+            SchedulerAdmissionKind::RecoveryHandoff,
+        )
+        .await
+    {
+        Ok(_worker_permit) => {
+            if let Err(error) = recover(&executors).await {
+                tracing::warn!("backup recovery failed: {error}");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error, "backup recovery stopped");
+            return;
+        }
     }
 
-    let poll_interval = Duration::from_secs(config.backup.worker_poll_interval_seconds);
     loop {
-        if let Err(error) = run_cycle(&pool, config.backup.worker_concurrency).await {
+        if let Err(error) = run_cycle(&executors).await {
             tracing::warn!("backup worker cycle failed: {error}");
         }
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-pub async fn recover(pool: &DbPool) -> AppResult<()> {
-    recover_processing_assets(pool).await?;
-    let resumable_files = {
-        let connection = pool.get().map_err(AppError::Pool)?;
-        connection.execute(queries::backup::RECOVER_WRITING_SESSIONS, [])?;
-
-        let mut statement = connection.prepare(queries::backup::SELECT_RESUMABLE_FILES)?;
-        let resumable_files = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        resumable_files
-    };
-
-    for (asset_id, staged_path, uploaded_size) in resumable_files {
-        let path = resolve_storage_path(&paths().backups, &staged_path)?;
-        match truncate_to_durable_offset(&path, uploaded_size as u64).await {
-            Ok(()) => {}
-            Err(AppError::Internal(_)) if uploaded_size > 0 => {
-                fail_missing_staged_file(pool, asset_id)?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    expire_stale_sessions(pool)?;
-    Ok(())
-}
-
-async fn recover_processing_assets(pool: &DbPool) -> AppResult<()> {
-    let processing_assets = {
-        let connection = pool.get().map_err(AppError::Pool)?;
-        let mut statement = connection.prepare(queries::backup::SELECT_PROCESSING_ASSETS)?;
-        let processing_assets = statement
-            .query_map([], |row| {
-                Ok(ProcessingAsset {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    staged_path: row.get(2)?,
-                    content_hash: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        processing_assets
-    };
-
-    for asset in processing_assets {
-        let recovered_media_id = if let Some(content_hash) = asset.content_hash.as_deref() {
-            let connection = pool.get().map_err(AppError::Pool)?;
-            connection
-                .query_row(
-                    queries::backup::SELECT_RECOVERED_MEDIA,
-                    rusqlite::params![content_hash, asset.user_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-        } else {
-            None
+        let next_expiration = match scheduler
+            .acquire_durable(
+                DurableSourceId::BackupImport,
+                SchedulerAdmissionKind::NewClaim,
+            )
+            .await
+        {
+            Ok(_worker_permit) => match sqlite.maintain_backup_sessions_durable().await {
+                Ok(maintenance) => maintenance
+                    .next_expiration_seconds
+                    .map(std::time::Duration::from_secs),
+                Err(error) => {
+                    tracing::warn!(error = %error, "backup expiration maintenance deferred");
+                    Some(std::time::Duration::from_secs(1))
+                }
+            },
+            Err(_) => return,
         };
-        if let Some(media_id) = recovered_media_id {
-            complete_recovered_asset(pool, asset.id, media_id)?;
-            let staged_path = resolve_storage_path(&paths().backups, &asset.staged_path)?;
-            cleanup_staged_file(&staged_path).await;
-            continue;
+        if let Some(delay) = next_expiration {
+            tokio::select! {
+                () = scheduler.backup_import_notified() => {}
+                () = tokio::time::sleep(delay) => {}
+            }
+        } else {
+            scheduler.backup_import_notified().await;
         }
-
-        if !resolve_storage_path(&paths().backups, &asset.staged_path)?.is_file() {
-            fail_processing_asset(pool, asset.id, "backup staging file is missing")?;
-            continue;
-        }
-        requeue_processing_asset(pool, asset.id)?;
     }
-    Ok(())
 }
 
-pub async fn run_cycle(pool: &DbPool, concurrency: usize) -> AppResult<()> {
-    expire_stale_sessions(pool)?;
-    let concurrency = concurrency.max(1).min(pool.max_size() as usize);
-    let mut claimed_assets = Vec::with_capacity(concurrency);
-    for _ in 0..concurrency {
-        let Some(asset) = claim_queued_asset(pool)? else {
+pub async fn recover(executors: &ExecutorHandles) -> AppResult<()> {
+    let sqlite = &executors.sqlite;
+    recover_processing_assets(executors).await?;
+    sqlite.recover_backup_writing_sessions_durable().await?;
+    let mut after_id = 0;
+    loop {
+        let page = sqlite
+            .load_backup_resumable_page_durable(BackupRecoveryPageQuery {
+                after_id,
+                limit: BACKUP_RECOVERY_PAGE_SIZE,
+            })
+            .await?;
+        for file in page.rows {
+            match truncate_to_durable_offset(executors, &file.staged_path, file.uploaded_size).await
+            {
+                Ok(()) => {}
+                Err(AppError::Internal(_)) if file.uploaded_size > 0 => {
+                    transition_backup_processing(
+                        sqlite,
+                        &executors.scheduler,
+                        BackupProcessingTransition::FailMissingStaging {
+                            asset_id: file.asset_id,
+                        },
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let Some(next_after_id) = page.next_after_id else {
             break;
         };
-        claimed_assets.push(asset);
+        after_id = next_after_id;
+    }
+    sqlite.maintain_backup_sessions_durable().await?;
+    Ok(())
+}
+
+async fn recover_processing_assets(executors: &ExecutorHandles) -> AppResult<()> {
+    let sqlite = &executors.sqlite;
+    let mut after_id = 0;
+    loop {
+        let page = sqlite
+            .load_backup_processing_page_durable(BackupRecoveryPageQuery {
+                after_id,
+                limit: BACKUP_RECOVERY_PAGE_SIZE,
+            })
+            .await?;
+        for asset in page.rows {
+            recover_processing_asset(executors, asset).await?;
+        }
+        let Some(next_after_id) = page.next_after_id else {
+            break;
+        };
+        after_id = next_after_id;
+    }
+    Ok(())
+}
+
+async fn recover_processing_asset(
+    executors: &ExecutorHandles,
+    asset: BackupProcessingAsset,
+) -> AppResult<()> {
+    let sqlite = &executors.sqlite;
+    let recovered_media_id = if let Some(content_hash) = asset.content_hash {
+        sqlite
+            .load_recovered_backup_media_durable(content_hash, asset.user_id)
+            .await?
+    } else {
+        None
+    };
+    if let Some(media_id) = recovered_media_id {
+        transition_backup_processing(
+            sqlite,
+            &executors.scheduler,
+            BackupProcessingTransition::Complete {
+                asset_id: asset.asset_id,
+                media_id,
+            },
+        )
+        .await?;
+        return Ok(());
     }
 
-    stream::iter(claimed_assets)
-        .for_each_concurrent(concurrency, |asset| async move {
-            if let Err(error) = process_claimed_asset(pool, asset).await {
-                tracing::warn!("backup asset processing failed: {error}");
+    if !storage_file_exists(executors, &asset.staged_path).await? {
+        transition_backup_processing(
+            sqlite,
+            &executors.scheduler,
+            BackupProcessingTransition::Fail {
+                asset_id: asset.asset_id,
+                error: "backup staging file is missing".to_string(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    transition_backup_processing(
+        sqlite,
+        &executors.scheduler,
+        BackupProcessingTransition::Requeue {
+            asset_id: asset.asset_id,
+        },
+    )
+    .await
+}
+
+pub async fn run_cycle(executors: &ExecutorHandles) -> AppResult<()> {
+    let sqlite = &executors.sqlite;
+    let scheduler = &executors.scheduler;
+    let concurrency = scheduler.durable_capacity();
+    let claimed_assets = {
+        let _worker_permit = scheduler
+            .acquire_durable(
+                DurableSourceId::BackupImport,
+                SchedulerAdmissionKind::NewClaim,
+            )
+            .await
+            .map_err(AppError::Internal)?;
+        sqlite.maintain_backup_sessions_durable().await?;
+        let mut claimed_assets = Vec::with_capacity(concurrency);
+        for _ in 0..concurrency {
+            let Some(asset) = sqlite.claim_backup_asset_durable().await? else {
+                break;
+            };
+            claimed_assets.push(asset);
+        }
+        claimed_assets
+    };
+
+    let mut processing = stream::iter(claimed_assets)
+        .map(|asset| async move {
+            let worker_permit = match scheduler
+                .acquire_durable(
+                    DurableSourceId::BackupImport,
+                    SchedulerAdmissionKind::ExistingClaimCompletion,
+                )
+                .await
+            {
+                Ok(worker_permit) => worker_permit,
+                Err(error) => {
+                    return Err(AppError::Unavailable(error));
+                }
+            };
+            match process_claimed_asset(executors, asset, worker_permit).await {
+                Ok(()) => {
+                    scheduler.wake_metadata();
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
         })
-        .await;
-    Ok(())
-}
-
-fn expire_stale_sessions(pool: &DbPool) -> AppResult<()> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::backup::EXPIRE_SESSIONS, [])?;
-    transaction.execute(queries::backup::EXPIRE_ASSETS, [])?;
-    transaction.commit()?;
-    Ok(())
-}
-
-fn claim_queued_asset(pool: &DbPool) -> AppResult<Option<ClaimedAsset>> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.unchecked_transaction()?;
-    let claimed_asset = transaction
-        .query_row(queries::backup::CLAIM_QUEUED, [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .optional()?;
-    let Some(claimed_asset) = claimed_asset else {
-        transaction.commit()?;
-        return Ok(None);
-    };
-    let (expected_content_hash, metadata_json) = transaction
-        .query_row(
-            queries::backup::SELECT_MANIFEST_FOR_ASSET,
-            [claimed_asset.0],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|error| {
-            AppError::Conflict(format!(
-                "backup asset is missing its lossless manifest: {error}"
-            ))
-        })?;
-    let session_claimed =
-        transaction.execute(queries::backup::MARK_SESSION_PROCESSING, [claimed_asset.0])?;
-    if session_claimed != 1 {
-        return Err(AppError::Conflict(
-            "backup upload changed while claiming work".to_string(),
-        ));
+        .buffer_unordered(concurrency);
+    let mut first_error = None;
+    while let Some(result) = processing.next().await {
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "backup asset processing failed");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
     }
-    transaction.commit()?;
-    Ok(Some(ClaimedAsset {
-        id: claimed_asset.0,
-        user_id: claimed_asset.1,
-        staged_path: claimed_asset.2,
-        source_modified_at: claimed_asset.3,
-        expected_content_hash,
-        metadata_json,
-    }))
+    first_error.map_or(Ok(()), Err)
 }
 
-async fn process_claimed_asset(pool: &DbPool, asset: ClaimedAsset) -> AppResult<()> {
-    let source_path = resolve_storage_path(&paths().backups, &asset.staged_path)?;
+async fn process_claimed_asset(
+    executors: &ExecutorHandles,
+    asset: ClaimedBackupAsset,
+    mut worker_permit: crate::runtime::DurableAdmission,
+) -> AppResult<()> {
+    let sqlite = &executors.sqlite;
+    let scheduler = &executors.scheduler;
     let result = async {
-        set_source_modified_time(&source_path, &asset.source_modified_at)?;
-        let content_hash = calculate_file_hash(&source_path).await?;
+        set_source_modified_time(executors, &asset.staged_path, &asset.source_modified_at).await?;
+        let content_hash = calculate_backup_hash(executors, &asset.staged_path).await?;
         if content_hash != asset.expected_content_hash {
             return Err(AppError::Conflict(
                 "staged backup no longer matches the Android original".to_string(),
             ));
         }
-        write_supplemental_metadata(&source_path, &asset.metadata_json).await?;
-        let connection = pool.get().map_err(AppError::Pool)?;
-        let stored = connection.execute(
-            queries::backup::STORE_CONTENT_HASH,
-            rusqlite::params![content_hash, asset.id],
-        )?;
-        if stored != 1 {
+        write_supplemental_metadata(
+            executors,
+            asset.asset_id,
+            &asset.staged_path,
+            &asset.metadata_json,
+        )
+        .await?;
+        if !sqlite
+            .store_backup_content_hash_durable(StoreBackupContentHash {
+                asset_id: asset.asset_id,
+                content_hash,
+            })
+            .await?
+        {
             return Err(AppError::Conflict(
                 "backup asset changed while preparing import".to_string(),
             ));
         }
-        import_staged_file(
-            &source_path,
+        let staged_source = StagedImportFile::new(
+            StorageRootId::Backups,
+            NormalizedStoragePath::parse(&asset.staged_path)
+                .map_err(|error| AppError::Validation(error.to_string()))?,
+        )?;
+        let mut attempt = import_staged_file(
+            staged_source,
             ImportSource::MobileBackup,
             asset.user_id,
-            pool,
-            true,
+            executors,
+            StagedImportCleanup {
+                source: false,
+                supplemental_metadata: false,
+            },
+            &worker_permit,
         )
-        .await
+        .await?;
+        loop {
+            match attempt {
+                crate::processor::import::ImportStagedFileOutcome::Completed(media_id) => {
+                    break Ok(media_id);
+                }
+                crate::processor::import::ImportStagedFileOutcome::Deferred(prepared) => {
+                    drop(worker_permit);
+                    tokio::task::yield_now().await;
+                    worker_permit = scheduler
+                        .acquire_durable(
+                            DurableSourceId::BackupImport,
+                            SchedulerAdmissionKind::ExistingClaimCompletion,
+                        )
+                        .await
+                        .map_err(AppError::Unavailable)?;
+                    attempt = crate::processor::import::resume_staged_file_import(
+                        *prepared,
+                        executors,
+                        &worker_permit,
+                    )
+                    .await?;
+                }
+            }
+        }
     }
     .await;
 
     match result {
         Ok(media_id) => {
-            let connection = pool.get().map_err(AppError::Pool)?;
-            let transaction = connection.unchecked_transaction()?;
-            transaction.execute(
-                queries::backup::COMPLETE_ASSET,
-                rusqlite::params![media_id, asset.id],
-            )?;
-            transaction.execute(queries::backup::COMPLETE_SESSION, [asset.id])?;
-            transaction.commit()?;
+            transition_backup_processing(
+                sqlite,
+                scheduler,
+                BackupProcessingTransition::Complete {
+                    asset_id: asset.asset_id,
+                    media_id,
+                },
+            )
+            .await?;
         }
         Err(error) => {
-            {
-                let connection = pool.get().map_err(AppError::Pool)?;
-                let transaction = connection.unchecked_transaction()?;
-                transaction.execute(
-                    queries::backup::FAIL_ASSET,
-                    rusqlite::params![error.to_string(), asset.id],
-                )?;
-                transaction.execute(queries::backup::FAIL_SESSION, [asset.id])?;
-                transaction.commit()?;
-            }
-            cleanup_staged_file(&source_path).await;
+            transition_backup_processing(
+                sqlite,
+                scheduler,
+                BackupProcessingTransition::Fail {
+                    asset_id: asset.asset_id,
+                    error: error.to_string(),
+                },
+            )
+            .await?;
         }
     }
     Ok(())
 }
 
-fn complete_recovered_asset(pool: &DbPool, asset_id: i64, media_id: i64) -> AppResult<()> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(
-        queries::backup::COMPLETE_ASSET,
-        rusqlite::params![media_id, asset_id],
-    )?;
-    transaction.execute(queries::backup::COMPLETE_SESSION, [asset_id])?;
-    transaction.commit()?;
-    Ok(())
+async fn transition_backup_processing(
+    sqlite: &SqliteExecutorHandle,
+    scheduler: &SchedulerHandle,
+    transition: BackupProcessingTransition,
+) -> AppResult<()> {
+    match sqlite
+        .transition_backup_processing_durable(transition)
+        .await?
+    {
+        BackupProcessingTransitionOutcome::Transitioned { cleanup_group } => {
+            if cleanup_group {
+                scheduler.wake_journal_recovery();
+            }
+            Ok(())
+        }
+        BackupProcessingTransitionOutcome::Unchanged => Err(AppError::Conflict(
+            "backup processing state changed concurrently".to_string(),
+        )),
+        BackupProcessingTransitionOutcome::PathConflict => Err(AppError::Conflict(
+            "backup staging files are being changed by another operation".to_string(),
+        )),
+    }
 }
 
-fn requeue_processing_asset(pool: &DbPool, asset_id: i64) -> AppResult<()> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::backup::RECOVER_QUEUED_ASSET, [asset_id])?;
-    transaction.execute(queries::backup::RECOVER_QUEUED_SESSION, [asset_id])?;
-    transaction.commit()?;
-    Ok(())
-}
-
-fn fail_processing_asset(pool: &DbPool, asset_id: i64, error: &str) -> AppResult<()> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(
-        queries::backup::FAIL_ASSET,
-        rusqlite::params![error, asset_id],
-    )?;
-    transaction.execute(queries::backup::FAIL_SESSION, [asset_id])?;
-    transaction.commit()?;
-    Ok(())
-}
-
-fn fail_missing_staged_file(pool: &DbPool, asset_id: i64) -> AppResult<()> {
-    let connection = pool.get().map_err(AppError::Pool)?;
-    let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::backup::FAIL_MISSING_STAGED_ASSET, [asset_id])?;
-    transaction.execute(queries::backup::FAIL_MISSING_STAGED_SESSION, [asset_id])?;
-    transaction.commit()?;
-    Ok(())
-}
-
-fn set_source_modified_time(path: &Path, source_modified_at: &str) -> AppResult<()> {
+async fn set_source_modified_time(
+    executors: &ExecutorHandles,
+    staged_path: &str,
+    source_modified_at: &str,
+) -> AppResult<()> {
     let timestamp = DateTime::parse_from_rfc3339(source_modified_at)
-        .map_err(|_| AppError::BadRequest("invalid stored sourceModifiedAt".to_string()))?
-        .timestamp();
-    set_file_mtime(path, FileTime::from_unix_time(timestamp, 0))?;
+        .map_err(|_| AppError::BadRequest("invalid stored sourceModifiedAt".to_string()))?;
+    let path = NormalizedStoragePath::parse(staged_path)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    executors
+        .file_io
+        .set_storage_modified_time_durable(
+            StorageRootId::Backups,
+            path,
+            timestamp.timestamp(),
+            timestamp.timestamp_subsec_nanos(),
+        )
+        .await?;
     Ok(())
 }
 
-async fn truncate_to_durable_offset(path: &Path, uploaded_size: u64) -> AppResult<()> {
-    let file = match tokio::fs::OpenOptions::new().write(true).open(path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && uploaded_size == 0 => {
-            return Ok(())
+async fn truncate_to_durable_offset(
+    executors: &ExecutorHandles,
+    staged_path: &str,
+    uploaded_size: u64,
+) -> AppResult<()> {
+    let path = NormalizedStoragePath::parse(staged_path)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    let exists = storage_file_exists(executors, staged_path).await?;
+    if !exists && uploaded_size == 0 {
+        return Ok(());
+    }
+    if !exists {
+        return Err(AppError::Internal(format!(
+            "backup staging file is missing with durable offset {uploaded_size}"
+        )));
+    }
+    let session = executors
+        .file_io
+        .open_storage_write_session_durable(StorageRootId::Backups, path, uploaded_size)
+        .await?;
+    executors
+        .file_io
+        .commit_storage_session_durable(session)
+        .await?;
+    Ok(())
+}
+
+async fn calculate_backup_hash(
+    executors: &ExecutorHandles,
+    staged_path: &str,
+) -> AppResult<String> {
+    let path = NormalizedStoragePath::parse(staged_path)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    let (opened_session, _) = executors
+        .file_io
+        .open_storage_read_session_durable(StorageRootId::Backups, path)
+        .await?;
+    let mut file_session = Some(opened_session);
+    let mut hash_session: Option<Sha256Session> =
+        Some(executors.cpu.start_sha256_session_durable().await?);
+    loop {
+        let active_file = file_session.take().ok_or_else(|| {
+            AppError::Internal("backup hash file session is unavailable".to_string())
+        })?;
+        let (returned_file, bytes) = executors
+            .file_io
+            .read_storage_session_durable(active_file, crate::runtime::FILE_IO_CHUNK_BYTES as usize)
+            .await?;
+        file_session = Some(returned_file);
+        if bytes.is_empty() {
+            break;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AppError::Internal(format!(
-                "backup staging file is missing with durable offset {uploaded_size}"
-            )));
-        }
+        let active_hash = hash_session.take().ok_or_else(|| {
+            AppError::Internal("backup hash CPU session is unavailable".to_string())
+        })?;
+        let (returned_hash, _) = executors
+            .cpu
+            .update_sha256_session_durable(active_hash, bytes)
+            .await?;
+        hash_session = Some(returned_hash);
+    }
+    executors
+        .file_io
+        .close_storage_session_durable(file_session.take().ok_or_else(|| {
+            AppError::Internal("backup hash file session is unavailable".to_string())
+        })?)
+        .await?;
+    Ok(executors
+        .cpu
+        .finish_sha256_session_durable(hash_session.take().ok_or_else(|| {
+            AppError::Internal("backup hash CPU session is unavailable".to_string())
+        })?)
+        .await?)
+}
+
+async fn storage_file_exists(executors: &ExecutorHandles, staged_path: &str) -> AppResult<bool> {
+    let path = NormalizedStoragePath::parse(staged_path)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    let session = match executors
+        .file_io
+        .open_storage_read_session_durable(StorageRootId::Backups, path)
+        .await
+    {
+        Ok((session, _)) => session,
+        Err(error) if error.kind == ExecutorErrorKind::FileNotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    file.set_len(uploaded_size).await?;
-    file.sync_data().await?;
-    Ok(())
-}
-
-async fn cleanup_staged_file(path: &Path) {
-    cleanup_file(&supplemental_metadata_path(path)).await;
-    cleanup_file(path).await;
-}
-
-async fn cleanup_file(path: &Path) {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            tracing::warn!(path = %path.display(), "backup staging cleanup failed: {error}")
-        }
-    }
-}
-
-async fn write_supplemental_metadata(source_path: &Path, metadata_json: &str) -> AppResult<()> {
-    let _: serde_json::Value = serde_json::from_str(metadata_json)?;
-    let destination_path = supplemental_metadata_path(source_path);
-    let parent = destination_path.parent().ok_or_else(|| {
-        AppError::Internal("backup supplemental metadata path has no parent".to_string())
-    })?;
-    let pending_path =
-        destination_path.with_extension(format!("json.pending-{}", uuid::Uuid::new_v4().simple()));
-    let mut pending_file = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&pending_path)
+    executors
+        .file_io
+        .close_storage_session_durable(session)
         .await?;
-    use tokio::io::AsyncWriteExt;
-    pending_file.write_all(metadata_json.as_bytes()).await?;
-    pending_file.sync_all().await?;
-    drop(pending_file);
-    if let Err(error) = tokio::fs::rename(&pending_path, &destination_path).await {
-        let _ = tokio::fs::remove_file(&pending_path).await;
-        return Err(error.into());
-    }
-    std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    Ok(true)
 }
 
-fn supplemental_metadata_path(source_path: &Path) -> PathBuf {
-    let filename = source_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("backup-media");
-    source_path.with_file_name(format!("{filename}.supplemental-metadata.json"))
+async fn write_supplemental_metadata(
+    executors: &ExecutorHandles,
+    asset_id: i64,
+    staged_path: &str,
+    metadata_json: &str,
+) -> AppResult<()> {
+    let contents = executors
+        .cpu
+        .validate_json_durable(metadata_json.as_bytes().to_vec())
+        .await?;
+    let temporary_path =
+        NormalizedStoragePath::parse(&format!(".momento-pending/backup-{asset_id}-metadata.json"))
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+    let destination_path =
+        NormalizedStoragePath::parse(&format!("{staged_path}.supplemental-metadata.json"))
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+    executors
+        .file_io
+        .atomic_replace_storage_file_durable(
+            StorageRootId::Backups,
+            temporary_path,
+            destination_path,
+            contents,
+        )
+        .await?;
+    Ok(())
 }
