@@ -167,13 +167,39 @@ async fn startup_rolls_back_prepared_file_operations_before_listener_publication
         .await
         .expect("sync interrupted temporary");
 
+    let deferred_cleanup_group_id = format!("restart-cleanup-{}", uuid::Uuid::new_v4());
+    let deferred_cleanup_path =
+        NormalizedStoragePath::parse(&format!("{deferred_cleanup_group_id}.tmp")).unwrap();
+    std::fs::write(
+        data_directory
+            .join("journal")
+            .join(deferred_cleanup_path.relative_path()),
+        b"cleanup after listener publication",
+    )
+    .expect("write deferred cleanup fixture");
+    pool.get()
+        .expect("cleanup fixture connection")
+        .execute_batch(&format!(
+            "INSERT INTO file_operation_groups
+                 (id, kind, owner_kind, owner_id, state, entry_count, completion_outcome, version)
+             VALUES ('{deferred_cleanup_group_id}', 'restart_cleanup_test', 'test',
+                     '{deferred_cleanup_group_id}', 'cleanup_pending', 1, 'published', 1);
+             INSERT INTO file_operation_entries
+                 (group_id, sequence, action, storage_root, source_path, expected_size,
+                  state, cleanup_state)
+             VALUES ('{deferred_cleanup_group_id}', 0, 'cleanup', 'journal',
+                     '{}', 34, 'committed', 'pending');",
+            deferred_cleanup_path.relative_path()
+        ))
+        .expect("create deferred cleanup fixture");
+
     assert_eq!(
         momento_api::io::recovery::rollback_prepared_file_operations_after_restart(&handles)
             .await
             .expect("request startup rollback"),
         1
     );
-    momento_api::io::recovery::recover_generic_file_operations(&handles)
+    momento_api::io::recovery::recover_startup_critical_file_operations(&handles)
         .await
         .expect("finish startup rollback");
 
@@ -191,6 +217,32 @@ async fn startup_rolls_back_prepared_file_operations_before_listener_publication
         )
         .expect("prepared group state");
     assert_eq!(state, "rolled_back");
+
+    let deferred_cleanup_state: String = pool
+        .get()
+        .expect("database connection")
+        .query_row(
+            "SELECT state FROM file_operation_groups WHERE id = ?",
+            [&deferred_cleanup_group_id],
+            |row| row.get(0),
+        )
+        .expect("deferred cleanup state");
+    assert_eq!(deferred_cleanup_state, "cleanup_pending");
+    assert!(data_directory
+        .join("journal")
+        .join(deferred_cleanup_path.relative_path())
+        .exists());
+
+    assert_eq!(
+        momento_api::io::recovery::recover_generic_file_operations(&handles)
+            .await
+            .expect("finish deferred cleanup"),
+        1
+    );
+    assert!(!data_directory
+        .join("journal")
+        .join(deferred_cleanup_path.relative_path())
+        .exists());
 }
 
 #[tokio::test]

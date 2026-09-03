@@ -70,6 +70,7 @@ struct SchedulerShared {
     durable_by_source: [AtomicUsize; DurableSourceId::COUNT],
     durable_by_kind: [AtomicUsize; SchedulerAdmissionKind::COUNT],
     active_claim_tokens: Mutex<HashSet<(DurableSourceId, String)>>,
+    durable_claim_registry_capacity: usize,
     control_versions: [AtomicU64; SchedulerControlSource::COUNT],
     control_changed: Notify,
     backup_import_wake: Notify,
@@ -143,6 +144,7 @@ impl SchedulerHandle {
                 durable_by_source: std::array::from_fn(|_| AtomicUsize::new(0)),
                 durable_by_kind: std::array::from_fn(|_| AtomicUsize::new(0)),
                 active_claim_tokens: Mutex::new(HashSet::new()),
+                durable_claim_registry_capacity: sizing.durable_claim_registry_capacity,
                 control_versions: std::array::from_fn(|_| AtomicU64::new(0)),
                 control_changed: Notify::new(),
                 backup_import_wake: Notify::new(),
@@ -162,6 +164,10 @@ impl SchedulerHandle {
 
     pub fn outbound_stream_capacity(&self) -> usize {
         self.shared.outbound_streams.maximum
+    }
+
+    pub fn durable_claim_registry_capacity(&self) -> usize {
+        self.shared.durable_claim_registry_capacity
     }
 
     pub async fn acquire_durable(
@@ -349,7 +355,7 @@ impl SchedulerHandle {
             .active_claim_tokens
             .lock()
             .map_err(|_| "durable claim registry is poisoned".to_string())?;
-        if active.len() >= self.shared.durable.maximum {
+        if active.len() >= self.shared.durable_claim_registry_capacity {
             return Err("durable claim registry is at capacity".to_string());
         }
         if !active.insert((admission.source, token.clone())) {

@@ -41,8 +41,7 @@ pub(crate) enum MediaTool {
 impl MediaTool {
     pub(crate) fn executable(self) -> &'static OsStr {
         match self {
-            Self::ImageMagick => OsStr::new("convert"),
-            Self::Identify => OsStr::new("identify"),
+            Self::ImageMagick | Self::Identify => OsStr::new("magick"),
             Self::ExifTool => OsStr::new("exiftool"),
             Self::Ffmpeg { .. } => OsStr::new("ffmpeg"),
             Self::Ffprobe => OsStr::new("ffprobe"),
@@ -511,7 +510,8 @@ fn tool_arguments(tool: MediaTool) -> Vec<OsString> {
     match tool {
         MediaTool::Ffmpeg { .. } => ffmpeg_single_thread_arguments(),
         MediaTool::Ffprobe => ffprobe_single_thread_arguments(),
-        MediaTool::ImageMagick | MediaTool::Identify | MediaTool::ExifTool => Vec::new(),
+        MediaTool::Identify => vec![OsString::from("identify")],
+        MediaTool::ImageMagick | MediaTool::ExifTool => Vec::new(),
     }
 }
 

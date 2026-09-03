@@ -208,6 +208,12 @@ pub enum JournalRecoveryState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JournalRecoveryScope {
+    All,
+    StartupCritical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalFailureStage {
     Publication,
     Cleanup,
@@ -1310,26 +1316,29 @@ fn release_group_ownership(connection: &Connection, group_id: &str) -> rusqlite:
 
 pub(crate) fn load_next_generic_recovery_group(
     connection: &Connection,
+    scope: JournalRecoveryScope,
 ) -> rusqlite::Result<Option<JournalRecoveryGroup>> {
+    let query = match scope {
+        JournalRecoveryScope::All => queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
+        JournalRecoveryScope::StartupCritical => {
+            queries::file_operations::SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP
+        }
+    };
     connection
-        .query_row(
-            queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
-            [],
-            |row| {
-                let state = match row.get::<_, String>(1)?.as_str() {
-                    "publishing" => JournalRecoveryState::Publishing,
-                    "files_committed" => JournalRecoveryState::FilesCommitted,
-                    "cleanup_pending" => JournalRecoveryState::CleanupPending,
-                    "rollback_pending" => JournalRecoveryState::RollbackPending,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                Ok(JournalRecoveryGroup {
-                    group_id: row.get(0)?,
-                    state,
-                    version: row.get(2)?,
-                })
-            },
-        )
+        .query_row(query, [], |row| {
+            let state = match row.get::<_, String>(1)?.as_str() {
+                "publishing" => JournalRecoveryState::Publishing,
+                "files_committed" => JournalRecoveryState::FilesCommitted,
+                "cleanup_pending" => JournalRecoveryState::CleanupPending,
+                "rollback_pending" => JournalRecoveryState::RollbackPending,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok(JournalRecoveryGroup {
+                group_id: row.get(0)?,
+                state,
+                version: row.get(2)?,
+            })
+        })
         .optional()
 }
 

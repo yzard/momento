@@ -6,7 +6,7 @@ use crate::runtime::{ExecutorHandles, SchedulerHandle};
 use super::file::{JournalMutationLease, JournalMutationTicket};
 use super::journal::{
     FileEntryAction, JournalCancellationOutcome, JournalCheckpointOutcome, JournalFailureStage,
-    JournalMutationGrant, JournalMutationStage, JournalRecoveryState,
+    JournalMutationGrant, JournalMutationStage, JournalRecoveryScope, JournalRecoveryState,
 };
 
 pub(crate) async fn acquire_verified_journal_mutation(
@@ -214,11 +214,24 @@ pub(crate) async fn cancel_generic_file_operation_with_components(
 pub async fn recover_generic_file_operations(
     executors: &ExecutorHandles,
 ) -> Result<usize, ExecutorError> {
+    recover_file_operations(executors, JournalRecoveryScope::All).await
+}
+
+pub async fn recover_startup_critical_file_operations(
+    executors: &ExecutorHandles,
+) -> Result<usize, ExecutorError> {
+    recover_file_operations(executors, JournalRecoveryScope::StartupCritical).await
+}
+
+async fn recover_file_operations(
+    executors: &ExecutorHandles,
+    scope: JournalRecoveryScope,
+) -> Result<usize, ExecutorError> {
     let mut recovered_entries = 0usize;
     loop {
         let Some(group) = executors
             .sqlite
-            .load_next_generic_file_operation_recovery_durable()
+            .load_next_generic_file_operation_recovery_durable(scope)
             .await?
         else {
             return Ok(recovered_entries);

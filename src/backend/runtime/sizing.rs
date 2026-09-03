@@ -48,6 +48,7 @@ const EXECUTOR_ENVELOPE_BYTES: u64 = 4 * KIBIBYTE;
 const LOG_EVENT_BYTES: u64 = 64 * KIBIBYTE;
 const LOG_EVENT_QUEUE_MULTIPLIER: u64 = 32;
 const FILE_REGISTRY_ENTRY_BYTES: u64 = 256;
+const DURABLE_CLAIM_REGISTRY_ENTRY_BYTES: u64 = 256;
 const JOURNAL_MUTATION_REGISTRY_ENTRY_BYTES: u64 = 512;
 const DNS_OPERATION_STATE_BYTES: u64 = 64 * KIBIBYTE;
 const FIXED_RUNTIME_INFRASTRUCTURE_BYTES: u64 = 8 * MEBIBYTE;
@@ -107,6 +108,7 @@ pub struct RuntimeSizing {
     pub active_inbound_durable_streams: usize,
     pub active_file_chunks: usize,
     pub durable_orchestrations: usize,
+    pub durable_claim_registry_capacity: usize,
     pub scheduler_ingress_capacity: usize,
     pub cpu_queue_capacity: usize,
     pub file_queue_capacity: usize,
@@ -158,6 +160,8 @@ impl RuntimeSizing {
         let active_file_chunks = checked_mul(2, file_workers)?;
         let durable_orchestrations =
             checked_add(checked_add(cpu_workers, file_workers)?, sqlite_workers)?;
+        let durable_claim_registry_capacity =
+            checked_add(durable_orchestrations, active_outbound_stream_sessions)?;
 
         let scheduler_ingress_capacity = [
             active_requests,
@@ -250,7 +254,13 @@ impl RuntimeSizing {
         )?;
         let file_chunk_buffers = checked_mul(active_file_chunks, FILE_IO_CHUNK_BYTES)?;
         let registry_bytes = checked_add(
-            checked_mul(file_registry_capacity, FILE_REGISTRY_ENTRY_BYTES)?,
+            checked_add(
+                checked_mul(file_registry_capacity, FILE_REGISTRY_ENTRY_BYTES)?,
+                checked_mul(
+                    durable_claim_registry_capacity,
+                    DURABLE_CLAIM_REGISTRY_ENTRY_BYTES,
+                )?,
+            )?,
             checked_mul(
                 journal_mutation_registry_capacity,
                 JOURNAL_MUTATION_REGISTRY_ENTRY_BYTES,
@@ -381,6 +391,7 @@ impl RuntimeSizing {
             active_inbound_durable_streams: narrow(active_inbound_durable_streams)?,
             active_file_chunks: narrow(active_file_chunks)?,
             durable_orchestrations: narrow(durable_orchestrations)?,
+            durable_claim_registry_capacity: narrow(durable_claim_registry_capacity)?,
             scheduler_ingress_capacity: narrow(scheduler_ingress_capacity)?,
             cpu_queue_capacity: narrow(cpu_queue_capacity)?,
             file_queue_capacity: narrow(file_queue_capacity)?,
@@ -534,6 +545,10 @@ fn validate_reservations(sizing: &RuntimeSizing) -> Result<(), RuntimePreflightE
         ("SQLite executor queue", sizing.sqlite_queue_capacity),
         ("log event ring", sizing.log_event_capacity),
         ("file handle registry", sizing.file_registry_capacity),
+        (
+            "durable claim registry",
+            sizing.durable_claim_registry_capacity,
+        ),
         (
             "Journal mutation registry",
             sizing.journal_mutation_registry_capacity,

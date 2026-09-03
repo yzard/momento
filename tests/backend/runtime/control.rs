@@ -144,6 +144,45 @@ async fn durable_claim_tokens_are_unique_and_unregister_on_drop() {
         .expect("released token registration");
 }
 
+#[tokio::test]
+async fn durable_claim_registry_accounts_for_detached_outbound_claims() {
+    let pool = crate::test_utils::create_test_db();
+    let scheduler = crate::test_utils::test_scheduler(pool);
+    let mut detached_claims = Vec::new();
+
+    for index in 0..scheduler.outbound_stream_capacity() {
+        let admission = scheduler
+            .acquire_durable(
+                DurableSourceId::LlmSubmission,
+                SchedulerAdmissionKind::ExistingClaimCompletion,
+            )
+            .await
+            .expect("detached outbound claim admission");
+        let claim = scheduler
+            .register_durable_claim(&admission, format!("outbound-{index}"))
+            .expect("detached outbound claim registration");
+        drop(admission);
+        detached_claims.push(claim);
+    }
+
+    let mut durable_claims = Vec::new();
+    for index in 0..scheduler.durable_capacity() {
+        let admission = scheduler
+            .acquire_durable(DurableSourceId::Metadata, SchedulerAdmissionKind::NewClaim)
+            .await
+            .expect("durable claim admission");
+        let claim = scheduler
+            .register_durable_claim(&admission, format!("durable-{index}"))
+            .expect("durable claim registration");
+        durable_claims.push((admission, claim));
+    }
+
+    assert_eq!(
+        detached_claims.len() + durable_claims.len(),
+        scheduler.durable_claim_registry_capacity()
+    );
+}
+
 #[test]
 fn request_admission_is_non_waiting_and_uses_the_derived_limit() {
     let pool = crate::test_utils::create_test_db();

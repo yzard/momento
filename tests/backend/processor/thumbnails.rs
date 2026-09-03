@@ -57,7 +57,7 @@ async fn image_preview_decodes_avif_without_changing_the_original() {
     image::RgbImage::from_pixel(120, 80, image::Rgb([20, 40, 60]))
         .save(&source_png)
         .expect("source PNG");
-    let conversion = std::process::Command::new("convert")
+    let conversion = std::process::Command::new("magick")
         .arg(&source_png)
         .arg(&source_avif)
         .output()
@@ -210,6 +210,6 @@ async fn image_preview_aborts_when_the_generated_file_exceeds_its_bound() {
     .await
     .expect_err("oversized generated preview must fail");
 
-    assert!(error.contains("convert"), "{error}");
+    assert!(error.contains("magick"), "{error}");
     assert!(!output.exists(), "oversized output must not be published");
 }

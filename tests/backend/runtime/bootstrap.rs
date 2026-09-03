@@ -36,6 +36,9 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dockerfile =
         std::fs::read_to_string(repository.join("docker/Dockerfile")).expect("Momento Dockerfile");
+    let image_magick_policy =
+        std::fs::read_to_string(repository.join("docker/imagemagick-policy.xml"))
+            .expect("ImageMagick policy");
     let entrypoint = std::fs::read_to_string(repository.join("docker/entrypoint.sh"))
         .expect("Momento entrypoint");
     assert!(dockerfile.contains("TMPDIR=/data/tmp"));
@@ -43,6 +46,7 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
     assert!(dockerfile.contains("TMP=/data/tmp"));
     assert!(dockerfile.contains("imagemagick-raw"));
     assert!(dockerfile.contains("AVIF DNG GIF HEIC QOI TIFF WEBP"));
+    assert!(!image_magick_policy.contains("name=\"time\""));
     assert!(entrypoint.contains("/data/tmp"));
 }
 

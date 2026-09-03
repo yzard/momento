@@ -41,7 +41,7 @@ use crate::io::journal::{
     DirectoryCopyFinishedCheckpoint, FileOperationPlan, JournalCancellationOutcome,
     JournalCancellationStatus, JournalCheckpointOutcome, JournalEntryCheckpoint,
     JournalFailureStage, JournalMaintenanceOutcome, JournalMutationGrant, JournalRecoveryGroup,
-    JournalRetryOutcome, PrepareJournalOutcome,
+    JournalRecoveryScope, JournalRetryOutcome, PrepareJournalOutcome,
 };
 use crate::models::{
     AiFeatureActionResult, AiFeatureScheduleResponse, AiStatusResponse, AlbumDetailResponse,
@@ -386,7 +386,9 @@ pub(crate) enum SqliteOperation {
         expected_version: i64,
         sequence: u16,
     },
-    LoadNextGenericFileOperationRecovery,
+    LoadNextGenericFileOperationRecovery {
+        scope: JournalRecoveryScope,
+    },
     YieldFileOperationProgress {
         group_id: String,
         expected_version: i64,
@@ -602,7 +604,7 @@ impl SqliteOperation {
             Self::CompleteFileOperation { .. } => "complete_file_operation",
             Self::VerifyFileOperationCleanup { .. } => "verify_file_operation_cleanup",
             Self::RecordFileEntryCleaned { .. } => "record_file_entry_cleaned",
-            Self::LoadNextGenericFileOperationRecovery => {
+            Self::LoadNextGenericFileOperationRecovery { .. } => {
                 "load_next_generic_file_operation_recovery"
             }
             Self::YieldFileOperationProgress { .. } => "yield_file_operation_progress",
@@ -711,7 +713,7 @@ impl SqliteOperation {
             | Self::PrepareMediaUpdate(_) => bounded_api_read_spec(),
             Self::VerifyFileOperationPublication { .. }
             | Self::VerifyFileOperationCleanup { .. }
-            | Self::LoadNextGenericFileOperationRecovery
+            | Self::LoadNextGenericFileOperationRecovery { .. }
             | Self::ListFileOperations { .. }
             | Self::LoadFileOperationDetail { .. }
             | Self::VerifyFileOperationRollback { .. } => bounded_api_read_spec(),
@@ -3730,12 +3732,13 @@ impl SqliteExecutorHandle {
         }
     }
 
-    pub async fn load_next_generic_file_operation_recovery_durable(
+    pub(crate) async fn load_next_generic_file_operation_recovery_durable(
         &self,
+        scope: JournalRecoveryScope,
     ) -> Result<Option<JournalRecoveryGroup>, ExecutorError> {
         match self
             .submit(
-                SqliteOperation::LoadNextGenericFileOperationRecovery,
+                SqliteOperation::LoadNextGenericFileOperationRecovery { scope },
                 SubmissionMode::Durable,
             )
             .await?
@@ -6243,8 +6246,8 @@ fn execute_with_connection(
             }
             Ok(SqliteOutput::FileEntryCleaned(checkpoint))
         }
-        SqliteOperation::LoadNextGenericFileOperationRecovery => {
-            crate::io::journal::load_next_generic_recovery_group(connection)
+        SqliteOperation::LoadNextGenericFileOperationRecovery { scope } => {
+            crate::io::journal::load_next_generic_recovery_group(connection, scope)
                 .map(SqliteOutput::GenericFileOperationRecovery)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }

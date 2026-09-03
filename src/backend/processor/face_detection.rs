@@ -729,7 +729,7 @@ async fn write_crop(
         let detail = format!(
             "ImageMagick could not crop face input {}: {}",
             descriptor.file_path,
-            output.failure_detail("convert")
+            output.failure_detail("magick")
         );
         tracing::error!(
             job_id,

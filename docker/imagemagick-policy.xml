@@ -15,7 +15,6 @@
   <policy domain="resource" name="width" value="64KP"/>
   <policy domain="resource" name="height" value="64KP"/>
   <policy domain="resource" name="thread" value="2"/>
-  <policy domain="resource" name="time" value="60"/>
   <policy domain="resource" name="list-length" value="32"/>
   <policy domain="resource" name="file" value="128"/>
   <policy domain="system" name="max-memory-request" value="256MiB"/>

@@ -269,6 +269,7 @@ fn main() {
     )
     .expect("Failed to size Momento runtime");
     let database_path = loaded_config.config.server.data_dir.join("database.sqlite");
+    eprintln!("Initializing Momento runtime");
     let application_runtime = RuntimeBuilder::new(
         runtime_sizing.clone(),
         database_path,
@@ -277,6 +278,7 @@ fn main() {
     )
     .build()
     .expect("Failed to initialize Momento runtime");
+    eprintln!("Momento runtime initialized; recovering durable work");
     let executors = application_runtime.executors();
     let system_timezone = application_runtime.system_timezone();
     let authentication_dummy_hash = application_runtime.authentication_dummy_hash().to_string();
@@ -319,24 +321,38 @@ async fn run(
             SchedulerAdmissionKind::RecoveryHandoff,
             "startup-recovery",
             async move {
-                momento_api::webdav::handler::resume_prepared_directory_copies_after_restart(
-                    &startup_executors,
-                )
-                .await
-                .expect("Failed to resume interrupted WebDAV directory copies");
-                momento_api::io::recovery::rollback_prepared_file_operations_after_restart(
-                    &startup_executors,
-                )
-                .await
-                .expect("Failed to roll back interrupted prepared file operations");
-                momento_api::io::recovery::discard_incomplete_file_products_after_restart(
-                    &startup_executors,
-                )
-                .await
-                .expect("Failed to discard interrupted LLM result products");
-                momento_api::io::recovery::recover_generic_file_operations(&startup_executors)
+                tracing::info!("Starting consistency-critical startup recovery");
+                let resumed_directory_copies =
+                    momento_api::webdav::handler::resume_prepared_directory_copies_after_restart(
+                        &startup_executors,
+                    )
                     .await
-                    .expect("Failed to recover generic file operations");
+                    .expect("Failed to resume interrupted WebDAV directory copies");
+                let prepared_rollbacks =
+                    momento_api::io::recovery::rollback_prepared_file_operations_after_restart(
+                        &startup_executors,
+                    )
+                    .await
+                    .expect("Failed to roll back interrupted prepared file operations");
+                let discarded_products =
+                    momento_api::io::recovery::discard_incomplete_file_products_after_restart(
+                        &startup_executors,
+                    )
+                    .await
+                    .expect("Failed to discard interrupted LLM result products");
+                let recovered_journal_entries =
+                    momento_api::io::recovery::recover_startup_critical_file_operations(
+                        &startup_executors,
+                    )
+                    .await
+                    .expect("Failed to recover consistency-critical file operations");
+                tracing::info!(
+                    resumed_directory_copies,
+                    prepared_rollbacks,
+                    discarded_products,
+                    recovered_journal_entries,
+                    "Consistency-critical journal recovery completed"
+                );
                 startup_executors
                     .sqlite
                     .recover_import_content_hash_claims_durable()
