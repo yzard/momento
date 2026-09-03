@@ -823,13 +823,7 @@ impl DataDirSpaceBudget {
             ObservationSource::Directory(directory) => observe_directory(directory)?,
             ObservationSource::Fixed(snapshot) => snapshot.clone(),
         };
-        snapshot.validate()?;
-        if snapshot.filesystem_id != self.inner.layout.filesystem_id
-            || snapshot.total_bytes != self.inner.layout.total_bytes
-            || snapshot.fragment_size != self.inner.layout.fragment_size
-        {
-            return Err(SpaceBudgetError::InvalidFilesystemSnapshot);
-        }
+        validate_runtime_observation(&self.inner.layout, &snapshot)?;
         Ok(snapshot)
     }
 
@@ -1453,6 +1447,19 @@ fn observe_directory(directory: &File) -> Result<FilesystemSpaceSnapshot, SpaceB
     Ok(snapshot)
 }
 
+fn validate_runtime_observation(
+    layout: &BudgetLayout,
+    snapshot: &FilesystemSpaceSnapshot,
+) -> Result<(), SpaceBudgetError> {
+    snapshot.validate()?;
+    if snapshot.filesystem_id != layout.filesystem_id
+        || snapshot.fragment_size != layout.fragment_size
+    {
+        return Err(SpaceBudgetError::InvalidFilesystemSnapshot);
+    }
+    Ok(())
+}
+
 fn refresh_health(
     layout: &BudgetLayout,
     state: &mut LedgerState,
@@ -1755,4 +1762,60 @@ fn checked_increment(value: u64) -> Result<u64, SpaceBudgetError> {
     value
         .checked_add(1)
         .ok_or(SpaceBudgetError::ArithmeticOverflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout() -> BudgetLayout {
+        BudgetLayout {
+            filesystem_id: "filesystem-1".to_string(),
+            total_bytes: 100 * GIBIBYTE,
+            fragment_size: 4096,
+            recovery_floor_bytes: 5 * GIBIBYTE,
+            sqlite_wal_limit_bytes: 2 * GIBIBYTE,
+            log_quota_bytes: GIBIBYTE,
+            data_hard_limit_bytes: 94 * GIBIBYTE,
+        }
+    }
+
+    #[test]
+    fn runtime_observation_accepts_total_capacity_changes() {
+        let layout = layout();
+        for (total_bytes, free_bytes) in [
+            (80 * GIBIBYTE, 20 * GIBIBYTE),
+            (120 * GIBIBYTE, 60 * GIBIBYTE),
+        ] {
+            validate_runtime_observation(
+                &layout,
+                &FilesystemSpaceSnapshot {
+                    filesystem_id: layout.filesystem_id.clone(),
+                    total_bytes,
+                    free_bytes,
+                    fragment_size: layout.fragment_size,
+                },
+            )
+            .expect("same filesystem with changed capacity");
+        }
+    }
+
+    #[test]
+    fn runtime_observation_rejects_filesystem_or_allocation_unit_changes() {
+        let layout = layout();
+        for (filesystem_id, fragment_size) in [("filesystem-2", 4096), ("filesystem-1", 8192)] {
+            assert_eq!(
+                validate_runtime_observation(
+                    &layout,
+                    &FilesystemSpaceSnapshot {
+                        filesystem_id: filesystem_id.to_string(),
+                        total_bytes: layout.total_bytes,
+                        free_bytes: 50 * GIBIBYTE,
+                        fragment_size,
+                    },
+                ),
+                Err(SpaceBudgetError::InvalidFilesystemSnapshot)
+            );
+        }
+    }
 }
