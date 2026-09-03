@@ -2087,6 +2087,101 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
 }
 
 #[tokio::test]
+async fn durable_cancellations_release_mutation_fences_before_rollback_finishes() {
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
+        cpu_workers: 1,
+        io_workers: 4,
+        sqlite_workers: 1,
+    })
+    .expect("runtime sizing");
+    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    init_database(&pool.get().expect("schema connection")).expect("database schema");
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    let identity = momento_api::config::load_config_with_identity(&config_path)
+        .expect("load config")
+        .identity;
+    let (runtime, handles) = ExecutorRuntime::start(
+        &sizing,
+        pool,
+        identity,
+        directory.path().to_path_buf(),
+        None,
+    )
+    .expect("executor runtime");
+
+    for index in 0..=sizing.journal_mutation_registry_capacity {
+        let group_id = format!("cancel-capacity-{index}");
+        let temporary =
+            NormalizedStoragePath::parse(&format!("capacity-{index}.tmp")).expect("temporary path");
+        let destination = NormalizedStoragePath::parse(&format!("capacity-{index}.bin"))
+            .expect("destination path");
+        let plan = FileOperationPlan {
+            group_id: group_id.clone(),
+            kind: "cancel_capacity_test".to_string(),
+            owner_kind: "test".to_string(),
+            owner_id: group_id.clone(),
+            claim_token: None,
+            product_target: None,
+            product_version: None,
+            entries: vec![FileEntryPlan {
+                action: FileEntryAction::Publish,
+                storage_root: StorageRootId::Journal,
+                source_path: None,
+                temporary_path: Some(temporary.clone()),
+                destination_path: Some(destination.clone()),
+                tombstone_path: None,
+                expected_size: Some(1),
+                expected_sha256: Some(Sha256::digest([index as u8]).into()),
+                expected_version: None,
+            }],
+            claims: vec![
+                FilePathClaimPlan {
+                    storage_root: StorageRootId::Journal,
+                    path: temporary,
+                    mode: PathClaimMode::Write,
+                    scope: PathClaimScope::Exact,
+                    role: "temporary".to_string(),
+                    expected_version: None,
+                },
+                FilePathClaimPlan {
+                    storage_root: StorageRootId::Journal,
+                    path: destination,
+                    mode: PathClaimMode::Write,
+                    scope: PathClaimScope::Exact,
+                    role: "destination".to_string(),
+                    expected_version: None,
+                },
+            ],
+            space_reservation: Some(journal_reservation(
+                &handles.file_io,
+                &format!("cancel-capacity-reservation-{index}"),
+            )),
+        };
+        assert_eq!(
+            handles
+                .sqlite
+                .prepare_file_operation_request(plan)
+                .await
+                .expect("prepare cancellation group"),
+            PrepareJournalOutcome::Prepared
+        );
+        assert_eq!(
+            momento_api::io::recovery::cancel_generic_file_operation(&handles, group_id, 1)
+                .await
+                .expect("request cancellation"),
+            momento_api::io::journal::JournalCancellationOutcome::Requested {
+                state: "rollback_pending".to_string(),
+                version: 2,
+            }
+        );
+    }
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
 async fn backup_cancellation_commits_product_state_and_journal_cleanup_atomically() {
     let directory = tempfile::tempdir().expect("temporary executor directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {

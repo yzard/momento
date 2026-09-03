@@ -350,7 +350,7 @@ impl ExecutorRuntime {
             .set(bootstrapped_roots)
             .map_err(|_| "storage-root registry was already published".to_string())?;
         let mutation_gates = Arc::new(
-            MutationGateRegistry::new(sizing.file_queue_capacity)
+            MutationGateRegistry::new(sizing.journal_mutation_registry_capacity)
                 .map_err(|error| error.to_string())?,
         );
         let (file_close_sender, file_close_receiver) = crossbeam_channel::bounded(1);

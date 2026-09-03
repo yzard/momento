@@ -335,6 +335,33 @@ pub mod import {
 
     pub const RECOVER_CONTENT_HASH_CLAIMS: &str = "DELETE FROM import_content_hash_claims";
 
+    pub const FINALIZE_PRODUCT: &str = r#"
+    UPDATE file_operation_groups
+       SET product_target = NULL
+         , state = 'cleanup_pending'
+         , completion_outcome = 'published'
+         , version = version + 1
+         , recovery_order = (
+               SELECT COALESCE(MAX(recovery_order), 0) + 1
+                 FROM file_operation_groups
+           )
+         , updated_at = datetime('now')
+         , terminal_at = NULL
+     WHERE id = ?
+       AND version = ?
+       AND state = 'files_committed'
+       AND owner_kind = 'import'
+       AND owner_id = CAST(? AS TEXT)
+       AND product_target = 'import_media'
+       AND product_version = 1
+       AND claim_token = ?
+       AND EXISTS (
+               SELECT 1
+                 FROM import_content_hash_claims
+                WHERE import_content_hash_claims.claim_token = file_operation_groups.claim_token
+           )
+    "#;
+
     pub const SELECT_INTERRUPTED_PAGE: &str = r#"
     SELECT id
       FROM media

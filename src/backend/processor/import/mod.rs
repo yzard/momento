@@ -261,34 +261,9 @@ pub(crate) fn finalize_import_media_on_connection(
 ) -> rusqlite::Result<bool> {
     let transaction = connection.unchecked_transaction()?;
     if transaction.execute(
-        r#"
-        UPDATE file_operation_groups
-           SET product_target = NULL
-             , state = 'cleanup_pending'
-             , completion_outcome = 'published'
-             , version = version + 1
-             , recovery_order = (
-                   SELECT COALESCE(MAX(recovery_order), 0) + 1
-                     FROM file_operation_groups
-               )
-             , updated_at = datetime('now')
-             , terminal_at = NULL
-         WHERE id = ?
-           AND version = ?
-           AND state = 'files_committed'
-           AND owner_kind = 'import'
-           AND owner_id = CAST(? AS TEXT)
-           AND product_target = 'import_media'
-           AND product_version = 1
-           AND claim_token = ?
-           AND EXISTS (
-                   SELECT 1
-                     FROM import_content_hash_claims
-                    WHERE import_content_hash_claims.claim_token = file_operation_groups.claim_token
-               )
-        "#,
+        queries::import::FINALIZE_PRODUCT,
         rusqlite::params![
-            request.product_group_id,
+            &request.product_group_id,
             request.product_group_version,
             request.media_id,
             request.claim_token,
@@ -315,6 +290,10 @@ pub(crate) fn finalize_import_media_on_connection(
         rusqlite::params![request.media_id, request.user_id, 2],
     )?;
     transaction.execute(queries::metadata_jobs::INSERT_QUEUED, [request.media_id])?;
+    transaction.execute(
+        queries::file_operations::RELEASE_GROUP_CLAIMS,
+        [&request.product_group_id],
+    )?;
     if let Some(source_cleanup) = request.source_cleanup {
         if crate::io::journal::prepare_committed_cleanup(&transaction, source_cleanup)?
             == PrepareJournalOutcome::PathConflict
@@ -1605,19 +1584,38 @@ async fn attempt_prepared_staged_import(
     let sqlite = &executors.sqlite;
     let source_path = Path::new(source.path.relative_path());
     let claim_token = uuid::Uuid::new_v4().to_string();
-    let claim_guard = match sqlite
+    let claim_outcome = sqlite
         .acquire_import_content_hash_claim_durable(
             content_hash.clone(),
             claim_token.clone(),
             import_source,
         )
-        .await?
-    {
-        ImportContentHashClaimOutcome::Acquired => ImportContentHashClaimGuard::new(
-            sqlite.clone(),
-            content_hash.clone(),
-            claim_token.clone(),
-        ),
+        .await?;
+    if matches!(claim_outcome, ImportContentHashClaimOutcome::Busy) {
+        return Ok(ImportStagedFileOutcome::Deferred(Box::new(
+            PreparedStagedImport {
+                source,
+                source_session: source_session.take().ok_or_else(|| {
+                    AppError::Internal("import source session is unavailable".to_string())
+                })?,
+                source_snapshot,
+                import_source,
+                user_id,
+                cleanup,
+                media_type,
+                original_filename,
+                mime_type,
+                source_size,
+                source_modified_seconds,
+                content_hash,
+                supplemental_metadata,
+            },
+        )));
+    }
+    let claim_guard =
+        ImportContentHashClaimGuard::new(sqlite.clone(), content_hash.clone(), claim_token.clone());
+    match claim_outcome {
+        ImportContentHashClaimOutcome::Acquired => {}
         ImportContentHashClaimOutcome::Existing(existing_media) => {
             executors
                 .file_io
@@ -1625,7 +1623,7 @@ async fn attempt_prepared_staged_import(
                     AppError::Internal("import source session is unavailable".to_string())
                 })?)
                 .await?;
-            return absorb_existing_media(
+            let result = absorb_existing_media(
                 ExistingStagedImport {
                     source: &source,
                     source_snapshot,
@@ -1637,30 +1635,11 @@ async fn attempt_prepared_staged_import(
                 },
                 executors,
             )
-            .await
-            .map(ImportStagedFileOutcome::Completed);
+            .await;
+            claim_guard.release().await?;
+            return result.map(ImportStagedFileOutcome::Completed);
         }
-        ImportContentHashClaimOutcome::Busy => {
-            return Ok(ImportStagedFileOutcome::Deferred(Box::new(
-                PreparedStagedImport {
-                    source,
-                    source_session: source_session.take().ok_or_else(|| {
-                        AppError::Internal("import source session is unavailable".to_string())
-                    })?,
-                    source_snapshot,
-                    import_source,
-                    user_id,
-                    cleanup,
-                    media_type,
-                    original_filename,
-                    mime_type,
-                    source_size,
-                    source_modified_seconds,
-                    content_hash,
-                    supplemental_metadata,
-                },
-            )))
-        }
+        ImportContentHashClaimOutcome::Busy => unreachable!(),
     };
     let _claim_registration = executors
         .scheduler
@@ -1885,24 +1864,24 @@ pub(crate) fn acquire_content_hash_claim_on_connection(
 ) -> rusqlite::Result<ImportContentHashClaimOutcome> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if let Some(existing) = select_existing_media(&transaction, content_hash)? {
-        transaction.rollback()?;
-        return Ok(if existing.import_state == "imported" {
-            ImportContentHashClaimOutcome::Existing(existing)
-        } else {
-            ImportContentHashClaimOutcome::Busy
-        });
-    }
     let inserted = transaction.execute(
         queries::import::INSERT_CONTENT_HASH_CLAIM,
         rusqlite::params![content_hash, claim_token, source.as_str()],
     )?;
+    if inserted == 0 {
+        transaction.rollback()?;
+        return Ok(ImportContentHashClaimOutcome::Busy);
+    }
+    if let Some(existing) = select_existing_media(&transaction, content_hash)? {
+        if existing.import_state != "imported" {
+            transaction.rollback()?;
+            return Ok(ImportContentHashClaimOutcome::Busy);
+        }
+        transaction.commit()?;
+        return Ok(ImportContentHashClaimOutcome::Existing(existing));
+    }
     transaction.commit()?;
-    Ok(if inserted == 1 {
-        ImportContentHashClaimOutcome::Acquired
-    } else {
-        ImportContentHashClaimOutcome::Busy
-    })
+    Ok(ImportContentHashClaimOutcome::Acquired)
 }
 
 pub(crate) fn release_content_hash_claim_on_connection(

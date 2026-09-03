@@ -48,6 +48,7 @@ const EXECUTOR_ENVELOPE_BYTES: u64 = 4 * KIBIBYTE;
 const LOG_EVENT_BYTES: u64 = 64 * KIBIBYTE;
 const LOG_EVENT_QUEUE_MULTIPLIER: u64 = 32;
 const FILE_REGISTRY_ENTRY_BYTES: u64 = 256;
+const JOURNAL_MUTATION_REGISTRY_ENTRY_BYTES: u64 = 512;
 const DNS_OPERATION_STATE_BYTES: u64 = 64 * KIBIBYTE;
 const FIXED_RUNTIME_INFRASTRUCTURE_BYTES: u64 = 8 * MEBIBYTE;
 
@@ -112,6 +113,7 @@ pub struct RuntimeSizing {
     pub sqlite_queue_capacity: usize,
     pub log_event_capacity: usize,
     pub file_registry_capacity: usize,
+    pub journal_mutation_registry_capacity: usize,
     pub required_open_files: u64,
     pub bootstrap_peak_bytes: u64,
     pub pre_listener_initialization_peak_bytes: u64,
@@ -187,6 +189,13 @@ impl RuntimeSizing {
         ]
         .into_iter()
         .try_fold(0_u64, checked_add)?;
+        let journal_mutation_registry_capacity = checked_add(
+            checked_add(
+                durable_orchestrations,
+                active_requests.max(active_stream_sessions),
+            )?,
+            active_inbound_durable_streams,
+        )?;
 
         let runtime_thread_count = checked_add(
             checked_add(checked_add(1, io_workers)?, cpu_workers)?,
@@ -240,7 +249,13 @@ impl RuntimeSizing {
             FILE_IO_CHUNK_BYTES,
         )?;
         let file_chunk_buffers = checked_mul(active_file_chunks, FILE_IO_CHUNK_BYTES)?;
-        let registry_bytes = checked_mul(file_registry_capacity, FILE_REGISTRY_ENTRY_BYTES)?;
+        let registry_bytes = checked_add(
+            checked_mul(file_registry_capacity, FILE_REGISTRY_ENTRY_BYTES)?,
+            checked_mul(
+                journal_mutation_registry_capacity,
+                JOURNAL_MUTATION_REGISTRY_ENTRY_BYTES,
+            )?,
+        )?;
         let stream_state = [stream_buffers, file_chunk_buffers, registry_bytes]
             .into_iter()
             .try_fold(0_u64, checked_add)?;
@@ -372,6 +387,7 @@ impl RuntimeSizing {
             sqlite_queue_capacity: narrow(sqlite_queue_capacity)?,
             log_event_capacity: narrow(log_event_capacity)?,
             file_registry_capacity: narrow(file_registry_capacity)?,
+            journal_mutation_registry_capacity: narrow(journal_mutation_registry_capacity)?,
             required_open_files,
             bootstrap_peak_bytes,
             pre_listener_initialization_peak_bytes,
@@ -518,6 +534,10 @@ fn validate_reservations(sizing: &RuntimeSizing) -> Result<(), RuntimePreflightE
         ("SQLite executor queue", sizing.sqlite_queue_capacity),
         ("log event ring", sizing.log_event_capacity),
         ("file handle registry", sizing.file_registry_capacity),
+        (
+            "Journal mutation registry",
+            sizing.journal_mutation_registry_capacity,
+        ),
     ] {
         let mut reservation = Vec::<u8>::new();
         reservation

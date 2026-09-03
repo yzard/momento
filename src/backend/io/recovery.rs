@@ -1,5 +1,7 @@
-use crate::executor::{ExecutorError, ExecutorErrorKind};
-use crate::runtime::ExecutorHandles;
+use crate::executor::{
+    ExecutorError, ExecutorErrorKind, FileIoExecutorHandle, SqliteExecutorHandle,
+};
+use crate::runtime::{ExecutorHandles, SchedulerHandle};
 
 use super::file::{JournalMutationLease, JournalMutationTicket};
 use super::journal::{
@@ -128,8 +130,24 @@ pub async fn cancel_generic_file_operation(
     group_id: String,
     expected_version: i64,
 ) -> Result<JournalCancellationOutcome, ExecutorError> {
-    let Some(status) = executors
-        .sqlite
+    cancel_generic_file_operation_with_components(
+        &executors.sqlite,
+        &executors.file_io,
+        &executors.scheduler,
+        group_id,
+        expected_version,
+    )
+    .await
+}
+
+pub(crate) async fn cancel_generic_file_operation_with_components(
+    sqlite: &SqliteExecutorHandle,
+    file_io: &FileIoExecutorHandle,
+    scheduler: &SchedulerHandle,
+    group_id: String,
+    expected_version: i64,
+) -> Result<JournalCancellationOutcome, ExecutorError> {
+    let Some(status) = sqlite
         .load_file_operation_cancellation_status_durable(group_id.clone())
         .await?
     else {
@@ -150,8 +168,7 @@ pub async fn cancel_generic_file_operation(
     ) {
         return Ok(JournalCancellationOutcome::NotCancellable);
     }
-    executors
-        .file_io
+    file_io
         .fence_journal_mutations(&group_id, expected_version)
         .await
         .map_err(|error| {
@@ -162,26 +179,26 @@ pub async fn cancel_generic_file_operation(
             )
         })?;
     let reconciliation_group_id = group_id.clone();
-    let outcome = executors
-        .sqlite
+    let outcome = sqlite
         .request_file_operation_cancellation_durable(group_id, expected_version)
         .await?;
     match outcome {
-        JournalCancellationOutcome::Requested { ref state, version } => {
-            if state == "rolled_back" {
-                executors
-                    .file_io
-                    .retire_journal_mutation_fence(&reconciliation_group_id, version)
-                    .map_err(mutation_registry_error)?;
-            }
-            executors.scheduler.wake_journal_recovery();
+        JournalCancellationOutcome::Requested { version, .. } => {
+            file_io
+                .release_journal_mutation_fence(&reconciliation_group_id, version)
+                .map_err(mutation_registry_error)?;
+            scheduler.wake_journal_recovery();
             Ok(outcome)
         }
         JournalCancellationOutcome::VersionConflict => {
-            let status = executors
-                .sqlite
-                .load_file_operation_cancellation_status_durable(reconciliation_group_id)
+            let status = sqlite
+                .load_file_operation_cancellation_status_durable(reconciliation_group_id.clone())
                 .await?;
+            if let Some(status) = &status {
+                file_io
+                    .release_journal_mutation_fence(&reconciliation_group_id, status.version)
+                    .map_err(mutation_registry_error)?;
+            }
             Ok(status
                 .filter(|status| status.cancel_requested)
                 .map(|status| JournalCancellationOutcome::AlreadyRequested {
@@ -317,7 +334,7 @@ pub async fn recover_generic_file_operations(
                 };
                 executors
                     .file_io
-                    .retire_journal_mutation_fence(&group.group_id, version)
+                    .release_journal_mutation_fence(&group.group_id, version)
                     .map_err(mutation_registry_error)?;
             }
             JournalRecoveryState::CleanupPending => {
@@ -402,7 +419,7 @@ pub async fn recover_generic_file_operations(
                 if checkpoint.phase_complete {
                     executors
                         .file_io
-                        .retire_journal_mutation_fence(&group.group_id, checkpoint.version)
+                        .release_journal_mutation_fence(&group.group_id, checkpoint.version)
                         .map_err(mutation_registry_error)?;
                     executors.scheduler.wake_llm_results();
                 }
@@ -500,7 +517,7 @@ pub async fn recover_generic_file_operations(
                 if checkpoint.phase_complete {
                     executors
                         .file_io
-                        .retire_journal_mutation_fence(&group.group_id, checkpoint.version)
+                        .release_journal_mutation_fence(&group.group_id, checkpoint.version)
                         .map_err(mutation_registry_error)?;
                     executors.scheduler.wake_llm_results();
                 }

@@ -11,6 +11,7 @@ use momento_api::{
         ImportSettings, ImportSource, StagedImportCleanup, StagedImportFile,
     },
 };
+use sha2::{Digest, Sha256};
 
 use crate::test_utils::{create_test_db, create_test_user, lock_webdav_test, QOI_FIXTURE};
 
@@ -642,6 +643,145 @@ async fn test_concurrent_matching_hash_imports_create_one_media_row() {
         .expect("media count");
     assert_eq!(first_media_id, second_media_id);
     assert_eq!(media_count, 1);
+}
+
+#[tokio::test]
+async fn duplicate_import_waits_for_the_existing_content_hash_owner_before_replacing_sidecar() {
+    let _filesystem_test_guard = lock_webdav_test().await;
+    let pool = create_test_db();
+    let user_id = create_test_user(
+        &pool,
+        "serialized-duplicate",
+        "serialized-duplicate@example.com",
+    );
+    let (executors, data_directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let directory_name = format!("serialized-{}", uuid::Uuid::new_v4());
+    let source_bytes = b"serialized duplicate bytes";
+    let (first_source, first_path) = staged_file(
+        &data_directory,
+        StorageRootId::Imports,
+        &format!("{directory_name}/first.jpg"),
+    );
+    std::fs::write(&first_path, source_bytes).expect("first source");
+    std::fs::write(
+        first_path.with_file_name("first.jpg.supplemental-metadata.json"),
+        b"{\"description\":\"first\"}",
+    )
+    .expect("first sidecar");
+    let first_admission = executors
+        .scheduler
+        .acquire_durable(
+            momento_api::runtime::DurableSourceId::LocalImport,
+            momento_api::runtime::SchedulerAdmissionKind::NewClaim,
+        )
+        .await
+        .expect("first import admission");
+    let media_id = import_staged_file(
+        first_source,
+        ImportSource::Local,
+        user_id,
+        &executors,
+        StagedImportCleanup {
+            source: false,
+            supplemental_metadata: false,
+        },
+        &first_admission,
+    )
+    .await
+    .expect("first import")
+    .completed_media_id()
+    .expect("first import was not deferred");
+
+    let content_hash = Sha256::digest(source_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let competing_claim_token = uuid::Uuid::new_v4().to_string();
+    pool.get()
+        .expect("database")
+        .execute(
+            momento_api::database::queries::import::INSERT_CONTENT_HASH_CLAIM,
+            rusqlite::params![content_hash, competing_claim_token, "local"],
+        )
+        .expect("competing content-hash claim");
+
+    let (second_source, second_path) = staged_file(
+        &data_directory,
+        StorageRootId::Imports,
+        &format!("{directory_name}/second.jpg"),
+    );
+    std::fs::write(&second_path, source_bytes).expect("second source");
+    std::fs::write(
+        second_path.with_file_name("second.jpg.supplemental-metadata.json"),
+        b"{\"description\":\"second\"}",
+    )
+    .expect("second sidecar");
+    let second_admission = executors
+        .scheduler
+        .acquire_durable(
+            momento_api::runtime::DurableSourceId::LocalImport,
+            momento_api::runtime::SchedulerAdmissionKind::NewClaim,
+        )
+        .await
+        .expect("second import admission");
+    let deferred = import_staged_file(
+        second_source,
+        ImportSource::Local,
+        user_id,
+        &executors,
+        StagedImportCleanup {
+            source: false,
+            supplemental_metadata: false,
+        },
+        &second_admission,
+    )
+    .await
+    .expect("deferred duplicate import");
+    let momento_api::processor::import::ImportStagedFileOutcome::Deferred(prepared) = deferred
+    else {
+        panic!("duplicate import bypassed its active content-hash owner");
+    };
+
+    pool.get()
+        .expect("database")
+        .execute(
+            momento_api::database::queries::import::RELEASE_CONTENT_HASH_CLAIM,
+            rusqlite::params![content_hash, competing_claim_token],
+        )
+        .expect("release competing content-hash claim");
+    let resumed_media_id = finish_deferred_import(
+        momento_api::processor::import::resume_staged_file_import(
+            *prepared,
+            &executors,
+            &second_admission,
+        )
+        .await
+        .expect("resume duplicate import"),
+        &executors,
+        &second_admission,
+    )
+    .await;
+    assert_eq!(resumed_media_id, media_id);
+
+    let canonical_path: String = pool
+        .get()
+        .expect("database")
+        .query_row(
+            "SELECT file_path FROM media WHERE id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("canonical path");
+    assert_eq!(
+        std::fs::read(
+            data_directory
+                .join("originals")
+                .join(format!("{canonical_path}.supplemental-metadata.json")),
+        )
+        .expect("canonical sidecar"),
+        b"{\"description\":\"second\"}"
+    );
 }
 
 #[tokio::test]

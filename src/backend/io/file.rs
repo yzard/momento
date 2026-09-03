@@ -327,10 +327,10 @@ impl MutationGateRegistry {
         }
     }
 
-    pub(crate) fn retire(
+    pub(crate) fn release_fence(
         &self,
         group_id: &str,
-        terminal_version: i64,
+        durable_version: i64,
     ) -> Result<(), MutationLeaseError> {
         let mut gates = self
             .gates
@@ -339,7 +339,7 @@ impl MutationGateRegistry {
         let Some(gate) = gates.get_mut(group_id) else {
             return Ok(());
         };
-        if terminal_version < gate.minimum_version || gate.owner.is_some() {
+        if durable_version < gate.minimum_version || gate.owner.is_some() {
             return Err(MutationLeaseError::Fenced);
         }
         gate.epoch = self.next_generation()?;

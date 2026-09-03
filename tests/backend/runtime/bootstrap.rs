@@ -153,6 +153,61 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
 }
 
 #[test]
+fn journal_mutation_registry_covers_every_active_mutation_owner() {
+    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
+        cpu_workers: 8,
+        io_workers: 4,
+        sqlite_workers: 4,
+    })
+    .expect("runtime sizing");
+    assert!(sizing.durable_orchestrations > sizing.file_queue_capacity);
+    let mutation_capacity = sizing.journal_mutation_registry_capacity;
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[thread_pool]\ncpu_workers=8\nio_workers=4\nsqlite_workers=4\n",
+    )
+    .expect("write config");
+    let identity = momento_api::config::load_config_with_identity(&config_path)
+        .expect("load config identity")
+        .identity;
+    let runtime = RuntimeBuilder::new(
+        sizing,
+        directory.path().join("database.sqlite"),
+        identity,
+        directory.path().join("static"),
+    )
+    .build()
+    .expect("application runtime");
+    let file_io = runtime.executors().file_io;
+    let mut tickets = Vec::new();
+    for index in 0..mutation_capacity {
+        tickets.push(
+            file_io
+                .reserve_journal_mutation(&format!("mutation-{index}"), 1)
+                .expect("derived mutation slot"),
+        );
+    }
+    assert_eq!(
+        file_io
+            .reserve_journal_mutation("mutation-over-capacity", 1)
+            .expect_err("registry remains bounded"),
+        momento_api::io::file::MutationLeaseError::Capacity
+    );
+    drop(tickets.pop());
+    tickets.push(
+        file_io
+            .reserve_journal_mutation("mutation-replacement", 1)
+            .expect("released mutation slot"),
+    );
+    drop(tickets);
+    drop(file_io);
+
+    runtime.block_on(async {}).expect("clean runtime shutdown");
+}
+
+#[test]
 fn runtime_builder_rejects_a_config_changed_after_initial_read() {
     let directory = tempfile::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");

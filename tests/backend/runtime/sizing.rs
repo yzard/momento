@@ -101,6 +101,14 @@ fn executor_queue_and_registry_capacities_are_derived() {
     assert_eq!(sizing.sqlite_queue_capacity, 4);
     assert_eq!(sizing.log_event_capacity, 128);
     assert_eq!(sizing.file_registry_capacity, 73);
+    assert_eq!(sizing.journal_mutation_registry_capacity, 40);
+    assert_eq!(
+        sizing.journal_mutation_registry_capacity,
+        sizing.durable_orchestrations
+            + sizing.active_requests.max(sizing.active_stream_sessions)
+            + sizing.active_inbound_durable_streams
+    );
+    assert!(sizing.journal_mutation_registry_capacity > sizing.file_queue_capacity);
     assert!(sizing.scheduler_ingress_capacity > sizing.active_requests);
     assert!(sizing.required_open_files > sizing.active_connections as u64);
 }

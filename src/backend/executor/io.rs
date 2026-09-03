@@ -422,12 +422,12 @@ impl FileIoExecutorHandle {
         self.mutation_gates.fence(group_id, next_version).await
     }
 
-    pub fn retire_journal_mutation_fence(
+    pub fn release_journal_mutation_fence(
         &self,
         group_id: &str,
-        terminal_version: i64,
+        durable_version: i64,
     ) -> Result<(), MutationLeaseError> {
-        self.mutation_gates.retire(group_id, terminal_version)
+        self.mutation_gates.release_fence(group_id, durable_version)
     }
 
     pub async fn publish_journal_entry_durable(

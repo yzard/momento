@@ -1527,21 +1527,16 @@ async fn handoff_result_journal_rollback(
     file_io: &FileIoExecutorHandle,
     scheduler: &SchedulerHandle,
 ) {
-    if let Err(error) = file_io
-        .fence_journal_mutations(group_id, expected_version)
-        .await
+    if let Err(error) = crate::io::recovery::cancel_generic_file_operation_with_components(
+        sqlite,
+        file_io,
+        scheduler,
+        group_id.to_string(),
+        expected_version,
+    )
+    .await
     {
-        tracing::error!(group_id, error = %error, "failed to fence result Journal mutation");
-        return;
-    }
-    match sqlite
-        .request_file_operation_cancellation_durable(group_id.to_string(), expected_version)
-        .await
-    {
-        Ok(_) => scheduler.wake_journal_recovery(),
-        Err(error) => {
-            tracing::error!(group_id, error = %error, "failed to hand result Journal rollback to recovery");
-        }
+        tracing::error!(group_id, error = %error, "failed to hand result Journal rollback to recovery");
     }
 }
 
