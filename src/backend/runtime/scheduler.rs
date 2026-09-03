@@ -561,6 +561,7 @@ fn reconstruct_space_budget(
     reconstruction.set_allocated_bytes(sqlite_allocated_bytes, log_allocated_bytes);
     if reservation_table_exists {
         let mut after_id = String::new();
+        let mut reported_filesystem_change = false;
         loop {
             let mut statement = connection
                 .prepare(
@@ -607,6 +608,21 @@ fn reconstruct_space_budget(
                 return Err("space reconstruction page unexpectedly became empty".to_string());
             };
             after_id = last.reservation_id.clone();
+            if !reported_filesystem_change {
+                if let Some(previous_filesystem_id) = page
+                    .iter()
+                    .find(|record| record.filesystem_id != budget.filesystem_id())
+                    .map(|record| record.filesystem_id.as_str())
+                {
+                    eprintln!(
+                        "Warning: data filesystem identity changed across restart \
+                         (previous={previous_filesystem_id}, current={}); reconstructing durable \
+                         reservations from database ownership evidence",
+                        budget.filesystem_id()
+                    );
+                    reported_filesystem_change = true;
+                }
+            }
             reconstruction
                 .add_page(&page)
                 .map_err(|error| error.to_string())?;

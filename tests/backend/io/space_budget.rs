@@ -186,6 +186,39 @@ fn reconstruction_restores_only_the_unconsumed_sqlite_parent_capacity() {
 }
 
 #[test]
+fn durable_reservations_survive_a_filesystem_identity_change_across_restart() {
+    let budget = DataDirSpaceBudget::from_snapshot(FilesystemSpaceSnapshot {
+        filesystem_id: "filesystem-after-zfs-remount".to_string(),
+        total_bytes: 100 * GIBIBYTE,
+        free_bytes: 98 * GIBIBYTE,
+        fragment_size: 4096,
+    })
+    .expect("space budget");
+    let record = DurableSpaceReservationRecord {
+        reservation_id: "journal-before-zfs-remount".to_string(),
+        class: SpaceReservationClass::Journal,
+        owner_kind: "file_operation".to_string(),
+        owner_id: "owner-before-zfs-remount".to_string(),
+        journal_group_id: Some("group-before-zfs-remount".to_string()),
+        filesystem_id: "filesystem-before-zfs-remount".to_string(),
+        reserved_peak_additional_bytes: GIBIBYTE,
+        newly_allocated_blocks: GIBIBYTE / 4,
+        version: 3,
+    };
+    let mut reconstruction = budget.begin_reconstruction();
+    reconstruction
+        .add_page(std::slice::from_ref(&record))
+        .expect("reconstruct reservation created before remount");
+    let snapshot = reconstruction.publish().expect("publish reconstruction");
+    assert_eq!(snapshot.journal_outstanding_bytes, 3 * GIBIBYTE / 4);
+
+    let checkout = budget
+        .reacquire_durable(&record)
+        .expect("reacquire reservation created before remount");
+    drop(checkout);
+}
+
+#[test]
 fn reconstructed_sqlite_work_competes_with_journal_work_for_shared_capacity() {
     let budget = DataDirSpaceBudget::from_snapshot(FilesystemSpaceSnapshot {
         filesystem_id: "filesystem-shared-data".to_string(),

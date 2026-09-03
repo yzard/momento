@@ -712,7 +712,7 @@ impl DataDirSpaceBudget {
         &self,
         record: &DurableSpaceReservationRecord,
     ) -> Result<DurableSpaceCheckout, SpaceBudgetError> {
-        record.validate_for(&self.inner.layout.filesystem_id)?;
+        record.validate()?;
         let mut state = self.lock_state()?;
         let entry = state
             .reservations
@@ -933,7 +933,7 @@ impl SpaceReconstruction {
             .try_reserve(records.len())
             .map_err(|_| SpaceBudgetError::CapacityStateAllocation)?;
         for record in records {
-            record.validate_for(&self.budget.inner.layout.filesystem_id)?;
+            record.validate()?;
             if self.reservations.contains_key(&record.reservation_id) {
                 return Err(SpaceBudgetError::InvalidReconstruction(
                     "duplicate reservation identity",
@@ -1306,7 +1306,7 @@ impl DurableSpaceCheckout {
         if self.class != SpaceReservationClass::Sqlite {
             return Err(SpaceBudgetError::ReservationStateMismatch);
         }
-        record.validate_for(self.budget.filesystem_id())?;
+        record.validate()?;
         let expected_owner = DurableOwner::from_record(record);
         let cleanup_owner_transition = self.owner.owner_kind == "llm_result"
             && expected_owner.owner_kind == "llm_result_cleanup"
@@ -1373,20 +1373,20 @@ impl Drop for DurableSpaceCheckout {
 }
 
 impl DurableSpaceReservationRecord {
-    fn validate_for(&self, filesystem_id: &str) -> Result<(), SpaceBudgetError> {
+    fn validate(&self) -> Result<(), SpaceBudgetError> {
         validate_identity(&self.reservation_id)?;
         validate_owner(&self.owner_kind)?;
         validate_owner(&self.owner_id)?;
+        validate_identity(&self.filesystem_id)?;
         if let Some(group_id) = &self.journal_group_id {
             validate_identity(group_id)?;
         }
-        if self.filesystem_id != filesystem_id
-            || self.reserved_peak_additional_bytes == 0
+        if self.reserved_peak_additional_bytes == 0
             || self.newly_allocated_blocks > self.reserved_peak_additional_bytes
             || self.version == 0
         {
             return Err(SpaceBudgetError::InvalidReconstruction(
-                "reservation evidence does not match the data filesystem",
+                "durable reservation evidence is invalid",
             ));
         }
         if self.class == SpaceReservationClass::Journal && self.journal_group_id.is_none() {
