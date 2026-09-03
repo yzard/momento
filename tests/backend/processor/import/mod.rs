@@ -7,8 +7,9 @@ use momento_api::{
     config::Config,
     database::{create_pool_at, init_database},
     processor::import::{
-        import_staged_file, run_local_import, run_webdav_import_cycle, CreateImportJobOutcome,
-        ImportSettings, ImportSource, StagedImportCleanup, StagedImportFile,
+        import_staged_file, import_staged_file_to_completion, run_local_import,
+        run_webdav_import_cycle, CreateImportJobOutcome, ImportSettings, ImportSource,
+        StagedImportCleanup, StagedImportFile, StagedImportRequest,
     },
 };
 use sha2::{Digest, Sha256};
@@ -111,6 +112,72 @@ async fn qoi_import_uses_the_canonical_image_mime_type() {
     assert_eq!(media_type, "image");
     assert_eq!(mime_type, "image/qoi");
     assert_eq!(metadata_status, "queued");
+}
+
+#[tokio::test]
+async fn staged_import_retries_a_busy_database_without_failing_the_media() {
+    let _filesystem_test_guard = lock_webdav_test().await;
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "busy-import-retry", "busy-import-retry@example.com");
+    let (executors, data_directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let (staged_source, source_path) = staged_file(
+        &data_directory,
+        StorageRootId::Imports,
+        &format!("busy-retry-{}/photo.jpg", uuid::Uuid::new_v4()),
+    );
+    std::fs::write(&source_path, b"retry database busy import").expect("import source");
+    let admission = executors
+        .scheduler
+        .acquire_durable(
+            momento_api::runtime::DurableSourceId::LocalImport,
+            momento_api::runtime::SchedulerAdmissionKind::NewClaim,
+        )
+        .await
+        .expect("import admission");
+    let database_path = data_directory.join("database.sqlite");
+    let writer = rusqlite::Connection::open(&database_path).expect("busy writer");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("hold SQLite write lock");
+
+    let import_executors = executors.clone();
+    let import_task = tokio::spawn(async move {
+        import_staged_file_to_completion(
+            StagedImportRequest {
+                source: staged_source,
+                import_source: ImportSource::Local,
+                user_id,
+                cleanup: StagedImportCleanup {
+                    source: false,
+                    supplemental_metadata: false,
+                },
+                durable_source: momento_api::runtime::DurableSourceId::LocalImport,
+            },
+            &import_executors,
+            &import_executors.scheduler,
+            admission,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    writer.execute_batch("COMMIT").expect("release SQLite lock");
+
+    let media_id = import_task
+        .await
+        .expect("import task")
+        .expect("busy database retry import");
+    let (import_state, failure): (String, Option<String>) = pool
+        .get()
+        .expect("database")
+        .query_row(
+            "SELECT import_state, import_error FROM media WHERE id = ?",
+            [media_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("imported media");
+    assert_eq!(import_state, "imported");
+    assert_eq!(failure, None);
 }
 
 #[tokio::test]

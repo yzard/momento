@@ -1,8 +1,10 @@
 use futures::stream::{self, StreamExt};
 use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 use crate::config::Config;
@@ -21,6 +23,8 @@ use crate::io::{StorageFileSession, StorageFileSnapshot};
 use crate::processor::media_processor::build_original_filename;
 use crate::processor::metadata::supplemental_metadata_candidates;
 use crate::runtime::{DurableAdmission, DurableSourceId, SchedulerAdmissionKind};
+
+const IMPORT_DATABASE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExistingMedia {
@@ -92,6 +96,15 @@ impl StagedImportFile {
 pub struct StagedImportCleanup {
     pub source: bool,
     pub supplemental_metadata: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StagedImportRequest {
+    pub source: StagedImportFile,
+    pub import_source: ImportSource,
+    pub user_id: i64,
+    pub cleanup: StagedImportCleanup,
+    pub durable_source: DurableSourceId,
 }
 
 struct WebDavImportCandidate {
@@ -586,14 +599,12 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
             return;
         }
     };
-    if let Err(error) = settings
-        .executors
-        .sqlite
-        .set_import_job_total_durable(job_id, source_files.len() as i64)
-        .await
-    {
-        warn!(job_id, error = %error, "failed to persist local import total");
-    }
+    persist_import_total(
+        &settings.executors.sqlite,
+        job_id,
+        source_files.len() as i64,
+    )
+    .await;
     drop(initial_worker);
 
     let concurrency = settings.scheduler.durable_capacity();
@@ -617,49 +628,24 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
                     update_import_progress(&settings.executors.sqlite, job_id, false, Some(detail)).await;
                     return;
                 }
-                let mut worker_permit = worker_permit.expect("worker permit was checked");
+                let worker_permit = worker_permit.expect("worker permit was checked");
                 let source_label = staged_source.path.relative_path().to_string();
-                let mut attempt = import_staged_file(
-                    staged_source,
-                    ImportSource::Local,
-                    settings.user_id,
-                    &settings.executors,
-                    StagedImportCleanup {
-                        source: true,
-                        supplemental_metadata: true,
+                let import_result = import_staged_file_to_completion(
+                    StagedImportRequest {
+                        source: staged_source,
+                        import_source: ImportSource::Local,
+                        user_id: settings.user_id,
+                        cleanup: StagedImportCleanup {
+                            source: true,
+                            supplemental_metadata: true,
+                        },
+                        durable_source: DurableSourceId::LocalImport,
                     },
-                    &worker_permit,
+                    &settings.executors,
+                    &settings.scheduler,
+                    worker_permit,
                 )
                 .await;
-                let import_result = loop {
-                    match attempt {
-                        Ok(ImportStagedFileOutcome::Deferred(prepared)) => {
-                            drop(worker_permit);
-                            tokio::task::yield_now().await;
-                            worker_permit = match settings
-                                .scheduler
-                                .acquire_durable(
-                                    DurableSourceId::LocalImport,
-                                    SchedulerAdmissionKind::ExistingClaimCompletion,
-                                )
-                                .await
-                            {
-                                Ok(worker_permit) => worker_permit,
-                                Err(error) => {
-                                    break Err(AppError::Unavailable(error));
-                                }
-                            };
-                            attempt = resume_staged_file_import(
-                                *prepared,
-                                &settings.executors,
-                                &worker_permit,
-                            )
-                            .await;
-                        }
-                        Ok(ImportStagedFileOutcome::Completed(media_id)) => break Ok(media_id),
-                        Err(error) => break Err(error),
-                    }
-                };
                 match import_result {
                     Ok(_) => {
                         settings.scheduler.wake_metadata();
@@ -681,13 +667,74 @@ pub async fn run_local_import(settings: ImportSettings, job_id: i64) {
 
     while imports.next().await.is_some() {}
 
-    if let Err(error) = settings
-        .executors
-        .sqlite
-        .complete_import_job_durable(job_id)
-        .await
-    {
-        warn!(job_id, error = %error, "failed to complete local import job");
+    complete_import_job(&settings.executors.sqlite, job_id).await;
+}
+
+pub async fn import_staged_file_to_completion(
+    request: StagedImportRequest,
+    executors: &crate::runtime::ExecutorHandles,
+    scheduler: &crate::runtime::SchedulerHandle,
+    initial_admission: DurableAdmission,
+) -> AppResult<i64> {
+    let StagedImportRequest {
+        source: staged_source,
+        import_source,
+        user_id,
+        cleanup,
+        durable_source,
+    } = request;
+    let source_label = staged_source.path.relative_path().to_string();
+    let mut admission = initial_admission;
+    let mut attempt = import_staged_file(
+        staged_source.clone(),
+        import_source,
+        user_id,
+        executors,
+        cleanup,
+        &admission,
+    )
+    .await;
+    loop {
+        match attempt {
+            Ok(ImportStagedFileOutcome::Completed(media_id)) => return Ok(media_id),
+            Ok(ImportStagedFileOutcome::Deferred(prepared)) => {
+                drop(admission);
+                tokio::task::yield_now().await;
+                admission = scheduler
+                    .acquire_durable(
+                        durable_source,
+                        SchedulerAdmissionKind::ExistingClaimCompletion,
+                    )
+                    .await
+                    .map_err(AppError::Unavailable)?;
+                attempt = resume_staged_file_import(*prepared, executors, &admission).await;
+            }
+            Err(AppError::DatabaseBusy) => {
+                warn!(
+                    path = %source_label,
+                    "import database operation was busy and will retry at the durable tail"
+                );
+                drop(admission);
+                tokio::time::sleep(IMPORT_DATABASE_RETRY_DELAY).await;
+                admission = scheduler
+                    .acquire_durable(
+                        durable_source,
+                        SchedulerAdmissionKind::ExistingClaimCompletion,
+                    )
+                    .await
+                    .map_err(AppError::Unavailable)?;
+                attempt = import_staged_file(
+                    staged_source.clone(),
+                    import_source,
+                    user_id,
+                    executors,
+                    cleanup,
+                    &admission,
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -700,11 +747,100 @@ async fn update_import_progress(
     let error_message = error_message
         .map(|error| bounded_error_detail(&error))
         .unwrap_or_default();
-    if let Err(error) = sqlite
-        .record_import_progress_durable(job_id, success, error_message)
-        .await
+    if let Err(error) = retry_import_sqlite_operation("record_import_progress", || {
+        sqlite.record_import_progress_durable(job_id, success, error_message.clone())
+    })
+    .await
     {
         warn!(job_id, error = %error, "failed to persist import progress");
+    }
+}
+
+async fn persist_import_total(sqlite: &SqliteExecutorHandle, job_id: i64, total_files: i64) {
+    if let Err(error) = retry_import_sqlite_operation("set_import_job_total", || {
+        sqlite.set_import_job_total_durable(job_id, total_files)
+    })
+    .await
+    {
+        warn!(job_id, error = %error, "failed to persist import total");
+    }
+}
+
+async fn complete_import_job(sqlite: &SqliteExecutorHandle, job_id: i64) {
+    if let Err(error) = retry_import_sqlite_operation("complete_import_job", || {
+        sqlite.complete_import_job_durable(job_id)
+    })
+    .await
+    {
+        warn!(job_id, error = %error, "failed to complete import job");
+    }
+}
+
+async fn retry_import_sqlite_operation<T, F, Fut>(
+    operation_name: &'static str,
+    mut operation: F,
+) -> Result<T, crate::executor::ExecutorError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, crate::executor::ExecutorError>>,
+{
+    let mut retry_count = 0_u64;
+    loop {
+        match operation().await {
+            Ok(output) => return Ok(output),
+            Err(error) if import_sqlite_error_is_retryable(error.kind) => {
+                retry_count = retry_count.saturating_add(1);
+                if retry_count == 1 || retry_count.is_multiple_of(60) {
+                    warn!(
+                        operation = operation_name,
+                        retry_count,
+                        error = %error,
+                        "import SQLite operation released its executor resources and will retry at the FIFO tail"
+                    );
+                }
+                tokio::time::sleep(IMPORT_DATABASE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn import_sqlite_error_is_retryable(kind: ExecutorErrorKind) -> bool {
+    matches!(
+        kind,
+        ExecutorErrorKind::Overloaded
+            | ExecutorErrorKind::DatabaseBusy
+            | ExecutorErrorKind::DatabaseTimeout
+    )
+}
+
+async fn prepare_import_file_operation<F>(
+    executors: &crate::runtime::ExecutorHandles,
+    operation_name: &'static str,
+    mut build_plan: F,
+) -> AppResult<PrepareJournalOutcome>
+where
+    F: FnMut() -> AppResult<FileOperationPlan>,
+{
+    let mut retry_count = 0_u64;
+    loop {
+        let plan = build_plan()?;
+        match executors.sqlite.prepare_file_operation_durable(plan).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if import_sqlite_error_is_retryable(error.kind) => {
+                retry_count = retry_count.saturating_add(1);
+                if retry_count == 1 || retry_count.is_multiple_of(60) {
+                    warn!(
+                        operation = operation_name,
+                        retry_count,
+                        error = %error,
+                        "import journal preparation released its reservation and will retry at the SQLite FIFO tail"
+                    );
+                }
+                tokio::time::sleep(IMPORT_DATABASE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -1136,31 +1272,30 @@ async fn publish_supplemental_metadata(
         .byte_size
         .checked_add(4096)
         .ok_or_else(|| AppError::ResourceLimit("sidecar reservation overflow".to_string()))?;
-    let reservation = executors
-        .file_io
-        .reserve_journal_space(group_id.clone(), reservation_bytes)
-        .map_err(|error| AppError::ResourceLimit(error.to_string()))?
-        .into_result()
-        .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
-    let plan = FileOperationPlan {
-        group_id: group_id.clone(),
-        kind: "import_sidecar_publication".to_string(),
-        owner_kind: "import".to_string(),
-        owner_id: group_id.clone(),
-        claim_token: None,
-        product_target: None,
-        product_version: None,
-        entries,
-        claims,
-        space_reservation: Some(
-            JournalSpaceReservationPlan::new(reservation)
-                .map_err(|error| AppError::ResourceLimit(error.to_string()))?,
-        ),
-    };
-    if executors
-        .sqlite
-        .prepare_file_operation_durable(plan)
-        .await?
+    if prepare_import_file_operation(executors, "prepare_import_sidecar_publication", || {
+        let reservation = executors
+            .file_io
+            .reserve_journal_space(group_id.clone(), reservation_bytes)
+            .map_err(|error| AppError::ResourceLimit(error.to_string()))?
+            .into_result()
+            .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
+        Ok(FileOperationPlan {
+            group_id: group_id.clone(),
+            kind: "import_sidecar_publication".to_string(),
+            owner_kind: "import".to_string(),
+            owner_id: group_id.clone(),
+            claim_token: None,
+            product_target: None,
+            product_version: None,
+            entries: entries.clone(),
+            claims: claims.clone(),
+            space_reservation: Some(
+                JournalSpaceReservationPlan::new(reservation)
+                    .map_err(|error| AppError::ResourceLimit(error.to_string()))?,
+            ),
+        })
+    })
+    .await?
         == PrepareJournalOutcome::PathConflict
     {
         return Err(AppError::Conflict(
@@ -1222,11 +1357,13 @@ async fn publish_supplemental_metadata_group(
         .file_io
         .reserve_journal_mutation(group_id, 2)
         .map_err(|error| AppError::Internal(error.to_string()))?;
-    let grant = executors
-        .sqlite
-        .begin_file_operation_publication_durable(&ticket, 1)
-        .await?
-        .ok_or_else(|| AppError::Conflict("sidecar publication changed".to_string()))?;
+    let grant = retry_import_sqlite_operation("begin_sidecar_publication", || {
+        executors
+            .sqlite
+            .begin_file_operation_publication_durable(&ticket, 1)
+    })
+    .await?
+    .ok_or_else(|| AppError::Conflict("sidecar publication changed".to_string()))?;
     let mut lease =
         crate::io::recovery::acquire_verified_journal_mutation(executors, ticket, grant).await?;
     let mut version = 2_i64;
@@ -1242,11 +1379,15 @@ async fn publish_supplemental_metadata_group(
                 .publish_journal_entry_durable(&mut lease, sequence)
                 .await?;
         }
-        let checkpoint = executors
-            .sqlite
-            .record_file_entry_published_durable(group_id.to_string(), version, sequence)
-            .await?
-            .ok_or_else(|| AppError::Conflict("sidecar checkpoint changed".to_string()))?;
+        let checkpoint = retry_import_sqlite_operation("record_sidecar_entry_published", || {
+            executors.sqlite.record_file_entry_published_durable(
+                group_id.to_string(),
+                version,
+                sequence,
+            )
+        })
+        .await?
+        .ok_or_else(|| AppError::Conflict("sidecar checkpoint changed".to_string()))?;
         version = checkpoint.version;
         if sequence + 1 == publication_entries && !checkpoint.phase_complete {
             return Err(AppError::Internal(
@@ -1255,10 +1396,12 @@ async fn publish_supplemental_metadata_group(
         }
     }
     drop(lease);
-    if executors
-        .sqlite
-        .complete_no_product_file_operation_durable(group_id.to_string(), version)
-        .await?
+    if retry_import_sqlite_operation("complete_sidecar_publication", || {
+        executors
+            .sqlite
+            .complete_no_product_file_operation_durable(group_id.to_string(), version)
+    })
+    .await?
         != (JournalCheckpointOutcome::Advanced {
             version: version + 1,
         })
@@ -1354,14 +1497,6 @@ async fn publish_import_original(
         .checked_add(supplemental_size)
         .and_then(|size| size.checked_add(8192))
         .ok_or_else(|| AppError::ResourceLimit("import reservation size overflow".to_string()))?;
-    let reservation = executors
-        .file_io
-        .reserve_journal_space(group_id.clone(), reservation_bytes)
-        .map_err(|error| AppError::ResourceLimit(error.to_string()))?
-        .into_result()
-        .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
-    let reservation = JournalSpaceReservationPlan::new(reservation)
-        .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
     let supplemental_hash = match supplemental_metadata {
         Some(metadata) => Some(executors.cpu.sha256_durable(metadata.bytes.clone()).await?),
         None => None,
@@ -1437,22 +1572,29 @@ async fn publish_import_original(
             expected_version: None,
         });
     }
-    let plan = FileOperationPlan {
-        group_id: group_id.clone(),
-        kind: "import_media_publication".to_string(),
-        owner_kind: "import".to_string(),
-        owner_id: media_id.to_string(),
-        claim_token: Some(claim_token.to_string()),
-        product_target: Some("import_media".to_string()),
-        product_version: Some(1),
-        entries,
-        claims,
-        space_reservation: Some(reservation),
-    };
-    if executors
-        .sqlite
-        .prepare_file_operation_durable(plan)
-        .await?
+    if prepare_import_file_operation(executors, "prepare_import_media_publication", || {
+        let reservation = executors
+            .file_io
+            .reserve_journal_space(group_id.clone(), reservation_bytes)
+            .map_err(|error| AppError::ResourceLimit(error.to_string()))?
+            .into_result()
+            .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
+        let reservation = JournalSpaceReservationPlan::new(reservation)
+            .map_err(|error| AppError::ResourceLimit(error.to_string()))?;
+        Ok(FileOperationPlan {
+            group_id: group_id.clone(),
+            kind: "import_media_publication".to_string(),
+            owner_kind: "import".to_string(),
+            owner_id: media_id.to_string(),
+            claim_token: Some(claim_token.to_string()),
+            product_target: Some("import_media".to_string()),
+            product_version: Some(1),
+            entries: entries.clone(),
+            claims: claims.clone(),
+            space_reservation: Some(reservation),
+        })
+    })
+    .await?
         == PrepareJournalOutcome::PathConflict
     {
         return Err(AppError::Conflict(
@@ -1497,13 +1639,15 @@ async fn publish_import_original(
             .file_io
             .reserve_journal_mutation(&group_id, 2)
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        let grant = executors
-            .sqlite
-            .begin_file_operation_publication_durable(&ticket, 1)
-            .await?
-            .ok_or_else(|| {
-                AppError::Conflict("import publication changed before it began".to_string())
-            })?;
+        let grant = retry_import_sqlite_operation("begin_import_media_publication", || {
+            executors
+                .sqlite
+                .begin_file_operation_publication_durable(&ticket, 1)
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("import publication changed before it began".to_string())
+        })?;
         let mut lease =
             crate::io::recovery::acquire_verified_journal_mutation(executors, ticket, grant)
                 .await?;
@@ -1518,13 +1662,17 @@ async fn publish_import_original(
                 .file_io
                 .publish_journal_entry_durable(&mut lease, sequence)
                 .await?;
-            let current = executors
-                .sqlite
-                .record_file_entry_published_durable(group_id.clone(), version, sequence)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Conflict("import publication changed before checkpoint".to_string())
-                })?;
+            let current = retry_import_sqlite_operation("record_import_entry_published", || {
+                executors.sqlite.record_file_entry_published_durable(
+                    group_id.clone(),
+                    version,
+                    sequence,
+                )
+            })
+            .await?
+            .ok_or_else(|| {
+                AppError::Conflict("import publication changed before checkpoint".to_string())
+            })?;
             version = current.version;
             checkpoint = Some(current);
         }
@@ -1584,13 +1732,14 @@ async fn attempt_prepared_staged_import(
     let sqlite = &executors.sqlite;
     let source_path = Path::new(source.path.relative_path());
     let claim_token = uuid::Uuid::new_v4().to_string();
-    let claim_outcome = sqlite
-        .acquire_import_content_hash_claim_durable(
+    let claim_outcome = retry_import_sqlite_operation("acquire_import_content_hash_claim", || {
+        sqlite.acquire_import_content_hash_claim_durable(
             content_hash.clone(),
             claim_token.clone(),
             import_source,
         )
-        .await?;
+    })
+    .await?;
     if matches!(claim_outcome, ImportContentHashClaimOutcome::Busy) {
         return Ok(ImportStagedFileOutcome::Deferred(Box::new(
             PreparedStagedImport {
@@ -1649,24 +1798,25 @@ async fn attempt_prepared_staged_import(
 
     let temporary_filename = format!(".importing-{}", uuid::Uuid::new_v4());
     let temporary_relative_path = PathBuf::from(".importing").join(&temporary_filename);
-    let import_target = sqlite
-        .allocate_import_media_durable(AllocateImportMedia {
+    let source_size = i64::try_from(source_size).map_err(|_| {
+        AppError::ResourceLimit("import source size exceeds SQLite integer range".to_string())
+    })?;
+    let temporary_relative_path_string = temporary_relative_path.to_string_lossy().into_owned();
+    let import_target = retry_import_sqlite_operation("allocate_import_media", || {
+        sqlite.allocate_import_media_durable(AllocateImportMedia {
             user_id,
-            temporary_filename,
-            original_filename,
-            temporary_relative_path: temporary_relative_path.to_string_lossy().into_owned(),
+            temporary_filename: temporary_filename.clone(),
+            original_filename: original_filename.clone(),
+            temporary_relative_path: temporary_relative_path_string.clone(),
             media_type: media_type.to_string(),
-            mime_type,
-            source_size: i64::try_from(source_size).map_err(|_| {
-                AppError::ResourceLimit(
-                    "import source size exceeds SQLite integer range".to_string(),
-                )
-            })?,
+            mime_type: mime_type.clone(),
+            source_size,
             content_hash: content_hash.clone(),
             source_modified_seconds,
             import_source,
         })
-        .await?;
+    })
+    .await?;
     let (media_id, temporary_relative_path) = match import_target {
         ImportTarget::New {
             media_id,
@@ -1727,13 +1877,13 @@ async fn attempt_prepared_staged_import(
 
         let product_group_id = committed_product.group_id.clone();
         let product_group_version = committed_product.version;
-        let finalized = sqlite
-            .finalize_import_media_durable(FinalizeImportMedia {
+        let finalized = retry_import_sqlite_operation("finalize_import_media", || {
+            sqlite.finalize_import_media_durable(FinalizeImportMedia {
                 media_id,
                 user_id,
                 final_filename: final_filename.clone(),
                 final_relative_path: final_relative_path.to_string_lossy().into_owned(),
-                product_group_id: committed_product.group_id,
+                product_group_id: product_group_id.clone(),
                 product_group_version,
                 claim_token: claim_token.clone(),
                 source_cleanup: (cleanup.source
@@ -1751,7 +1901,8 @@ async fn attempt_prepared_staged_import(
                     )
                 }),
             })
-            .await;
+        })
+        .await;
         let finalized = match finalized {
             Ok(finalized) => finalized,
             Err(error) => {
@@ -1795,9 +1946,18 @@ async fn attempt_prepared_staged_import(
     .await;
 
     if let Err(error) = result {
-        let _ = sqlite
-            .mark_import_media_failed_durable(media_id, bounded_error_detail(&error.to_string()))
-            .await;
+        let failure_detail = bounded_error_detail(&error.to_string());
+        if let Err(mark_error) = retry_import_sqlite_operation("mark_import_media_failed", || {
+            sqlite.mark_import_media_failed_durable(media_id, failure_detail.clone())
+        })
+        .await
+        {
+            warn!(
+                media_id,
+                error = %mark_error,
+                "failed to persist terminal import failure"
+            );
+        }
         return Err(error);
     }
     claim_guard.release().await?;
@@ -1825,13 +1985,13 @@ impl ImportContentHashClaimGuard {
     }
 
     async fn release(mut self) -> AppResult<()> {
-        if !self
-            .sqlite
-            .release_import_content_hash_claim_durable(
+        if !retry_import_sqlite_operation("release_import_content_hash_claim", || {
+            self.sqlite.release_import_content_hash_claim_durable(
                 self.content_hash.clone(),
                 self.claim_token.clone(),
             )
-            .await?
+        })
+        .await?
         {
             return Err(AppError::Conflict(
                 "import content-hash claim changed before release".to_string(),
@@ -1984,8 +2144,8 @@ async fn absorb_existing_media(
         .await?;
     }
 
-    sqlite
-        .absorb_existing_media_durable(AbsorbExistingMediaDatabase {
+    retry_import_sqlite_operation("absorb_existing_media", || {
+        sqlite.absorb_existing_media_durable(AbsorbExistingMediaDatabase {
             media_id: existing_media.id,
             user_id,
             source_modified_seconds,
@@ -2005,7 +2165,8 @@ async fn absorb_existing_media(
                 )
             }),
         })
-        .await?;
+    })
+    .await?;
     if cleanup.source || (cleanup.supplemental_metadata && supplemental_metadata.is_some()) {
         executors.scheduler.wake_journal_recovery();
     }
@@ -2158,17 +2319,12 @@ pub async fn run_webdav_import_cycle(
     }
     drop(upload_barrier);
     drop(cycle_worker);
-    if let Err(error) = sqlite
-        .set_import_job_total_durable(job_id, claimed_imports.len() as i64)
-        .await
-    {
-        warn!(job_id, error = %error, "failed to persist WebDAV import total");
-    }
+    persist_import_total(sqlite, job_id, claimed_imports.len() as i64).await;
     stream::iter(claimed_imports)
         .for_each_concurrent(
             scheduler.durable_capacity(),
             |(staged_source, user_id, ready_file_path, supplemental_ready_file_path)| async move {
-                let Ok(mut worker_permit) = scheduler
+                let Ok(worker_permit) = scheduler
                     .acquire_durable(
                         DurableSourceId::WebDavImport,
                         SchedulerAdmissionKind::ExistingClaimCompletion,
@@ -2178,41 +2334,22 @@ pub async fn run_webdav_import_cycle(
                     return;
                 };
                 let source_label = staged_source.path.relative_path().to_string();
-                let mut attempt = import_staged_file(
-                    staged_source,
-                    ImportSource::Webdav,
-                    user_id,
-                    executors,
-                    StagedImportCleanup {
-                        source: true,
-                        supplemental_metadata: true,
+                let import_result = import_staged_file_to_completion(
+                    StagedImportRequest {
+                        source: staged_source,
+                        import_source: ImportSource::Webdav,
+                        user_id,
+                        cleanup: StagedImportCleanup {
+                            source: true,
+                            supplemental_metadata: true,
+                        },
+                        durable_source: DurableSourceId::WebDavImport,
                     },
-                    &worker_permit,
+                    executors,
+                    scheduler,
+                    worker_permit,
                 )
                 .await;
-                let import_result = loop {
-                    match attempt {
-                        Ok(ImportStagedFileOutcome::Deferred(prepared)) => {
-                            drop(worker_permit);
-                            tokio::task::yield_now().await;
-                            worker_permit = match scheduler
-                                .acquire_durable(
-                                    DurableSourceId::WebDavImport,
-                                    SchedulerAdmissionKind::ExistingClaimCompletion,
-                                )
-                                .await
-                            {
-                                Ok(worker_permit) => worker_permit,
-                                Err(error) => break Err(AppError::Unavailable(error)),
-                            };
-                            attempt =
-                                resume_staged_file_import(*prepared, executors, &worker_permit)
-                                    .await;
-                        }
-                        Ok(ImportStagedFileOutcome::Completed(media_id)) => break Ok(media_id),
-                        Err(error) => break Err(error),
-                    }
-                };
                 if let Err(error) = import_result {
                     let detail = bounded_error_detail(&format!(
                         "WebDAV import failed for {}: {error}",
@@ -2234,9 +2371,7 @@ pub async fn run_webdav_import_cycle(
             },
         )
         .await;
-    if let Err(error) = sqlite.complete_import_job_durable(job_id).await {
-        warn!(job_id, error = %error, "failed to complete WebDAV import job");
-    }
+    complete_import_job(sqlite, job_id).await;
 }
 
 async fn collect_import_files(
@@ -2359,13 +2494,14 @@ async fn delete_ready_paths(
 ) {
     let mut remove = vec![ready_file_path.to_string()];
     remove.extend(supplemental_ready_file_path.map(str::to_string));
-    if let Err(error) = sqlite
-        .update_webdav_ready_paths_durable(UpdateWebdavReadyPaths {
+    if let Err(error) = retry_import_sqlite_operation("update_webdav_ready_paths", || {
+        sqlite.update_webdav_ready_paths_durable(UpdateWebdavReadyPaths {
             user_id,
-            remove,
+            remove: remove.clone(),
             add: Vec::new(),
         })
-        .await
+    })
+    .await
     {
         warn!("failed to remove imported WebDAV readiness: {error}");
     }

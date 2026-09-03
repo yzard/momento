@@ -9,7 +9,8 @@ use crate::error::{AppError, AppResult};
 use crate::executor::{ExecutorErrorKind, Sha256Session, SqliteExecutorHandle};
 use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::processor::import::{
-    import_staged_file, ImportSource, StagedImportCleanup, StagedImportFile,
+    import_staged_file_to_completion, ImportSource, StagedImportCleanup, StagedImportFile,
+    StagedImportRequest,
 };
 use crate::runtime::{DurableSourceId, ExecutorHandles, SchedulerAdmissionKind, SchedulerHandle};
 
@@ -236,7 +237,7 @@ pub async fn run_cycle(executors: &ExecutorHandles) -> AppResult<()> {
 async fn process_claimed_asset(
     executors: &ExecutorHandles,
     asset: ClaimedBackupAsset,
-    mut worker_permit: crate::runtime::DurableAdmission,
+    worker_permit: crate::runtime::DurableAdmission,
 ) -> AppResult<()> {
     let sqlite = &executors.sqlite;
     let scheduler = &executors.scheduler;
@@ -271,42 +272,22 @@ async fn process_claimed_asset(
             NormalizedStoragePath::parse(&asset.staged_path)
                 .map_err(|error| AppError::Validation(error.to_string()))?,
         )?;
-        let mut attempt = import_staged_file(
-            staged_source,
-            ImportSource::MobileBackup,
-            asset.user_id,
-            executors,
-            StagedImportCleanup {
-                source: false,
-                supplemental_metadata: false,
+        import_staged_file_to_completion(
+            StagedImportRequest {
+                source: staged_source,
+                import_source: ImportSource::MobileBackup,
+                user_id: asset.user_id,
+                cleanup: StagedImportCleanup {
+                    source: false,
+                    supplemental_metadata: false,
+                },
+                durable_source: DurableSourceId::BackupImport,
             },
-            &worker_permit,
+            executors,
+            scheduler,
+            worker_permit,
         )
-        .await?;
-        loop {
-            match attempt {
-                crate::processor::import::ImportStagedFileOutcome::Completed(media_id) => {
-                    break Ok(media_id);
-                }
-                crate::processor::import::ImportStagedFileOutcome::Deferred(prepared) => {
-                    drop(worker_permit);
-                    tokio::task::yield_now().await;
-                    worker_permit = scheduler
-                        .acquire_durable(
-                            DurableSourceId::BackupImport,
-                            SchedulerAdmissionKind::ExistingClaimCompletion,
-                        )
-                        .await
-                        .map_err(AppError::Unavailable)?;
-                    attempt = crate::processor::import::resume_staged_file_import(
-                        *prepared,
-                        executors,
-                        &worker_permit,
-                    )
-                    .await?;
-                }
-            }
-        }
+        .await
     }
     .await;
 
