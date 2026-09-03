@@ -719,9 +719,10 @@ pub fn resolve_config_environment(
         );
     }
     if resolved.contains(RESET_ADMIN_PASSWORD_PLACEHOLDER) {
-        let reset_admin_password =
-            required_environment_value(reset_admin_password, "RESET_ADMIN_PASSWORD")?;
-        let reset_admin_password = parse_reset_admin_password(reset_admin_password)?;
+        let reset_admin_password = match reset_admin_password {
+            Some(value) => parse_reset_admin_password(value)?,
+            None => defaults::SERVER_RESET_ADMIN_PASSWORD,
+        };
         resolved = resolved.replace(
             &format!("\"{RESET_ADMIN_PASSWORD_PLACEHOLDER}\""),
             if reset_admin_password {
@@ -755,6 +756,9 @@ fn required_environment_value<'a>(value: Option<&'a str>, name: &str) -> std::io
 }
 
 fn parse_reset_admin_password(value: &str) -> std::io::Result<bool> {
+    if value.trim().is_empty() {
+        return Ok(defaults::SERVER_RESET_ADMIN_PASSWORD);
+    }
     match value {
         "true" => Ok(true),
         "false" => Ok(false),

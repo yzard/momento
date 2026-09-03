@@ -3,7 +3,10 @@ use axum_test::TestServer;
 use base64::Engine;
 use momento_api::{
     app::create_app,
-    auth::{hash_password, hash_refresh_token, prepare_admin_password_reset, verify_password},
+    auth::{
+        ensure_default_admin, hash_password, hash_refresh_token, prepare_admin_password_reset,
+        verify_password,
+    },
     config::Config,
 };
 use serde_json::{json, Value};
@@ -45,6 +48,33 @@ fn create_server_with_config(
         crate::test_utils::test_app_dependencies(pool, reset_user_id),
     );
     TestServer::new(app).expect("server")
+}
+
+#[tokio::test]
+async fn new_database_admin_uses_initial_credentials_without_reset_configuration() {
+    let pool = create_test_db();
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    ensure_default_admin(&executors)
+        .await
+        .expect("initialize administrator");
+    let server = create_server(pool, None);
+
+    let login = server
+        .post("/api/v1/user/authenticate")
+        .add_header(AUTHORIZATION, basic_credentials("admin", "admin"))
+        .await;
+    login.assert_status_ok();
+    let access_token = login.json::<Value>()["accessToken"]
+        .as_str()
+        .expect("access token")
+        .to_string();
+    let current_user = server
+        .post("/api/v1/user/get")
+        .add_header(AUTHORIZATION, format!("Bearer {access_token}"))
+        .await;
+
+    current_user.assert_status_ok();
+    assert_eq!(current_user.json::<Value>()["mustChangePassword"], true);
 }
 
 #[tokio::test]

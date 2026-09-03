@@ -204,6 +204,23 @@ fn config_environment_resolves_boolean_and_escaped_secret_placeholders() {
 }
 
 #[test]
+fn config_environment_defaults_missing_or_empty_admin_reset_to_false() {
+    for reset_admin_password in [None, Some(""), Some("   ")] {
+        let resolved = resolve_config_environment(
+            "reset_admin_password = \"${RESET_ADMIN_PASSWORD}\"",
+            None,
+            reset_admin_password,
+            None,
+            None,
+        )
+        .expect("defaulted administrator reset setting");
+        let config: toml::Value = toml::from_str(&resolved).expect("resolved TOML");
+
+        assert_eq!(config["reset_admin_password"].as_bool(), Some(false));
+    }
+}
+
+#[test]
 fn config_environment_overrides_recovery_and_shared_secrets() {
     let mut config = Config::default();
 
@@ -222,11 +239,16 @@ fn config_environment_overrides_recovery_and_shared_secrets() {
     apply_config_environment(&mut config, Some("false"), None, None)
         .expect("disabled recovery override");
     assert!(!config.server.reset_admin_password);
+
+    config.server.reset_admin_password = true;
+    apply_config_environment(&mut config, Some(""), None, None)
+        .expect("empty recovery override defaults to disabled");
+    assert!(!config.server.reset_admin_password);
 }
 
 #[test]
 fn config_environment_rejects_invalid_recovery_and_empty_secrets() {
-    for reset_admin_password in ["TRUE", "1", "yes", ""] {
+    for reset_admin_password in ["TRUE", "1", "yes"] {
         let error = apply_config_environment(
             &mut Config::default(),
             Some(reset_admin_password),
