@@ -190,13 +190,13 @@ async fn import_status_is_durable_source_specific_and_prevents_concurrent_jobs()
 
     let local_status = executors
         .sqlite
-        .load_import_status_request(ImportSource::Local)
+        .load_import_status_durable(ImportSource::Local)
         .await
         .expect("local import status")
         .job;
     let webdav_status = executors
         .sqlite
-        .load_import_status_request(ImportSource::Webdav)
+        .load_import_status_durable(ImportSource::Webdav)
         .await
         .expect("WebDAV import status")
         .job;
@@ -466,7 +466,7 @@ async fn interrupted_import_recovery_rejects_an_unjournaled_original() {
     drop(connection);
     let import_status = executors
         .sqlite
-        .load_import_status_request(ImportSource::Local)
+        .load_import_status_durable(ImportSource::Local)
         .await
         .expect("import status")
         .job;

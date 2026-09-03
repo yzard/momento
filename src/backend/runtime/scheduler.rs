@@ -442,7 +442,7 @@ impl ExecutorRuntime {
         };
 
         let handles = ExecutorHandles {
-            cpu: CpuExecutorHandle::new(ingress.clone()),
+            cpu: CpuExecutorHandle::new(ingress.clone(), sizing.cpu_workers),
             file_io: FileIoExecutorHandle::new(
                 ingress.clone(),
                 mutation_gates,

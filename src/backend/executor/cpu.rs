@@ -1,4 +1,5 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
@@ -435,6 +436,7 @@ impl CpuOutput {
 pub(crate) struct CpuCommand {
     operation: CpuOperation,
     reply: oneshot::Sender<Result<CpuOutput, ExecutorError>>,
+    _child_process_admission: Option<ChildProcessAdmissionGuard>,
 }
 
 impl CpuCommand {
@@ -442,7 +444,23 @@ impl CpuCommand {
         operation: CpuOperation,
         reply: oneshot::Sender<Result<CpuOutput, ExecutorError>>,
     ) -> Self {
-        Self { operation, reply }
+        Self {
+            operation,
+            reply,
+            _child_process_admission: None,
+        }
+    }
+
+    fn with_child_process_admission(
+        operation: CpuOperation,
+        reply: oneshot::Sender<Result<CpuOutput, ExecutorError>>,
+        child_process_admission: ChildProcessAdmissionGuard,
+    ) -> Self {
+        Self {
+            operation,
+            reply,
+            _child_process_admission: Some(child_process_admission),
+        }
     }
 
     pub(crate) fn reject(self, error: ExecutorError) {
@@ -454,13 +472,15 @@ impl CpuCommand {
 pub struct CpuExecutorHandle {
     ingress: SchedulerIngress,
     reverse_geocoder: Arc<OnceLock<ReverseGeocoderSnapshot>>,
+    child_process_admission: Arc<ChildProcessAdmission>,
 }
 
 impl CpuExecutorHandle {
-    pub(crate) fn new(ingress: SchedulerIngress) -> Self {
+    pub(crate) fn new(ingress: SchedulerIngress, worker_count: usize) -> Self {
         Self {
             ingress,
             reverse_geocoder: Arc::new(OnceLock::new()),
+            child_process_admission: Arc::new(ChildProcessAdmission::new(worker_count)),
         }
     }
 
@@ -616,7 +636,7 @@ impl CpuExecutorHandle {
         match self
             .submit(
                 CpuOperation::ParseControlRequest { kind, bytes },
-                SubmissionMode::Try,
+                SubmissionMode::Durable,
             )
             .await?
         {
@@ -634,7 +654,7 @@ impl CpuExecutorHandle {
                 CpuOperation::SerializeControlResponse {
                     response: Box::new(response),
                 },
-                SubmissionMode::Try,
+                SubmissionMode::Durable,
             )
             .await?
         {
@@ -1104,15 +1124,24 @@ impl CpuExecutorHandle {
         &self,
         spec: ChildProcessSpec,
     ) -> Result<ChildProcessCompletion, ExecutorError> {
-        match self
-            .submit(
+        const OPERATION: &str = "supervise_child_process";
+        let admission = self.child_process_admission.acquire().await;
+        let (reply, response) = oneshot::channel();
+        self.ingress.submit_cpu(
+            CpuCommand::with_child_process_admission(
                 CpuOperation::SuperviseChildProcess { spec },
-                SubmissionMode::Durable,
-            )
-            .await?
+                reply,
+                admission,
+            ),
+            SubmissionMode::Durable,
+            OPERATION,
+        )?;
+        match response
+            .await
+            .map_err(|_| ExecutorError::shutting_down(OPERATION))??
         {
             CpuOutput::ChildProcessSupervised(completion) => Ok(completion),
-            output => Err(output.mismatch("supervise_child_process")),
+            output => Err(output.mismatch(OPERATION)),
         }
     }
 
@@ -1128,6 +1157,56 @@ impl CpuExecutorHandle {
         response
             .await
             .map_err(|_| ExecutorError::shutting_down(operation_name))?
+    }
+}
+
+struct ChildProcessAdmission {
+    active: AtomicUsize,
+    maximum: usize,
+    changed: Notify,
+}
+
+impl ChildProcessAdmission {
+    fn new(worker_count: usize) -> Self {
+        debug_assert!(
+            worker_count > 0,
+            "CPU executor must have at least one worker"
+        );
+        Self {
+            active: AtomicUsize::new(0),
+            maximum: worker_count.saturating_sub(1).max(1),
+            changed: Notify::new(),
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> ChildProcessAdmissionGuard {
+        loop {
+            let changed = self.changed.notified();
+            if self
+                .active
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                    (active < self.maximum).then_some(active + 1)
+                })
+                .is_ok()
+            {
+                return ChildProcessAdmissionGuard {
+                    admission: Arc::clone(self),
+                };
+            }
+            changed.await;
+        }
+    }
+}
+
+struct ChildProcessAdmissionGuard {
+    admission: Arc<ChildProcessAdmission>,
+}
+
+impl Drop for ChildProcessAdmissionGuard {
+    fn drop(&mut self) {
+        let previous = self.admission.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "child process admission underflow");
+        self.admission.changed.notify_one();
     }
 }
 
@@ -1537,5 +1616,62 @@ fn execute(operation: CpuOperation) -> Result<CpuOutput, ExecutorError> {
         CpuOperation::SuperviseChildProcess { spec } => {
             Ok(CpuOutput::ChildProcessSupervised(spec.run()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{ChildProcessAdmission, CpuCommand, CpuOperation};
+
+    #[test]
+    fn child_process_admission_leaves_one_worker_for_short_cpu_work() {
+        assert_eq!(ChildProcessAdmission::new(1).maximum, 1);
+        assert_eq!(ChildProcessAdmission::new(2).maximum, 1);
+        assert_eq!(ChildProcessAdmission::new(8).maximum, 7);
+    }
+
+    #[tokio::test]
+    async fn child_process_admission_releases_capacity_when_a_process_finishes() {
+        let admission = Arc::new(ChildProcessAdmission::new(2));
+        let first = admission.acquire().await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), admission.acquire())
+                .await
+                .is_err(),
+            "a second child process must wait while the only child slot is occupied"
+        );
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), admission.acquire())
+            .await
+            .expect("released child slot must wake the next waiter");
+    }
+
+    #[tokio::test]
+    async fn submitted_command_owns_child_capacity_until_the_worker_drops_it() {
+        let admission = Arc::new(ChildProcessAdmission::new(2));
+        let guard = admission.acquire().await;
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let command = CpuCommand::with_child_process_admission(
+            CpuOperation::Probe { sequence: 1 },
+            reply,
+            guard,
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), admission.acquire())
+                .await
+                .is_err(),
+            "the submitted command must retain child-process capacity"
+        );
+
+        drop(command);
+        tokio::time::timeout(Duration::from_secs(1), admission.acquire())
+            .await
+            .expect("dropping the worker command must release child-process capacity");
     }
 }

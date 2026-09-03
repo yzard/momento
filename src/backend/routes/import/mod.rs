@@ -57,7 +57,7 @@ async fn get_import_job_status(
     let snapshot = state
         .executors
         .sqlite
-        .load_import_status_request(ImportSource::Local)
+        .load_import_status_durable(ImportSource::Local)
         .await?;
     let job = snapshot.job;
 

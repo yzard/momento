@@ -10,6 +10,9 @@ use crate::executor::{CpuExecutorHandle, ErrorResponse};
 
 const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal server error";
 const FALLBACK_INTERNAL_ERROR_JSON: &str = r#"{"detail":"Internal server error"}"#;
+const FALLBACK_SERVICE_UNAVAILABLE_JSON: &str =
+    r#"{"detail":"Service unavailable; retry shortly"}"#;
+const FALLBACK_ERROR_JSON: &str = r#"{"detail":"Request could not be completed"}"#;
 
 #[derive(Clone, Debug)]
 struct PendingErrorResponse(ErrorResponse);
@@ -193,9 +196,8 @@ pub async fn render_pending_error_response(
     let bytes = match cpu.serialize_control_response(pending.0.into()).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            tracing::error!(error = %error, "Could not serialize an HTTP error response");
-            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            FALLBACK_INTERNAL_ERROR_JSON.as_bytes().to_vec()
+            tracing::warn!(error = %error, "Using the static HTTP error response");
+            fallback_error_json(response.status()).as_bytes().to_vec()
         }
     };
     *response.body_mut() = Body::from(bytes);
@@ -204,6 +206,14 @@ pub async fn render_pending_error_response(
         header::HeaderValue::from_static("application/json"),
     );
     response
+}
+
+fn fallback_error_json(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::INTERNAL_SERVER_ERROR => FALLBACK_INTERNAL_ERROR_JSON,
+        StatusCode::SERVICE_UNAVAILABLE => FALLBACK_SERVICE_UNAVAILABLE_JSON,
+        _ => FALLBACK_ERROR_JSON,
+    }
 }
 
 fn internal_server_error(
@@ -267,3 +277,29 @@ impl From<crate::executor::ExecutorError> for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::{
+        fallback_error_json, FALLBACK_ERROR_JSON, FALLBACK_INTERNAL_ERROR_JSON,
+        FALLBACK_SERVICE_UNAVAILABLE_JSON,
+    };
+
+    #[test]
+    fn static_error_fallback_matches_the_original_status_class() {
+        assert_eq!(
+            fallback_error_json(StatusCode::INTERNAL_SERVER_ERROR),
+            FALLBACK_INTERNAL_ERROR_JSON
+        );
+        assert_eq!(
+            fallback_error_json(StatusCode::SERVICE_UNAVAILABLE),
+            FALLBACK_SERVICE_UNAVAILABLE_JSON
+        );
+        assert_eq!(
+            fallback_error_json(StatusCode::UNAUTHORIZED),
+            FALLBACK_ERROR_JSON
+        );
+    }
+}

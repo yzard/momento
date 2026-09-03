@@ -2472,7 +2472,7 @@ impl SqliteExecutorHandle {
         }
     }
 
-    pub async fn load_ai_status_request(
+    pub async fn load_ai_status_durable(
         &self,
         config: Config,
         schedules: Vec<AiFeatureScheduleResponse>,
@@ -2494,7 +2494,7 @@ impl SqliteExecutorHandle {
                     config: Box::new(config),
                     schedules,
                 },
-                SubmissionMode::Try,
+                SubmissionMode::Durable,
             )
             .await?
         {
@@ -3148,14 +3148,14 @@ impl SqliteExecutorHandle {
         }
     }
 
-    pub async fn load_import_status_request(
+    pub async fn load_import_status_durable(
         &self,
         source: ImportSource,
     ) -> Result<ImportStatusSnapshot, ExecutorError> {
         match self
             .submit(
                 SqliteOperation::LoadImportStatus { source },
-                SubmissionMode::Try,
+                SubmissionMode::Durable,
             )
             .await?
         {
@@ -4087,11 +4087,14 @@ impl SqliteExecutorHandle {
         }
     }
 
-    pub async fn load_metadata_job_status_request(
+    pub async fn load_metadata_job_status_durable(
         &self,
     ) -> Result<MetadataJobStatus, ExecutorError> {
         match self
-            .submit(SqliteOperation::LoadMetadataJobStatus, SubmissionMode::Try)
+            .submit(
+                SqliteOperation::LoadMetadataJobStatus,
+                SubmissionMode::Durable,
+            )
             .await?
         {
             SqliteOutput::MetadataJobStatus(status) => Ok(status),

@@ -71,7 +71,7 @@ async fn all_status(
     let response = state
         .executors
         .sqlite
-        .load_ai_status_request(config.as_ref().clone(), schedules)
+        .load_ai_status_durable(config.as_ref().clone(), schedules)
         .await?;
     render_json(&state, response).await
 }

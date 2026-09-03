@@ -42,7 +42,7 @@ async fn status(
     let job_status = state
         .executors
         .sqlite
-        .load_metadata_job_status_request()
+        .load_metadata_job_status_durable()
         .await?;
     let counts = job_status.counts;
     let count_for = |status: &str| {
