@@ -261,6 +261,7 @@ pub struct JournalMutationGrant {
     group_version: i64,
     stage: JournalMutationStage,
     entries: Vec<AuthorizedJournalEntry>,
+    discarding_product: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +286,9 @@ pub(crate) enum JournalMutationStage {
 }
 
 impl JournalMutationGrant {
+    pub(crate) fn discarding_product(&self) -> bool {
+        self.discarding_product
+    }
     pub(crate) fn stage(&self) -> JournalMutationStage {
         self.stage
     }
@@ -297,6 +301,10 @@ impl JournalMutationGrant {
         self.entries.first().map(|entry| entry.sequence)
     }
 
+    pub(crate) fn retain_first_entry(&mut self) {
+        self.entries.truncate(1);
+    }
+
     pub(crate) fn publication(
         group_id: String,
         group_version: i64,
@@ -307,6 +315,7 @@ impl JournalMutationGrant {
             group_version,
             stage: JournalMutationStage::Publication,
             entries,
+            discarding_product: false,
         }
     }
 
@@ -325,12 +334,14 @@ impl JournalMutationGrant {
         group_id: String,
         group_version: i64,
         entries: Vec<AuthorizedJournalEntry>,
+        discarding_product: bool,
     ) -> Self {
         Self {
             group_id,
             group_version,
             stage: JournalMutationStage::Cleanup,
             entries,
+            discarding_product,
         }
     }
 
@@ -344,6 +355,7 @@ impl JournalMutationGrant {
             group_version,
             stage: JournalMutationStage::Rollback,
             entries,
+            discarding_product: false,
         }
     }
 }
@@ -1041,16 +1053,26 @@ pub(crate) fn verify_file_operation_cleanup(
         transaction.rollback()?;
         return Ok(None);
     }
-    let entries = load_authorized_entries(
-        &transaction,
-        queries::file_operations::SELECT_PENDING_CLEANUP_ENTRIES,
-        group_id,
-    )?;
+    let discard = transaction
+        .query_row(
+            queries::file_operations::IS_DERIVED_PRODUCT_DISCARD,
+            [group_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let query = if discard {
+        queries::file_operations::SELECT_DERIVED_PRODUCT_DISCARD_ENTRIES
+    } else {
+        queries::file_operations::SELECT_PENDING_CLEANUP_ENTRIES
+    };
+    let entries = load_authorized_entries(&transaction, query, group_id)?;
     transaction.commit()?;
     Ok(Some(JournalMutationGrant::cleanup(
         group_id.to_string(),
         expected_version,
         entries,
+        discard,
     )))
 }
 
@@ -1134,6 +1156,17 @@ pub(crate) fn request_file_operation_cancellation(
         return Ok(JournalCancellationOutcome::VersionConflict);
     }
     if cancel_requested {
+        if transaction.execute(
+            queries::file_operations::BEGIN_DERIVED_PRODUCT_DISCARD,
+            [group_id],
+        )? == 1
+        {
+            transaction.commit()?;
+            return Ok(JournalCancellationOutcome::Requested {
+                state: "cleanup_pending".to_string(),
+                version: current_version + 1,
+            });
+        }
         transaction.rollback()?;
         return Ok(JournalCancellationOutcome::AlreadyRequested {
             state,
@@ -1195,10 +1228,19 @@ pub(crate) fn request_file_operation_cancellation(
         queries::file_operations::DETACH_CANCELLED_DISCARDABLE_PRODUCT,
         [group_id],
     )?;
+    let discarding = transaction.execute(
+        queries::file_operations::BEGIN_DERIVED_PRODUCT_DISCARD,
+        [group_id],
+    )? == 1;
     transaction.commit()?;
     Ok(JournalCancellationOutcome::Requested {
-        state: next_state.to_string(),
-        version: next_version,
+        state: if discarding {
+            "cleanup_pending"
+        } else {
+            next_state
+        }
+        .to_string(),
+        version: next_version + i64::from(discarding),
     })
 }
 
@@ -1309,6 +1351,10 @@ fn release_group_ownership(connection: &Connection, group_id: &str) -> rusqlite:
     connection.execute(queries::file_operations::RELEASE_GROUP_CLAIMS, [group_id])?;
     connection.execute(
         queries::file_operations::RELEASE_GROUP_RESERVATION,
+        [group_id],
+    )?;
+    connection.execute(
+        queries::file_operations::REQUEUE_DISCARDED_METADATA,
         [group_id],
     )?;
     Ok(())

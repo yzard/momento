@@ -18,7 +18,7 @@ use crate::io::file::{
     MutationLeaseError, MutationOperationGuard, NormalizedStoragePath, StorageRootId,
     StorageRootRegistry,
 };
-use crate::io::journal::{FileEntryAction, JournalMutationStage};
+use crate::io::journal::{AuthorizedJournalEntry, FileEntryAction, JournalMutationStage};
 use crate::io::log::{LogEventConsumer, LogEventProducer, RuntimeLogWriter};
 use crate::io::session::{
     rename_descriptor_entry, snapshot_regular_file, ChildDescriptorAccess, ChildDescriptorLease,
@@ -537,28 +537,48 @@ impl FileIoExecutorHandle {
         let entry = lease
             .take_entry(sequence, &[FileEntryAction::Cleanup])
             .map_err(|error| mutation_lease_error("cleanup_journal_entry", error))?;
-        let source_path = entry
-            .source_path
-            .ok_or_else(|| output_mismatch("cleanup_journal_entry_missing_source_path"))?;
-        let outcome = match self
-            .submit(
-                FileOperation::CleanupJournalEntry {
-                    authorization: lease.authorization(),
-                    storage_root: entry.storage_root,
-                    source_path,
-                    expected_size: entry.expected_size,
-                },
-                "cleanup_journal_entry",
-            )
-            .await?
-        {
-            FileOutput::JournalEntryCleaned(outcome) => outcome,
-            _ => return Err(output_mismatch("cleanup_journal_entry")),
-        };
+        let outcome = self.cleanup_authorized_entry(lease, entry).await?;
         lease
             .finish_operation(sequence)
             .map_err(|error| mutation_lease_error("cleanup_journal_entry", error))?;
         Ok(outcome)
+    }
+
+    async fn cleanup_authorized_entry(
+        &self,
+        lease: &JournalMutationLease,
+        entry: AuthorizedJournalEntry,
+    ) -> Result<CleanupJournalOutcome, ExecutorError> {
+        let source = entry
+            .source_path
+            .ok_or_else(|| output_mismatch("cleanup_journal_entry_missing_source_path"))?;
+        let mut result = CleanupJournalOutcome::AlreadyAbsent;
+        // A discarded derived product owns both the temporary and unpublished
+        // destination. Checkpoint only after both are gone; replay is idempotent.
+        for source_path in std::iter::once(source).chain(entry.destination_path) {
+            let outcome = match self
+                .submit(
+                    FileOperation::CleanupJournalEntry {
+                        authorization: lease.authorization(),
+                        storage_root: entry.storage_root,
+                        source_path,
+                        expected_size: entry.expected_size,
+                    },
+                    "cleanup_journal_entry",
+                )
+                .await?
+            {
+                FileOutput::JournalEntryCleaned(outcome) => outcome,
+                _ => return Err(output_mismatch("cleanup_journal_entry")),
+            };
+            if outcome == CleanupJournalOutcome::ProgressPending {
+                return Ok(outcome);
+            }
+            if outcome == CleanupJournalOutcome::Removed {
+                result = outcome;
+            }
+        }
+        Ok(result)
     }
 
     pub async fn apply_next_journal_entry_durable(
@@ -669,26 +689,9 @@ impl FileIoExecutorHandle {
                     ],
                     "apply_next_journal_entry",
                 )?;
-                let source_path = entry.source_path.ok_or_else(|| {
-                    output_mismatch("apply_next_journal_entry_missing_source_path")
-                })?;
-                match self
-                    .submit(
-                        FileOperation::CleanupJournalEntry {
-                            authorization: lease.authorization(),
-                            storage_root: entry.storage_root,
-                            source_path,
-                            expected_size: entry.expected_size,
-                        },
-                        "cleanup_journal_entry",
-                    )
-                    .await?
-                {
-                    FileOutput::JournalEntryCleaned(outcome) => {
-                        JournalFileMutationOutcome::Cleaned(outcome)
-                    }
-                    _ => return Err(output_mismatch("apply_next_journal_entry")),
-                }
+                JournalFileMutationOutcome::Cleaned(
+                    self.cleanup_authorized_entry(lease, entry).await?,
+                )
             }
         };
         lease

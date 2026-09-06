@@ -417,7 +417,7 @@ async fn restart_recovery_detaches_an_unpublished_metadata_generation() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("recovered metadata product");
-    assert_eq!(recovered, ("files_committed".to_string(), 1, None));
+    assert_eq!(recovered, ("cleanup_pending".to_string(), 1, None));
 }
 
 #[tokio::test]

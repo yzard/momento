@@ -80,6 +80,8 @@ pub(crate) async fn acquire_verified_journal_mutation(
             ));
         }
         let mut hasher = executors.cpu.start_sha256_session_durable().await?;
+        let mut verified_bytes = 0_u64;
+        let mut last_progress_log = std::time::Instant::now();
         loop {
             let (returned, bytes) = executors
                 .file_io
@@ -89,11 +91,21 @@ pub(crate) async fn acquire_verified_journal_mutation(
             if bytes.is_empty() {
                 break;
             }
+            verified_bytes += bytes.len() as u64;
             let (returned_hasher, _) = executors
                 .cpu
                 .update_sha256_session_durable(hasher, bytes)
                 .await?;
             hasher = returned_hasher;
+            if last_progress_log.elapsed().as_secs() >= 5 {
+                tracing::info!(
+                    sequence = entry.sequence,
+                    ?stage,
+                    verified_bytes,
+                    "Journal entry verification progress"
+                );
+                last_progress_log = std::time::Instant::now();
+            }
         }
         executors
             .file_io
@@ -153,7 +165,12 @@ pub(crate) async fn cancel_generic_file_operation_with_components(
     else {
         return Ok(JournalCancellationOutcome::VersionConflict);
     };
-    if status.cancel_requested {
+    if status.cancel_requested
+        && !matches!(
+            status.state.as_str(),
+            "publishing" | "publication_failed" | "files_committed" | "finalize_failed"
+        )
+    {
         return Ok(JournalCancellationOutcome::AlreadyRequested {
             state: status.state,
             version: status.version,
@@ -183,7 +200,8 @@ pub(crate) async fn cancel_generic_file_operation_with_components(
         .request_file_operation_cancellation_durable(group_id, expected_version)
         .await?;
     match outcome {
-        JournalCancellationOutcome::Requested { version, .. } => {
+        JournalCancellationOutcome::Requested { version, .. }
+        | JournalCancellationOutcome::AlreadyRequested { version, .. } => {
             file_io
                 .release_journal_mutation_fence(&reconciliation_group_id, version)
                 .map_err(mutation_registry_error)?;
@@ -228,6 +246,8 @@ async fn recover_file_operations(
     scope: JournalRecoveryScope,
 ) -> Result<usize, ExecutorError> {
     let mut recovered_entries = 0usize;
+    let mut previous = None;
+    let mut last_progress_log = std::time::Instant::now();
     loop {
         let Some(group) = executors
             .sqlite
@@ -236,19 +256,37 @@ async fn recover_file_operations(
         else {
             return Ok(recovered_entries);
         };
+        let position = (group.group_id.clone(), group.version);
+        if previous.as_ref() == Some(&position) {
+            return Err(ExecutorError::new(
+                ExecutorErrorKind::Conflict,
+                "recover_generic_file_operations",
+                format!(
+                    "journal recovery made no progress: {} version {}",
+                    group.group_id, group.version
+                ),
+            ));
+        }
+        if previous.is_none() || last_progress_log.elapsed().as_secs() >= 5 {
+            tracing::info!(group_id = %group.group_id, state = ?group.state, recovered_entries,
+                "Journal recovery progress");
+            last_progress_log = std::time::Instant::now();
+        }
+        previous = Some(position);
         match group.state {
             JournalRecoveryState::Publishing => {
                 let ticket = executors
                     .file_io
                     .reserve_journal_mutation(&group.group_id, group.version)
                     .map_err(mutation_registry_error)?;
-                let Some(grant) = executors
+                let Some(mut grant) = executors
                     .sqlite
                     .verify_file_operation_publication_durable(&ticket)
                     .await?
                 else {
                     continue;
                 };
+                grant.retain_first_entry();
                 let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
                 let mut lease =
                     match acquire_verified_journal_mutation(executors, ticket, grant).await {
@@ -355,31 +393,39 @@ async fn recover_file_operations(
                     .file_io
                     .reserve_journal_mutation(&group.group_id, group.version)
                     .map_err(mutation_registry_error)?;
-                let Some(grant) = executors
+                let Some(mut grant) = executors
                     .sqlite
                     .verify_file_operation_cleanup_durable(&ticket)
                     .await?
                 else {
                     continue;
                 };
+                grant.retain_first_entry();
+                let discarding_product = grant.discarding_product();
                 let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
-                let mut lease =
-                    match acquire_verified_journal_mutation(executors, ticket, grant).await {
-                        Ok(lease) => lease,
-                        Err(error) if is_permanent_file_failure(error.kind) => {
-                            record_permanent_failure(
-                                executors,
-                                group.group_id,
-                                group.version,
-                                sequence,
-                                JournalFailureStage::Cleanup,
-                                error,
-                            )
-                            .await?;
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
+                let mut lease = match acquire_verified_journal_mutation(executors, ticket, grant)
+                    .await
+                {
+                    Ok(lease) => lease,
+                    Err(error) if discarding_product => {
+                        tracing::warn!(group_id = %group.group_id, %error, "Discard cleanup deferred; retaining ownership for retry");
+                        yield_progress_to_tail(executors, group.group_id, group.version).await?;
+                        return Err(error);
+                    }
+                    Err(error) if is_permanent_file_failure(error.kind) => {
+                        record_permanent_failure(
+                            executors,
+                            group.group_id,
+                            group.version,
+                            sequence,
+                            JournalFailureStage::Cleanup,
+                            error,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let sequence = lease.next_sequence().map_err(|error| {
                     ExecutorError::new(
                         ExecutorErrorKind::Internal,
@@ -393,6 +439,12 @@ async fn recover_file_operations(
                     .await
                 {
                     Ok(applied) => applied,
+                    Err(error) if discarding_product => {
+                        drop(lease);
+                        tracing::warn!(group_id = %group.group_id, %error, "Discard cleanup deferred; retaining ownership for retry");
+                        yield_progress_to_tail(executors, group.group_id, group.version).await?;
+                        return Err(error);
+                    }
                     Err(error) if is_permanent_file_failure(error.kind) => {
                         drop(lease);
                         record_permanent_failure(
@@ -415,6 +467,9 @@ async fn recover_file_operations(
                 {
                     drop(lease);
                     yield_progress_to_tail(executors, group.group_id, group.version).await?;
+                    if scope == JournalRecoveryScope::StartupCritical {
+                        continue;
+                    }
                     return Ok(recovered_entries);
                 }
                 let checkpoint = executors
@@ -435,6 +490,7 @@ async fn recover_file_operations(
                         .release_journal_mutation_fence(&group.group_id, checkpoint.version)
                         .map_err(mutation_registry_error)?;
                     executors.scheduler.wake_llm_results();
+                    executors.scheduler.wake_metadata();
                 }
                 recovered_entries = recovered_entries
                     .checked_add(1)
@@ -445,13 +501,14 @@ async fn recover_file_operations(
                     .file_io
                     .reserve_journal_mutation(&group.group_id, group.version)
                     .map_err(mutation_registry_error)?;
-                let Some(grant) = executors
+                let Some(mut grant) = executors
                     .sqlite
                     .verify_file_operation_rollback_durable(&ticket)
                     .await?
                 else {
                     continue;
                 };
+                grant.retain_first_entry();
                 let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
                 let mut lease =
                     match acquire_verified_journal_mutation(executors, ticket, grant).await {
@@ -513,6 +570,9 @@ async fn recover_file_operations(
                 {
                     drop(lease);
                     yield_progress_to_tail(executors, group.group_id, group.version).await?;
+                    if scope == JournalRecoveryScope::StartupCritical {
+                        continue;
+                    }
                     return Ok(recovered_entries);
                 }
                 let checkpoint = executors
@@ -533,6 +593,7 @@ async fn recover_file_operations(
                         .release_journal_mutation_fence(&group.group_id, checkpoint.version)
                         .map_err(mutation_registry_error)?;
                     executors.scheduler.wake_llm_results();
+                    executors.scheduler.wake_metadata();
                 }
                 recovered_entries = recovered_entries
                     .checked_add(1)
@@ -563,8 +624,7 @@ pub async fn rollback_prepared_file_operations_after_restart(
             )
             .await?
             {
-                JournalCancellationOutcome::Requested { .. }
-                | JournalCancellationOutcome::AlreadyRequested { .. } => {
+                JournalCancellationOutcome::Requested { .. } => {
                     page_progressed = true;
                     requested = requested.checked_add(1).ok_or_else(|| {
                         ExecutorError::new(
@@ -575,6 +635,7 @@ pub async fn rollback_prepared_file_operations_after_restart(
                     })?;
                 }
                 JournalCancellationOutcome::VersionConflict
+                | JournalCancellationOutcome::AlreadyRequested { .. }
                 | JournalCancellationOutcome::NotCancellable => {}
             }
         }
@@ -600,6 +661,7 @@ pub async fn discard_incomplete_file_products_after_restart(
     let mut cursor = None;
     let mut pending_cursor_operation = None;
     let mut discarded = 0_usize;
+    let mut last_progress_log = std::time::Instant::now();
     loop {
         let page = executors
             .sqlite
@@ -616,6 +678,10 @@ pub async fn discard_incomplete_file_products_after_restart(
                 discarded =
                     discard_incomplete_file_product(executors, operation, discarded).await?;
             }
+        }
+        if last_progress_log.elapsed().as_secs() >= 5 {
+            tracing::info!(discarded, "Startup interrupted-product scan progress");
+            last_progress_log = std::time::Instant::now();
         }
         match next_cursor {
             Some(next_cursor) => cursor = Some(next_cursor),
@@ -637,7 +703,18 @@ async fn discard_incomplete_file_product(
         && operation.product_target.as_deref() == Some("metadata_artifacts");
     let is_import_product = operation.kind == "import_media_publication"
         && operation.product_target.as_deref() == Some("import_media");
-    if !is_inbox && !is_face_product && !is_metadata_product && !is_import_product {
+    let is_detached_product = operation.cancel_requested
+        && operation.product_target.is_none()
+        && matches!(
+            operation.kind.as_str(),
+            "metadata_artifacts" | "llm_result_artifacts" | "llm_result_receive"
+        );
+    if !is_inbox
+        && !is_face_product
+        && !is_metadata_product
+        && !is_import_product
+        && !is_detached_product
+    {
         return Ok(discarded);
     }
     match cancel_generic_file_operation(executors, operation.operation_id, operation.version)

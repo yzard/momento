@@ -328,18 +328,21 @@ async fn run(
                     )
                     .await
                     .expect("Failed to resume interrupted WebDAV directory copies");
+                tracing::info!(resumed_directory_copies, "Startup directory-copy recovery completed; requesting prepared rollbacks");
                 let prepared_rollbacks =
                     momento_api::io::recovery::rollback_prepared_file_operations_after_restart(
                         &startup_executors,
                     )
                     .await
                     .expect("Failed to roll back interrupted prepared file operations");
+                tracing::info!(prepared_rollbacks, "Startup rollback requests completed; discarding interrupted products");
                 let discarded_products =
                     momento_api::io::recovery::discard_incomplete_file_products_after_restart(
                         &startup_executors,
                     )
                     .await
                     .expect("Failed to discard interrupted LLM result products");
+                tracing::info!(discarded_products, "Startup product discard requests completed; recovering journal entries");
                 let recovered_journal_entries =
                     momento_api::io::recovery::recover_startup_critical_file_operations(
                         &startup_executors,
@@ -363,6 +366,7 @@ async fn run(
                     .recover_metadata_claims_durable()
                     .await
                     .expect("Failed to recover interrupted metadata claims");
+                tracing::info!("Startup import and metadata claims recovered; recovering LLM results");
                 loop {
                     let result_recovery = startup_executors
                         .sqlite

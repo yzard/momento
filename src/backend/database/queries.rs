@@ -31,6 +31,75 @@ macro_rules! media_response_columns {
 }
 
 pub mod file_operations {
+    pub const REQUEUE_DISCARDED_METADATA: &str = r#"
+        UPDATE media_metadata_jobs
+           SET status = 'queued', claim_token = NULL, claimed_at = NULL,
+               available_at = datetime('now'), completed_at = NULL,
+               updated_at = datetime('now')
+         WHERE media_id = (SELECT CAST(owner_id AS INTEGER) FROM file_operation_groups WHERE id = ?1)
+           AND EXISTS (
+               SELECT 1 FROM file_operation_groups AS g
+                WHERE g.id = ?1 AND g.kind = 'metadata_artifacts'
+                  AND g.owner_kind = 'metadata_generation'
+                  AND g.owner_id = CAST(media_metadata_jobs.media_id AS TEXT)
+                  AND g.cancel_requested = 1 AND g.state IN ('cleaned', 'rolled_back')
+                  AND g.product_version > COALESCE((
+                      SELECT artifact_version FROM media_metadata WHERE media_id = media_metadata_jobs.media_id
+                  ), 0)
+                  AND (media_metadata_jobs.status = 'failed'
+                       OR (media_metadata_jobs.status = 'processing' AND media_metadata_jobs.claim_token = g.claim_token))
+         )
+    "#;
+    // Only detached, unpublished derived products are disposable. Originals and
+    // general filesystem mutations retain their evidence-checked recovery path.
+    pub const BEGIN_DERIVED_PRODUCT_DISCARD: &str = r#"
+        UPDATE file_operation_groups
+           SET state = 'cleanup_pending', completion_outcome = 'discarded',
+               version = version + 1, updated_at = datetime('now'),
+               finalization_error_kind = COALESCE(finalization_error_kind, 'InterruptedProduct'),
+               finalization_error = COALESCE(finalization_error, 'Interrupted product discarded for regeneration')
+         WHERE id = ? AND cancel_requested = 1 AND product_target IS NULL
+           AND state IN ('publishing', 'publication_failed', 'files_committed', 'finalize_failed')
+           AND ((kind = 'metadata_artifacts' AND owner_kind = 'metadata_generation')
+                OR (kind IN ('llm_result_artifacts', 'llm_result_receive') AND owner_kind = 'llm_result'))
+           AND entry_count > 0
+           AND NOT EXISTS (
+               SELECT 1 FROM file_operation_entries
+                WHERE group_id = file_operation_groups.id
+                  AND (action != 'publish' OR storage_root NOT IN ('thumbnails', 'tiny_thumbnails', 'place_thumbnails', 'previews', 'journal'))
+           )
+    "#;
+    pub const IS_DERIVED_PRODUCT_DISCARD: &str = r#"
+        SELECT 1 FROM file_operation_groups
+         WHERE id = ? AND cancel_requested = 1 AND product_target IS NULL
+           AND completion_outcome = 'discarded' AND state = 'cleanup_pending'
+           AND ((kind = 'metadata_artifacts' AND owner_kind = 'metadata_generation')
+                OR (kind IN ('llm_result_artifacts', 'llm_result_receive') AND owner_kind = 'llm_result'))
+           AND NOT EXISTS (
+               SELECT 1 FROM file_operation_entries
+                WHERE group_id = file_operation_groups.id
+                  AND (action != 'publish' OR storage_root NOT IN ('thumbnails', 'tiny_thumbnails', 'place_thumbnails', 'previews', 'journal'))
+           )
+    "#;
+    pub const SELECT_DERIVED_PRODUCT_DISCARD_ENTRIES: &str = r#"
+        SELECT e.sequence, 'cleanup', e.storage_root, e.temporary_path, NULL,
+               CASE WHEN EXISTS (
+                   SELECT 1 FROM media_metadata AS m
+                    WHERE m.media_id = CAST(g.owner_id AS INTEGER)
+                      AND g.owner_kind = 'metadata_generation'
+                      AND ((e.storage_root IN ('thumbnails', 'tiny_thumbnails', 'place_thumbnails') AND m.thumbnail_path = e.destination_path)
+                           OR (e.storage_root = 'previews' AND m.preview_path = e.destination_path))
+               ) OR EXISTS (
+                   SELECT 1 FROM media_faces AS f
+                    WHERE f.media_id = (SELECT media_id FROM llm_jobs WHERE id = g.owner_id)
+                      AND g.kind = 'llm_result_artifacts' AND f.crop_path = e.destination_path
+               ) THEN NULL ELSE e.destination_path END,
+               NULL, NULL, NULL, NULL
+          FROM file_operation_entries AS e
+          JOIN file_operation_groups AS g ON g.id = e.group_id
+         WHERE e.group_id = ? AND e.cleanup_state = 'pending'
+         ORDER BY e.sequence
+    "#;
     pub const INSERT_GROUP: &str = "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count, recovery_order) VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?, ?, (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups))";
     pub const INSERT_COMMITTED_CLEANUP_GROUP: &str = "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count, completion_outcome, recovery_order) VALUES (?, ?, ?, ?, ?, 'cleanup_pending', ?, ?, ?, 'published', (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups))";
     pub const INSERT_ENTRY: &str = "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, source_path, temporary_path, destination_path, tombstone_path, expected_size, expected_sha256, expected_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
@@ -62,8 +131,8 @@ pub mod file_operations {
     pub const VERIFY_OPERATION_CLAIM_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = ?1 AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = ?1 AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = ?1)";
     pub const VERIFY_CLEANUP: &str = "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
     pub const SELECT_PENDING_CLEANUP_ENTRIES: &str = "SELECT e.sequence, 'cleanup', e.storage_root, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.destination_path WHEN e.action = 'publish' THEN e.temporary_path ELSE e.source_path END, NULL, NULL, NULL, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_size WHEN e.action = 'cleanup' THEN e.expected_size ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_sha256 WHEN e.action = 'cleanup' THEN e.expected_sha256 ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_version WHEN e.action = 'cleanup' THEN e.expected_version ELSE NULL END FROM file_operation_entries AS e JOIN file_operation_groups AS g ON g.id = e.group_id WHERE e.group_id = ? AND e.cleanup_state = 'pending' AND (e.action = 'cleanup' OR (e.action = 'publish' AND e.state = 'committed')) ORDER BY e.sequence";
-    pub const CLEAN_ENTRY: &str = "UPDATE file_operation_entries SET cleanup_state = 'cleaned', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))";
-    pub const COUNT_UNCLEANED_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND cleanup_state != 'cleaned' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))";
+    pub const CLEAN_ENTRY: &str = "UPDATE file_operation_entries SET cleanup_state = 'cleaned', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND cleanup_state = 'pending' AND action IN ('cleanup', 'publish')";
+    pub const COUNT_UNCLEANED_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND cleanup_state != 'cleaned' AND action IN ('cleanup', 'publish')";
     pub const CHECKPOINT_CLEANUP: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'cleaned' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
     pub const RECORD_PUBLICATION_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET state = 'publication_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'publishing'";
     pub const RECORD_PUBLICATION_FAILURE_ENTRY: &str = "UPDATE file_operation_entries SET last_error_kind = ?, last_error = ? WHERE group_id = ? AND sequence = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared'";
@@ -196,7 +265,7 @@ pub mod file_operations {
     pub const SHRINK_SQLITE_RESULT_RESERVATION_TO_CLEANUP: &str = "UPDATE data_dir_space_reservations SET owner_kind = 'llm_result_cleanup', newly_allocated_blocks = reserved_peak_additional_bytes - ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND reserved_peak_additional_bytes - newly_allocated_blocks >= ?";
     pub const SELECT_GROUP_VERSION: &str = "SELECT version FROM file_operation_groups WHERE id = ?";
     pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') ORDER BY recovery_order, id LIMIT 1";
-    pub const SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'rollback_pending') ORDER BY recovery_order, id LIMIT 1";
+    pub const SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND (state IN ('publishing', 'files_committed', 'rollback_pending') OR (state = 'cleanup_pending' AND completion_outcome = 'discarded' AND cancel_requested = 1)) ORDER BY recovery_order, id LIMIT 1";
     pub const YIELD_RECOVERY_PROGRESS: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state IN ('cleanup_pending', 'rollback_pending')";
     pub const SELECT_RETRY_RECEIPT: &str = "SELECT group_id, expected_version, request_hash, response_state, response_version, expires_at > datetime('now') FROM file_operation_retry_requests WHERE retry_request_id = ?";
     pub const COUNT_LIVE_RETRY_RECEIPTS: &str = "SELECT COUNT(*) FROM file_operation_retry_requests WHERE group_id = ? AND expires_at > datetime('now')";
@@ -971,6 +1040,13 @@ pub mod metadata_jobs {
                 WHERE status = 'queued'
                   AND available_at <= datetime('now')
                   AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM file_operation_groups AS g
+                       WHERE g.owner_kind = 'metadata_generation'
+                         AND g.owner_id = CAST(media_metadata_jobs.media_id AS TEXT)
+                         AND g.cancel_requested = 1
+                         AND g.state NOT IN ('cleaned', 'rolled_back')
+                  )
                 ORDER BY media_id
                 LIMIT 1
            )
