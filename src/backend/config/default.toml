@@ -17,7 +17,10 @@ api_request_body_max_bytes = {{SERVER_API_REQUEST_BODY_MAX_BYTES}}
 [thread_pool]
 # Startup-only execution-domain sizes. Changing them requires a restart.
 cpu_workers = {{THREAD_POOL_CPU_WORKERS}}
-io_workers = {{THREAD_POOL_IO_WORKERS}}
+# Async network threads, minimum 2; separate from storage threads.
+network_io_workers = {{THREAD_POOL_NETWORK_IO_WORKERS}}
+# Minimum 2: one reader, one writer, remaining threads serve both queues.
+storage_io_workers = {{THREAD_POOL_STORAGE_IO_WORKERS}}
 # Total SQLite threads: one writer plus sqlite_workers - 1 readers (minimum 2).
 sqlite_workers = {{THREAD_POOL_SQLITE_WORKERS}}
 

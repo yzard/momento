@@ -273,6 +273,92 @@ async fn interrupted_products_discard_corrupt_partial_files_without_the_expired_
 }
 
 #[tokio::test]
+async fn interrupted_video_frame_cleanup_preserves_current_and_snapshotted_inputs() {
+    for reference in ["none", "media", "job"] {
+        for state in [
+            "publishing",
+            "publication_failed",
+            "files_committed",
+            "finalize_failed",
+        ] {
+            let pool = crate::test_utils::create_test_db();
+            let media_id = crate::test_utils::create_test_media(&pool, "video.mp4");
+            let (executors, directory) =
+                crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+            let connection = pool.get().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+                    [media_id],
+                )
+                .unwrap();
+            connection.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, entry_count, version) VALUES ('frame', 'video_ai_frame', 'generated_artifact', 'frame', '00000000-0000-0000-0000-000000000091', ?, 1, 2)", [state]).unwrap();
+            connection.execute("INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path, expected_size, expected_sha256) VALUES ('frame', 0, 'publish', 'previews', 'partial-frame', 'frame.png', 500, zeroblob(32))", []).unwrap();
+            if reference == "media" {
+                connection.execute("INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 'ocr', 0, 'video_frame', 'previews', 'frame.png', 'frame.png', 'image/png', 5, 'hash')", [media_id]).unwrap();
+            } else if reference == "job" {
+                connection.execute("INSERT INTO llm_jobs (id, media_id, task, status) VALUES ('job', ?, 'ocr', 'submitted')", [media_id]).unwrap();
+                connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES ('job', 0, 'video_frame', 'previews', 'frame.png', 'frame.png', 'image/png', 5, 'hash')", []).unwrap();
+            }
+            drop(connection);
+            std::fs::write(directory.join("previews/partial-frame"), b"partial").unwrap();
+            std::fs::write(directory.join("previews/frame.png"), b"valid").unwrap();
+            std::fs::write(directory.join("originals/video.mp4"), b"original").unwrap();
+            assert_eq!(
+                discard_incomplete_file_products_after_restart(&executors)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                recover_startup_critical_file_operations(&executors)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                recover_startup_critical_file_operations(&executors)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(!directory.join("previews/partial-frame").exists());
+            assert_eq!(
+                directory.join("previews/frame.png").exists(),
+                reference != "none"
+            );
+            if reference != "none" {
+                assert_eq!(
+                    std::fs::read(directory.join("previews/frame.png")).unwrap(),
+                    b"valid"
+                );
+            }
+            assert_eq!(
+                std::fs::read(directory.join("originals/video.mp4")).unwrap(),
+                b"original"
+            );
+            let connection = pool.get().unwrap();
+            let status: String = connection
+                .query_row(
+                    "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                    [media_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "completed");
+            let status: String = connection
+                .query_row(
+                    "SELECT state FROM file_operation_groups WHERE id = 'frame'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "cleaned");
+        }
+    }
+}
+
+#[tokio::test]
 async fn unknown_stale_owner_does_not_spin_or_delete_originals() {
     let pool = crate::test_utils::create_test_db();
     let (executors, directory) =

@@ -703,6 +703,9 @@ async fn discard_incomplete_file_product(
         && operation.product_target.as_deref() == Some("metadata_artifacts");
     let is_import_product = operation.kind == "import_media_publication"
         && operation.product_target.as_deref() == Some("import_media");
+    let is_video_frame = operation.kind == "video_ai_frame"
+        && operation.owner_kind == "generated_artifact"
+        && operation.product_target.is_none();
     let is_detached_product = operation.cancel_requested
         && operation.product_target.is_none()
         && matches!(
@@ -713,10 +716,17 @@ async fn discard_incomplete_file_product(
         && !is_face_product
         && !is_metadata_product
         && !is_import_product
+        && !is_video_frame
         && !is_detached_product
     {
         return Ok(discarded);
     }
+    tracing::info!(
+        operation_id = %operation.operation_id,
+        kind = %operation.kind,
+        state = %operation.state,
+        "Discarding interrupted derived operation; preserving referenced products during cleanup"
+    );
     match cancel_generic_file_operation(executors, operation.operation_id, operation.version)
         .await?
     {

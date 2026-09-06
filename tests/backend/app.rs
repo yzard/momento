@@ -33,6 +33,7 @@ async fn responses_include_browser_security_headers() {
         headers.get("referrer-policy").unwrap(),
         "strict-origin-when-cross-origin"
     );
+    assert_eq!(headers.get_all("referrer-policy").iter().count(), 1);
     assert_eq!(
         headers.get("permissions-policy").unwrap(),
         "camera=(), geolocation=(), microphone=()",
@@ -46,6 +47,10 @@ async fn responses_include_browser_security_headers() {
     assert!(content_security_policy
         .contains("img-src 'self' data: blob: https://tile.openstreetmap.org"));
     assert!(content_security_policy.contains("frame-ancestors 'none'"));
+
+    let missing = server.post("/api/v1/removed/operation").await;
+    missing.assert_status_not_found();
+    missing.assert_header("referrer-policy", "strict-origin-when-cross-origin");
 }
 
 #[tokio::test]
@@ -87,7 +92,8 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
     config.webdav.mount_path = "/webdav".to_string();
     config.thread_pool = ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     };
     let config_path = directory.path().join("config.toml");

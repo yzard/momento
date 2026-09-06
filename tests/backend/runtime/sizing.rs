@@ -1,6 +1,7 @@
 use momento_api::config::ThreadPoolConfig;
 use momento_api::runtime::{
-    RuntimeSizing, MAX_CPU_WORKERS, MAX_DERIVED_RUNTIME_BYTES, MAX_IO_WORKERS, MAX_SQLITE_WORKERS,
+    RuntimeSizing, MAX_CPU_WORKERS, MAX_DERIVED_RUNTIME_BYTES, MAX_SQLITE_WORKERS,
+    MAX_STORAGE_IO_WORKERS,
 };
 
 #[test]
@@ -9,8 +10,8 @@ fn documented_default_configuration_fits_runtime_budget() {
         .expect("documented runtime defaults must fit");
 
     assert_eq!(sizing.cpu_workers, 8);
-    assert_eq!(sizing.io_workers, 8);
-    assert_eq!(sizing.file_workers, 6);
+    assert_eq!(sizing.storage_io_workers, 6);
+    assert_eq!(sizing.network_io_workers, 2);
     assert_eq!(sizing.sqlite_workers, 4);
     assert!(sizing.derived_runtime_bytes <= MAX_DERIVED_RUNTIME_BYTES);
     assert_eq!(
@@ -32,11 +33,22 @@ fn documented_default_configuration_fits_runtime_budget() {
 
 #[test]
 fn worker_count_boundaries_are_enforced_before_derivation() {
+    for count in [0, 1, momento_api::runtime::MAX_NETWORK_IO_WORKERS + 1] {
+        let configuration = ThreadPoolConfig {
+            network_io_workers: count,
+            ..ThreadPoolConfig::default()
+        };
+        assert!(RuntimeSizing::validate_worker_counts(&configuration)
+            .unwrap_err()
+            .to_string()
+            .contains("network_io_workers"));
+    }
     for (configuration, field) in [
         (
             ThreadPoolConfig {
                 cpu_workers: 0,
-                io_workers: 8,
+                network_io_workers: 2,
+                storage_io_workers: 6,
                 sqlite_workers: 4,
             },
             "cpu_workers",
@@ -44,7 +56,8 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
         (
             ThreadPoolConfig {
                 cpu_workers: MAX_CPU_WORKERS + 1,
-                io_workers: 8,
+                network_io_workers: 2,
+                storage_io_workers: 6,
                 sqlite_workers: 4,
             },
             "cpu_workers",
@@ -52,23 +65,26 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
         (
             ThreadPoolConfig {
                 cpu_workers: 8,
-                io_workers: 3,
+                network_io_workers: 2,
+                storage_io_workers: 1,
                 sqlite_workers: 4,
             },
-            "io_workers",
+            "storage_io_workers",
         ),
         (
             ThreadPoolConfig {
                 cpu_workers: 8,
-                io_workers: MAX_IO_WORKERS + 1,
+                network_io_workers: 2,
+                storage_io_workers: MAX_STORAGE_IO_WORKERS + 1,
                 sqlite_workers: 4,
             },
-            "io_workers",
+            "storage_io_workers",
         ),
         (
             ThreadPoolConfig {
                 cpu_workers: 8,
-                io_workers: 8,
+                network_io_workers: 2,
+                storage_io_workers: 6,
                 sqlite_workers: 0,
             },
             "sqlite_workers",
@@ -76,7 +92,8 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
         (
             ThreadPoolConfig {
                 cpu_workers: 8,
-                io_workers: 8,
+                network_io_workers: 2,
+                storage_io_workers: 6,
                 sqlite_workers: 1,
             },
             "sqlite_workers",
@@ -84,7 +101,8 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
         (
             ThreadPoolConfig {
                 cpu_workers: 8,
-                io_workers: 8,
+                network_io_workers: 2,
+                storage_io_workers: 6,
                 sqlite_workers: MAX_SQLITE_WORKERS + 1,
             },
             "sqlite_workers",
@@ -97,10 +115,44 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
 }
 
 #[test]
+fn network_and_storage_counts_are_independent_and_budget_all_thread_stacks() {
+    let base = ThreadPoolConfig {
+        cpu_workers: 1,
+        network_io_workers: 2,
+        storage_io_workers: 2,
+        sqlite_workers: 2,
+    };
+    let sizing = RuntimeSizing::validate_worker_counts(&base).unwrap();
+    let network = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
+        network_io_workers: 3,
+        ..base.clone()
+    })
+    .unwrap();
+    let storage = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
+        storage_io_workers: 4,
+        ..base
+    })
+    .unwrap();
+    assert_eq!(network.storage_io_workers, 2);
+    assert_eq!(network.file_queue_capacity, sizing.file_queue_capacity);
+    assert_eq!(storage.network_io_workers, 2);
+    assert_eq!(storage.file_queue_capacity, 2 * sizing.file_queue_capacity);
+    assert_eq!(
+        network.breakdown.thread_stacks - sizing.breakdown.thread_stacks,
+        momento_api::runtime::WORKER_STACK_BYTES
+    );
+    assert_eq!(
+        storage.breakdown.thread_stacks - sizing.breakdown.thread_stacks,
+        2 * momento_api::runtime::WORKER_STACK_BYTES
+    );
+}
+
+#[test]
 fn executor_queue_and_registry_capacities_are_derived() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 2,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("minimum runtime");
@@ -141,7 +193,8 @@ fn default_runtime_passes_pre_spawn_allocation_and_descriptor_checks() {
 fn over_budget_error_reports_one_field_at_a_time_feasible_worker_counts() {
     let error = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: MAX_CPU_WORKERS,
-        io_workers: MAX_IO_WORKERS,
+        network_io_workers: 2,
+        storage_io_workers: MAX_STORAGE_IO_WORKERS,
         sqlite_workers: MAX_SQLITE_WORKERS,
     })
     .expect_err("maximum parser values exceed the combined runtime budget");

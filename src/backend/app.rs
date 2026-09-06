@@ -198,10 +198,11 @@ async fn browser_security_headers(request: Request<Body>, next: middleware::Next
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("DENY"),
     );
-    headers.insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
+    // Media and public-share responses explicitly prohibit referrer disclosure.
+    // Supply the browser default only when the route has not set its policy.
+    headers
+        .entry(HeaderName::from_static("referrer-policy"))
+        .or_insert(HeaderValue::from_static("strict-origin-when-cross-origin"));
     headers.insert(
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), geolocation=(), microphone=()"),

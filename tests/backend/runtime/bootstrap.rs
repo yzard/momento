@@ -60,7 +60,8 @@ fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops(
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -103,14 +104,15 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
     let directory = tempfile::tempdir().expect("temporary runtime directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 3,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let config_path = directory.path().join("config.toml");
     std::fs::write(
         &config_path,
-        "[thread_pool]\ncpu_workers=1\nio_workers=4\nsqlite_workers=2\n",
+        "[thread_pool]\ncpu_workers=1\nnetwork_io_workers = 3\nstorage_io_workers = 2\nsqlite_workers=2\n",
     )
     .expect("write config");
     let loaded_config =
@@ -127,6 +129,7 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
 
     let names = runtime
         .block_on(async move {
+            assert_eq!(tokio::runtime::Handle::current().metrics().num_workers(), 3);
             let network_name = tokio::spawn(async {
                 std::thread::current()
                     .name()
@@ -161,7 +164,8 @@ fn journal_mutation_registry_covers_every_active_mutation_owner() {
     let directory = tempfile::tempdir().expect("temporary runtime directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 8,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 4,
     })
     .expect("runtime sizing");
@@ -170,7 +174,7 @@ fn journal_mutation_registry_covers_every_active_mutation_owner() {
     let config_path = directory.path().join("config.toml");
     std::fs::write(
         &config_path,
-        "[thread_pool]\ncpu_workers=8\nio_workers=4\nsqlite_workers=4\n",
+        "[thread_pool]\ncpu_workers=8\nnetwork_io_workers = 2\nstorage_io_workers = 2\nsqlite_workers=4\n",
     )
     .expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
@@ -221,7 +225,8 @@ fn runtime_builder_rejects_a_config_changed_after_initial_read() {
     std::fs::write(&config_path, "# changed config\n").expect("replace config contents");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -252,7 +257,8 @@ fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -293,7 +299,8 @@ fn runtime_builder_does_not_create_a_missing_data_directory() {
     let missing = directory.path().join("missing");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -322,7 +329,8 @@ fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -349,7 +357,8 @@ fn runtime_builder_creates_every_writable_storage_root_before_publication() {
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -414,7 +423,8 @@ fn runtime_builder_rejects_static_storage_that_overlaps_private_data() {
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -452,7 +462,8 @@ fn runtime_builder_rejects_orphan_and_truncated_sqlite_bootstrap_files() {
             .identity;
         let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
             cpu_workers: 1,
-            io_workers: 4,
+            network_io_workers: 2,
+            storage_io_workers: 2,
             sqlite_workers: 2,
         })
         .expect("runtime sizing");
@@ -488,7 +499,8 @@ fn runtime_builder_rejects_an_existing_schema_that_needs_migration() {
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");

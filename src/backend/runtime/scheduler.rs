@@ -399,7 +399,10 @@ impl ExecutorRuntime {
 
         let capacity_wake = Arc::new(Notify::new());
         let (cpu_sender, cpu_receiver) = crossbeam_channel::bounded(sizing.cpu_queue_capacity);
-        let (file_sender, file_receiver) = crossbeam_channel::bounded(sizing.file_queue_capacity);
+        let (file_read_sender, file_read_receiver) =
+            crossbeam_channel::bounded(sizing.file_queue_capacity / 2);
+        let (file_write_sender, file_write_receiver) =
+            crossbeam_channel::bounded(sizing.file_queue_capacity - sizing.file_queue_capacity / 2);
         let sqlite_write_capacity = sizing.sqlite_queue_capacity / sizing.sqlite_workers;
         let (sqlite_read_sender, sqlite_read_receiver) =
             crossbeam_channel::bounded(sizing.sqlite_queue_capacity - sqlite_write_capacity);
@@ -426,8 +429,9 @@ impl ExecutorRuntime {
                 .map_err(|error| error.to_string())?,
         );
         let mut worker_threads = spawn_file_workers(
-            sizing.file_workers,
-            file_receiver,
+            sizing.storage_io_workers,
+            file_read_receiver,
+            file_write_receiver,
             FileWorkerContext {
                 capacity_wake: Arc::clone(&capacity_wake),
                 storage_roots: Arc::clone(&storage_roots),
@@ -454,7 +458,8 @@ impl ExecutorRuntime {
         ) {
             Ok(workers) => workers,
             Err(error) => {
-                drop(file_sender);
+                drop(file_read_sender);
+                drop(file_write_sender);
                 drop(sqlite_read_sender);
                 drop(sqlite_write_sender);
                 join_started_workers(worker_threads)?;
@@ -467,7 +472,8 @@ impl ExecutorRuntime {
                 Ok(workers) => workers,
                 Err(error) => {
                     drop(cpu_sender);
-                    drop(file_sender);
+                    drop(file_read_sender);
+                    drop(file_write_sender);
                     drop(sqlite_read_sender);
                     drop(sqlite_write_sender);
                     join_started_workers(worker_threads)?;
@@ -494,7 +500,8 @@ impl ExecutorRuntime {
                 scheduler_runtime.block_on(run_scheduler(
                     receiver,
                     cpu_sender,
-                    file_sender,
+                    file_read_sender,
+                    file_write_sender,
                     sqlite_read_sender,
                     sqlite_write_sender,
                     capacity_wake,
@@ -778,20 +785,22 @@ fn configure_sqlite_capacity(
 async fn run_scheduler(
     mut receiver: mpsc::Receiver<SchedulerCommand>,
     cpu_sender: ExecutorSender<CpuCommand>,
-    file_sender: ExecutorSender<FileCommand>,
+    file_read_sender: ExecutorSender<FileCommand>,
+    file_write_sender: ExecutorSender<FileCommand>,
     sqlite_read_sender: ExecutorSender<SqliteCommand>,
     sqlite_write_sender: ExecutorSender<SqliteCommand>,
     capacity_wake: Arc<Notify>,
 ) {
     let mut cpu_waiters = VecDeque::new();
-    let mut file_waiters = VecDeque::new();
+    let mut file_read_waiters = VecDeque::new();
+    let mut file_write_waiters = VecDeque::new();
     let mut sqlite_read_waiters = VecDeque::new();
     let mut sqlite_write_waiters = VecDeque::new();
     loop {
         tokio::select! {
             command = receiver.recv() => {
                 let Some(command) = command else {
-                    reject_all_waiters(&mut cpu_waiters, &mut file_waiters, &mut sqlite_read_waiters, &mut sqlite_write_waiters);
+                    reject_all_waiters(&mut cpu_waiters, &mut file_read_waiters, &mut file_write_waiters, &mut sqlite_read_waiters, &mut sqlite_write_waiters);
                     return;
                 };
                 match command {
@@ -799,7 +808,12 @@ async fn run_scheduler(
                         submit_cpu(command, mode, operation, reservation, &cpu_sender, &mut cpu_waiters);
                     }
                     SchedulerCommand::File { command, mode, operation, reservation } => {
-                        submit_file(command, mode, operation, reservation, &file_sender, &mut file_waiters);
+                        let (sender, waiters) = if command.is_read_only() {
+                            (&file_read_sender, &mut file_read_waiters)
+                        } else {
+                            (&file_write_sender, &mut file_write_waiters)
+                        };
+                        submit_file(command, mode, operation, reservation, sender, waiters);
                     }
                     SchedulerCommand::Sqlite { command, mode, operation, reservation } => {
                         let (sender, waiters) = if command.is_read_only() {
@@ -814,7 +828,7 @@ async fn run_scheduler(
                         let _scheduler_control = tokio::spawn(task);
                     }
                     SchedulerCommand::Shutdown { reply } => {
-                        reject_all_waiters(&mut cpu_waiters, &mut file_waiters, &mut sqlite_read_waiters, &mut sqlite_write_waiters);
+                        reject_all_waiters(&mut cpu_waiters, &mut file_read_waiters, &mut file_write_waiters, &mut sqlite_read_waiters, &mut sqlite_write_waiters);
                         let _ = reply.send(());
                         return;
                     }
@@ -823,7 +837,8 @@ async fn run_scheduler(
             () = capacity_wake.notified() => {}
         }
         flush_cpu(&cpu_sender, &mut cpu_waiters);
-        flush_file(&file_sender, &mut file_waiters);
+        flush_file(&file_read_sender, &mut file_read_waiters);
+        flush_file(&file_write_sender, &mut file_write_waiters);
         flush_sqlite(&sqlite_read_sender, &mut sqlite_read_waiters);
         flush_sqlite(&sqlite_write_sender, &mut sqlite_write_waiters);
     }
@@ -970,14 +985,18 @@ fn flush_sqlite(
 
 fn reject_all_waiters(
     cpu_waiters: &mut VecDeque<(CpuCommand, PendingReservation)>,
-    file_waiters: &mut VecDeque<(FileCommand, PendingReservation)>,
+    file_read_waiters: &mut VecDeque<(FileCommand, PendingReservation)>,
+    file_write_waiters: &mut VecDeque<(FileCommand, PendingReservation)>,
     sqlite_read_waiters: &mut VecDeque<(SqliteCommand, PendingReservation)>,
     sqlite_write_waiters: &mut VecDeque<(SqliteCommand, PendingReservation)>,
 ) {
     for (command, _) in cpu_waiters.drain(..) {
         command.reject(ExecutorError::shutting_down("cpu_operation"));
     }
-    for (command, _) in file_waiters.drain(..) {
+    for (command, _) in file_read_waiters
+        .drain(..)
+        .chain(file_write_waiters.drain(..))
+    {
         command.reject(ExecutorError::shutting_down("file_operation"));
     }
     for (command, _) in sqlite_read_waiters

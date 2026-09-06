@@ -30,7 +30,8 @@ fn start_runtime(
         .identity;
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");

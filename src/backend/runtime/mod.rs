@@ -20,7 +20,7 @@ pub use scheduler::{ExecutorHandles, ExecutorRuntime};
 pub(crate) use sizing::FILE_IO_CHUNK_BYTES;
 pub use sizing::{
     RuntimePreflightError, RuntimeSizing, RuntimeSizingBreakdown, ARGON2_WORKSPACE_BYTES,
-    MAX_CPU_WORKERS, MAX_DERIVED_RUNTIME_BYTES, MAX_IO_WORKERS, MAX_SQLITE_WORKERS,
-    WORKER_STACK_BYTES,
+    MAX_CPU_WORKERS, MAX_DERIVED_RUNTIME_BYTES, MAX_NETWORK_IO_WORKERS, MAX_SQLITE_WORKERS,
+    MAX_STORAGE_IO_WORKERS, WORKER_STACK_BYTES,
 };
 pub use timezone::SystemTimezoneSnapshot;

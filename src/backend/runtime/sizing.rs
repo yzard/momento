@@ -3,13 +3,13 @@ use std::fmt;
 use crate::config::ThreadPoolConfig;
 
 pub const MAX_CPU_WORKERS: usize = 256;
-pub const MAX_IO_WORKERS: usize = 256;
+pub const MAX_STORAGE_IO_WORKERS: usize = 256;
+pub const MAX_NETWORK_IO_WORKERS: usize = 256;
 pub const MAX_SQLITE_WORKERS: usize = 64;
 pub const WORKER_STACK_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_DERIVED_RUNTIME_BYTES: u64 = 1024 * 1024 * 1024;
 
 const EXECUTOR_QUEUE_OPERATIONS_PER_WORKER: u64 = 4;
-const NETWORK_WORKERS: u64 = 2;
 const R2D2_MAINTENANCE_THREADS: u64 = 1;
 const DURABLE_SOURCE_COUNT: u64 = super::job::DurableSourceId::COUNT as u64;
 const SCHEDULER_CONTROL_SOURCE_COUNT: u64 = super::control::SchedulerControlSource::COUNT as u64;
@@ -98,9 +98,9 @@ impl RuntimeSizingBreakdown {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSizing {
     pub cpu_workers: usize,
-    pub io_workers: usize,
+    pub storage_io_workers: usize,
+    pub network_io_workers: usize,
     pub sqlite_workers: usize,
-    pub file_workers: usize,
     pub active_connections: usize,
     pub active_requests: usize,
     pub active_stream_sessions: usize,
@@ -128,14 +128,6 @@ impl RuntimeSizing {
     pub fn validate_worker_counts(
         configuration: &ThreadPoolConfig,
     ) -> Result<Self, RuntimeSizingError> {
-        validate_range("cpu_workers", configuration.cpu_workers, 1, MAX_CPU_WORKERS)?;
-        validate_range("io_workers", configuration.io_workers, 4, MAX_IO_WORKERS)?;
-        validate_range(
-            "sqlite_workers",
-            configuration.sqlite_workers,
-            2,
-            MAX_SQLITE_WORKERS,
-        )?;
         Self::new(configuration)
     }
 
@@ -147,6 +139,19 @@ impl RuntimeSizing {
         configuration: &ThreadPoolConfig,
         enforce_runtime_budget: bool,
     ) -> Result<Self, RuntimeSizingError> {
+        validate_range("cpu_workers", configuration.cpu_workers, 1, MAX_CPU_WORKERS)?;
+        validate_range(
+            "storage_io_workers",
+            configuration.storage_io_workers,
+            2,
+            MAX_STORAGE_IO_WORKERS,
+        )?;
+        validate_range(
+            "network_io_workers",
+            configuration.network_io_workers,
+            2,
+            MAX_NETWORK_IO_WORKERS,
+        )?;
         validate_range(
             "sqlite_workers",
             configuration.sqlite_workers,
@@ -154,13 +159,15 @@ impl RuntimeSizing {
             MAX_SQLITE_WORKERS,
         )?;
         let cpu_workers = widen(configuration.cpu_workers)?;
-        let io_workers = widen(configuration.io_workers)?;
+        let storage_io_workers = widen(configuration.storage_io_workers)?;
+        let network_io_workers = widen(configuration.network_io_workers)?;
         let sqlite_workers = widen(configuration.sqlite_workers)?;
-        let file_workers = checked_sub(io_workers, NETWORK_WORKERS)?;
+        let file_workers = storage_io_workers;
+        let combined_io_workers = checked_add(network_io_workers, storage_io_workers)?;
 
-        let active_connections = checked_mul(16, io_workers)?;
-        let active_requests = checked_mul(8, io_workers)?;
-        let active_stream_sessions = checked_mul(8, io_workers)?;
+        let active_connections = checked_mul(16, combined_io_workers)?;
+        let active_requests = checked_mul(8, combined_io_workers)?;
+        let active_stream_sessions = checked_mul(8, combined_io_workers)?;
         let active_outbound_stream_sessions = checked_mul(2, file_workers)?;
         let active_inbound_durable_streams = checked_add(cpu_workers, sqlite_workers)?;
         let active_file_chunks = checked_mul(2, file_workers)?;
@@ -186,7 +193,7 @@ impl RuntimeSizing {
         let file_queue_capacity = checked_mul(file_workers, EXECUTOR_QUEUE_OPERATIONS_PER_WORKER)?;
         let sqlite_queue_capacity =
             checked_mul(sqlite_workers, EXECUTOR_QUEUE_OPERATIONS_PER_WORKER)?;
-        let log_event_capacity = checked_mul(LOG_EVENT_QUEUE_MULTIPLIER, io_workers)?;
+        let log_event_capacity = checked_mul(LOG_EVENT_QUEUE_MULTIPLIER, combined_io_workers)?;
 
         let file_registry_capacity = [
             active_stream_sessions,
@@ -208,7 +215,7 @@ impl RuntimeSizing {
         )?;
 
         let runtime_thread_count = checked_add(
-            checked_add(checked_add(1, io_workers)?, cpu_workers)?,
+            checked_add(checked_add(1, combined_io_workers)?, cpu_workers)?,
             checked_add(sqlite_workers, R2D2_MAINTENANCE_THREADS)?,
         )?;
         let thread_stacks = checked_mul(runtime_thread_count, WORKER_STACK_BYTES)?;
@@ -354,7 +361,14 @@ impl RuntimeSizing {
                 maximum: MAX_DERIVED_RUNTIME_BYTES,
                 breakdown: Box::new(breakdown),
                 feasible_cpu_workers: maximum_feasible_workers(configuration, WorkerField::Cpu)?,
-                feasible_io_workers: maximum_feasible_workers(configuration, WorkerField::Io)?,
+                feasible_storage_io_workers: maximum_feasible_workers(
+                    configuration,
+                    WorkerField::StorageIo,
+                )?,
+                feasible_network_io_workers: maximum_feasible_workers(
+                    configuration,
+                    WorkerField::NetworkIo,
+                )?,
                 feasible_sqlite_workers: maximum_feasible_workers(
                     configuration,
                     WorkerField::Sqlite,
@@ -387,9 +401,9 @@ impl RuntimeSizing {
 
         Ok(Self {
             cpu_workers: narrow(cpu_workers)?,
-            io_workers: narrow(io_workers)?,
+            storage_io_workers: narrow(storage_io_workers)?,
+            network_io_workers: narrow(network_io_workers)?,
             sqlite_workers: narrow(sqlite_workers)?,
-            file_workers: narrow(file_workers)?,
             active_connections: narrow(active_connections)?,
             active_requests: narrow(active_requests)?,
             active_stream_sessions: narrow(active_stream_sessions)?,
@@ -435,7 +449,8 @@ pub enum RuntimeSizingError {
         maximum: u64,
         breakdown: Box<RuntimeSizingBreakdown>,
         feasible_cpu_workers: usize,
-        feasible_io_workers: usize,
+        feasible_storage_io_workers: usize,
+        feasible_network_io_workers: usize,
         feasible_sqlite_workers: usize,
     },
 }
@@ -462,11 +477,12 @@ impl fmt::Display for RuntimeSizingError {
                 maximum,
                 breakdown,
                 feasible_cpu_workers,
-                feasible_io_workers,
+                feasible_storage_io_workers,
+                feasible_network_io_workers,
                 feasible_sqlite_workers,
             } => write!(
                 formatter,
-                "derived runtime reservation {required} exceeds {maximum} bytes: {breakdown:?}; maximum feasible workers with the other configured values fixed: cpu={feasible_cpu_workers}, io={feasible_io_workers}, sqlite={feasible_sqlite_workers}"
+                "derived runtime reservation {required} exceeds {maximum} bytes: {breakdown:?}; maximum feasible workers with the other configured values fixed: cpu={feasible_cpu_workers}, storage_io={feasible_storage_io_workers}, network_io={feasible_network_io_workers}, sqlite={feasible_sqlite_workers}"
             ),
         }
     }
@@ -513,7 +529,8 @@ impl std::error::Error for RuntimePreflightError {}
 #[derive(Clone, Copy)]
 enum WorkerField {
     Cpu,
-    Io,
+    StorageIo,
+    NetworkIo,
     Sqlite,
 }
 
@@ -523,7 +540,8 @@ fn maximum_feasible_workers(
 ) -> Result<usize, RuntimeSizingError> {
     let (minimum, maximum): (usize, usize) = match field {
         WorkerField::Cpu => (1, MAX_CPU_WORKERS),
-        WorkerField::Io => (4, MAX_IO_WORKERS),
+        WorkerField::StorageIo => (2, MAX_STORAGE_IO_WORKERS),
+        WorkerField::NetworkIo => (2, MAX_NETWORK_IO_WORKERS),
         WorkerField::Sqlite => (2, MAX_SQLITE_WORKERS),
     };
     let mut feasible = minimum.saturating_sub(1);
@@ -531,7 +549,8 @@ fn maximum_feasible_workers(
         let mut adjusted = configuration.clone();
         match field {
             WorkerField::Cpu => adjusted.cpu_workers = candidate,
-            WorkerField::Io => adjusted.io_workers = candidate,
+            WorkerField::StorageIo => adjusted.storage_io_workers = candidate,
+            WorkerField::NetworkIo => adjusted.network_io_workers = candidate,
             WorkerField::Sqlite => adjusted.sqlite_workers = candidate,
         }
         let sizing = RuntimeSizing::calculate(&adjusted, false)?;
@@ -626,11 +645,6 @@ fn narrow(value: u64) -> Result<usize, RuntimeSizingError> {
 
 fn checked_add(left: u64, right: u64) -> Result<u64, RuntimeSizingError> {
     left.checked_add(right)
-        .ok_or(RuntimeSizingError::ArithmeticOverflow)
-}
-
-fn checked_sub(left: u64, right: u64) -> Result<u64, RuntimeSizingError> {
-    left.checked_sub(right)
         .ok_or(RuntimeSizingError::ArithmeticOverflow)
 }
 

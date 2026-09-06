@@ -285,13 +285,14 @@ fn test_load_config_reads_thread_pool() {
     let dir = TempDir::new().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[thread_pool]\ncpu_workers = 7\nio_workers = 8\nsqlite_workers = 3\n",
+        "[thread_pool]\ncpu_workers = 7\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 3\n",
     );
 
     let config = load_config(&path).expect("Failed to load config");
 
     assert_eq!(config.thread_pool.cpu_workers, 7);
-    assert_eq!(config.thread_pool.io_workers, 8);
+    assert_eq!(config.thread_pool.storage_io_workers, 6);
+    assert_eq!(config.thread_pool.network_io_workers, 2);
     assert_eq!(config.thread_pool.sqlite_workers, 3);
 }
 
@@ -350,9 +351,9 @@ fn removed_worker_concurrency_settings_are_rejected() {
 #[test]
 fn thread_pool_worker_bounds_are_validated() {
     for invalid_section in [
-        "cpu_workers = 0\nio_workers = 8\nsqlite_workers = 4",
-        "cpu_workers = 8\nio_workers = 3\nsqlite_workers = 4",
-        "cpu_workers = 8\nio_workers = 8\nsqlite_workers = 0",
+        "cpu_workers = 0\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 4",
+        "cpu_workers = 8\nnetwork_io_workers = 2\nstorage_io_workers = 1\nsqlite_workers = 4",
+        "cpu_workers = 8\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 0",
     ] {
         let directory = TempDir::new().expect("temporary directory");
         let path = write_config(&directory, &format!("[thread_pool]\n{invalid_section}\n"));
@@ -367,11 +368,21 @@ fn removed_available_workers_key_is_rejected() {
     let directory = TempDir::new().expect("temporary directory");
     let path = write_config(
         &directory,
-        "[thread_pool]\navailable_workers = 16\ncpu_workers = 8\nio_workers = 8\nsqlite_workers = 4\n",
+        "[thread_pool]\navailable_workers = 16\ncpu_workers = 8\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 4\n",
     );
 
     let error = load_config(&path).expect_err("old worker setting must fail");
     assert!(error.to_string().contains("available_workers"), "{error}");
+}
+
+#[test]
+fn removed_combined_io_workers_key_is_rejected() {
+    let directory = TempDir::new().unwrap();
+    let path = write_config(&directory, "[thread_pool]\ncpu_workers=2\nnetwork_io_workers=2\nstorage_io_workers=2\nsqlite_workers=2\nio_workers=4\n");
+    assert!(load_config(&path)
+        .unwrap_err()
+        .to_string()
+        .contains("io_workers"));
 }
 
 #[test]

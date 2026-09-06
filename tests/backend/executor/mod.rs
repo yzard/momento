@@ -30,7 +30,8 @@ async fn operations_run_on_their_named_execution_domains() {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 2,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -477,7 +478,8 @@ async fn cpu_hashing_is_bounded_and_returns_the_expected_digest() {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -554,7 +556,8 @@ async fn sqlite_executor_atomically_prepares_journal_and_rejects_path_conflicts(
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -676,7 +679,8 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -1099,7 +1103,8 @@ async fn file_executor_streams_storage_chunks_through_root_relative_operations()
     let directory = tempfile::tempdir().expect("temporary storage directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -1276,7 +1281,8 @@ async fn file_executor_enumerates_large_directories_with_resumable_sessions() {
     let directory = tempfile::tempdir().expect("temporary storage directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -1350,7 +1356,8 @@ async fn journal_move_rejects_a_replaced_source_generation() {
     let directory = tempfile::tempdir().expect("temporary storage directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -1484,7 +1491,8 @@ async fn generic_journal_recovery_finishes_a_rename_not_checkpointed_before_rest
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -1767,7 +1775,8 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -2172,7 +2181,8 @@ async fn durable_cancellations_release_mutation_fences_before_rollback_finishes(
     let directory = tempfile::tempdir().expect("temporary database directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");
@@ -2271,7 +2281,8 @@ async fn backup_cancellation_commits_product_state_and_journal_cleanup_atomicall
     let directory = tempfile::tempdir().expect("temporary executor directory");
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 2,
     })
     .expect("runtime sizing");

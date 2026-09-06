@@ -105,8 +105,12 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         Some(runtime_defaults.thread_pool.cpu_workers as i64)
     );
     assert_eq!(
-        template["thread_pool"]["io_workers"].as_integer(),
-        Some(runtime_defaults.thread_pool.io_workers as i64)
+        template["thread_pool"]["storage_io_workers"].as_integer(),
+        Some(runtime_defaults.thread_pool.storage_io_workers as i64)
+    );
+    assert_eq!(
+        template["thread_pool"]["network_io_workers"].as_integer(),
+        Some(runtime_defaults.thread_pool.network_io_workers as i64)
     );
     assert_eq!(
         template["thread_pool"]["sqlite_workers"].as_integer(),

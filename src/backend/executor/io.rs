@@ -33,6 +33,10 @@ use crate::runtime::ConfigFileIdentity;
 const STORAGE_DIRECTORY_CHUNK_BYTES: usize = 64 * 1024;
 pub const FILE_IO_ENTRY_BATCH: usize = 256;
 
+#[cfg(test)]
+#[path = "../../../tests/backend/executor/io.rs"]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageDirectoryEntryKind {
     File,
@@ -147,6 +151,33 @@ pub(crate) enum FileOperation {
 }
 
 impl FileOperation {
+    fn is_read_only(&self) -> bool {
+        match self {
+            Self::Probe { .. }
+            | Self::ReadConfig { .. }
+            | Self::OpenStorageReadSession { .. }
+            | Self::OpenStorageDirectorySession { .. }
+            | Self::InspectStorageSession { .. }
+            | Self::ReadStorageSession { .. }
+            | Self::ReadStorageDirectorySession { .. }
+            | Self::SeekStorageReadSession { .. } => true,
+            Self::ReplaceConfig { .. }
+            | Self::PublishJournalEntry { .. }
+            | Self::RenameJournalEntry { .. }
+            | Self::CleanupJournalEntry { .. }
+            | Self::OpenStorageWriteSession { .. }
+            | Self::CreateStorageDirectory { .. }
+            | Self::SetStorageModifiedTime { .. }
+            | Self::PinStorageSessionForChild { .. }
+            | Self::ReturnStorageSessionFromChild { .. }
+            | Self::AtomicReplaceStorageFile { .. }
+            | Self::WriteStorageSession { .. }
+            | Self::CommitStorageSession { .. }
+            | Self::AbortStorageSession { .. }
+            | Self::CloseStorageSession { .. } => false,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::Probe { .. } => "file_probe",
@@ -349,6 +380,10 @@ pub(crate) struct FileCommand {
 }
 
 impl FileCommand {
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.operation.is_read_only()
+    }
+
     pub(crate) fn new(
         operation: FileOperation,
         reply: oneshot::Sender<Result<FileOutput, ExecutorError>>,
@@ -1626,7 +1661,8 @@ pub(crate) struct FileWorkerContext {
 
 pub(crate) fn spawn_file_workers(
     worker_count: usize,
-    receiver: Receiver<FileCommand>,
+    read_receiver: Receiver<FileCommand>,
+    write_receiver: Receiver<FileCommand>,
     context: FileWorkerContext,
 ) -> Result<Vec<JoinHandle<()>>, std::io::Error> {
     let mut workers = Vec::new();
@@ -1634,71 +1670,148 @@ pub(crate) fn spawn_file_workers(
         std::io::Error::other(format!("failed to reserve file worker handles: {error}"))
     })?;
     for worker_index in 0..worker_count {
-        let receiver = receiver.clone();
+        let (read_receiver, write_receiver) =
+            worker_receivers(worker_index, &read_receiver, &write_receiver);
         let context = context.clone();
+        let role = match worker_index {
+            0 => "reader",
+            1 => "writer",
+            _ => "shared",
+        };
         workers.push(
             std::thread::Builder::new()
-                .name(format!("momento-io-file-{worker_index}"))
+                .name(format!("momento-io-file-{role}-{worker_index}"))
                 .stack_size(crate::runtime::WORKER_STACK_BYTES as usize)
-                .spawn(move || run_worker(receiver, context))?,
+                .spawn(move || {
+                    run_worker(read_receiver, write_receiver, context, worker_index != 0)
+                })?,
         );
     }
     Ok(workers)
 }
 
-fn run_worker(receiver: Receiver<FileCommand>, context: FileWorkerContext) {
+fn worker_receivers<T>(
+    worker_index: usize,
+    read: &Receiver<T>,
+    write: &Receiver<T>,
+) -> (Receiver<T>, Receiver<T>) {
+    (
+        if worker_index == 1 {
+            crossbeam_channel::never()
+        } else {
+            read.clone()
+        },
+        if worker_index == 0 {
+            crossbeam_channel::never()
+        } else {
+            write.clone()
+        },
+    )
+}
+
+fn try_preferred_command<T>(
+    read: &Receiver<T>,
+    write: &Receiver<T>,
+    prefer_read: bool,
+) -> Result<T, crossbeam_channel::TryRecvError> {
+    let (first, second) = if prefer_read {
+        (read, write)
+    } else {
+        (write, read)
+    };
+    first.try_recv().or_else(|_| second.try_recv())
+}
+
+fn run_worker(
+    read_receiver: Receiver<FileCommand>,
+    write_receiver: Receiver<FileCommand>,
+    context: FileWorkerContext,
+    can_write: bool,
+) {
+    let close_receiver = if can_write {
+        context.close_receiver.clone()
+    } else {
+        crossbeam_channel::never()
+    };
+    let log_receiver = if can_write {
+        context.log_consumer.receiver().clone()
+    } else {
+        crossbeam_channel::never()
+    };
+    let mut prefer_read = true;
     loop {
-        crossbeam_channel::select! {
-            recv(receiver) -> command => {
-                let Ok(command) = command else {
-                    drain_and_flush_logs(
-                        &context.storage_roots,
-                        &context.log_consumer,
-                        &context.log_writer,
-                        &context.space_budget,
-                    );
-                    context.file_handles.sweep_close_requests();
-                    return;
-                };
-                context.capacity_wake.notify_one();
-                context.file_handles.sweep_close_requests();
-                let operation_name = command.operation.name();
-                let operation_result = catch_unwind(AssertUnwindSafe(|| {
-                    execute(
-                        command.operation,
-                        &context.storage_roots,
-                        &context.mutation_gates,
-                        &context.file_handles,
-                    )
-                }))
-                .unwrap_or_else(|_| {
-                    Err(ExecutorError::new(
-                        ExecutorErrorKind::WorkerPanic,
-                        operation_name,
-                        "file operation panicked",
-                    ))
-                });
-                let _ = command.reply.send(operation_result);
-                context.file_handles.sweep_close_requests();
-            }
-            recv(context.close_receiver) -> _ => context.file_handles.sweep_close_requests(),
-            recv(context.log_consumer.receiver()) -> event => {
-                let Ok(event) = event else {
-                    continue;
-                };
-                let Some(roots) = context.storage_roots.get() else {
-                    continue;
-                };
-                let Ok(logs) = roots.directory(StorageRootId::Logs) else {
-                    continue;
-                };
-                let Ok(mut writer) = context.log_writer.lock() else {
-                    continue;
-                };
-                writer.append_received(&context.log_consumer, logs, &context.space_budget, event);
+        if can_write {
+            if let Ok(event) = log_receiver.try_recv() {
+                append_log_event(&context, event);
             }
         }
+        // Prefer the opposite lane after each command when both have backlog.
+        // Waiting is event-driven when neither lane has work.
+        let command = match try_preferred_command(&read_receiver, &write_receiver, prefer_read) {
+            Ok(command) => Ok(command),
+            Err(_) => crossbeam_channel::select! {
+            recv(read_receiver) -> command => command,
+            recv(write_receiver) -> command => command,
+            recv(close_receiver) -> _ => { context.file_handles.sweep_close_requests(); continue; },
+            recv(log_receiver) -> event => {
+                if let Ok(event) = event {
+                    append_log_event(&context, event);
+                }
+                continue;
+            }
+            },
+        };
+        let Ok(command) = command else {
+            if can_write {
+                drain_and_flush_logs(
+                    &context.storage_roots,
+                    &context.log_consumer,
+                    &context.log_writer,
+                    &context.space_budget,
+                );
+                context.file_handles.sweep_close_requests();
+            }
+            return;
+        };
+        prefer_read = !command.is_read_only();
+        context.capacity_wake.notify_one();
+        if can_write {
+            context.file_handles.sweep_close_requests();
+        }
+        let operation_name = command.operation.name();
+        let operation_result = catch_unwind(AssertUnwindSafe(|| {
+            execute(
+                command.operation,
+                &context.storage_roots,
+                &context.mutation_gates,
+                &context.file_handles,
+            )
+        }))
+        .unwrap_or_else(|_| {
+            Err(ExecutorError::new(
+                ExecutorErrorKind::WorkerPanic,
+                operation_name,
+                "file operation panicked",
+            ))
+        });
+        let _ = command.reply.send(operation_result);
+        if can_write {
+            context.file_handles.sweep_close_requests();
+        }
     }
+}
+
+fn append_log_event(context: &FileWorkerContext, event: crate::io::log::LogEvent) {
+    let Some(roots) = context.storage_roots.get() else {
+        return;
+    };
+    let Ok(logs) = roots.directory(StorageRootId::Logs) else {
+        return;
+    };
+    let Ok(mut writer) = context.log_writer.lock() else {
+        return;
+    };
+    writer.append_received(&context.log_consumer, logs, &context.space_budget, event);
 }
 
 fn drain_and_flush_logs(

@@ -10,8 +10,6 @@ use super::{
     WORKER_STACK_BYTES,
 };
 
-const NETWORK_WORKERS: usize = 2;
-
 pub struct RuntimeBuilder {
     sizing: RuntimeSizing,
     database_path: PathBuf,
@@ -81,7 +79,7 @@ impl RuntimeBuilder {
 
         let network_worker_index = AtomicUsize::new(0);
         let network_runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(NETWORK_WORKERS)
+            .worker_threads(self.sizing.network_io_workers)
             .thread_stack_size(WORKER_STACK_BYTES as usize)
             .thread_name_fn(move || {
                 let index = network_worker_index.fetch_add(1, Ordering::Relaxed);

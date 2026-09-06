@@ -14,7 +14,8 @@ async fn one_writer_drains_its_queue_while_readers_remain_available() {
     let directory = tempfile::tempdir().unwrap();
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
-        io_workers: 4,
+        network_io_workers: 2,
+        storage_io_workers: 2,
         sqlite_workers: 4,
     })
     .unwrap();

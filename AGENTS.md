@@ -12,8 +12,9 @@ Momento is a self-hosted photo management application with:
 
 Monorepo managed with pnpm workspaces and Turborepo.
 
-Momento API has one dedicated scheduler thread, a fixed two-thread network runtime, and three closed
-executor domains configured only by `[thread_pool].cpu_workers`, `[thread_pool].io_workers`, and
+Momento API has one dedicated scheduler thread, an asynchronous network runtime configured by
+`[thread_pool].network_io_workers` (minimum 2), and three closed executor domains configured by
+`[thread_pool].cpu_workers`, `[thread_pool].storage_io_workers`, and
 `[thread_pool].sqlite_workers`. Client requests and every background business operation acquire
 source-owned capacity from the scheduler, then submit typed bounded operations to the CPU, File I/O,
 or SQLite FIFO; no business operation blocks a network thread with CPU, disk, or SQL work. Business
@@ -22,6 +23,9 @@ concurrency windows. r2d2 is the deliberate additional connection pool: it owns 
 and its connection-maintenance thread, while each SQL operation executes only on the configured SQLite
 executor worker that checks out that connection. File workers exclusively perform filesystem and log
 sink I/O; CPU workers own parsing, encoding, hashing, image work, and supervised child processes.
+`storage_io_workers` excludes network threads (minimum 2): one dedicated reader, one dedicated
+writer, and remaining workers alternate between ready read/write FIFOs. Log writes, cleanup,
+and mixed operations must never execute on the reserved reader. No `io_workers` alias exists.
 `sqlite_workers` counts one dedicated writer plus `sqlite_workers - 1` readers (minimum 2).
 The scheduler routes SQL through separate bounded read/write FIFOs using the operation's read
 specification, never its HTTP method or its name. Reads execute under SQLite `query_only` protection;

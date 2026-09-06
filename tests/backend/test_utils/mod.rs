@@ -64,7 +64,8 @@ pub fn test_executor_handles_with_data_directory(
     let sizing = momento_api::runtime::RuntimeSizing::validate_worker_counts(
         &momento_api::config::ThreadPoolConfig {
             cpu_workers: 1,
-            io_workers: 4,
+            network_io_workers: 2,
+            storage_io_workers: 2,
             sqlite_workers: 2,
         },
     )

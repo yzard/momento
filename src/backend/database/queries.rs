@@ -61,7 +61,8 @@ pub mod file_operations {
          WHERE id = ? AND cancel_requested = 1 AND product_target IS NULL
            AND state IN ('publishing', 'publication_failed', 'files_committed', 'finalize_failed')
            AND ((kind = 'metadata_artifacts' AND owner_kind = 'metadata_generation')
-                OR (kind IN ('llm_result_artifacts', 'llm_result_receive') AND owner_kind = 'llm_result'))
+                OR (kind IN ('llm_result_artifacts', 'llm_result_receive') AND owner_kind = 'llm_result')
+                OR (kind = 'video_ai_frame' AND owner_kind = 'generated_artifact'))
            AND entry_count > 0
            AND NOT EXISTS (
                SELECT 1 FROM file_operation_entries
@@ -74,7 +75,8 @@ pub mod file_operations {
          WHERE id = ? AND cancel_requested = 1 AND product_target IS NULL
            AND completion_outcome = 'discarded' AND state = 'cleanup_pending'
            AND ((kind = 'metadata_artifacts' AND owner_kind = 'metadata_generation')
-                OR (kind IN ('llm_result_artifacts', 'llm_result_receive') AND owner_kind = 'llm_result'))
+                OR (kind IN ('llm_result_artifacts', 'llm_result_receive') AND owner_kind = 'llm_result')
+                OR (kind = 'video_ai_frame' AND owner_kind = 'generated_artifact'))
            AND NOT EXISTS (
                SELECT 1 FROM file_operation_entries
                 WHERE group_id = file_operation_groups.id
@@ -93,6 +95,12 @@ pub mod file_operations {
                    SELECT 1 FROM media_faces AS f
                     WHERE f.media_id = (SELECT media_id FROM llm_jobs WHERE id = g.owner_id)
                       AND g.kind = 'llm_result_artifacts' AND f.crop_path = e.destination_path
+               ) OR EXISTS (
+                   SELECT 1 FROM media_ai_inputs AS i
+                    WHERE i.storage_root = e.storage_root AND i.file_path = e.destination_path
+               ) OR EXISTS (
+                   SELECT 1 FROM llm_job_inputs AS i
+                    WHERE i.storage_root = e.storage_root AND i.file_path = e.destination_path
                ) THEN NULL ELSE e.destination_path END,
                NULL, NULL, NULL, NULL
           FROM file_operation_entries AS e

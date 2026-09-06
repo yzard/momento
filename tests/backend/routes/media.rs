@@ -213,6 +213,7 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
         .add_header(AUTHORIZATION, authorization.clone())
         .await;
     original.assert_status_ok();
+    original.assert_header("referrer-policy", "no-referrer");
     original.assert_header(CACHE_CONTROL, "private");
     original.assert_header(CONTENT_DISPOSITION, "inline; filename=\"binary-media.jpg\"");
     let etag = original.header(ETAG).to_str().expect("etag").to_string();
@@ -221,12 +222,13 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
         .to_str()
         .expect("last modified")
         .to_string();
-    server
+    let not_modified = server
         .get(&format!("/api/v1/media/{media_id}/original"))
         .add_header(AUTHORIZATION, authorization.clone())
         .add_header("if-none-match", &etag)
-        .await
-        .assert_status(StatusCode::NOT_MODIFIED);
+        .await;
+    not_modified.assert_status(StatusCode::NOT_MODIFIED);
+    not_modified.assert_header("referrer-policy", "no-referrer");
     let range = server
         .get(&format!("/api/v1/media/{media_id}/original"))
         .add_header(AUTHORIZATION, authorization.clone())
@@ -284,6 +286,7 @@ async fn individual_media_endpoints_require_access_and_honor_original_cache_and_
         .add_header(RANGE, "bytes=0-1,3-4")
         .await;
     invalid_range.assert_status(StatusCode::RANGE_NOT_SATISFIABLE);
+    invalid_range.assert_header("referrer-policy", "no-referrer");
     invalid_range.assert_header(CONTENT_RANGE, "bytes */6");
     pool.get()
         .expect("database")

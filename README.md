@@ -312,14 +312,20 @@ Momento validates the complete prospective configuration, atomically updates the
 `config.toml` while preserving comments and unrelated values, and reschedules the affected cron
 loop immediately without a service restart.
 
-Momento API uses one scheduler thread, a fixed two-thread network runtime, and three bounded FIFO
-executor domains configured by `[thread_pool].cpu_workers`, `[thread_pool].io_workers`, and
+Momento API uses one scheduler thread, an asynchronous network runtime configured by
+`[thread_pool].network_io_workers` (minimum 2), and three bounded executor domains configured by
+`[thread_pool].cpu_workers`, `[thread_pool].storage_io_workers`, and
 `[thread_pool].sqlite_workers`. HTTP/WebDAV orchestration stays on the network runtime; parsing,
 hashing, encoding, and supervised media tools use CPU workers; filesystem and log operations use I/O
 workers; and SQL uses SQLite workers. Metadata, LLM submission, and LLM result workers drain their
 durable queues and then wait for versioned work signals; they have no poll-interval settings. WebDAV
 and Android backup imports are event-driven, while local import starts only from an administrator
 request. There are no per-feature concurrency settings.
+`storage_io_workers` counts only filesystem threads (minimum 2): one dedicated reader, one
+dedicated writer, and the remaining workers alternate between ready read/write queues. Logging,
+cleanup, and mixed/mutating operations use write-capable workers; network threads are separate.
+Defaults preserve the previous total: 2 network threads and 6 storage threads. The old
+`io_workers` configuration key is rejected; update configurations before restarting.
 r2d2 separately owns SQLite connections and its connection-maintenance thread. Each SQL operation is
 still executed by a configured SQLite executor worker after checking out a connection; r2d2 does not
 form another business-work queue.

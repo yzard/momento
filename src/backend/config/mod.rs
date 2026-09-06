@@ -352,7 +352,8 @@ impl Default for LlmConfig {
 #[serde(deny_unknown_fields)]
 pub struct ThreadPoolConfig {
     pub cpu_workers: usize,
-    pub io_workers: usize,
+    pub network_io_workers: usize,
+    pub storage_io_workers: usize,
     /// Total SQLite executor threads: one writer and at least one reader.
     pub sqlite_workers: usize,
 }
@@ -361,7 +362,8 @@ impl Default for ThreadPoolConfig {
     fn default() -> Self {
         Self {
             cpu_workers: defaults::THREAD_POOL_CPU_WORKERS,
-            io_workers: defaults::THREAD_POOL_IO_WORKERS,
+            network_io_workers: defaults::THREAD_POOL_NETWORK_IO_WORKERS,
+            storage_io_workers: defaults::THREAD_POOL_STORAGE_IO_WORKERS,
             sqlite_workers: defaults::THREAD_POOL_SQLITE_WORKERS,
         }
     }
