@@ -15,15 +15,17 @@ function validateNewPassword(newPassword: string, confirmPassword: string): stri
 }
 
 export default function PasswordChangeForm({ onComplete, layout }: PasswordChangeFormProps) {
-  const { changePassword } = useAuth()
-  const [currentPassword, setCurrentPassword] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
+  const { user, changePassword } = useAuth()
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
-  const handleSubmit = async (event: FormEvent) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const form = event.currentTarget
+    const fields = new FormData(form)
+    const currentPassword = String(fields.get('currentPassword') ?? '')
+    const newPassword = String(fields.get('newPassword') ?? '')
+    const confirmPassword = String(fields.get('confirmPassword') ?? '')
     const validationError = validateNewPassword(newPassword, confirmPassword)
     if (validationError) {
       setError(validationError)
@@ -34,9 +36,7 @@ export default function PasswordChangeForm({ onComplete, layout }: PasswordChang
     setIsLoading(true)
     try {
       await changePassword(currentPassword, newPassword)
-      setCurrentPassword('')
-      setNewPassword('')
-      setConfirmPassword('')
+      form.reset()
       onComplete()
     } catch {
       setError('Failed to change password. Please verify your current password.')
@@ -52,9 +52,23 @@ export default function PasswordChangeForm({ onComplete, layout }: PasswordChang
 
   return (
     <form
+      id="change-password"
+      autoComplete="on"
+      method="post"
       onSubmit={handleSubmit}
       className={layout === 'modal' ? 'space-y-4' : 'max-w-lg space-y-8'}
     >
+      {user && (
+        <input
+          type="text"
+          id="change-password-username"
+          name="username"
+          autoComplete="username"
+          value={user.username}
+          readOnly
+          hidden
+        />
+      )}
       {error && (
         <div
           role="alert"
@@ -67,24 +81,21 @@ export default function PasswordChangeForm({ onComplete, layout }: PasswordChang
         <PasswordField
           id="currentPassword"
           label="Current Password"
-          value={currentPassword}
-          onChange={setCurrentPassword}
+          autoComplete="current-password"
           minLength={null}
           inputClassName={inputClassName}
         />
         <PasswordField
           id="newPassword"
           label="New Password"
-          value={newPassword}
-          onChange={setNewPassword}
+          autoComplete="new-password"
           minLength={8}
           inputClassName={inputClassName}
         />
         <PasswordField
           id="confirmPassword"
           label="Confirm New Password"
-          value={confirmPassword}
-          onChange={setConfirmPassword}
+          autoComplete="new-password"
           minLength={null}
           inputClassName={inputClassName}
         />
@@ -107,20 +118,12 @@ export default function PasswordChangeForm({ onComplete, layout }: PasswordChang
 interface PasswordFieldProps {
   id: string
   label: string
-  value: string
-  onChange: (value: string) => void
+  autoComplete: 'current-password' | 'new-password'
   minLength: number | null
   inputClassName: string
 }
 
-function PasswordField({
-  id,
-  label,
-  value,
-  onChange,
-  minLength,
-  inputClassName,
-}: PasswordFieldProps) {
+function PasswordField({ id, label, autoComplete, minLength, inputClassName }: PasswordFieldProps) {
   return (
     <div className="space-y-2 group">
       <label
@@ -131,13 +134,12 @@ function PasswordField({
       </label>
       <input
         id={id}
+        name={id}
         type="password"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
         className={inputClassName}
         required
         minLength={minLength ?? undefined}
-        autoComplete={id === 'currentPassword' ? 'current-password' : 'new-password'}
+        autoComplete={autoComplete}
       />
       {id === 'newPassword' && (
         <p className="pl-1 text-xs font-medium text-muted-foreground">
