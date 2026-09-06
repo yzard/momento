@@ -26,55 +26,59 @@ const MAX_API_QUERY_ROWS: usize = 4096;
 const MAX_API_QUERY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResetMetadataOutcome {
-    Reset { media_count: i64 },
+pub enum CleanMetadataOutcome {
+    Cleaned { media_count: i64 },
     PathConflict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResetMetadataStepOutcome {
+pub enum CleanMetadataStepOutcome {
     Progressed,
-    Reset { media_count: i64 },
+    Cleaned { media_count: i64 },
     PathConflict,
     Idle,
 }
 
-const METADATA_RESET_PAGE_SIZE: i64 = 256;
+pub(crate) fn cancel_active_metadata_jobs(connection: &Connection) -> rusqlite::Result<usize> {
+    connection.execute(queries::metadata_jobs::CANCEL_ACTIVE, [])
+}
 
-pub fn reset_metadata_page(
+const METADATA_CLEAN_PAGE_SIZE: i64 = 256;
+
+pub fn clean_metadata_page(
     connection: &mut Connection,
     cleanup_group_id: Option<&str>,
-) -> rusqlite::Result<ResetMetadataStepOutcome> {
+) -> rusqlite::Result<CleanMetadataStepOutcome> {
     let existing = connection
-        .query_row(queries::metadata_jobs::SELECT_RESET_STATE, [], |_| Ok(()))
+        .query_row(queries::metadata_jobs::SELECT_CLEAN_STATE, [], |_| Ok(()))
         .optional()?;
     if existing.is_none() {
         let Some(cleanup_group_id) = cleanup_group_id else {
-            return Ok(ResetMetadataStepOutcome::Idle);
+            return Ok(CleanMetadataStepOutcome::Idle);
         };
-        let plan = metadata_reset_cleanup_plan(cleanup_group_id)?;
+        let plan = metadata_clean_cleanup_plan(cleanup_group_id)?;
         let prepare = crate::io::journal::prepare_file_operation_with(connection, plan, |tx| {
-            tx.execute(queries::metadata_jobs::CANCEL_LLM_JOBS_FOR_RESET, [])?;
+            tx.execute(queries::metadata_jobs::CANCEL_LLM_JOBS_FOR_CLEAN, [])?;
             tx.execute(
-                queries::metadata_jobs::DISCARD_LLM_RESULT_RECEIPTS_FOR_RESET,
+                queries::metadata_jobs::DISCARD_LLM_RESULT_RECEIPTS_FOR_CLEAN,
                 [],
             )?;
             tx.execute(
-                queries::metadata_jobs::INSERT_RESET_STATE,
+                queries::metadata_jobs::INSERT_CLEAN_STATE,
                 [cleanup_group_id],
             )?;
             Ok(())
         })?;
         if prepare == PrepareJournalOutcome::PathConflict {
-            return Ok(ResetMetadataStepOutcome::PathConflict);
+            return Ok(CleanMetadataStepOutcome::PathConflict);
         }
-        return Ok(ResetMetadataStepOutcome::Progressed);
+        return Ok(CleanMetadataStepOutcome::Progressed);
     }
 
-    advance_metadata_reset_page(connection)
+    advance_metadata_clean_page(connection)
 }
 
-fn metadata_reset_cleanup_plan(cleanup_group_id: &str) -> rusqlite::Result<FileOperationPlan> {
+fn metadata_clean_cleanup_plan(cleanup_group_id: &str) -> rusqlite::Result<FileOperationPlan> {
     let media_path =
         NormalizedStoragePath::parse("media").map_err(|_| rusqlite::Error::InvalidQuery)?;
     let faces_path =
@@ -111,7 +115,7 @@ fn metadata_reset_cleanup_plan(cleanup_group_id: &str) -> rusqlite::Result<FileO
     ];
     Ok(FileOperationPlan {
         group_id: cleanup_group_id.to_string(),
-        kind: "metadata_reset".to_string(),
+        kind: "metadata_clean".to_string(),
         owner_kind: "metadata".to_string(),
         owner_id: "all".to_string(),
         claim_token: None,
@@ -146,12 +150,12 @@ fn metadata_reset_cleanup_plan(cleanup_group_id: &str) -> rusqlite::Result<FileO
     })
 }
 
-fn advance_metadata_reset_page(
+fn advance_metadata_clean_page(
     connection: &mut Connection,
-) -> rusqlite::Result<ResetMetadataStepOutcome> {
+) -> rusqlite::Result<CleanMetadataStepOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (cleanup_group_id, phase, media_cursor, media_count) =
-        transaction.query_row(queries::metadata_jobs::SELECT_RESET_STATE, [], |row| {
+        transaction.query_row(queries::metadata_jobs::SELECT_CLEAN_STATE, [], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -160,12 +164,12 @@ fn advance_metadata_reset_page(
             ))
         })?;
 
-    if phase == "metadata_jobs" || phase == "queue_imported" || phase == "dirty_imported" {
+    if phase == "metadata_jobs" {
         let media_ids = {
             let mut statement =
                 transaction.prepare(queries::metadata_jobs::SELECT_IMPORTED_PAGE)?;
             let media_ids = statement
-                .query_map(params![media_cursor, METADATA_RESET_PAGE_SIZE], |row| {
+                .query_map(params![media_cursor, METADATA_CLEAN_PAGE_SIZE], |row| {
                     row.get::<_, i64>(0)
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -173,21 +177,17 @@ fn advance_metadata_reset_page(
         };
         if let Some(last_media_id) = media_ids.last().copied() {
             for media_id in media_ids {
-                if phase == "dirty_imported" {
-                    transaction.execute(queries::metadata_jobs::MARK_MEDIA_DIRTY, [media_id])?;
-                } else {
-                    transaction.execute(queries::metadata_jobs::RESET_JOB_FOR_MEDIA, [media_id])?;
-                }
+                transaction.execute(queries::metadata_jobs::CLEAN_JOB_FOR_MEDIA, [media_id])?;
             }
             transaction.execute(
-                queries::metadata_jobs::UPDATE_RESET_CURSOR,
+                queries::metadata_jobs::UPDATE_CLEAN_CURSOR,
                 params![last_media_id, phase],
             )?;
         } else {
-            advance_metadata_reset_phase(&transaction, &phase)?;
+            advance_metadata_clean_phase(&transaction, &phase)?;
         }
         transaction.commit()?;
-        return Ok(ResetMetadataStepOutcome::Progressed);
+        return Ok(CleanMetadataStepOutcome::Progressed);
     }
 
     if phase == "llm_result_groups" {
@@ -195,12 +195,12 @@ fn advance_metadata_reset_page(
             let mut statement =
                 transaction.prepare(queries::metadata_jobs::SELECT_LLM_RESULT_GROUPS_PAGE)?;
             let group_ids = statement
-                .query_map([METADATA_RESET_PAGE_SIZE], |row| row.get::<_, String>(0))?
+                .query_map([METADATA_CLEAN_PAGE_SIZE], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             group_ids
         };
         if group_ids.is_empty() {
-            advance_metadata_reset_phase(&transaction, &phase)?;
+            advance_metadata_clean_phase(&transaction, &phase)?;
         } else {
             for group_id in group_ids {
                 transaction.execute(
@@ -220,41 +220,41 @@ fn advance_metadata_reset_page(
             }
         }
         transaction.commit()?;
-        return Ok(ResetMetadataStepOutcome::Progressed);
+        return Ok(CleanMetadataStepOutcome::Progressed);
     }
 
     if phase == "activate_cleanup" {
         let activated = transaction.execute(
-            queries::file_operations::ACTIVATE_METADATA_RESET_CLEANUP,
+            queries::file_operations::ACTIVATE_METADATA_CLEANUP,
             [&cleanup_group_id],
         )?;
         if activated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let deleted = transaction.execute(queries::metadata_jobs::DELETE_RESET_STATE, [])?;
+        let deleted = transaction.execute(queries::metadata_jobs::DELETE_CLEAN_STATE, [])?;
         if deleted != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         transaction.commit()?;
-        return Ok(ResetMetadataStepOutcome::Reset { media_count });
+        return Ok(CleanMetadataStepOutcome::Cleaned { media_count });
     }
 
-    let delete_query = metadata_reset_delete_query(&phase)?;
-    let changed = transaction.execute(delete_query, [METADATA_RESET_PAGE_SIZE])?;
+    let delete_query = metadata_clean_delete_query(&phase)?;
+    let changed = transaction.execute(delete_query, [METADATA_CLEAN_PAGE_SIZE])?;
     if changed == 0 {
-        advance_metadata_reset_phase(&transaction, &phase)?;
+        advance_metadata_clean_phase(&transaction, &phase)?;
     }
     transaction.commit()?;
-    Ok(ResetMetadataStepOutcome::Progressed)
+    Ok(CleanMetadataStepOutcome::Progressed)
 }
 
-fn advance_metadata_reset_phase(
+fn advance_metadata_clean_phase(
     transaction: &Transaction<'_>,
     current_phase: &str,
 ) -> rusqlite::Result<()> {
-    let next_phase = metadata_reset_next_phase(current_phase)?;
+    let next_phase = metadata_clean_next_phase(current_phase)?;
     let changed = transaction.execute(
-        queries::metadata_jobs::ADVANCE_RESET_PHASE,
+        queries::metadata_jobs::ADVANCE_CLEAN_PHASE,
         params![next_phase, current_phase],
     )?;
     if changed != 1 {
@@ -263,7 +263,7 @@ fn advance_metadata_reset_phase(
     Ok(())
 }
 
-fn metadata_reset_next_phase(current: &str) -> rusqlite::Result<&'static str> {
+fn metadata_clean_next_phase(current: &str) -> rusqlite::Result<&'static str> {
     match current {
         "metadata_jobs" => Ok("llm_result_groups"),
         "llm_result_groups" => Ok("llm_result_staging"),
@@ -309,14 +309,12 @@ fn metadata_reset_next_phase(current: &str) -> rusqlite::Result<&'static str> {
         "ai_inputs" => Ok("rtree"),
         "rtree" => Ok("metadata_sources"),
         "metadata_sources" => Ok("metadata"),
-        "metadata" => Ok("queue_imported"),
-        "queue_imported" => Ok("dirty_imported"),
-        "dirty_imported" => Ok("activate_cleanup"),
+        "metadata" => Ok("activate_cleanup"),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
 
-fn metadata_reset_delete_query(phase: &str) -> rusqlite::Result<&'static str> {
+fn metadata_clean_delete_query(phase: &str) -> rusqlite::Result<&'static str> {
     let query = match phase {
         "llm_result_staging" => queries::metadata_jobs::DELETE_LLM_RESULT_STAGING_PAGE,
         "llm_result_receipts" => queries::metadata_jobs::DELETE_LLM_RESULT_RECEIPTS_PAGE,

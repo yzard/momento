@@ -3,7 +3,8 @@ use axum::http::header::AUTHORIZATION;
 use axum_test::TestServer;
 use momento_api::auth::create_access_token;
 use momento_api::config::Config;
-use momento_api::database::operations::ResetMetadataOutcome;
+use momento_api::database::operations::CleanMetadataOutcome;
+use momento_api::database::operations::FinishMetadataJob;
 use momento_api::processor::ai;
 
 #[tokio::test]
@@ -19,6 +20,200 @@ async fn metadata_generate_requires_administrator() {
         .json(&serde_json::json!({}))
         .await
         .assert_status_forbidden();
+}
+
+#[tokio::test]
+async fn metadata_cancel_stops_queued_and_processing_jobs_without_allowing_a_late_completion() {
+    let (application, pool) = create_test_app();
+    let administrator_id = create_test_user(
+        &pool,
+        "metadata-cancel-admin",
+        "metadata-cancel-admin@example.com",
+    );
+    let queued_media_id = create_test_media(&pool, "metadata-queued.jpg");
+    let processing_media_id = create_test_media(&pool, "metadata-processing.jpg");
+    let claim_token = "00000000-0000-0000-0000-000000000042";
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute(
+            "UPDATE users SET role = 'admin' WHERE id = ?",
+            [administrator_id],
+        )
+        .expect("administrator role");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+            [queued_media_id],
+        )
+        .expect("queued metadata job");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, claim_token, claimed_at) VALUES (?, 'processing', ?, datetime('now'))",
+            rusqlite::params![processing_media_id, claim_token],
+        )
+        .expect("processing metadata job");
+    drop(connection);
+    let token = create_access_token(
+        administrator_id,
+        "metadata-cancel-admin",
+        "admin",
+        &Config::default(),
+        None,
+    )
+    .expect("token");
+    let server = TestServer::new(application).expect("server");
+
+    let response = server
+        .post("/api/v1/metadata/cancel")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+
+    response.assert_status_ok();
+    assert_eq!(response.json::<serde_json::Value>()["affectedJobs"], 2);
+    let connection = pool.get().expect("database connection");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [queued_media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("queued job status"),
+        "cancelled"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [processing_media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("processing job status"),
+        "cancelling"
+    );
+    drop(connection);
+
+    let status_response = server
+        .post("/api/v1/metadata/status")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+    status_response.assert_status_ok();
+    let status = status_response.json::<serde_json::Value>();
+    assert_eq!(status["status"], "cancelling");
+    assert_eq!(status["cancellingJobs"], 1);
+
+    crate::test_utils::test_executor_handles(pool.clone())
+        .sqlite
+        .finish_metadata_job_durable(FinishMetadataJob {
+            media_id: processing_media_id,
+            claim_token: claim_token.to_string(),
+            error: None,
+        })
+        .await
+        .expect("cancelled worker completion");
+    assert_eq!(
+        pool.get()
+            .expect("database connection")
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [processing_media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("settled job status"),
+        "cancelled"
+    );
+
+    let generate_response = server
+        .post("/api/v1/metadata/generate")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+    generate_response.assert_status_ok();
+    assert_eq!(
+        generate_response.json::<serde_json::Value>()["affectedJobs"],
+        2
+    );
+}
+
+#[tokio::test]
+async fn metadata_clean_removes_generated_data_without_regenerating_it() {
+    let (application, pool) = create_test_app();
+    let administrator_id = create_test_user(
+        &pool,
+        "metadata-clean-admin",
+        "metadata-clean-admin@example.com",
+    );
+    let media_id = create_test_media(&pool, "metadata-clean.jpg");
+    let connection = pool.get().expect("database connection");
+    connection
+        .execute(
+            "UPDATE users SET role = 'admin' WHERE id = ?",
+            [administrator_id],
+        )
+        .expect("administrator role");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'completed')",
+            [media_id],
+        )
+        .expect("completed metadata job");
+    drop(connection);
+    let token = create_access_token(
+        administrator_id,
+        "metadata-clean-admin",
+        "admin",
+        &Config::default(),
+        None,
+    )
+    .expect("token");
+    let server = TestServer::new(application).expect("server");
+
+    let clean_response = server
+        .post("/api/v1/metadata/clean")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+
+    clean_response.assert_status_ok();
+    assert_eq!(
+        clean_response.json::<serde_json::Value>()["affectedJobs"],
+        1
+    );
+    let connection = pool.get().expect("database connection");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM media_metadata WHERE media_id = ?",
+                [media_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata count"),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("cleaned metadata job"),
+        "cancelled"
+    );
+    drop(connection);
+
+    let generate_response = server
+        .post("/api/v1/metadata/generate")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+    generate_response.assert_status_ok();
+    assert_eq!(
+        generate_response.json::<serde_json::Value>()["affectedJobs"],
+        1
+    );
 }
 
 #[tokio::test]
@@ -67,7 +262,7 @@ async fn metadata_status_returns_complete_failure_diagnostics() {
 }
 
 #[tokio::test]
-async fn metadata_reset_clears_durable_ai_input_records() {
+async fn metadata_clean_clears_durable_ai_input_records() {
     let (_application, pool) = create_test_app();
     let media_id = create_test_user(&pool, "metadata-reset", "metadata-reset@example.com");
     let connection = pool.get().expect("connection");
@@ -77,10 +272,10 @@ async fn metadata_reset_clears_durable_ai_input_records() {
     drop(connection);
     let outcome = crate::test_utils::test_executor_handles(pool.clone())
         .sqlite
-        .reset_metadata_request("metadata-reset-inputs".to_string())
+        .clean_metadata_request("metadata-clean-inputs".to_string())
         .await
         .expect("reset");
-    assert_eq!(outcome, ResetMetadataOutcome::Reset { media_count: 1 });
+    assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 1 });
     let connection = pool.get().expect("connection");
     let count: i64 = connection
         .query_row(
@@ -93,7 +288,7 @@ async fn metadata_reset_clears_durable_ai_input_records() {
 }
 
 #[tokio::test]
-async fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
+async fn metadata_clean_removes_ai_jobs_results_and_similarity_index() {
     let (_application, pool) = create_test_app();
     let media_id = create_test_media(&pool, "metadata-reset-derived.jpg");
     let connection = pool.get().expect("connection");
@@ -105,10 +300,10 @@ async fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
     drop(connection);
     let outcome = crate::test_utils::test_executor_handles(pool.clone())
         .sqlite
-        .reset_metadata_request("metadata-reset-derived".to_string())
+        .clean_metadata_request("metadata-clean-derived".to_string())
         .await
         .expect("reset");
-    assert_eq!(outcome, ResetMetadataOutcome::Reset { media_count: 1 });
+    assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 1 });
     let connection = pool.get().expect("connection");
     for table in [
         "llm_jobs",
@@ -127,7 +322,7 @@ async fn metadata_reset_removes_ai_jobs_results_and_similarity_index() {
 }
 
 #[tokio::test]
-async fn metadata_reset_commits_derived_tree_cleanup_to_the_generic_journal() {
+async fn metadata_clean_commits_derived_tree_cleanup_to_the_generic_journal() {
     let (_application, pool) = create_test_app();
     let (executors, data_directory) =
         crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
@@ -147,16 +342,16 @@ async fn metadata_reset_commits_derived_tree_cleanup_to_the_generic_journal() {
     assert_eq!(
         executors
             .sqlite
-            .reset_metadata_request("metadata-reset-files".to_string())
+            .clean_metadata_request("metadata-clean-files".to_string())
             .await
-            .expect("metadata reset"),
-        ResetMetadataOutcome::Reset { media_count: 0 }
+            .expect("metadata cleanup"),
+        CleanMetadataOutcome::Cleaned { media_count: 0 }
     );
     assert_eq!(
         pool.get()
             .expect("database")
             .query_row(
-                "SELECT state FROM file_operation_groups WHERE id = 'metadata-reset-files'",
+                "SELECT state FROM file_operation_groups WHERE id = 'metadata-clean-files'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -177,7 +372,7 @@ async fn metadata_reset_commits_derived_tree_cleanup_to_the_generic_journal() {
         pool.get()
             .expect("database")
             .query_row(
-                "SELECT state FROM file_operation_groups WHERE id = 'metadata-reset-files'",
+                "SELECT state FROM file_operation_groups WHERE id = 'metadata-clean-files'",
                 [],
                 |row| row.get::<_, String>(0),
             )

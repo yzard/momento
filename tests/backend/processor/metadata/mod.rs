@@ -10,7 +10,7 @@ use momento_api::processor::metadata::{
 };
 use std::fs;
 
-mod reset;
+mod clean;
 mod reverse_geocoding;
 
 async fn claim_metadata_job(
@@ -730,6 +730,92 @@ async fn stale_metadata_claim_cannot_finish_a_new_owner() {
         )
         .expect("active token");
     assert_eq!(active_token, second_claim.claim_token);
+}
+
+#[tokio::test]
+async fn startup_recovery_settles_a_cancelling_metadata_claim_without_requeueing_it() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "cancelling-claim.jpg");
+    let claim_token = "00000000-0000-0000-0000-000000000043";
+    pool.get()
+        .expect("connection")
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, claim_token, claimed_at) VALUES (?, 'cancelling', ?, datetime('now'))",
+            rusqlite::params![media_id, claim_token],
+        )
+        .expect("cancelling job");
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+
+    assert_eq!(
+        executors
+            .sqlite
+            .recover_metadata_claims_durable()
+            .await
+            .expect("recover cancelling claim"),
+        1
+    );
+    assert_eq!(
+        pool.get()
+            .expect("connection")
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("recovered status"),
+        "cancelled"
+    );
+    assert_eq!(
+        executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .expect("claim after cancellation"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_new_rerun_request_after_cancellation_is_not_lost() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "cancelled-rerun.jpg");
+    let claim_token = "00000000-0000-0000-0000-000000000044";
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, claim_token, claimed_at) VALUES (?, 'cancelling', ?, datetime('now'))",
+            rusqlite::params![media_id, claim_token],
+        )
+        .expect("cancelling job");
+    connection
+        .execute(
+            momento_api::database::queries::metadata_jobs::REQUEST_RERUN,
+            [media_id],
+        )
+        .expect("request rerun");
+    drop(connection);
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+
+    executors
+        .sqlite
+        .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            media_id,
+            claim_token: claim_token.to_string(),
+            error: Some("cancelled work stopped".to_string()),
+        })
+        .await
+        .expect("settle cancelled attempt");
+    assert_eq!(
+        pool.get()
+            .expect("connection")
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("rerun status"),
+        "queued"
+    );
 }
 
 #[tokio::test]

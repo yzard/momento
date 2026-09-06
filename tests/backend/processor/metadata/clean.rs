@@ -4,7 +4,7 @@ use momento_api::constants::{
     SCREENSHOT_DETECTION_MODEL_TYPE,
 };
 use momento_api::database::operations::{
-    reset_metadata_page, ResetMetadataOutcome, ResetMetadataStepOutcome,
+    clean_metadata_page, CleanMetadataOutcome, CleanMetadataStepOutcome,
 };
 use momento_api::database::queries;
 use momento_api::processor::ai::operation::AiFeature;
@@ -35,11 +35,11 @@ async fn clearing_metadata_also_clears_llm_text_models() {
 
     let outcome = crate::test_utils::test_executor_handles(pool.clone())
         .sqlite
-        .reset_metadata_request("metadata-reset-models".to_string())
+        .clean_metadata_request("metadata-clean-models".to_string())
         .await
-        .expect("metadata reset should succeed");
+        .expect("metadata cleanup should succeed");
 
-    assert_eq!(outcome, ResetMetadataOutcome::Reset { media_count: 1 });
+    assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 1 });
     let conn = pool.get().expect("Failed to get database connection");
     let count: i64 = conn
         .query_row(
@@ -87,7 +87,7 @@ async fn clearing_metadata_also_clears_llm_text_models() {
 }
 
 #[tokio::test]
-async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() {
+async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() {
     let (_app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "metadata-reset-page", "reset-page@example.com");
     let connection = pool.get().expect("database connection");
@@ -110,14 +110,14 @@ async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() 
 
     let mut connection = pool.get().expect("database connection");
     assert_eq!(
-        reset_metadata_page(&mut connection, Some("metadata-reset-resume"))
+        clean_metadata_page(&mut connection, Some("metadata-clean-resume"))
             .expect("initialize reset"),
-        ResetMetadataStepOutcome::Progressed
+        CleanMetadataStepOutcome::Progressed
     );
     assert_eq!(
         connection
             .query_row(
-                "SELECT state FROM file_operation_groups WHERE id = 'metadata-reset-resume'",
+                "SELECT state FROM file_operation_groups WHERE id = 'metadata-clean-resume'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -165,13 +165,13 @@ async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() 
         != "metadata_sources"
     {
         assert_eq!(
-            reset_metadata_page(&mut connection, None).expect("advance reset"),
-            ResetMetadataStepOutcome::Progressed
+            clean_metadata_page(&mut connection, None).expect("advance cleanup"),
+            CleanMetadataStepOutcome::Progressed
         );
     }
     assert_eq!(
-        reset_metadata_page(&mut connection, None).expect("delete first source page"),
-        ResetMetadataStepOutcome::Progressed
+        clean_metadata_page(&mut connection, None).expect("delete first source page"),
+        CleanMetadataStepOutcome::Progressed
     );
     assert_eq!(
         connection
@@ -185,10 +185,10 @@ async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() 
 
     let outcome = crate::test_utils::test_executor_handles(pool.clone())
         .sqlite
-        .reset_metadata_request("unused-new-reset-id".to_string())
+        .clean_metadata_request("unused-new-clean-id".to_string())
         .await
         .expect("resume reset");
-    assert_eq!(outcome, ResetMetadataOutcome::Reset { media_count: 300 });
+    assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 300 });
 
     let connection = pool.get().expect("database connection");
     assert_eq!(
@@ -204,7 +204,7 @@ async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() 
     assert_eq!(
         connection
             .query_row(
-                "SELECT state FROM file_operation_groups WHERE id = 'metadata-reset-resume'",
+                "SELECT state FROM file_operation_groups WHERE id = 'metadata-clean-resume'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -214,7 +214,7 @@ async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() 
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM file_operation_groups WHERE id = 'unused-new-reset-id'",
+                "SELECT COUNT(*) FROM file_operation_groups WHERE id = 'unused-new-clean-id'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -224,7 +224,7 @@ async fn metadata_reset_pages_large_tables_and_resumes_the_existing_operation() 
 }
 
 #[tokio::test]
-async fn metadata_reset_retires_result_journals_before_removing_receipts() {
+async fn metadata_clean_retires_result_journals_before_removing_receipts() {
     let (_app, pool) = create_test_app();
     let media_id = create_test_media(&pool, "metadata-reset-result.jpg");
     let connection = pool.get().expect("database connection");
@@ -262,10 +262,10 @@ async fn metadata_reset_retires_result_journals_before_removing_receipts() {
 
     let outcome = crate::test_utils::test_executor_handles(pool.clone())
         .sqlite
-        .reset_metadata_request("metadata-reset-result-cleanup".to_string())
+        .clean_metadata_request("metadata-clean-result-cleanup".to_string())
         .await
-        .expect("metadata reset");
-    assert_eq!(outcome, ResetMetadataOutcome::Reset { media_count: 1 });
+        .expect("metadata cleanup");
+    assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 1 });
 
     let connection = pool.get().expect("database connection");
     let (state, target, outcome): (String, Option<String>, Option<String>) = connection
@@ -309,7 +309,7 @@ async fn metadata_reset_retires_result_journals_before_removing_receipts() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = 'metadata-reset-result-cleanup' AND storage_root = 'journal' AND source_path = 'llm-results'",
+                "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = 'metadata-clean-result-cleanup' AND storage_root = 'journal' AND source_path = 'llm-results'",
                 [],
                 |row| row.get::<_, i64>(0),
             )

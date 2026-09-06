@@ -306,7 +306,7 @@ pub mod file_operations {
     pub const SELECT_GROUP_FOR_CANCELLATION: &str =
         "SELECT state, version, cancel_requested FROM file_operation_groups WHERE id = ?";
     pub const REQUEST_PRECOMMIT_ROLLBACK: &str = "UPDATE file_operation_groups SET cancel_requested = 1, state = 'rollback_pending', version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'prepared'";
-    pub const ACTIVATE_METADATA_RESET_CLEANUP: &str = r#"
+    pub const ACTIVATE_METADATA_CLEANUP: &str = r#"
     UPDATE file_operation_groups
        SET state = 'cleanup_pending'
          , completion_outcome = 'published'
@@ -318,7 +318,7 @@ pub mod file_operations {
          , updated_at = datetime('now')
          , terminal_at = NULL
      WHERE id = ?
-       AND kind = 'metadata_reset'
+       AND kind = 'metadata_clean'
        AND owner_kind = 'metadata'
        AND owner_id = 'all'
        AND state = 'prepared'
@@ -820,8 +820,6 @@ pub mod webdav_ready {
 }
 
 pub mod metadata_jobs {
-    pub const COUNT_IMPORTED_MEDIA: &str =
-        "SELECT COUNT(*) FROM media WHERE import_state = 'imported'";
     pub const INSERT_QUEUED: &str = r#"
     INSERT INTO media_metadata_jobs (media_id, status, available_at)
     VALUES (?, 'queued', datetime('now'))
@@ -833,20 +831,20 @@ pub mod metadata_jobs {
     VALUES (?, 'queued', datetime('now'))
     ON CONFLICT(media_id) DO UPDATE SET
         status = CASE
-            WHEN media_metadata_jobs.status = 'processing' THEN 'processing'
+            WHEN media_metadata_jobs.status IN ('processing', 'cancelling') THEN media_metadata_jobs.status
             ELSE 'queued'
         END
       , attempts = CASE
-            WHEN media_metadata_jobs.status = 'processing' THEN media_metadata_jobs.attempts
+            WHEN media_metadata_jobs.status IN ('processing', 'cancelling') THEN media_metadata_jobs.attempts
             ELSE 0
         END
       , rerun_requested = CASE
-            WHEN media_metadata_jobs.status = 'processing' THEN 1
+            WHEN media_metadata_jobs.status IN ('processing', 'cancelling') THEN 1
             ELSE 0
         END
       , available_at = datetime('now')
       , claim_token = CASE
-            WHEN media_metadata_jobs.status = 'processing' THEN media_metadata_jobs.claim_token
+            WHEN media_metadata_jobs.status IN ('processing', 'cancelling') THEN media_metadata_jobs.claim_token
             ELSE NULL
         END
       , completed_at = NULL
@@ -862,17 +860,49 @@ pub mod metadata_jobs {
       FROM media
       LEFT JOIN media_metadata ON media_metadata.media_id = media.id
      WHERE media.import_state = 'imported'
-       AND media_metadata.media_id IS NULL
+       AND (
+            media_metadata.media_id IS NULL
+            OR EXISTS (
+                SELECT 1
+                  FROM media_metadata_jobs AS existing_job
+                 WHERE existing_job.media_id = media.id
+                   AND existing_job.status IN ('failed', 'cancelled')
+            )
+       )
     ON CONFLICT(media_id) DO UPDATE SET
         status = CASE
-            WHEN media_metadata_jobs.status = 'failed' THEN 'queued'
+            WHEN media_metadata_jobs.status IN ('failed', 'cancelled') THEN 'queued'
             ELSE media_metadata_jobs.status
         END
       , available_at = CASE
-            WHEN media_metadata_jobs.status = 'failed' THEN datetime('now')
+            WHEN media_metadata_jobs.status IN ('failed', 'cancelled') THEN datetime('now')
             ELSE media_metadata_jobs.available_at
         END
+      , attempts = CASE
+            WHEN media_metadata_jobs.status IN ('failed', 'cancelled') THEN 0
+            ELSE media_metadata_jobs.attempts
+        END
+      , completed_at = CASE
+            WHEN media_metadata_jobs.status IN ('failed', 'cancelled') THEN NULL
+            ELSE media_metadata_jobs.completed_at
+        END
+      , last_error = CASE
+            WHEN media_metadata_jobs.status IN ('failed', 'cancelled') THEN NULL
+            ELSE media_metadata_jobs.last_error
+        END
       , updated_at = datetime('now')
+    "#;
+
+    pub const CANCEL_ACTIVE: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = CASE WHEN status = 'processing' THEN 'cancelling' ELSE 'cancelled' END
+         , claim_token = CASE WHEN status = 'processing' THEN claim_token ELSE NULL END
+         , rerun_requested = 0
+         , claimed_at = CASE WHEN status = 'processing' THEN claimed_at ELSE NULL END
+         , completed_at = CASE WHEN status = 'processing' THEN NULL ELSE datetime('now') END
+         , last_error = NULL
+         , updated_at = datetime('now')
+     WHERE status IN ('queued', 'processing')
     "#;
 
     pub const SELECT_STATUS_COUNTS: &str = r#"
@@ -880,17 +910,21 @@ pub mod metadata_jobs {
          , COUNT(*)
       FROM media_metadata_jobs
      GROUP BY status
+    UNION ALL
+    SELECT 'cleaning'
+         , COUNT(*)
+      FROM metadata_reset_operations
+     HAVING COUNT(*) > 0
     "#;
 
-    pub const SELECT_ALL_MEDIA_IDS: &str = "SELECT id FROM media";
-    pub const SELECT_RESET_STATE: &str = r#"
+    pub const SELECT_CLEAN_STATE: &str = r#"
     SELECT cleanup_group_id, phase, media_cursor, media_count
       FROM metadata_reset_operations
      WHERE id = 1
     "#;
-    pub const IS_RESET_ACTIVE: &str =
+    pub const IS_CLEAN_ACTIVE: &str =
         "SELECT EXISTS (SELECT 1 FROM metadata_reset_operations WHERE id = 1)";
-    pub const INSERT_RESET_STATE: &str = r#"
+    pub const INSERT_CLEAN_STATE: &str = r#"
     INSERT INTO metadata_reset_operations (
         id, cleanup_group_id, phase, media_cursor, media_count
     )
@@ -899,7 +933,7 @@ pub mod metadata_jobs {
         (SELECT COUNT(*) FROM media WHERE import_state = 'imported')
     )
     "#;
-    pub const CANCEL_LLM_JOBS_FOR_RESET: &str = r#"
+    pub const CANCEL_LLM_JOBS_FOR_CLEAN: &str = r#"
     UPDATE llm_jobs
        SET status = 'cancelled'
          , state_version = state_version + 1
@@ -908,12 +942,12 @@ pub mod metadata_jobs {
          , updated_at = datetime('now')
      WHERE status IN ('queued', 'submitting', 'submitted')
     "#;
-    pub const DISCARD_LLM_RESULT_RECEIPTS_FOR_RESET: &str = r#"
+    pub const DISCARD_LLM_RESULT_RECEIPTS_FOR_CLEAN: &str = r#"
     UPDATE llm_result_receipts
        SET state = 'discarded'
          , cancel_requested = 1
          , claim_token = NULL
-         , last_error = 'metadata reset superseded this result'
+         , last_error = 'metadata cleanup superseded this result'
          , updated_at = datetime('now')
      WHERE state IN ('received', 'processing')
     "#;
@@ -955,39 +989,34 @@ pub mod metadata_jobs {
      ORDER BY id
      LIMIT ?
     "#;
-    pub const RESET_JOB_FOR_MEDIA: &str = r#"
+    pub const CLEAN_JOB_FOR_MEDIA: &str = r#"
     INSERT INTO media_metadata_jobs (
         media_id, status, claim_token, attempts, rerun_requested, available_at,
         claimed_at, completed_at, last_error, updated_at
     )
-    VALUES (?, 'queued', NULL, 0, 0, datetime('now'), NULL, NULL, NULL, datetime('now'))
+    VALUES (?, 'cancelled', NULL, 0, 0, datetime('now'), NULL, datetime('now'), NULL, datetime('now'))
     ON CONFLICT(media_id) DO UPDATE SET
-        status = 'queued'
+        status = 'cancelled'
       , claim_token = NULL
       , attempts = 0
       , rerun_requested = 0
       , available_at = datetime('now')
       , claimed_at = NULL
-      , completed_at = NULL
+      , completed_at = datetime('now')
       , last_error = NULL
       , updated_at = datetime('now')
     "#;
-    pub const MARK_MEDIA_DIRTY: &str = r#"
-    INSERT INTO media_similarity_dirty (media_id, marked_at)
-    VALUES (?, datetime('now'))
-    ON CONFLICT(media_id) DO UPDATE SET marked_at = excluded.marked_at
-    "#;
-    pub const UPDATE_RESET_CURSOR: &str = r#"
+    pub const UPDATE_CLEAN_CURSOR: &str = r#"
     UPDATE metadata_reset_operations
        SET media_cursor = ?, updated_at = datetime('now')
      WHERE id = 1 AND phase = ?
     "#;
-    pub const ADVANCE_RESET_PHASE: &str = r#"
+    pub const ADVANCE_CLEAN_PHASE: &str = r#"
     UPDATE metadata_reset_operations
        SET phase = ?, media_cursor = 0, updated_at = datetime('now')
      WHERE id = 1 AND phase = ?
     "#;
-    pub const DELETE_RESET_STATE: &str =
+    pub const DELETE_CLEAN_STATE: &str =
         "DELETE FROM metadata_reset_operations WHERE id = 1 AND phase = 'activate_cleanup'";
     pub const DELETE_LLM_RESULT_STAGING_PAGE: &str = "DELETE FROM llm_result_staging WHERE rowid IN (SELECT rowid FROM llm_result_staging ORDER BY rowid LIMIT ?)";
     pub const DELETE_LLM_RESULT_RECEIPTS_PAGE: &str = "DELETE FROM llm_result_receipts WHERE rowid IN (SELECT rowid FROM llm_result_receipts ORDER BY rowid LIMIT ?)";
@@ -1071,9 +1100,9 @@ pub mod metadata_jobs {
        AND available_at > datetime('now')
        AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
     "#;
-    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' ELSE 'completed' END, claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
-    pub const MARK_RETRY: &str = "UPDATE media_metadata_jobs SET status = 'queued', claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, last_error = CASE WHEN rerun_requested = 1 THEN NULL ELSE ? END, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
-    pub const RECOVER_ORPHANED_CLAIMS: &str = "UPDATE media_metadata_jobs SET status = 'queued', claim_token = NULL, available_at = datetime('now'), claimed_at = NULL, updated_at = datetime('now') WHERE status = 'processing' AND claim_token IS NOT NULL";
+    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' WHEN status = 'cancelling' THEN 'cancelled' ELSE 'completed' END, claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status IN ('processing', 'cancelling')";
+    pub const MARK_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' WHEN status = 'cancelling' THEN 'cancelled' ELSE 'queued' END, claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, completed_at = CASE WHEN status = 'cancelling' AND rerun_requested = 0 THEN datetime('now') ELSE completed_at END, last_error = CASE WHEN status = 'cancelling' OR rerun_requested = 1 THEN NULL ELSE ? END, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status IN ('processing', 'cancelling')";
+    pub const RECOVER_ORPHANED_CLAIMS: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN status = 'cancelling' THEN 'cancelled' ELSE 'queued' END, claim_token = NULL, available_at = datetime('now'), claimed_at = NULL, completed_at = CASE WHEN status = 'cancelling' THEN datetime('now') ELSE completed_at END, updated_at = datetime('now') WHERE status IN ('processing', 'cancelling') AND claim_token IS NOT NULL";
     pub const VERIFY_CLAIM: &str = "SELECT 1 FROM media_metadata_jobs WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
     pub const SELECT_FAILURES: &str = "SELECT last_error FROM media_metadata_jobs WHERE status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
 }

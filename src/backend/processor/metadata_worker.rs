@@ -234,21 +234,17 @@ async fn process_cycle(
             .acquire_durable(DurableSourceId::Metadata, SchedulerAdmissionKind::NewClaim)
             .await
             .map_err(|error| error.to_string())?;
-        let mut reset_progressed = false;
+        let mut clean_progressed = false;
         while sqlite
-            .continue_metadata_reset_durable()
+            .continue_metadata_clean_durable()
             .await
             .map_err(|error| error.to_string())?
         {
-            reset_progressed = true;
+            clean_progressed = true;
         }
-        if reset_progressed {
+        if clean_progressed {
             scheduler.wake_journal_recovery();
         }
-        sqlite
-            .queue_incomplete_metadata_durable()
-            .await
-            .map_err(|error| error.to_string())?;
     }
     let mut lanes = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {

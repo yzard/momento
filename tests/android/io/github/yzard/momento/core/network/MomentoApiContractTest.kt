@@ -64,8 +64,12 @@ class MomentoApiContractTest {
 
     @Test fun metadataActionsStillSendTheirRequiredEmptyJsonBody() {
         val metadata = MomentoApi::class.java.getMethod("metadataStatus", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val cancel = MomentoApi::class.java.getMethod("cancelMetadata", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
+        val clean = MomentoApi::class.java.getMethod("cleanMetadata", EmptyRequest::class.java, kotlin.coroutines.Continuation::class.java)
 
         assertEquals("api/v1/metadata/status", requireNotNull(metadata.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/metadata/cancel", requireNotNull(cancel.getAnnotation(POST::class.java)).value)
+        assertEquals("api/v1/metadata/clean", requireNotNull(clean.getAnnotation(POST::class.java)).value)
         assertEquals("{}", Json.encodeToString(EmptyRequest()))
     }
 

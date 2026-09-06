@@ -9,9 +9,10 @@ interface AdministrationRepository {
     suspend fun deleteUser(id: Long): MessageResponse
     suspend fun localImport(): MessageResponse
     suspend fun importStatus(): ImportStatus
-    suspend fun generateMetadata(): JobActionResponse
-    suspend fun metadataStatus(): JobStatus
-    suspend fun resetMetadata(): JobActionResponse
+    suspend fun generateMetadata(): MetadataActionResponse
+    suspend fun cancelMetadata(): MetadataActionResponse
+    suspend fun metadataStatus(): MetadataStatus
+    suspend fun cleanMetadata(): MetadataActionResponse
     suspend fun startAi(): AiActionResponse
     suspend fun aiStatus(): AiStatusResponse
     suspend fun cancelAi(): AiActionResponse

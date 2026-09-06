@@ -324,7 +324,9 @@ CREATE TABLE IF NOT EXISTS media_document_classification_inputs (
 
 CREATE TABLE IF NOT EXISTS media_metadata_jobs (
     media_id INTEGER PRIMARY KEY,
-    status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')),
+    status TEXT NOT NULL CHECK(status IN (
+        'queued', 'processing', 'cancelling', 'cancelled', 'completed', 'failed'
+    )),
     claim_token TEXT UNIQUE,
     attempts INTEGER NOT NULL DEFAULT 0,
     rerun_requested INTEGER NOT NULL DEFAULT 0 CHECK(rerun_requested IN (0, 1)),
@@ -335,8 +337,8 @@ CREATE TABLE IF NOT EXISTS media_metadata_jobs (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     CHECK(
-        (status = 'processing' AND claim_token IS NOT NULL AND length(claim_token) = 36)
-        OR (status <> 'processing' AND claim_token IS NULL)
+        (status IN ('processing', 'cancelling') AND claim_token IS NOT NULL AND length(claim_token) = 36)
+        OR (status NOT IN ('processing', 'cancelling') AND claim_token IS NULL)
     ),
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
@@ -359,8 +361,7 @@ CREATE TABLE IF NOT EXISTS metadata_reset_operations (
         'similarity_finalizations', 'similarity_generation_state',
         'similarity_generations', 'similarity_bands', 'similarity_index',
         'similarity_dirty', 'similarity_runs', 'ai_inputs', 'rtree',
-        'metadata_sources', 'metadata', 'queue_imported', 'dirty_imported',
-        'activate_cleanup'
+        'metadata_sources', 'metadata', 'activate_cleanup'
     )),
     media_cursor INTEGER NOT NULL DEFAULT 0 CHECK(media_cursor >= 0),
     media_count INTEGER NOT NULL CHECK(media_count >= 0),

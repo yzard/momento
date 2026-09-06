@@ -169,7 +169,8 @@ pub(crate) enum SqliteOperation {
     LoadTimelineMarkers(TimelineMarkersQuery),
     MoveMediaToTrash(MoveMediaToTrash),
     QueueIncompleteMetadata,
-    ResetMetadataPage {
+    CancelActiveMetadataJobs,
+    CleanMetadataPage {
         cleanup_group_id: Option<String>,
     },
     LoadMetadataJobStatus,
@@ -499,7 +500,8 @@ impl SqliteOperation {
             Self::LoadTimelineMarkers(_) => "load_timeline_markers",
             Self::MoveMediaToTrash(_) => "move_media_to_trash",
             Self::QueueIncompleteMetadata => "queue_incomplete_metadata",
-            Self::ResetMetadataPage { .. } => "reset_metadata_page",
+            Self::CancelActiveMetadataJobs => "cancel_active_metadata_jobs",
+            Self::CleanMetadataPage { .. } => "clean_metadata_page",
             Self::LoadMetadataJobStatus => "load_metadata_job_status",
             Self::ClaimNextMetadataJob { .. } => "claim_next_metadata_job",
             Self::LoadNextMetadataJobDelay => "load_next_metadata_job_delay",
@@ -826,7 +828,8 @@ impl SqliteOperation {
             | Self::LoadPublicShareContent(_)
             | Self::MoveMediaToTrash(_)
             | Self::QueueIncompleteMetadata
-            | Self::ResetMetadataPage { .. }
+            | Self::CancelActiveMetadataJobs
+            | Self::CleanMetadataPage { .. }
             | Self::ClaimNextMetadataJob { .. }
             | Self::FinishMetadataJob(_)
             | Self::RecoverMetadataClaims
@@ -1035,7 +1038,8 @@ pub(crate) enum SqliteOutput {
     TimelineMarkers(Vec<TimelineMarkerRecord>),
     MediaMovedToTrash(usize),
     IncompleteMetadataQueued(usize),
-    MetadataResetStep(operations::ResetMetadataStepOutcome),
+    ActiveMetadataJobsCancelled(usize),
+    MetadataCleanStep(operations::CleanMetadataStepOutcome),
     MetadataJobStatus(MetadataJobStatus),
     MetadataJobClaimed(Option<MetadataJobClaim>),
     NextMetadataJobDelay(Option<u64>),
@@ -1196,7 +1200,8 @@ impl SqliteOutput {
             Self::TimelineMarkers(_) => "timeline_markers",
             Self::MediaMovedToTrash(_) => "media_moved_to_trash",
             Self::IncompleteMetadataQueued(_) => "incomplete_metadata_queued",
-            Self::MetadataResetStep(_) => "metadata_reset_step",
+            Self::ActiveMetadataJobsCancelled(_) => "active_metadata_jobs_cancelled",
+            Self::MetadataCleanStep(_) => "metadata_clean_step",
             Self::MetadataJobStatus(_) => "metadata_job_status",
             Self::MetadataJobClaimed(_) => "metadata_job_claimed",
             Self::NextMetadataJobDelay(_) => "next_metadata_job_delay",
@@ -4103,79 +4108,87 @@ impl SqliteExecutorHandle {
             .await
     }
 
-    pub async fn reset_metadata_request(
+    pub async fn cancel_active_metadata_jobs_request(&self) -> Result<usize, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::CancelActiveMetadataJobs,
+                SubmissionMode::Request,
+            )
+            .await?
+        {
+            SqliteOutput::ActiveMetadataJobsCancelled(count) => Ok(count),
+            output => Err(output.mismatch("cancel_active_metadata_jobs")),
+        }
+    }
+
+    pub async fn clean_metadata_request(
         &self,
         cleanup_group_id: String,
-    ) -> Result<operations::ResetMetadataOutcome, ExecutorError> {
+    ) -> Result<operations::CleanMetadataOutcome, ExecutorError> {
         if cleanup_group_id.is_empty()
             || cleanup_group_id.len() > crate::io::file::MAX_FILE_OPERATION_ID_BYTES
         {
             return Err(ExecutorError::new(
                 ExecutorErrorKind::InvalidInput,
-                "reset_metadata",
-                "metadata reset cleanup group ID is invalid",
+                "clean_metadata",
+                "metadata cleanup group ID is invalid",
             ));
         }
         let mut requested_group_id = Some(cleanup_group_id);
         loop {
             match self
-                .reset_metadata_page(requested_group_id.take(), SubmissionMode::Request)
+                .clean_metadata_page(requested_group_id.take(), SubmissionMode::Request)
                 .await?
             {
-                operations::ResetMetadataStepOutcome::Progressed => {}
-                operations::ResetMetadataStepOutcome::Reset { media_count } => {
-                    return Ok(operations::ResetMetadataOutcome::Reset { media_count });
+                operations::CleanMetadataStepOutcome::Progressed => {}
+                operations::CleanMetadataStepOutcome::Cleaned { media_count } => {
+                    return Ok(operations::CleanMetadataOutcome::Cleaned { media_count });
                 }
-                operations::ResetMetadataStepOutcome::PathConflict => {
-                    return Ok(operations::ResetMetadataOutcome::PathConflict);
+                operations::CleanMetadataStepOutcome::PathConflict => {
+                    return Ok(operations::CleanMetadataOutcome::PathConflict);
                 }
-                operations::ResetMetadataStepOutcome::Idle => {
+                operations::CleanMetadataStepOutcome::Idle => {
                     return Err(ExecutorError::new(
                         ExecutorErrorKind::Conflict,
-                        "reset_metadata",
-                        "the metadata reset was completed by another request",
+                        "clean_metadata",
+                        "the metadata cleanup was completed by another request",
                     ));
                 }
             }
         }
     }
 
-    pub async fn continue_metadata_reset_durable(&self) -> Result<bool, ExecutorError> {
+    pub async fn continue_metadata_clean_durable(&self) -> Result<bool, ExecutorError> {
         match self
-            .reset_metadata_page(None, SubmissionMode::Durable)
+            .clean_metadata_page(None, SubmissionMode::Durable)
             .await?
         {
-            operations::ResetMetadataStepOutcome::Idle => Ok(false),
-            operations::ResetMetadataStepOutcome::Progressed
-            | operations::ResetMetadataStepOutcome::Reset { .. } => Ok(true),
-            operations::ResetMetadataStepOutcome::PathConflict => Err(ExecutorError::new(
+            operations::CleanMetadataStepOutcome::Idle => Ok(false),
+            operations::CleanMetadataStepOutcome::Progressed
+            | operations::CleanMetadataStepOutcome::Cleaned { .. } => Ok(true),
+            operations::CleanMetadataStepOutcome::PathConflict => Err(ExecutorError::new(
                 ExecutorErrorKind::Internal,
-                "continue_metadata_reset",
-                "an existing metadata reset unexpectedly encountered a path conflict",
+                "continue_metadata_clean",
+                "an existing metadata cleanup unexpectedly encountered a path conflict",
             )),
         }
     }
 
-    async fn reset_metadata_page(
+    async fn clean_metadata_page(
         &self,
         cleanup_group_id: Option<String>,
         mode: SubmissionMode,
-    ) -> Result<operations::ResetMetadataStepOutcome, ExecutorError> {
+    ) -> Result<operations::CleanMetadataStepOutcome, ExecutorError> {
         match self
             .submit(
-                SqliteOperation::ResetMetadataPage { cleanup_group_id },
+                SqliteOperation::CleanMetadataPage { cleanup_group_id },
                 mode,
             )
             .await?
         {
-            SqliteOutput::MetadataResetStep(outcome) => Ok(outcome),
-            output => Err(output.mismatch("reset_metadata_page")),
+            SqliteOutput::MetadataCleanStep(outcome) => Ok(outcome),
+            output => Err(output.mismatch("clean_metadata_page")),
         }
-    }
-
-    pub async fn queue_incomplete_metadata_durable(&self) -> Result<usize, ExecutorError> {
-        self.queue_incomplete_metadata(SubmissionMode::Durable)
-            .await
     }
 
     async fn queue_incomplete_metadata(
@@ -5722,9 +5735,14 @@ fn execute_with_connection(
                 .map(SqliteOutput::IncompleteMetadataQueued)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
-        SqliteOperation::ResetMetadataPage { cleanup_group_id } => {
-            operations::reset_metadata_page(connection, cleanup_group_id.as_deref())
-                .map(SqliteOutput::MetadataResetStep)
+        SqliteOperation::CancelActiveMetadataJobs => {
+            operations::cancel_active_metadata_jobs(connection)
+                .map(SqliteOutput::ActiveMetadataJobsCancelled)
+                .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::CleanMetadataPage { cleanup_group_id } => {
+            operations::clean_metadata_page(connection, cleanup_group_id.as_deref())
+                .map(SqliteOutput::MetadataCleanStep)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::LoadMetadataJobStatus => operations::load_metadata_job_status(connection)

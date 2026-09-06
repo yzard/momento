@@ -25,7 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.core.data.AdministrationRepository
 import io.github.yzard.momento.core.model.ImportStatus
-import io.github.yzard.momento.core.model.JobStatus
+import io.github.yzard.momento.core.model.MetadataStatus
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.io.IOException
@@ -180,7 +180,7 @@ internal fun MetadataAdministrationScreen(repository: AdministrationRepository) 
 @Composable
 internal fun MetadataAdministration(
     repository: AdministrationRepository,
-    status: JobStatus?,
+    status: MetadataStatus?,
     error: String?,
     refresh: () -> Unit,
 ) {
@@ -188,6 +188,9 @@ internal fun MetadataAdministration(
     var actionError by remember { mutableStateOf<String?>(null) }
     var pendingAction by remember { mutableStateOf<PendingAdminAction?>(null) }
     val scope = rememberCoroutineScope()
+    val generationIsActive = isActiveMetadataGeneration(status)
+    val cancellationIsSettling = status?.status == "cancelling"
+    val cleaningIsActive = status?.status == "cleaning"
 
     fun runAction(actionName: String, action: suspend () -> Unit) {
         if (busyAction != null) return
@@ -230,22 +233,37 @@ internal fun MetadataAdministration(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Button(
-                        onClick = { runAction("generate") { repository.generateMetadata() } },
-                        enabled = busyAction == null,
+                        onClick = {
+                            if (generationIsActive) {
+                                runAction("cancel") { repository.cancelMetadata() }
+                            } else {
+                                runAction("generate") { repository.generateMetadata() }
+                            }
+                        },
+                        enabled = busyAction == null && !cancellationIsSettling && !cleaningIsActive,
                         modifier = Modifier.weight(1f),
-                    ) { Text(if (busyAction == "generate") "Generating" else "Generate") }
+                    ) {
+                        Text(
+                            when {
+                                busyAction == "cancel" || cancellationIsSettling -> "Cancelling"
+                                busyAction == "generate" -> "Generating"
+                                generationIsActive -> "Cancel"
+                                else -> "Generate"
+                            },
+                        )
+                    }
                     OutlinedButton(
                         onClick = {
                             pendingAction = PendingAdminAction(
-                                title = "Reset metadata and AI data?",
-                                description = "This removes generated metadata and related AI data, then queues metadata generation again. Existing original media is preserved.",
-                                confirmLabel = "Reset & regenerate",
-                                execute = { runAction("reset") { repository.resetMetadata() } },
+                                title = "Clean metadata and AI data?",
+                                description = "This removes generated metadata, thumbnails, and related AI data without deleting original media. Use Generate afterwards to rebuild metadata.",
+                                confirmLabel = "Clean Data",
+                                execute = { runAction("clean") { repository.cleanMetadata() } },
                             )
                         },
-                        enabled = busyAction == null,
+                        enabled = busyAction == null && !generationIsActive && !cancellationIsSettling && !cleaningIsActive,
                         modifier = Modifier.weight(1f),
-                    ) { Text("Reset & regenerate") }
+                    ) { Text("Clean Data") }
                 }
                 error?.let { AdminError(it) }
                 actionError?.let { AdminError(it) }
@@ -264,3 +282,6 @@ internal fun MetadataAdministration(
         )
     }
 }
+
+internal fun isActiveMetadataGeneration(status: MetadataStatus?): Boolean =
+    status?.status == "queued" || status?.status == "processing"

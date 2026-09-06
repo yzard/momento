@@ -6,26 +6,42 @@ import { usePollingStatus } from '../../hooks/usePollingStatus'
 import ConfirmationDialog from '../common/ConfirmationDialog'
 import { AdminFailureLog, AdminStatusMetrics } from './AdminComponents'
 
+type MetadataAction = 'generate' | 'cancel' | 'clean'
+
+function isMetadataGenerationActive(status: MetadataStatus | null): boolean {
+  return status?.status === 'queued' || status?.status === 'processing'
+}
+
 export default function MetadataPanel() {
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [pendingReset, setPendingReset] = useState(false)
+  const [busyAction, setBusyAction] = useState<MetadataAction | null>(null)
+  const [pendingClean, setPendingClean] = useState(false)
   const { status, errorMessage, setErrorMessage, refresh } = usePollingStatus<MetadataStatus>(
     metadataApi.getStatus,
     'Could not load metadata status.',
     2000
   )
 
-  const runAction = async (action: () => Promise<unknown>) => {
-    setIsSubmitting(true)
+  const runAction = async (actionName: MetadataAction, action: () => Promise<unknown>) => {
+    setBusyAction(actionName)
     try {
       await action()
       await refresh()
     } catch {
       setErrorMessage('Could not complete the metadata action.')
     } finally {
-      setIsSubmitting(false)
+      setBusyAction(null)
     }
   }
+
+  const generationIsActive = isMetadataGenerationActive(status)
+  const cancellationIsSettling = status?.status === 'cancelling'
+  const cleaningIsActive = status?.status === 'cleaning'
+  const primaryAction: MetadataAction = generationIsActive ? 'cancel' : 'generate'
+  const primaryLabel = cancellationIsSettling
+    ? 'Cancelling…'
+    : generationIsActive
+      ? 'Cancel'
+      : 'Generate'
 
   return (
     <div>
@@ -44,24 +60,35 @@ export default function MetadataPanel() {
       <div className="mt-6 flex flex-col gap-3 sm:flex-row">
         <button
           type="button"
-          onClick={() => void runAction(metadataApi.generate)}
-          disabled={isSubmitting}
-          className="inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-primary px-8 py-2.5 text-sm font-semibold text-primary-foreground transition-colors duration-200 hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+          onClick={() =>
+            void runAction(
+              primaryAction,
+              generationIsActive ? metadataApi.cancel : metadataApi.generate
+            )
+          }
+          disabled={busyAction !== null || cancellationIsSettling || cleaningIsActive}
+          className={`inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-lg px-8 py-2.5 text-sm font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto ${
+            generationIsActive
+              ? 'border border-destructive/40 text-destructive hover:bg-destructive/10 focus-visible:ring-destructive'
+              : 'bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:ring-primary'
+          }`}
         >
-          {isSubmitting ? (
+          {busyAction === primaryAction ? (
             <Loader2 className="w-4 h-4 animate-spin" />
           ) : (
             <RefreshCw className="w-4 h-4" />
           )}{' '}
-          Generate
+          {primaryLabel}
         </button>
         <button
           type="button"
-          onClick={() => setPendingReset(true)}
-          disabled={isSubmitting}
+          onClick={() => setPendingClean(true)}
+          disabled={
+            busyAction !== null || generationIsActive || cancellationIsSettling || cleaningIsActive
+          }
           className="inline-flex min-h-11 w-full cursor-pointer items-center justify-center rounded-lg border border-destructive/40 px-8 py-2.5 text-sm font-semibold text-destructive transition-colors duration-200 hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
         >
-          Reset &amp; regenerate
+          Clean Data
         </button>
       </div>
       {errorMessage && (
@@ -70,18 +97,18 @@ export default function MetadataPanel() {
         </p>
       )}
       <AdminFailureLog title="Metadata failure log" entries={status?.errors ?? []} />
-      {pendingReset && (
+      {pendingClean && (
         <ConfirmationDialog
-          title="Reset metadata and AI data?"
-          description="This removes generated metadata and related AI data, then queues metadata generation again. Existing original media is preserved."
-          confirmLabel="Reset & regenerate"
-          isProcessing={isSubmitting}
+          title="Clean metadata and AI data?"
+          description="This removes generated metadata, thumbnails, and related AI data without deleting original media. Use Generate afterwards to rebuild metadata."
+          confirmLabel="Clean Data"
+          isProcessing={busyAction === 'clean'}
           destructive
           onConfirm={() => {
-            setPendingReset(false)
-            void runAction(metadataApi.reset)
+            setPendingClean(false)
+            void runAction('clean', metadataApi.clean)
           }}
-          onCancel={() => setPendingReset(false)}
+          onCancel={() => setPendingClean(false)}
         />
       )}
     </div>

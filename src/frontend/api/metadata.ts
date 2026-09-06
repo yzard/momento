@@ -4,16 +4,24 @@ export interface MetadataStatus {
   status: string
   queuedJobs: number
   processingJobs: number
+  cancellingJobs: number
   completedJobs: number
   failedJobs: number
   errors: string[]
 }
 
+export interface MetadataActionResponse {
+  message: string
+  affectedJobs: number
+}
+
 export const metadataApi = {
-  generate: async (): Promise<{ message: string; queuedJobs: number }> =>
+  generate: async (): Promise<MetadataActionResponse> =>
     (await apiClient.post('/metadata/generate', {})).data,
+  cancel: async (): Promise<MetadataActionResponse> =>
+    (await apiClient.post('/metadata/cancel', {})).data,
   getStatus: async (): Promise<MetadataStatus> =>
     (await apiClient.post('/metadata/status', {})).data,
-  reset: async (): Promise<{ message: string; queuedJobs: number }> =>
-    (await apiClient.post('/metadata/reset', {})).data,
+  clean: async (): Promise<MetadataActionResponse> =>
+    (await apiClient.post('/metadata/clean', {})).data,
 }

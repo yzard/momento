@@ -1,7 +1,7 @@
 use axum::{extract::State, response::Response, routing::post, Router};
 
 use crate::auth::{AppState, RequireAdmin};
-use crate::database::operations::ResetMetadataOutcome;
+use crate::database::operations::CleanMetadataOutcome;
 use crate::error::{AppError, AppResult};
 use crate::models::{MetadataActionResponse, MetadataRequest, MetadataStatusResponse};
 use crate::routes::{render_json, CpuJson};
@@ -9,8 +9,9 @@ use crate::routes::{render_json, CpuJson};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/metadata/generate", post(generate))
+        .route("/metadata/cancel", post(cancel))
+        .route("/metadata/clean", post(clean))
         .route("/metadata/status", post(status))
-        .route("/metadata/reset", post(reset))
 }
 
 async fn generate(
@@ -28,7 +29,28 @@ async fn generate(
         &state,
         MetadataActionResponse {
             message: "Metadata generation queued".to_string(),
-            queued_jobs,
+            affected_jobs: queued_jobs,
+        },
+    )
+    .await
+}
+
+async fn cancel(
+    State(state): State<AppState>,
+    RequireAdmin(_): RequireAdmin,
+    CpuJson(_request): CpuJson<MetadataRequest>,
+) -> AppResult<Response> {
+    let affected_jobs = state
+        .executors
+        .sqlite
+        .cancel_active_metadata_jobs_request()
+        .await? as i64;
+    state.scheduler.wake_metadata();
+    render_json(
+        &state,
+        MetadataActionResponse {
+            message: "Metadata generation cancelled".to_string(),
+            affected_jobs,
         },
     )
     .await
@@ -54,8 +76,13 @@ async fn status(
     };
     let queued_jobs = count_for("queued");
     let processing_jobs = count_for("processing");
+    let cancelling_jobs = count_for("cancelling");
     let failed_jobs = count_for("failed");
-    let status = if processing_jobs > 0 {
+    let status = if count_for("cleaning") > 0 {
+        "cleaning"
+    } else if cancelling_jobs > 0 {
+        "cancelling"
+    } else if processing_jobs > 0 {
         "processing"
     } else if queued_jobs > 0 {
         "queued"
@@ -70,6 +97,7 @@ async fn status(
             status: status.to_string(),
             queued_jobs,
             processing_jobs,
+            cancelling_jobs,
             completed_jobs: count_for("completed"),
             failed_jobs,
             errors: job_status.errors,
@@ -79,36 +107,34 @@ async fn status(
     .await
 }
 
-async fn reset(
+async fn clean(
     State(state): State<AppState>,
     RequireAdmin(_): RequireAdmin,
     CpuJson(_request): CpuJson<MetadataRequest>,
 ) -> AppResult<Response> {
-    let cleanup_group_id = format!("metadata-reset-{}", uuid::Uuid::new_v4().simple());
-    match state
+    let cleanup_group_id = format!("metadata-clean-{}", uuid::Uuid::new_v4().simple());
+    let media_count = match state
         .executors
         .sqlite
-        .reset_metadata_request(cleanup_group_id)
+        .clean_metadata_request(cleanup_group_id)
         .await?
     {
-        ResetMetadataOutcome::Reset { .. } => state.scheduler.wake_journal_recovery(),
-        ResetMetadataOutcome::PathConflict => {
+        CleanMetadataOutcome::Cleaned { media_count } => {
+            state.scheduler.wake_journal_recovery();
+            media_count
+        }
+        CleanMetadataOutcome::PathConflict => {
             return Err(AppError::Conflict(
-                "metadata reset conflicts with active file work".to_string(),
+                "metadata cleanup conflicts with active file work; cancel metadata generation and wait for cancellation to finish"
+                    .to_string(),
             ));
         }
-    }
-    state.scheduler.wake_metadata();
-    let queued_jobs = state
-        .executors
-        .sqlite
-        .queue_incomplete_metadata_request()
-        .await? as i64;
+    };
     render_json(
         &state,
         MetadataActionResponse {
-            message: "Metadata and AI data reset".to_string(),
-            queued_jobs,
+            message: "Metadata and related AI data cleaned".to_string(),
+            affected_jobs: media_count,
         },
     )
     .await

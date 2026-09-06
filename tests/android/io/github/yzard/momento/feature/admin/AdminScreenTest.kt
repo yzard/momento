@@ -5,6 +5,7 @@ import io.github.yzard.momento.core.model.AiTaskStatus
 import io.github.yzard.momento.core.model.AiFeatureSchedule
 import io.github.yzard.momento.core.model.AiStatusResponse
 import io.github.yzard.momento.core.model.DeduplicateStatusResponse
+import io.github.yzard.momento.core.model.MetadataStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,6 +13,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AdminScreenTest {
+    @Test
+    fun metadataGenerateControlSwitchesToCancelOnlyForActiveGeneration() {
+        fun status(state: String) = MetadataStatus(state, 0, 0, 0, 0, 0, emptyList())
+
+        assertTrue(isActiveMetadataGeneration(status("queued")))
+        assertTrue(isActiveMetadataGeneration(status("processing")))
+        assertFalse(isActiveMetadataGeneration(status("cancelling")))
+        assertFalse(isActiveMetadataGeneration(status("cleaning")))
+        assertFalse(isActiveMetadataGeneration(status("idle")))
+    }
+
     @Test
     fun togglesBetweenAdministratorAndUserRoles() {
         assertEquals("user", toggledRole("admin"))
