@@ -740,8 +740,27 @@ impl HttpRequestAdmission {
         }
     }
 
-    pub fn acquire(scheduler: &SchedulerHandle) -> Result<Self, String> {
-        scheduler.try_acquire_request().map(Self::new)
+    pub async fn acquire(scheduler: &SchedulerHandle) -> Result<Self, String> {
+        let mut logged = false;
+        loop {
+            let released = scheduler.shared.requests.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            if scheduler.state() != SchedulerState::Running {
+                return Err("scheduler is shutting down".to_string());
+            }
+            if let Ok(admission) = scheduler.try_acquire_request() {
+                return Ok(Self::new(admission));
+            }
+            if !logged {
+                tracing::warn!(
+                    error_code = "executor_overloaded",
+                    "Waiting for HTTP request capacity"
+                );
+                logged = true;
+            }
+            released.await;
+        }
     }
 
     pub fn scheduler(&self) -> Result<SchedulerHandle, String> {
@@ -762,7 +781,31 @@ impl HttpRequestAdmission {
         })
     }
 
-    pub fn convert_to_stream(&self) -> Result<(), String> {
+    pub async fn convert_to_stream(&self) -> Result<(), String> {
+        let scheduler = self.scheduler()?;
+        let mut logged = false;
+        loop {
+            let released = scheduler.shared.streams.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            if scheduler.state() != SchedulerState::Running {
+                return Err("scheduler is shutting down".to_string());
+            }
+            if self.try_convert_to_stream()? {
+                return Ok(());
+            }
+            if !logged {
+                tracing::warn!(
+                    error_code = "executor_overloaded",
+                    "Waiting for HTTP stream capacity"
+                );
+                logged = true;
+            }
+            released.await;
+        }
+    }
+
+    fn try_convert_to_stream(&self) -> Result<bool, String> {
         let mut state = self
             .state
             .lock()
@@ -773,16 +816,16 @@ impl HttpRequestAdmission {
         match admission {
             HttpAdmission::Stream(admission) => {
                 *state = Some(HttpAdmission::Stream(admission));
-                Ok(())
+                Ok(true)
             }
             HttpAdmission::Request(admission) => match admission.try_into_stream() {
                 Ok(admission) => {
                     *state = Some(HttpAdmission::Stream(admission));
-                    Ok(())
+                    Ok(true)
                 }
                 Err(admission) => {
                     *state = Some(HttpAdmission::Request(admission));
-                    Err("stream-session admission is at capacity".to_string())
+                    Ok(false)
                 }
             },
         }
@@ -801,7 +844,7 @@ pub async fn schedule_client_request(
     request: Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let admission = match HttpRequestAdmission::acquire(&scheduler) {
+    let admission = match HttpRequestAdmission::acquire(&scheduler).await {
         Ok(admission) => admission,
         Err(_) => {
             let mut response = (

@@ -13,7 +13,7 @@ use crate::executor::{
     bootstrap_file_executor, complete_file_executor_bootstrap, recover_log_capacity,
     spawn_cpu_workers, spawn_file_workers, spawn_sqlite_workers, BootstrapDatabaseState,
     CpuCommand, CpuExecutorHandle, ExecutorError, FileCommand, FileIoExecutorHandle,
-    FileWorkerContext, SqliteCommand, SqliteExecutorHandle,
+    FileWorkerContext, SqliteCommand, SqliteExecutorHandle, SqliteWorkerContext,
 };
 use crate::io::file::MutationGateRegistry;
 use crate::io::session::FileHandleRegistry;
@@ -23,20 +23,26 @@ use crate::io::space_budget::{
 };
 use crate::runtime::RuntimeSizing;
 
+#[cfg(test)]
+#[path = "../../../tests/backend/runtime/scheduler.rs"]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmissionMode {
-    Try,
+    Request,
     Durable,
 }
 
 struct PendingReservation {
     pending: Arc<AtomicUsize>,
+    changed: Arc<Notify>,
 }
 
 impl Drop for PendingReservation {
     fn drop(&mut self) {
         let previous = self.pending.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "scheduler pending reservation underflow");
+        self.changed.notify_waiters();
     }
 }
 
@@ -73,16 +79,17 @@ pub(crate) struct SchedulerIngress {
     sender: mpsc::Sender<SchedulerCommand>,
     pending: Arc<AtomicUsize>,
     maximum_pending: usize,
+    changed: Arc<Notify>,
 }
 
 impl SchedulerIngress {
-    pub(crate) fn submit_cpu(
+    pub(crate) async fn submit_cpu(
         &self,
         command: CpuCommand,
         mode: SubmissionMode,
         operation: &'static str,
     ) -> Result<(), ExecutorError> {
-        let reservation = self.reserve(operation)?;
+        let reservation = self.reserve_for(mode, operation).await?;
         self.submit(
             SchedulerCommand::Cpu {
                 command,
@@ -94,13 +101,13 @@ impl SchedulerIngress {
         )
     }
 
-    pub(crate) fn submit_file(
+    pub(crate) async fn submit_file(
         &self,
         command: FileCommand,
         mode: SubmissionMode,
         operation: &'static str,
     ) -> Result<(), ExecutorError> {
-        let reservation = self.reserve(operation)?;
+        let reservation = self.reserve_for(mode, operation).await?;
         self.submit(
             SchedulerCommand::File {
                 command,
@@ -112,13 +119,13 @@ impl SchedulerIngress {
         )
     }
 
-    pub(crate) fn submit_sqlite(
+    pub(crate) async fn submit_sqlite(
         &self,
         command: SqliteCommand,
         mode: SubmissionMode,
         operation: &'static str,
     ) -> Result<(), ExecutorError> {
-        let reservation = self.reserve(operation)?;
+        let reservation = self.reserve_for(mode, operation).await?;
         self.submit(
             SchedulerCommand::Sqlite {
                 command,
@@ -145,6 +152,55 @@ impl SchedulerIngress {
         )
     }
 
+    pub(crate) fn submit_sqlite_detached(
+        &self,
+        command: SqliteCommand,
+        operation: &'static str,
+    ) -> Result<(), ExecutorError> {
+        let reservation = self.reserve(operation)?;
+        self.submit(
+            SchedulerCommand::Sqlite {
+                command,
+                mode: SubmissionMode::Durable,
+                operation,
+                reservation,
+            },
+            operation,
+        )
+    }
+
+    async fn reserve_for(
+        &self,
+        mode: SubmissionMode,
+        operation: &'static str,
+    ) -> Result<PendingReservation, ExecutorError> {
+        let mut logged = false;
+        loop {
+            let changed = self.changed.notified();
+            if self.sender.is_closed() {
+                return Err(ExecutorError::shutting_down(operation));
+            }
+            match self.reserve(operation) {
+                Ok(reservation) => return Ok(reservation),
+                Err(error) if mode == SubmissionMode::Durable => return Err(error),
+                Err(_) => {
+                    if !logged {
+                        tracing::warn!(
+                            error_code = "executor_overloaded",
+                            operation,
+                            "Waiting for scheduler capacity"
+                        );
+                        logged = true;
+                    }
+                    tokio::select! {
+                        _ = changed => {},
+                        _ = self.sender.closed() => return Err(ExecutorError::shutting_down(operation)),
+                    }
+                }
+            }
+        }
+    }
+
     fn submit(
         &self,
         command: SchedulerCommand,
@@ -168,6 +224,7 @@ impl SchedulerIngress {
             .map_err(|_| ExecutorError::overloaded(operation))?;
         Ok(PendingReservation {
             pending: Arc::clone(&self.pending),
+            changed: Arc::clone(&self.changed),
         })
     }
 }
@@ -343,8 +400,11 @@ impl ExecutorRuntime {
         let capacity_wake = Arc::new(Notify::new());
         let (cpu_sender, cpu_receiver) = crossbeam_channel::bounded(sizing.cpu_queue_capacity);
         let (file_sender, file_receiver) = crossbeam_channel::bounded(sizing.file_queue_capacity);
-        let (sqlite_sender, sqlite_receiver) =
-            crossbeam_channel::bounded(sizing.sqlite_queue_capacity);
+        let sqlite_write_capacity = sizing.sqlite_queue_capacity / sizing.sqlite_workers;
+        let (sqlite_read_sender, sqlite_read_receiver) =
+            crossbeam_channel::bounded(sizing.sqlite_queue_capacity - sqlite_write_capacity);
+        let (sqlite_write_sender, sqlite_write_receiver) =
+            crossbeam_channel::bounded(sqlite_write_capacity);
         let storage_roots = Arc::new(std::sync::OnceLock::new());
         storage_roots
             .set(bootstrapped_roots)
@@ -382,17 +442,21 @@ impl ExecutorRuntime {
         .map_err(|error| error.to_string())?;
         let sqlite_workers = match spawn_sqlite_workers(
             sizing.sqlite_workers,
-            pool.clone(),
-            sqlite_receiver,
-            Arc::clone(&capacity_wake),
-            space_budget.clone(),
-            database_path,
-            sqlite_footprints,
+            sqlite_read_receiver,
+            sqlite_write_receiver,
+            SqliteWorkerContext {
+                pool: pool.clone(),
+                capacity_wake: Arc::clone(&capacity_wake),
+                space_budget: space_budget.clone(),
+                database_path,
+                footprints: sqlite_footprints,
+            },
         ) {
             Ok(workers) => workers,
             Err(error) => {
                 drop(file_sender);
-                drop(sqlite_sender);
+                drop(sqlite_read_sender);
+                drop(sqlite_write_sender);
                 join_started_workers(worker_threads)?;
                 return Err(error.to_string());
             }
@@ -404,7 +468,8 @@ impl ExecutorRuntime {
                 Err(error) => {
                     drop(cpu_sender);
                     drop(file_sender);
-                    drop(sqlite_sender);
+                    drop(sqlite_read_sender);
+                    drop(sqlite_write_sender);
                     join_started_workers(worker_threads)?;
                     return Err(error.to_string());
                 }
@@ -416,6 +481,7 @@ impl ExecutorRuntime {
             sender,
             pending: Arc::new(AtomicUsize::new(0)),
             maximum_pending: sizing.scheduler_ingress_capacity,
+            changed: Arc::new(Notify::new()),
         };
         let scheduler_thread = match std::thread::Builder::new()
             .name("momento-scheduler".to_string())
@@ -429,7 +495,8 @@ impl ExecutorRuntime {
                     receiver,
                     cpu_sender,
                     file_sender,
-                    sqlite_sender,
+                    sqlite_read_sender,
+                    sqlite_write_sender,
                     capacity_wake,
                 ));
             }) {
@@ -712,17 +779,19 @@ async fn run_scheduler(
     mut receiver: mpsc::Receiver<SchedulerCommand>,
     cpu_sender: ExecutorSender<CpuCommand>,
     file_sender: ExecutorSender<FileCommand>,
-    sqlite_sender: ExecutorSender<SqliteCommand>,
+    sqlite_read_sender: ExecutorSender<SqliteCommand>,
+    sqlite_write_sender: ExecutorSender<SqliteCommand>,
     capacity_wake: Arc<Notify>,
 ) {
     let mut cpu_waiters = VecDeque::new();
     let mut file_waiters = VecDeque::new();
-    let mut sqlite_waiters = VecDeque::new();
+    let mut sqlite_read_waiters = VecDeque::new();
+    let mut sqlite_write_waiters = VecDeque::new();
     loop {
         tokio::select! {
             command = receiver.recv() => {
                 let Some(command) = command else {
-                    reject_all_waiters(&mut cpu_waiters, &mut file_waiters, &mut sqlite_waiters);
+                    reject_all_waiters(&mut cpu_waiters, &mut file_waiters, &mut sqlite_read_waiters, &mut sqlite_write_waiters);
                     return;
                 };
                 match command {
@@ -733,14 +802,19 @@ async fn run_scheduler(
                         submit_file(command, mode, operation, reservation, &file_sender, &mut file_waiters);
                     }
                     SchedulerCommand::Sqlite { command, mode, operation, reservation } => {
-                        submit_sqlite(command, mode, operation, reservation, &sqlite_sender, &mut sqlite_waiters);
+                        let (sender, waiters) = if command.is_read_only() {
+                            (&sqlite_read_sender, &mut sqlite_read_waiters)
+                        } else {
+                            (&sqlite_write_sender, &mut sqlite_write_waiters)
+                        };
+                        submit_sqlite(command, mode, operation, reservation, sender, waiters);
                     }
                     SchedulerCommand::SchedulerControl { task, reservation } => {
                         drop(reservation);
                         let _scheduler_control = tokio::spawn(task);
                     }
                     SchedulerCommand::Shutdown { reply } => {
-                        reject_all_waiters(&mut cpu_waiters, &mut file_waiters, &mut sqlite_waiters);
+                        reject_all_waiters(&mut cpu_waiters, &mut file_waiters, &mut sqlite_read_waiters, &mut sqlite_write_waiters);
                         let _ = reply.send(());
                         return;
                     }
@@ -750,7 +824,8 @@ async fn run_scheduler(
         }
         flush_cpu(&cpu_sender, &mut cpu_waiters);
         flush_file(&file_sender, &mut file_waiters);
-        flush_sqlite(&sqlite_sender, &mut sqlite_waiters);
+        flush_sqlite(&sqlite_read_sender, &mut sqlite_read_waiters);
+        flush_sqlite(&sqlite_write_sender, &mut sqlite_write_waiters);
     }
 }
 
@@ -763,19 +838,16 @@ fn submit_cpu(
     waiters: &mut VecDeque<(CpuCommand, PendingReservation)>,
 ) {
     if !waiters.is_empty() {
-        if mode == SubmissionMode::Try {
-            command.reject(ExecutorError::overloaded(operation));
-        } else {
-            waiters.push_back((command, reservation));
-        }
+        log_capacity_wait(mode, operation);
+        waiters.push_back((command, reservation));
         return;
     }
     match sender.try_send(command) {
         Ok(()) => drop(reservation),
-        Err(TrySendError::Full(command)) if mode == SubmissionMode::Durable => {
+        Err(TrySendError::Full(command)) => {
+            log_capacity_wait(mode, operation);
             waiters.push_back((command, reservation));
         }
-        Err(TrySendError::Full(command)) => command.reject(ExecutorError::overloaded(operation)),
         Err(TrySendError::Disconnected(command)) => {
             command.reject(ExecutorError::shutting_down(operation));
         }
@@ -791,19 +863,16 @@ fn submit_file(
     waiters: &mut VecDeque<(FileCommand, PendingReservation)>,
 ) {
     if !waiters.is_empty() {
-        if mode == SubmissionMode::Try {
-            command.reject(ExecutorError::overloaded(operation));
-        } else {
-            waiters.push_back((command, reservation));
-        }
+        log_capacity_wait(mode, operation);
+        waiters.push_back((command, reservation));
         return;
     }
     match sender.try_send(command) {
         Ok(()) => drop(reservation),
-        Err(TrySendError::Full(command)) if mode == SubmissionMode::Durable => {
+        Err(TrySendError::Full(command)) => {
+            log_capacity_wait(mode, operation);
             waiters.push_back((command, reservation));
         }
-        Err(TrySendError::Full(command)) => command.reject(ExecutorError::overloaded(operation)),
         Err(TrySendError::Disconnected(command)) => {
             command.reject(ExecutorError::shutting_down(operation));
         }
@@ -819,22 +888,29 @@ fn submit_sqlite(
     waiters: &mut VecDeque<(SqliteCommand, PendingReservation)>,
 ) {
     if !waiters.is_empty() {
-        if mode == SubmissionMode::Try {
-            command.reject(ExecutorError::overloaded(operation));
-        } else {
-            waiters.push_back((command, reservation));
-        }
+        log_capacity_wait(mode, operation);
+        waiters.push_back((command, reservation));
         return;
     }
     match sender.try_send(command) {
         Ok(()) => drop(reservation),
-        Err(TrySendError::Full(command)) if mode == SubmissionMode::Durable => {
+        Err(TrySendError::Full(command)) => {
+            log_capacity_wait(mode, operation);
             waiters.push_back((command, reservation));
         }
-        Err(TrySendError::Full(command)) => command.reject(ExecutorError::overloaded(operation)),
         Err(TrySendError::Disconnected(command)) => {
             command.reject(ExecutorError::shutting_down(operation));
         }
+    }
+}
+
+fn log_capacity_wait(mode: SubmissionMode, operation: &'static str) {
+    if mode == SubmissionMode::Request {
+        tracing::warn!(
+            error_code = "executor_overloaded",
+            operation,
+            "Request queued until executor capacity is available"
+        );
     }
 }
 
@@ -895,7 +971,8 @@ fn flush_sqlite(
 fn reject_all_waiters(
     cpu_waiters: &mut VecDeque<(CpuCommand, PendingReservation)>,
     file_waiters: &mut VecDeque<(FileCommand, PendingReservation)>,
-    sqlite_waiters: &mut VecDeque<(SqliteCommand, PendingReservation)>,
+    sqlite_read_waiters: &mut VecDeque<(SqliteCommand, PendingReservation)>,
+    sqlite_write_waiters: &mut VecDeque<(SqliteCommand, PendingReservation)>,
 ) {
     for (command, _) in cpu_waiters.drain(..) {
         command.reject(ExecutorError::shutting_down("cpu_operation"));
@@ -903,7 +980,10 @@ fn reject_all_waiters(
     for (command, _) in file_waiters.drain(..) {
         command.reject(ExecutorError::shutting_down("file_operation"));
     }
-    for (command, _) in sqlite_waiters.drain(..) {
+    for (command, _) in sqlite_read_waiters
+        .drain(..)
+        .chain(sqlite_write_waiters.drain(..))
+    {
         command.reject(ExecutorError::shutting_down("sqlite_operation"));
     }
 }

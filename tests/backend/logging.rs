@@ -3,6 +3,68 @@ use momento_api::logging::{
     begin_payload_capture, redact_request_values, MAX_REQUEST_LOG_CAPTURE_BYTES,
 };
 
+#[tokio::test]
+async fn request_failure_logs_include_the_response_cause_and_request_path() {
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber;
+    #[derive(Clone)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = LogBuffer(Arc::new(Mutex::new(Vec::new())));
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let app = axum::Router::new()
+        .route(
+            "/thumbnail",
+            axum::routing::get(|| async {
+                Err::<(), _>(momento_api::error::AppError::StreamUnavailable(
+                    "stream-session admission is at capacity".into(),
+                ))
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            momento_api::logging::RequestLoggerState {
+                cpu: test_cpu_executor(),
+            },
+            momento_api::logging::request_logger,
+        ));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/thumbnail")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    let bytes = buffer.0.lock().unwrap().clone();
+    let log = String::from_utf8(bytes).unwrap();
+    assert!(log.contains("GET /thumbnail 503"), "{log}");
+    assert!(log.contains("stream_unavailable"), "{log}");
+    assert!(
+        log.contains("stream-session admission is at capacity"),
+        "{log}"
+    );
+}
+
 fn test_cpu_executor() -> momento_api::executor::CpuExecutorHandle {
     crate::test_utils::test_executor_handles(crate::test_utils::create_test_db()).cpu
 }

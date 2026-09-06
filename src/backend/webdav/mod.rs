@@ -52,7 +52,7 @@ async fn webdav_handler(State(state): State<AppState>, request: Request<Body>) -
         None => return stream_admission_unavailable(),
     };
     if (request_mutates_staging(request.method()) || request.method().as_str() == "PROPFIND")
-        && admission.convert_to_stream().is_err()
+        && admission.convert_to_stream().await.is_err()
     {
         return stream_admission_unavailable();
     }

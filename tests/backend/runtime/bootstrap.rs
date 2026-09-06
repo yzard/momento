@@ -61,7 +61,7 @@ fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops(
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let runtime = RuntimeBuilder::new(
@@ -104,13 +104,13 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let config_path = directory.path().join("config.toml");
     std::fs::write(
         &config_path,
-        "[thread_pool]\ncpu_workers=1\nio_workers=4\nsqlite_workers=1\n",
+        "[thread_pool]\ncpu_workers=1\nio_workers=4\nsqlite_workers=2\n",
     )
     .expect("write config");
     let loaded_config =
@@ -222,7 +222,7 @@ fn runtime_builder_rejects_a_config_changed_after_initial_read() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
 
@@ -253,7 +253,7 @@ fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let first = RuntimeBuilder::new(
@@ -294,7 +294,7 @@ fn runtime_builder_does_not_create_a_missing_data_directory() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
 
@@ -323,7 +323,7 @@ fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
 
@@ -350,7 +350,7 @@ fn runtime_builder_creates_every_writable_storage_root_before_publication() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
 
@@ -415,7 +415,7 @@ fn runtime_builder_rejects_static_storage_that_overlaps_private_data() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
 
@@ -453,7 +453,7 @@ fn runtime_builder_rejects_orphan_and_truncated_sqlite_bootstrap_files() {
         let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
             cpu_workers: 1,
             io_workers: 4,
-            sqlite_workers: 1,
+            sqlite_workers: 2,
         })
         .expect("runtime sizing");
         let result = RuntimeBuilder::new(
@@ -489,7 +489,7 @@ fn runtime_builder_rejects_an_existing_schema_that_needs_migration() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let result = RuntimeBuilder::new(

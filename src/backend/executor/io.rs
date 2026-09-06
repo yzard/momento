@@ -704,11 +704,13 @@ impl FileIoExecutorHandle {
         let operation = FileOperation::Probe { sequence };
         let operation_name = operation.name();
         let (reply, response) = oneshot::channel();
-        self.ingress.submit_file(
-            FileCommand::new(operation, reply),
-            SubmissionMode::Durable,
-            operation_name,
-        )?;
+        self.ingress
+            .submit_file(
+                FileCommand::new(operation, reply),
+                SubmissionMode::Durable,
+                operation_name,
+            )
+            .await?;
         match response
             .await
             .map_err(|_| ExecutorError::shutting_down(operation_name))??
@@ -786,8 +788,13 @@ impl FileIoExecutorHandle {
         path: NormalizedStoragePath,
         rollback_length: u64,
     ) -> Result<StorageFileSession, ExecutorError> {
-        self.open_storage_write_session(storage_root, path, rollback_length, SubmissionMode::Try)
-            .await
+        self.open_storage_write_session(
+            storage_root,
+            path,
+            rollback_length,
+            SubmissionMode::Request,
+        )
+        .await
     }
 
     pub async fn open_storage_write_session_durable(
@@ -834,7 +841,7 @@ impl FileIoExecutorHandle {
         storage_root: StorageRootId,
         path: NormalizedStoragePath,
     ) -> Result<(StorageFileSession, StorageFileSnapshot), ExecutorError> {
-        self.open_storage_read_session(storage_root, path, SubmissionMode::Try)
+        self.open_storage_read_session(storage_root, path, SubmissionMode::Request)
             .await
     }
 
@@ -893,7 +900,7 @@ impl FileIoExecutorHandle {
             .submit_with_mode(
                 FileOperation::OpenStorageDirectorySession { storage_root, path },
                 "open_storage_directory_session",
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -925,7 +932,7 @@ impl FileIoExecutorHandle {
         session: StorageFileSession,
         offset: u64,
     ) -> Result<StorageFileSession, ExecutorError> {
-        self.seek_storage_read_session(session, offset, SubmissionMode::Try)
+        self.seek_storage_read_session(session, offset, SubmissionMode::Request)
             .await
     }
 
@@ -1084,7 +1091,7 @@ impl FileIoExecutorHandle {
         session: StorageFileSession,
         bytes: Vec<u8>,
     ) -> Result<(StorageFileSession, usize), ExecutorError> {
-        self.write_storage_session(session, bytes, SubmissionMode::Try)
+        self.write_storage_session(session, bytes, SubmissionMode::Request)
             .await
     }
 
@@ -1128,7 +1135,7 @@ impl FileIoExecutorHandle {
         session: StorageFileSession,
         maximum_bytes: usize,
     ) -> Result<(StorageFileSession, Vec<u8>), ExecutorError> {
-        self.read_storage_session(session, maximum_bytes, SubmissionMode::Try)
+        self.read_storage_session(session, maximum_bytes, SubmissionMode::Request)
             .await
     }
 
@@ -1199,7 +1206,7 @@ impl FileIoExecutorHandle {
             .submit_with_mode(
                 FileOperation::ReadStorageDirectorySession { session },
                 "read_storage_directory_session",
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1216,7 +1223,7 @@ impl FileIoExecutorHandle {
         &self,
         session: StorageFileSession,
     ) -> Result<(), ExecutorError> {
-        self.commit_storage_session(session, SubmissionMode::Try)
+        self.commit_storage_session(session, SubmissionMode::Request)
             .await
     }
 
@@ -1254,7 +1261,7 @@ impl FileIoExecutorHandle {
             .submit_with_mode(
                 FileOperation::AbortStorageSession { session },
                 "abort_storage_session",
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1284,7 +1291,7 @@ impl FileIoExecutorHandle {
         &self,
         session: StorageFileSession,
     ) -> Result<(), ExecutorError> {
-        self.close_storage_session(session, SubmissionMode::Try)
+        self.close_storage_session(session, SubmissionMode::Request)
             .await
     }
 
@@ -1331,7 +1338,8 @@ impl FileIoExecutorHandle {
     ) -> Result<FileOutput, ExecutorError> {
         let (reply, response) = oneshot::channel();
         self.ingress
-            .submit_file(FileCommand::new(operation, reply), mode, operation_name)?;
+            .submit_file(FileCommand::new(operation, reply), mode, operation_name)
+            .await?;
         response
             .await
             .map_err(|_| ExecutorError::shutting_down(operation_name))?

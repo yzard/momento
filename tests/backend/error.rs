@@ -8,6 +8,44 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::time::Duration;
 
+#[tokio::test]
+async fn unavailable_responses_explain_the_cause_without_cpu_serialization_or_internal_details() {
+    use momento_api::executor::{ExecutorError, ExecutorErrorKind};
+    for (error, code) in [
+        (AppError::DatabaseBusy, "database_busy"),
+        (
+            AppError::StreamUnavailable("stream-session admission is at capacity".into()),
+            "stream_unavailable",
+        ),
+        (
+            AppError::from(ExecutorError {
+                kind: ExecutorErrorKind::Overloaded,
+                operation: "open_storage_read_session",
+                detail: "private-path".into(),
+            }),
+            "executor_overloaded",
+        ),
+        (
+            AppError::from(ExecutorError {
+                kind: ExecutorErrorKind::ShuttingDown,
+                operation: "read",
+                detail: "private-path".into(),
+            }),
+            "server_shutting_down",
+        ),
+    ] {
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[RETRY_AFTER], "1");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = to_bytes(response.into_body(), 2048).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], code);
+        assert!(value["detail"].as_str().unwrap().contains("retry"));
+        assert!(!String::from_utf8_lossy(&body).contains("private-path"));
+    }
+}
+
 #[test]
 fn sqlite_busy_errors_return_retryable_service_unavailable() {
     let sqlite_error = rusqlite::Error::SqliteFailure(
@@ -19,6 +57,27 @@ fn sqlite_busy_errors_return_retryable_service_unavailable() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+}
+
+#[tokio::test]
+async fn sqlite_execution_timeout_is_not_reported_as_capacity_contention() {
+    let error = AppError::from(momento_api::executor::ExecutorError {
+        kind: momento_api::executor::ExecutorErrorKind::DatabaseTimeout,
+        operation: "load_binary_media",
+        detail: "private SQL detail".into(),
+    });
+    assert!(matches!(error, AppError::DatabaseTimeout(_)));
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response.headers().contains_key(RETRY_AFTER));
+    let pool = crate::test_utils::create_test_db();
+    let executors = crate::test_utils::test_executor_handles(pool);
+    let response =
+        momento_api::error::render_pending_error_response(&executors.cpu, response).await;
+    let body = to_bytes(response.into_body(), 2048).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["code"], "database_timeout");
+    assert_eq!(value["detail"], "Database operation timed out");
 }
 
 #[test]

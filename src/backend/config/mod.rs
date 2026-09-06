@@ -353,6 +353,7 @@ impl Default for LlmConfig {
 pub struct ThreadPoolConfig {
     pub cpu_workers: usize,
     pub io_workers: usize,
+    /// Total SQLite executor threads: one writer and at least one reader.
     pub sqlite_workers: usize,
 }
 

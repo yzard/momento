@@ -323,6 +323,10 @@ request. There are no per-feature concurrency settings.
 r2d2 separately owns SQLite connections and its connection-maintenance thread. Each SQL operation is
 still executed by a configured SQLite executor worker after checking out a connection; r2d2 does not
 form another business-work queue.
+`sqlite_workers` is the total SQLite executor thread count (minimum 2): exactly one writer
+and `sqlite_workers - 1` readers. Read and write operations have separate bounded FIFO queues,
+so queued writes cannot occupy reader workers. Read operations run with SQLite `query_only`
+enabled. The r2d2 pool has the same connection limit; its one maintenance thread is additional.
 
 GPS coordinates are reverse geocoded entirely on-device with a pinned GeoNames `cities500`
 snapshot embedded in the Momento API binary. No external geocoding service or runtime network

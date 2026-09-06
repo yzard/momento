@@ -625,35 +625,14 @@ impl SqliteOperation {
         }
     }
 
-    fn spec(
-        &self,
-        footprints: &crate::database::result_footprint::SqliteFootprintRegistry,
-    ) -> Result<SqliteOperationSpec, ExecutorError> {
-        Ok(match self {
+    fn read_spec(&self) -> Option<SqliteOperationSpec> {
+        Some(match self {
             Self::Probe { .. } => SqliteOperationSpec::read(OperationSpec {
                 domain: ExecutorDomain::Sqlite,
                 maximum_input_bytes: size_of::<u64>(),
                 maximum_output_bytes: MAX_PROBE_OUTPUT_BYTES,
                 maximum_temporary_bytes: 0,
             }),
-            Self::RegisterAuthAttempt(_) => SqliteOperationSpec::fresh_write(
-                OperationSpec {
-                    domain: ExecutorDomain::Sqlite,
-                    maximum_input_bytes: size_of::<RegisterAuthAttempt>(),
-                    maximum_output_bytes: size_of::<AuthAttemptDecision>(),
-                    maximum_temporary_bytes: 256 * 128,
-                },
-                AUTH_SQLITE_MAX_GROWTH_BYTES,
-            ),
-            Self::ClearAuthAttempts(_) => SqliteOperationSpec::fresh_write(
-                OperationSpec {
-                    domain: ExecutorDomain::Sqlite,
-                    maximum_input_bytes: size_of::<ClearAuthAttempts>(),
-                    maximum_output_bytes: 0,
-                    maximum_temporary_bytes: 1024,
-                },
-                AUTH_SQLITE_MAX_GROWTH_BYTES,
-            ),
             Self::LoadUserForToken { .. } => SqliteOperationSpec::read(OperationSpec {
                 domain: ExecutorDomain::Sqlite,
                 maximum_input_bytes: size_of::<i64>(),
@@ -661,25 +640,8 @@ impl SqliteOperation {
                 maximum_temporary_bytes: 1024,
             }),
             Self::LoadUserForAuthentication(_) => user_read_spec(),
-            Self::InsertRefreshToken(_) => auth_write_spec(size_of::<InsertRefreshToken>()),
-            Self::RotateRefreshToken(_) => auth_write_spec(size_of::<RotateRefreshToken>()),
-            Self::RevokeRefreshToken { .. } => auth_write_spec(256),
             Self::LoadPasswordHash { .. } => user_read_spec(),
-            Self::ReplacePassword(_) => auth_write_spec(size_of::<ReplacePassword>()),
             Self::LoadAdminId => user_read_spec(),
-            Self::InsertDefaultAdmin { .. } => auth_write_spec(512),
-            Self::PrepareAdminPasswordReset { .. } => auth_write_spec(size_of::<i64>()),
-            Self::CleanupRefreshTokens => auth_write_spec(0),
-            Self::InitializeDatabase => SqliteOperationSpec::fresh_write(
-                OperationSpec {
-                    domain: ExecutorDomain::Sqlite,
-                    maximum_input_bytes: 0,
-                    maximum_output_bytes: 0,
-                    maximum_temporary_bytes: 1024 * 1024,
-                },
-                SCHEMA_SQLITE_MAX_GROWTH_BYTES,
-            ),
-            Self::CreateUser(_) => auth_write_spec(size_of::<CreateUser>()),
             Self::ListUsers => SqliteOperationSpec::read(OperationSpec {
                 domain: ExecutorDomain::Sqlite,
                 maximum_input_bytes: 0,
@@ -687,8 +649,6 @@ impl SqliteOperation {
                 maximum_temporary_bytes: 256 * 1024,
             }),
             Self::LoadUserRecord { .. } => user_read_spec(),
-            Self::UpdateUser(_) => auth_write_spec(size_of::<UpdateUser>()),
-            Self::DeleteUser { .. } => auth_write_spec(size_of::<i64>()),
             Self::LoadMapClusters(_)
             | Self::LoadMapMedia(_)
             | Self::LoadDuplicateGroups(_)
@@ -726,6 +686,127 @@ impl SqliteOperation {
             | Self::LoadFaceRepresentativeGroupPage(_)
             | Self::LoadFaceRepresentativeCandidatePage(_) => bounded_api_read_spec(),
             Self::LoadDeduplicateScheduleState => bounded_api_read_spec(),
+            Self::LoadImportStatus { .. }
+            | Self::LoadWebdavReadyPage { .. }
+            | Self::CheckWebdavReady { .. } => bounded_api_read_spec(),
+            Self::LoadNextMetadataJobDelay | Self::LoadNextLlmSubmissionDelay => {
+                bounded_api_read_spec()
+            }
+            Self::SelectLlmResultStagingCleanup { .. } => bounded_api_read_spec(),
+            Self::LoadLlmResultStagingPage { .. } => bounded_api_read_spec(),
+            Self::LoadFacePreparationContext { .. } => bounded_api_read_spec(),
+            Self::LoadBackupUpload(_)
+            | Self::PrepareBackupCompletion(_)
+            | Self::LoadBackupResumablePage(_)
+            | Self::LoadBackupProcessingPage(_)
+            | Self::LoadRecoveredBackupMedia { .. } => bounded_api_read_spec(),
+            Self::LoadFileOperationCancellationStatus { .. } => bounded_api_read_spec(),
+            _ => return None,
+        })
+    }
+
+    fn spec(
+        &self,
+        footprints: &crate::database::result_footprint::SqliteFootprintRegistry,
+    ) -> Result<SqliteOperationSpec, ExecutorError> {
+        Ok(match self {
+            Self::Probe { .. }
+            | Self::LoadUserForToken { .. }
+            | Self::LoadUserForAuthentication(_)
+            | Self::LoadPasswordHash { .. }
+            | Self::LoadAdminId
+            | Self::ListUsers
+            | Self::LoadUserRecord { .. }
+            | Self::LoadMapClusters(_)
+            | Self::LoadMapMedia(_)
+            | Self::LoadDuplicateGroups(_)
+            | Self::LoadPlaceCover(_)
+            | Self::LoadPlacesPage(_)
+            | Self::LoadPlaceMediaPage(_)
+            | Self::ListAlbums { .. }
+            | Self::LoadAlbum(_)
+            | Self::ListShareLinks { .. }
+            | Self::LoadActiveShare { .. }
+            | Self::LoadPublicSharedFile(_)
+            | Self::LoadPublicSharedThumbnail(_)
+            | Self::LoadMediaBatch(_)
+            | Self::LoadTimelinePage(_)
+            | Self::LoadTimelineMarkers(_)
+            | Self::LoadMetadataJobStatus
+            | Self::LoadMetadataGenerationMedia { .. }
+            | Self::LoadLlmPreparedInputs { .. }
+            | Self::LoadLlmCancellationBatch { .. }
+            | Self::LoadMetadataAiInputVerification { .. }
+            | Self::LoadBinaryMedia(_)
+            | Self::PrepareMediaUpdate(_)
+            | Self::VerifyFileOperationPublication { .. }
+            | Self::VerifyFileOperationCleanup { .. }
+            | Self::LoadNextGenericFileOperationRecovery { .. }
+            | Self::ListFileOperations { .. }
+            | Self::LoadFileOperationDetail { .. }
+            | Self::VerifyFileOperationRollback { .. }
+            | Self::LoadDirectoryCopy { .. }
+            | Self::LoadTrash { .. }
+            | Self::LoadFaceGroupsPage(_)
+            | Self::LoadFaceGroup(_)
+            | Self::LoadVisibleFaceRepresentative { .. }
+            | Self::LoadAiStatus { .. }
+            | Self::LoadFaceRepresentativeGroupPage(_)
+            | Self::LoadFaceRepresentativeCandidatePage(_)
+            | Self::LoadDeduplicateScheduleState
+            | Self::LoadImportStatus { .. }
+            | Self::LoadWebdavReadyPage { .. }
+            | Self::CheckWebdavReady { .. }
+            | Self::LoadNextMetadataJobDelay
+            | Self::LoadNextLlmSubmissionDelay
+            | Self::SelectLlmResultStagingCleanup { .. }
+            | Self::LoadLlmResultStagingPage { .. }
+            | Self::LoadFacePreparationContext { .. }
+            | Self::LoadBackupUpload(_)
+            | Self::PrepareBackupCompletion(_)
+            | Self::LoadBackupResumablePage(_)
+            | Self::LoadBackupProcessingPage(_)
+            | Self::LoadRecoveredBackupMedia { .. }
+            | Self::LoadFileOperationCancellationStatus { .. } => self
+                .read_spec()
+                .expect("read operation has a read specification"),
+            Self::RegisterAuthAttempt(_) => SqliteOperationSpec::fresh_write(
+                OperationSpec {
+                    domain: ExecutorDomain::Sqlite,
+                    maximum_input_bytes: size_of::<RegisterAuthAttempt>(),
+                    maximum_output_bytes: size_of::<AuthAttemptDecision>(),
+                    maximum_temporary_bytes: 256 * 128,
+                },
+                AUTH_SQLITE_MAX_GROWTH_BYTES,
+            ),
+            Self::ClearAuthAttempts(_) => SqliteOperationSpec::fresh_write(
+                OperationSpec {
+                    domain: ExecutorDomain::Sqlite,
+                    maximum_input_bytes: size_of::<ClearAuthAttempts>(),
+                    maximum_output_bytes: 0,
+                    maximum_temporary_bytes: 1024,
+                },
+                AUTH_SQLITE_MAX_GROWTH_BYTES,
+            ),
+            Self::InsertRefreshToken(_) => auth_write_spec(size_of::<InsertRefreshToken>()),
+            Self::RotateRefreshToken(_) => auth_write_spec(size_of::<RotateRefreshToken>()),
+            Self::RevokeRefreshToken { .. } => auth_write_spec(256),
+            Self::ReplacePassword(_) => auth_write_spec(size_of::<ReplacePassword>()),
+            Self::InsertDefaultAdmin { .. } => auth_write_spec(512),
+            Self::PrepareAdminPasswordReset { .. } => auth_write_spec(size_of::<i64>()),
+            Self::CleanupRefreshTokens => auth_write_spec(0),
+            Self::InitializeDatabase => SqliteOperationSpec::fresh_write(
+                OperationSpec {
+                    domain: ExecutorDomain::Sqlite,
+                    maximum_input_bytes: 0,
+                    maximum_output_bytes: 0,
+                    maximum_temporary_bytes: 1024 * 1024,
+                },
+                SCHEMA_SQLITE_MAX_GROWTH_BYTES,
+            ),
+            Self::CreateUser(_) => auth_write_spec(size_of::<CreateUser>()),
+            Self::UpdateUser(_) => auth_write_spec(size_of::<UpdateUser>()),
+            Self::DeleteUser { .. } => auth_write_spec(size_of::<i64>()),
             Self::RecoverDeduplicateRuns
             | Self::LoadDeduplicateFinalizationWork
             | Self::CommitDeduplicateCpuResult(_)
@@ -733,9 +814,6 @@ impl SqliteOperation {
             | Self::LoadFaceGroupFinalizationWork(_)
             | Self::CommitFaceGroupCpuResult(_)
             | Self::UpdateFaceRepresentative(_) => bounded_api_write_spec(),
-            Self::LoadImportStatus { .. }
-            | Self::LoadWebdavReadyPage { .. }
-            | Self::CheckWebdavReady { .. } => bounded_api_read_spec(),
             Self::CreateAlbum(_)
             | Self::UpdateAlbum(_)
             | Self::DeleteAlbum(_)
@@ -759,9 +837,6 @@ impl SqliteOperation {
             | Self::PrepareLlmResultReceipt(_)
             | Self::CommitLlmResultReceipt(_)
             | Self::FinalizeMediaUpdate(_) => bounded_api_write_spec(),
-            Self::LoadNextMetadataJobDelay | Self::LoadNextLlmSubmissionDelay => {
-                bounded_api_read_spec()
-            }
             Self::RejectLlmResultReceipt(_) => SqliteOperationSpec::fresh_write(
                 bounded_api_write_spec().resources,
                 footprints.result_rejection_max_growth_bytes,
@@ -825,7 +900,6 @@ impl SqliteOperation {
                     capacity: SqliteCapacitySource::DurableParent { max_growth_bytes },
                 }
             }
-            Self::SelectLlmResultStagingCleanup { .. } => bounded_api_read_spec(),
             Self::CleanupLlmResultStagingPage { .. } => SqliteOperationSpec {
                 resources: bounded_api_write_spec().resources,
                 capacity: SqliteCapacitySource::DurableParent {
@@ -833,10 +907,8 @@ impl SqliteOperation {
                 },
             },
             Self::FinalizeLlmResultCleanup { .. } => bounded_api_write_spec(),
-            Self::LoadLlmResultStagingPage { .. } => bounded_api_read_spec(),
             Self::ReleaseLlmResultClaim { .. } => bounded_api_write_spec(),
             Self::RecoverLlmResultState => bounded_api_write_spec(),
-            Self::LoadFacePreparationContext { .. } => bounded_api_read_spec(),
             Self::SelectLlmResultCandidates { .. } => bounded_api_write_spec(),
             Self::PersistPreparedLlmResult(prepared) => {
                 match prepared
@@ -881,11 +953,6 @@ impl SqliteOperation {
                 },
                 BULK_SQLITE_MAX_GROWTH_BYTES,
             ),
-            Self::LoadBackupUpload(_)
-            | Self::PrepareBackupCompletion(_)
-            | Self::LoadBackupResumablePage(_)
-            | Self::LoadBackupProcessingPage(_)
-            | Self::LoadRecoveredBackupMedia { .. } => bounded_api_read_spec(),
             Self::RecoverBackupWritingSessions
             | Self::MaintainBackupSessions
             | Self::ClaimBackupAsset
@@ -916,7 +983,6 @@ impl SqliteOperation {
             | Self::RecordFileOperationFinalizationFailure { .. } => bounded_api_write_spec(),
             Self::YieldFileOperationProgress { .. } => bounded_api_write_spec(),
             Self::RetryFileOperation { .. } => bounded_api_write_spec(),
-            Self::LoadFileOperationCancellationStatus { .. } => bounded_api_read_spec(),
             Self::MaintainFileOperationJournal
             | Self::RequestFileOperationCancellation { .. }
             | Self::RecordFileEntryRolledBack { .. } => bounded_api_write_spec(),
@@ -1446,6 +1512,9 @@ pub(crate) struct SqliteCommand {
 }
 
 impl SqliteCommand {
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.operation.read_spec().is_some()
+    }
     pub(crate) fn new(
         operation: SqliteOperation,
         reply: oneshot::Sender<Result<SqliteOutput, ExecutorError>>,
@@ -1472,11 +1541,13 @@ impl SqliteExecutorHandle {
         let operation = SqliteOperation::Probe { sequence };
         let operation_name = operation.name();
         let (reply, response) = oneshot::channel();
-        self.ingress.submit_sqlite(
-            SqliteCommand::new(operation, reply),
-            SubmissionMode::Durable,
-            operation_name,
-        )?;
+        self.ingress
+            .submit_sqlite(
+                SqliteCommand::new(operation, reply),
+                SubmissionMode::Durable,
+                operation_name,
+            )
+            .await?;
         match response
             .await
             .map_err(|_| ExecutorError::shutting_down(operation_name))??
@@ -1496,7 +1567,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::RegisterAuthAttempt(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1512,7 +1583,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::ClearAuthAttempts(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1526,10 +1597,7 @@ impl SqliteExecutorHandle {
         user_id: i64,
     ) -> Result<Option<UserForToken>, ExecutorError> {
         match self
-            .submit(
-                SqliteOperation::LoadUserForToken { user_id },
-                SubmissionMode::Try,
-            )
+            .submit_media_read(|| SqliteOperation::LoadUserForToken { user_id })
             .await?
         {
             SqliteOutput::UserForToken(user) => Ok(user),
@@ -1551,7 +1619,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadUserForAuthentication(identifier),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1567,7 +1635,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::InsertRefreshToken(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1583,7 +1651,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::RotateRefreshToken(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1599,7 +1667,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::RevokeRefreshToken { token_hash },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1615,7 +1683,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadPasswordHash { user_id },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1631,7 +1699,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::ReplacePassword(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1710,7 +1778,10 @@ impl SqliteExecutorHandle {
         request: CreateUser,
     ) -> Result<CreateUserOutcome, ExecutorError> {
         match self
-            .submit(SqliteOperation::CreateUser(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::CreateUser(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::UserCreated(outcome) => Ok(outcome),
@@ -1720,7 +1791,7 @@ impl SqliteExecutorHandle {
 
     pub(crate) async fn list_users_request(&self) -> Result<Vec<UserRecord>, ExecutorError> {
         match self
-            .submit(SqliteOperation::ListUsers, SubmissionMode::Try)
+            .submit(SqliteOperation::ListUsers, SubmissionMode::Request)
             .await?
         {
             SqliteOutput::Users(users) => Ok(users),
@@ -1735,7 +1806,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadUserRecord { user_id },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1749,7 +1820,10 @@ impl SqliteExecutorHandle {
         request: UpdateUser,
     ) -> Result<UpdateUserOutcome, ExecutorError> {
         match self
-            .submit(SqliteOperation::UpdateUser(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::UpdateUser(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::UserUpdated(outcome) => Ok(outcome),
@@ -1762,7 +1836,10 @@ impl SqliteExecutorHandle {
         user_id: i64,
     ) -> Result<DeleteUserOutcome, ExecutorError> {
         match self
-            .submit(SqliteOperation::DeleteUser { user_id }, SubmissionMode::Try)
+            .submit(
+                SqliteOperation::DeleteUser { user_id },
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::UserDeleted(outcome) => Ok(outcome),
@@ -1788,7 +1865,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadMapClusters(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1818,7 +1895,10 @@ impl SqliteExecutorHandle {
             ));
         }
         match self
-            .submit(SqliteOperation::LoadMapMedia(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::LoadMapMedia(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::MapMedia(response) => Ok(response),
@@ -1840,7 +1920,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadDuplicateGroups(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1857,7 +1937,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadPlaceCover(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1874,7 +1954,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadPlacesPage(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1892,7 +1972,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadPlaceMediaPage(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1912,7 +1992,10 @@ impl SqliteExecutorHandle {
         )?;
         validate_album_media_ids(&request.media_ids, "create_album")?;
         match self
-            .submit(SqliteOperation::CreateAlbum(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::CreateAlbum(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::AlbumCreated(album) => Ok(album),
@@ -1925,7 +2008,10 @@ impl SqliteExecutorHandle {
         user_id: i64,
     ) -> Result<Vec<AlbumResponse>, ExecutorError> {
         match self
-            .submit(SqliteOperation::ListAlbums { user_id }, SubmissionMode::Try)
+            .submit(
+                SqliteOperation::ListAlbums { user_id },
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::Albums(albums) => Ok(albums),
@@ -1938,7 +2024,7 @@ impl SqliteExecutorHandle {
         request: UserAlbum,
     ) -> Result<AlbumDetailOutcome, ExecutorError> {
         match self
-            .submit(SqliteOperation::LoadAlbum(request), SubmissionMode::Try)
+            .submit(SqliteOperation::LoadAlbum(request), SubmissionMode::Request)
             .await?
         {
             SqliteOutput::Album(outcome) => Ok(outcome),
@@ -1956,7 +2042,10 @@ impl SqliteExecutorHandle {
             "update_album",
         )?;
         match self
-            .submit(SqliteOperation::UpdateAlbum(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::UpdateAlbum(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::AlbumUpdated(outcome) => Ok(outcome),
@@ -2010,7 +2099,7 @@ impl SqliteExecutorHandle {
         operation: SqliteOperation,
         operation_name: &'static str,
     ) -> Result<AlbumMutationOutcome, ExecutorError> {
-        match self.submit(operation, SubmissionMode::Try).await? {
+        match self.submit(operation, SubmissionMode::Request).await? {
             SqliteOutput::AlbumMutated(outcome) => Ok(outcome),
             output => Err(output.mismatch(operation_name)),
         }
@@ -2040,7 +2129,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::CreateShareLink(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2056,7 +2145,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::ListShareLinks { user_id },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2073,7 +2162,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::DeleteShareLink { user_id, share_id },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2098,7 +2187,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::GrantShareAccess(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2119,10 +2208,9 @@ impl SqliteExecutorHandle {
             ));
         }
         match self
-            .submit(
-                SqliteOperation::LoadActiveShare { token },
-                SubmissionMode::Try,
-            )
+            .submit_media_read(|| SqliteOperation::LoadActiveShare {
+                token: token.clone(),
+            })
             .await?
         {
             SqliteOutput::ActiveShare(share) => Ok(share),
@@ -2137,7 +2225,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadPublicShareContent(share),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2151,10 +2239,12 @@ impl SqliteExecutorHandle {
         request: PublicSharedMediaQuery,
     ) -> Result<PublicFileAccessOutcome, ExecutorError> {
         match self
-            .submit(
-                SqliteOperation::LoadPublicSharedFile(request),
-                SubmissionMode::Try,
-            )
+            .submit_media_read(|| {
+                SqliteOperation::LoadPublicSharedFile(PublicSharedMediaQuery {
+                    share: request.share.clone(),
+                    media_id: request.media_id,
+                })
+            })
             .await?
         {
             SqliteOutput::PublicSharedFile(outcome) => Ok(outcome),
@@ -2167,10 +2257,12 @@ impl SqliteExecutorHandle {
         request: PublicSharedMediaQuery,
     ) -> Result<PublicThumbnailAccessOutcome, ExecutorError> {
         match self
-            .submit(
-                SqliteOperation::LoadPublicSharedThumbnail(request),
-                SubmissionMode::Try,
-            )
+            .submit_media_read(|| {
+                SqliteOperation::LoadPublicSharedThumbnail(PublicSharedMediaQuery {
+                    share: request.share.clone(),
+                    media_id: request.media_id,
+                })
+            })
             .await?
         {
             SqliteOutput::PublicSharedThumbnail(outcome) => Ok(outcome),
@@ -2192,7 +2284,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadMediaBatch(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2225,7 +2317,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadTimelinePage(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2256,7 +2348,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadTimelineMarkers(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2279,7 +2371,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::MoveMediaToTrash(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2293,7 +2385,10 @@ impl SqliteExecutorHandle {
         user_id: i64,
     ) -> Result<Vec<crate::models::TrashMediaResponse>, ExecutorError> {
         match self
-            .submit(SqliteOperation::LoadTrash { user_id }, SubmissionMode::Try)
+            .submit(
+                SqliteOperation::LoadTrash { user_id },
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::Trash(items) => Ok(items),
@@ -2313,7 +2408,10 @@ impl SqliteExecutorHandle {
             ));
         }
         match self
-            .submit(SqliteOperation::RestoreTrash(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::RestoreTrash(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::TrashRestored(count) => Ok(count),
@@ -2335,7 +2433,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::DeleteTrashMedia(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2358,7 +2456,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::DeleteTrashPage(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2404,7 +2502,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadFaceGroupsPage(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2418,7 +2516,10 @@ impl SqliteExecutorHandle {
         request: FaceGroupQuery,
     ) -> Result<Option<FaceGroupMediaResponse>, ExecutorError> {
         match self
-            .submit(SqliteOperation::LoadFaceGroup(request), SubmissionMode::Try)
+            .submit(
+                SqliteOperation::LoadFaceGroup(request),
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::FaceGroup(group) => Ok(group),
@@ -2439,7 +2540,7 @@ impl SqliteExecutorHandle {
                     user_id,
                     config,
                 },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2463,7 +2564,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::MergeFaceGroups { group_ids, config },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2509,7 +2610,7 @@ impl SqliteExecutorHandle {
         trigger: String,
         scheduled_for: Option<String>,
     ) -> Result<usize, ExecutorError> {
-        self.start_ai_feature(feature, trigger, scheduled_for, SubmissionMode::Try)
+        self.start_ai_feature(feature, trigger, scheduled_for, SubmissionMode::Request)
             .await
     }
 
@@ -2565,7 +2666,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::CancelAiFeature { feature },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2578,7 +2679,10 @@ impl SqliteExecutorHandle {
         &self,
     ) -> Result<Vec<AiFeatureActionResult>, ExecutorError> {
         match self
-            .submit(SqliteOperation::CancelAllAiFeatures, SubmissionMode::Try)
+            .submit(
+                SqliteOperation::CancelAllAiFeatures,
+                SubmissionMode::Request,
+            )
             .await?
         {
             SqliteOutput::AllAiFeaturesCancelled(results) => Ok(results),
@@ -2604,7 +2708,7 @@ impl SqliteExecutorHandle {
                     feature,
                     cleanup_group_id,
                 },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2798,7 +2902,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::InvalidateWebdavReadiness(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2814,7 +2918,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::MarkWebdavReady(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2830,7 +2934,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::CancelBackupUpload(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -2998,7 +3102,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::RegisterBackupDevice(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3014,7 +3118,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::CreateBackupUpload(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3030,7 +3134,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadBackupUpload(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3046,7 +3150,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::PrepareBackupCompletion(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3062,7 +3166,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::QueueBackupCompletion(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3078,7 +3182,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::ClaimBackupChunk(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3094,7 +3198,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::FinishBackupChunk(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3110,7 +3214,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::AbandonBackupChunk(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3123,7 +3227,8 @@ impl SqliteExecutorHandle {
         &self,
         source: ImportSource,
     ) -> Result<CreateImportJobOutcome, ExecutorError> {
-        self.create_import_job(source, SubmissionMode::Try).await
+        self.create_import_job(source, SubmissionMode::Request)
+            .await
     }
 
     pub(crate) async fn create_import_job_durable(
@@ -3467,11 +3572,8 @@ impl SqliteExecutorHandle {
         };
         let operation_name = operation.name();
         let (reply, _response) = oneshot::channel();
-        self.ingress.submit_sqlite(
-            SqliteCommand::new(operation, reply),
-            SubmissionMode::Durable,
-            operation_name,
-        )
+        self.ingress
+            .submit_sqlite_detached(SqliteCommand::new(operation, reply), operation_name)
     }
 
     pub async fn recover_import_content_hash_claims_durable(&self) -> Result<usize, ExecutorError> {
@@ -3491,7 +3593,8 @@ impl SqliteExecutorHandle {
         &self,
         plan: FileOperationPlan,
     ) -> Result<PrepareJournalOutcome, ExecutorError> {
-        self.prepare_file_operation(plan, SubmissionMode::Try).await
+        self.prepare_file_operation(plan, SubmissionMode::Request)
+            .await
     }
 
     pub async fn prepare_file_operation_durable(
@@ -3835,7 +3938,7 @@ impl SqliteExecutorHandle {
                     expected_version,
                     request_hash,
                 },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3850,7 +3953,7 @@ impl SqliteExecutorHandle {
         cursor: Option<String>,
         limit: u16,
     ) -> Result<FileOperationListResponse, ExecutorError> {
-        self.list_file_operations(states, cursor, limit, SubmissionMode::Try)
+        self.list_file_operations(states, cursor, limit, SubmissionMode::Request)
             .await
     }
 
@@ -3894,7 +3997,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::LoadFileOperationDetail { group_id },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -3996,7 +4099,8 @@ impl SqliteExecutorHandle {
     }
 
     pub async fn queue_incomplete_metadata_request(&self) -> Result<usize, ExecutorError> {
-        self.queue_incomplete_metadata(SubmissionMode::Try).await
+        self.queue_incomplete_metadata(SubmissionMode::Request)
+            .await
     }
 
     pub async fn reset_metadata_request(
@@ -4015,7 +4119,7 @@ impl SqliteExecutorHandle {
         let mut requested_group_id = Some(cleanup_group_id);
         loop {
             match self
-                .reset_metadata_page(requested_group_id.take(), SubmissionMode::Try)
+                .reset_metadata_page(requested_group_id.take(), SubmissionMode::Request)
                 .await?
             {
                 operations::ResetMetadataStepOutcome::Progressed => {}
@@ -4789,10 +4893,13 @@ impl SqliteExecutorHandle {
         request: BinaryMediaQuery,
     ) -> Result<Option<BinaryMediaRecord>, ExecutorError> {
         match self
-            .submit(
-                SqliteOperation::LoadBinaryMedia(request),
-                SubmissionMode::Try,
-            )
+            .submit_media_read(|| {
+                SqliteOperation::LoadBinaryMedia(BinaryMediaQuery {
+                    user_id: request.user_id,
+                    media_id: request.media_id,
+                    deleted: request.deleted,
+                })
+            })
             .await?
         {
             SqliteOutput::BinaryMedia(media) => Ok(media),
@@ -4807,7 +4914,7 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::PrepareMediaUpdate(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -4841,12 +4948,35 @@ impl SqliteExecutorHandle {
         match self
             .submit(
                 SqliteOperation::FinalizeMediaUpdate(request),
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
             SqliteOutput::MediaUpdateFinalized(media) => Ok(*media),
             output => Err(output.mismatch("finalize_media_update")),
+        }
+    }
+
+    // Only read-only media/auth lookups may be replayed. Never replay an HTTP
+    // request or a potentially committed mutation after a transient SQL error.
+    async fn submit_media_read(
+        &self,
+        operation: impl Fn() -> SqliteOperation,
+    ) -> Result<SqliteOutput, ExecutorError> {
+        let mut logged = false;
+        loop {
+            match self.submit(operation(), SubmissionMode::Request).await {
+                Err(error) if error.kind == ExecutorErrorKind::DatabaseBusy => {
+                    if !logged {
+                        tracing::warn!(error_code = "database_busy", error = %error, "Media request waiting for SQLite availability");
+                        logged = true;
+                    }
+                    // The failed operation has released its connection and worker.
+                    // External SQLite writers cannot notify this process on unlock.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
         }
     }
 
@@ -4858,7 +4988,8 @@ impl SqliteExecutorHandle {
         let operation_name = operation.name();
         let (reply, response) = oneshot::channel();
         self.ingress
-            .submit_sqlite(SqliteCommand::new(operation, reply), mode, operation_name)?;
+            .submit_sqlite(SqliteCommand::new(operation, reply), mode, operation_name)
+            .await?;
         response
             .await
             .map_err(|_| ExecutorError::shutting_down(operation_name))?
@@ -4980,60 +5111,71 @@ fn validate_album_media_ids(
     Ok(())
 }
 
+#[derive(Clone)]
+pub(crate) struct SqliteWorkerContext {
+    pub pool: DbPool,
+    pub capacity_wake: std::sync::Arc<Notify>,
+    pub space_budget: crate::io::space_budget::DataDirSpaceBudget,
+    pub database_path: std::path::PathBuf,
+    pub footprints: crate::database::result_footprint::SqliteFootprintRegistry,
+}
+
 pub(crate) fn spawn_sqlite_workers(
     worker_count: usize,
-    pool: DbPool,
-    receiver: Receiver<SqliteCommand>,
-    capacity_wake: std::sync::Arc<Notify>,
-    space_budget: crate::io::space_budget::DataDirSpaceBudget,
-    database_path: std::path::PathBuf,
-    footprints: crate::database::result_footprint::SqliteFootprintRegistry,
+    read_receiver: Receiver<SqliteCommand>,
+    write_receiver: Receiver<SqliteCommand>,
+    context: SqliteWorkerContext,
 ) -> Result<Vec<JoinHandle<()>>, std::io::Error> {
+    if worker_count < 2 {
+        return Err(std::io::Error::other(
+            "SQLite requires one writer and at least one reader",
+        ));
+    }
     let mut workers = Vec::new();
     workers.try_reserve_exact(worker_count).map_err(|error| {
         std::io::Error::other(format!("failed to reserve SQLite worker handles: {error}"))
     })?;
     for worker_index in 0..worker_count {
-        let pool = pool.clone();
-        let receiver = receiver.clone();
-        let capacity_wake = std::sync::Arc::clone(&capacity_wake);
-        let space_budget = space_budget.clone();
-        let database_path = database_path.clone();
+        let read_only = worker_index != 0;
+        let receiver = if read_only {
+            read_receiver.clone()
+        } else {
+            write_receiver.clone()
+        };
+        let context = context.clone();
+        let name = if read_only {
+            format!("momento-sqlite-reader-{worker_index}")
+        } else {
+            "momento-sqlite-writer".to_string()
+        };
         workers.push(
             std::thread::Builder::new()
-                .name(format!("momento-sqlite-{worker_index}"))
+                .name(name)
                 .stack_size(crate::runtime::WORKER_STACK_BYTES as usize)
-                .spawn(move || {
-                    run_worker(
-                        pool,
-                        receiver,
-                        capacity_wake,
-                        space_budget,
-                        database_path,
-                        footprints,
-                    )
-                })?,
+                .spawn(move || run_worker(context, receiver, read_only))?,
         );
     }
     Ok(workers)
 }
 
-fn run_worker(
-    pool: DbPool,
-    receiver: Receiver<SqliteCommand>,
-    capacity_wake: std::sync::Arc<Notify>,
-    space_budget: crate::io::space_budget::DataDirSpaceBudget,
-    database_path: std::path::PathBuf,
-    footprints: crate::database::result_footprint::SqliteFootprintRegistry,
-) {
+fn run_worker(context: SqliteWorkerContext, receiver: Receiver<SqliteCommand>, read_only: bool) {
     while let Ok(command) = receiver.recv() {
-        capacity_wake.notify_one();
+        context.capacity_wake.notify_one();
+        if command.is_read_only() != read_only {
+            let operation = command.operation.name();
+            command.reject(ExecutorError::new(
+                ExecutorErrorKind::Internal,
+                operation,
+                "SQLite command reached the wrong worker lane",
+            ));
+            continue;
+        }
         let operation_result = execute(
-            &pool,
+            &context.pool,
             command.operation,
-            &space_budget,
-            &database_path,
-            &footprints,
+            &context.space_budget,
+            &context.database_path,
+            &context.footprints,
         );
         let _ = command.reply.send(operation_result);
     }
@@ -5098,9 +5240,9 @@ fn execute(
         .get_timeout(SQLITE_CONNECTION_TIMEOUT)
         .map_err(|error| {
             ExecutorError::new(
-                ExecutorErrorKind::DatabaseTimeout,
+                ExecutorErrorKind::DatabaseBusy,
                 operation_name,
-                error.to_string(),
+                format!("SQLite connection capacity is unavailable: {error}"),
             )
         })?;
     let durable_capacity = match operation_spec.capacity {
@@ -5133,6 +5275,13 @@ fn execute(
         | SqliteCapacitySource::Fresh { .. }
         | SqliteCapacitySource::ProvisionalParent { .. } => None,
     };
+    connection
+        .pragma_update(
+            None,
+            "query_only",
+            operation_spec.capacity == SqliteCapacitySource::ReadOnly,
+        )
+        .map_err(|error| map_sqlite_error(operation_name, error))?;
     connection.progress_handler(
         SQLITE_PROGRESS_HANDLER_OPS,
         Some(move || Instant::now() >= deadline),
@@ -5172,6 +5321,9 @@ fn execute(
         )
     }));
     connection.progress_handler(0, None::<fn() -> bool>);
+    connection
+        .pragma_update(None, "query_only", false)
+        .map_err(|error| map_sqlite_error(operation_name, error))?;
     let mut operation_result = match result {
         Ok(result) => result,
         Err(_) => Err(ExecutorError::new(

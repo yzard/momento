@@ -83,9 +83,9 @@ pub(crate) async fn serve_file(
         drop(session);
         Body::empty()
     } else {
-        if let Err(error) = options.admission.convert_to_stream() {
+        if let Err(error) = options.admission.convert_to_stream().await {
             drop(session);
-            return Err(AppError::Unavailable(error));
+            return Err(AppError::StreamUnavailable(error));
         }
         streaming_body(
             file_io.clone(),
@@ -142,9 +142,9 @@ async fn serve_range(
         drop(session);
         Body::empty()
     } else {
-        if let Err(error) = options.admission.convert_to_stream() {
+        if let Err(error) = options.admission.convert_to_stream().await {
             drop(session);
-            return Err(AppError::Unavailable(error));
+            return Err(AppError::StreamUnavailable(error));
         }
         streaming_body(file_io.clone(), options.admission.clone(), session, length)
     };

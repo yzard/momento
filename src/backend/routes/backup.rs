@@ -279,6 +279,7 @@ async fn upload_chunk(
     }
     admission
         .convert_to_stream()
+        .await
         .map_err(AppError::Unavailable)?;
     let staged_path = match state
         .executors

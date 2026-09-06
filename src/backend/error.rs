@@ -11,11 +11,17 @@ use crate::executor::{CpuExecutorHandle, ErrorResponse};
 const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal server error";
 const FALLBACK_INTERNAL_ERROR_JSON: &str = r#"{"detail":"Internal server error"}"#;
 const FALLBACK_SERVICE_UNAVAILABLE_JSON: &str =
-    r#"{"detail":"Service unavailable; retry shortly"}"#;
+    r#"{"detail":"Service unavailable; retry shortly","code":"service_unavailable"}"#;
 const FALLBACK_ERROR_JSON: &str = r#"{"detail":"Request could not be completed"}"#;
 
 #[derive(Clone, Debug)]
 struct PendingErrorResponse(ErrorResponse);
+
+#[derive(Clone, Debug)]
+pub(crate) struct HttpErrorDiagnostic {
+    pub code: &'static str,
+    pub message: String,
+}
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -61,8 +67,17 @@ pub enum AppError {
     #[error("Database is busy")]
     DatabaseBusy,
 
+    #[error("Database operation timed out: {0}")]
+    DatabaseTimeout(String),
+
     #[error("Service unavailable: {0}")]
     Unavailable(String),
+
+    #[error("Media stream unavailable: {0}")]
+    StreamUnavailable(String),
+
+    #[error("{0}")]
+    ExecutorUnavailable(crate::executor::ExecutorError),
 
     #[error("Too many authentication attempts; retry after {retry_after_seconds} seconds")]
     RateLimited { retry_after_seconds: u64 },
@@ -86,17 +101,44 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         if matches!(&self, AppError::DatabaseBusy) {
-            tracing::warn!("Database is busy; request should be retried");
-            let mut response = pending_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Database is busy; retry shortly".to_string(),
-                None,
+            return unavailable_response(
+                "database_busy",
+                r#"{"detail":"Database is busy; retry shortly","code":"database_busy"}"#,
+                self.to_string(),
             );
-            response.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("1"),
+        }
+        if let AppError::StreamUnavailable(reason) = &self {
+            return unavailable_response(
+                "stream_unavailable",
+                r#"{"detail":"Media streaming capacity is unavailable; retry shortly","code":"stream_unavailable"}"#,
+                reason.clone(),
             );
-            return response;
+        }
+        if let AppError::Unavailable(reason) = &self {
+            return unavailable_response(
+                "service_unavailable",
+                FALLBACK_SERVICE_UNAVAILABLE_JSON,
+                reason.clone(),
+            );
+        }
+        if let AppError::ExecutorUnavailable(error) = &self {
+            use crate::executor::ExecutorErrorKind;
+            let (code, json) = match error.kind {
+                ExecutorErrorKind::Overloaded => (
+                    "executor_overloaded",
+                    r#"{"detail":"Server work queue is at capacity; retry shortly","code":"executor_overloaded"}"#,
+                ),
+                ExecutorErrorKind::ShuttingDown => (
+                    "server_shutting_down",
+                    r#"{"detail":"Server is shutting down; retry shortly","code":"server_shutting_down"}"#,
+                ),
+                ExecutorErrorKind::DatabaseBusy => (
+                    "database_busy",
+                    r#"{"detail":"Database is busy; retry shortly","code":"database_busy"}"#,
+                ),
+                _ => ("service_unavailable", FALLBACK_SERVICE_UNAVAILABLE_JSON),
+            };
+            return unavailable_response(code, json, error.to_string());
         }
         if let AppError::RateLimited {
             retry_after_seconds,
@@ -152,9 +194,16 @@ impl IntoResponse for AppError {
             AppError::Internal(message) => internal_server_error("Internal", message),
             AppError::Database(error) => internal_server_error("Database", error),
             AppError::DatabaseBusy => unreachable!(),
-            AppError::Unavailable(message) => {
-                (StatusCode::SERVICE_UNAVAILABLE, message.clone(), None)
+            AppError::DatabaseTimeout(reason) => {
+                tracing::error!(error_code = "database_timeout", error_message = %reason, "SQLite operation exceeded its execution deadline");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database operation timed out".to_string(),
+                    Some("database_timeout"),
+                )
             }
+            AppError::StreamUnavailable(_) | AppError::ExecutorUnavailable(_) => unreachable!(),
+            AppError::Unavailable(_) => unreachable!(),
             AppError::RateLimited { .. } => unreachable!(),
             AppError::ResourceLimit(message) => {
                 (StatusCode::TOO_MANY_REQUESTS, message.clone(), None)
@@ -175,15 +224,7 @@ impl IntoResponse for AppError {
             }
         };
 
-        let close_connection = matches!(self, AppError::Unavailable(_));
-        let mut response = pending_error_response(status, message, error_code);
-        if close_connection {
-            response.headers_mut().insert(
-                axum::http::header::CONNECTION,
-                axum::http::HeaderValue::from_static("close"),
-            );
-        }
-        response
+        pending_error_response(status, message, error_code)
     }
 }
 
@@ -194,9 +235,31 @@ fn pending_error_response(
 ) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = status;
+    response.extensions_mut().insert(HttpErrorDiagnostic {
+        code: code.unwrap_or("http_error"),
+        message: detail.clone(),
+    });
     response
         .extensions_mut()
         .insert(PendingErrorResponse(ErrorResponse { detail, code }));
+    response
+}
+
+fn unavailable_response(code: &'static str, json: &'static str, message: String) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::RETRY_AFTER, "1"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONNECTION, "close"),
+        ],
+        json,
+    )
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(HttpErrorDiagnostic { code, message });
     response
 }
 
@@ -263,19 +326,15 @@ impl From<crate::executor::ExecutorError> for AppError {
         use crate::executor::ExecutorErrorKind;
 
         match error.kind {
-            ExecutorErrorKind::Overloaded => {
-                Self::Unavailable("The server is at capacity; retry shortly".to_string())
+            ExecutorErrorKind::Overloaded | ExecutorErrorKind::ShuttingDown => {
+                Self::ExecutorUnavailable(error)
             }
-            ExecutorErrorKind::ShuttingDown => {
-                Self::Unavailable("The server is shutting down".to_string())
-            }
+            ExecutorErrorKind::DatabaseBusy => Self::DatabaseBusy,
+            ExecutorErrorKind::DatabaseTimeout => Self::DatabaseTimeout(error.to_string()),
             ExecutorErrorKind::InvalidInput => Self::Validation(error.detail),
             ExecutorErrorKind::BadRequest => Self::BadRequest(error.detail),
             ExecutorErrorKind::Conflict => Self::Conflict(error.detail),
             ExecutorErrorKind::NotFound => Self::NotFound(error.detail),
-            ExecutorErrorKind::DatabaseBusy | ExecutorErrorKind::DatabaseTimeout => {
-                Self::DatabaseBusy
-            }
             ExecutorErrorKind::WorkerPanic
             | ExecutorErrorKind::DatabasePermanent
             | ExecutorErrorKind::Database

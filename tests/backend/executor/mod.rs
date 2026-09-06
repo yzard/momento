@@ -11,6 +11,7 @@ use momento_api::io::journal::{
 use momento_api::runtime::{ExecutorRuntime, RuntimeSizing};
 
 mod control_json;
+mod sqlite;
 
 fn journal_reservation(
     file_io: &momento_api::executor::FileIoExecutorHandle,
@@ -477,7 +478,7 @@ async fn cpu_hashing_is_bounded_and_returns_the_expected_digest() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let pool = create_pool_at(
@@ -554,10 +555,14 @@ async fn sqlite_executor_atomically_prepares_journal_and_rejects_path_conflicts(
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let native_maximum_pages: u64 = pool
         .get()
@@ -672,10 +677,14 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -1091,10 +1100,14 @@ async fn file_executor_streams_storage_chunks_through_root_relative_operations()
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -1264,10 +1277,14 @@ async fn file_executor_enumerates_large_directories_with_resumable_sessions() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -1334,10 +1351,14 @@ async fn journal_move_rejects_a_replaced_source_generation() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -1464,10 +1485,14 @@ async fn generic_journal_recovery_finishes_a_rename_not_checkpointed_before_rest
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -1743,10 +1768,14 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -2144,10 +2173,14 @@ async fn durable_cancellations_release_mutation_fences_before_rollback_finishes(
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
-    let pool = create_pool_at(&directory.path().join("database.sqlite"), 1).expect("database pool");
+    let pool = create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# executor config\n").expect("write config");
@@ -2239,7 +2272,7 @@ async fn backup_cancellation_commits_product_state_and_journal_cleanup_atomicall
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 1,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("runtime sizing");
     let pool = create_pool_at(

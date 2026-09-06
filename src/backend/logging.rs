@@ -169,6 +169,17 @@ pub async fn request_logger(
         );
 
         let status_code = status.as_u16();
+        if let Some(diagnostic) = response
+            .extensions()
+            .get::<crate::error::HttpErrorDiagnostic>()
+        {
+            if status.is_server_error() {
+                error!(error_code = diagnostic.code, error_message = %diagnostic.message, "{}", log_line);
+            } else {
+                warn!(error_code = diagnostic.code, error_message = %diagnostic.message, "{}", log_line);
+            }
+            return response;
+        }
         let is_missing_route = status_code == 404;
 
         if is_missing_route {

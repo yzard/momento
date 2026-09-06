@@ -213,20 +213,25 @@ fn connection_admission_is_non_waiting_and_uses_the_derived_limit() {
     assert!(scheduler.try_acquire_connection().is_ok());
 }
 
-#[test]
-fn request_admission_converts_once_to_a_separately_bounded_stream_session() {
+#[tokio::test]
+async fn request_admission_converts_once_to_a_separately_bounded_stream_session() {
     let pool = crate::test_utils::create_test_db();
     let scheduler = crate::test_utils::test_scheduler(pool);
-    let admission =
-        momento_api::runtime::HttpRequestAdmission::acquire(&scheduler).expect("request admission");
+    let admission = momento_api::runtime::HttpRequestAdmission::acquire(&scheduler)
+        .await
+        .expect("request admission");
     assert_eq!(scheduler.active_request_total(), 1);
     assert_eq!(scheduler.active_stream_total(), 0);
 
-    admission.convert_to_stream().expect("stream conversion");
+    admission
+        .convert_to_stream()
+        .await
+        .expect("stream conversion");
     assert_eq!(scheduler.active_request_total(), 0);
     assert_eq!(scheduler.active_stream_total(), 1);
     admission
         .convert_to_stream()
+        .await
         .expect("idempotent stream conversion");
     assert_eq!(scheduler.active_stream_total(), 1);
 
@@ -255,6 +260,74 @@ async fn scheduler_quiescing_rejects_new_admission_and_wakes_waiters() {
     assert!(waiter.await.expect("waiter task").is_err());
     assert!(scheduler.try_acquire_request().is_err());
     drop(admissions);
+}
+
+#[tokio::test]
+async fn http_capacity_waits_release_resources_on_cancellation_and_shutdown() {
+    use momento_api::runtime::HttpRequestAdmission;
+    let pool = crate::test_utils::create_test_db();
+    let scheduler = crate::test_utils::test_scheduler(pool);
+    let mut held = Vec::new();
+    while let Ok(admission) = scheduler.try_acquire_request() {
+        held.push(admission);
+    }
+    let count = scheduler.active_request_total();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(20),
+        HttpRequestAdmission::acquire(&scheduler)
+    )
+    .await
+    .is_err());
+    assert_eq!(scheduler.active_request_total(), count);
+    drop(held.pop());
+    let acquired = tokio::time::timeout(
+        Duration::from_secs(1),
+        HttpRequestAdmission::acquire(&scheduler),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let waiting = HttpRequestAdmission::acquire(&scheduler);
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+            .await
+            .is_err()
+    );
+    scheduler.transition_to(SchedulerState::Quiescing).unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .is_err());
+    drop(acquired);
+    drop(held);
+    assert_eq!(scheduler.active_request_total(), 0);
+}
+
+#[tokio::test]
+async fn stream_capacity_wait_is_interrupted_by_shutdown() {
+    use momento_api::runtime::HttpRequestAdmission;
+    let pool = crate::test_utils::create_test_db();
+    let scheduler = crate::test_utils::test_scheduler(pool);
+    let mut held = Vec::new();
+    for _ in 0..scheduler.stream_capacity() {
+        let admission = HttpRequestAdmission::acquire(&scheduler).await.unwrap();
+        admission.convert_to_stream().await.unwrap();
+        held.push(admission);
+    }
+    let admission = HttpRequestAdmission::acquire(&scheduler).await.unwrap();
+    let waiting = admission.convert_to_stream();
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+            .await
+            .is_err()
+    );
+    scheduler.transition_to(SchedulerState::Quiescing).unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .is_err());
 }
 
 #[tokio::test]

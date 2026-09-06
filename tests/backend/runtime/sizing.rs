@@ -77,6 +77,14 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
             ThreadPoolConfig {
                 cpu_workers: 8,
                 io_workers: 8,
+                sqlite_workers: 1,
+            },
+            "sqlite_workers",
+        ),
+        (
+            ThreadPoolConfig {
+                cpu_workers: 8,
+                io_workers: 8,
                 sqlite_workers: MAX_SQLITE_WORKERS + 1,
             },
             "sqlite_workers",
@@ -93,17 +101,17 @@ fn executor_queue_and_registry_capacities_are_derived() {
     let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
         cpu_workers: 2,
         io_workers: 4,
-        sqlite_workers: 1,
+        sqlite_workers: 2,
     })
     .expect("minimum runtime");
 
     assert_eq!(sizing.cpu_queue_capacity, 8);
     assert_eq!(sizing.file_queue_capacity, 8);
-    assert_eq!(sizing.sqlite_queue_capacity, 4);
+    assert_eq!(sizing.sqlite_queue_capacity, 8);
     assert_eq!(sizing.log_event_capacity, 128);
-    assert_eq!(sizing.file_registry_capacity, 73);
-    assert_eq!(sizing.journal_mutation_registry_capacity, 40);
-    assert_eq!(sizing.durable_claim_registry_capacity, 9);
+    assert_eq!(sizing.file_registry_capacity, 74);
+    assert_eq!(sizing.journal_mutation_registry_capacity, 42);
+    assert_eq!(sizing.durable_claim_registry_capacity, 10);
     assert_eq!(
         sizing.durable_claim_registry_capacity,
         sizing.durable_orchestrations + sizing.active_outbound_stream_sessions

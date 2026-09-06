@@ -30,7 +30,7 @@ pub(crate) use io::{
     bootstrap_file_executor, complete_file_executor_bootstrap, recover_log_capacity,
     spawn_file_workers, BootstrapDatabaseState, FileCommand, FileWorkerContext,
 };
-pub(crate) use sqlite::{spawn_sqlite_workers, SqliteCommand};
+pub(crate) use sqlite::{spawn_sqlite_workers, SqliteCommand, SqliteWorkerContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorDomain {

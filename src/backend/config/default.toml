@@ -18,6 +18,7 @@ api_request_body_max_bytes = {{SERVER_API_REQUEST_BODY_MAX_BYTES}}
 # Startup-only execution-domain sizes. Changing them requires a restart.
 cpu_workers = {{THREAD_POOL_CPU_WORKERS}}
 io_workers = {{THREAD_POOL_IO_WORKERS}}
+# Total SQLite threads: one writer plus sqlite_workers - 1 readers (minimum 2).
 sqlite_workers = {{THREAD_POOL_SQLITE_WORKERS}}
 
 [security]

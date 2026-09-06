@@ -22,6 +22,11 @@ concurrency windows. r2d2 is the deliberate additional connection pool: it owns 
 and its connection-maintenance thread, while each SQL operation executes only on the configured SQLite
 executor worker that checks out that connection. File workers exclusively perform filesystem and log
 sink I/O; CPU workers own parsing, encoding, hashing, image work, and supervised child processes.
+`sqlite_workers` counts one dedicated writer plus `sqlite_workers - 1` readers (minimum 2).
+The scheduler routes SQL through separate bounded read/write FIFOs using the operation's read
+specification, never its HTTP method or its name. Reads execute under SQLite `query_only` protection;
+transactions that may mutate data, including claim/cleanup operations, must use the writer lane.
+The r2d2 connection limit remains `sqlite_workers`, with one additional maintenance thread.
 
 ---
 

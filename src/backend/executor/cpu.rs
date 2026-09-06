@@ -511,7 +511,7 @@ impl CpuExecutorHandle {
     pub async fn try_sha256(&self, bytes: Vec<u8>) -> Result<[u8; 32], ExecutorError> {
         validate_hash_input(&bytes)?;
         let output = self
-            .submit(CpuOperation::Sha256 { bytes }, SubmissionMode::Try)
+            .submit(CpuOperation::Sha256 { bytes }, SubmissionMode::Request)
             .await?;
         match output {
             CpuOutput::Sha256(digest) => Ok(digest),
@@ -520,7 +520,7 @@ impl CpuExecutorHandle {
     }
 
     pub async fn start_sha256_session_request(&self) -> Result<Sha256Session, ExecutorError> {
-        self.start_sha256_session(SubmissionMode::Try).await
+        self.start_sha256_session(SubmissionMode::Request).await
     }
 
     pub async fn start_sha256_session_durable(&self) -> Result<Sha256Session, ExecutorError> {
@@ -542,7 +542,7 @@ impl CpuExecutorHandle {
         session: Sha256Session,
         bytes: Vec<u8>,
     ) -> Result<(Sha256Session, Vec<u8>), ExecutorError> {
-        self.update_sha256_session(session, bytes, SubmissionMode::Try)
+        self.update_sha256_session(session, bytes, SubmissionMode::Request)
             .await
     }
 
@@ -575,7 +575,7 @@ impl CpuExecutorHandle {
         &self,
         session: Sha256Session,
     ) -> Result<String, ExecutorError> {
-        self.finish_sha256_session(session, SubmissionMode::Try)
+        self.finish_sha256_session(session, SubmissionMode::Request)
             .await
     }
 
@@ -670,7 +670,7 @@ impl CpuExecutorHandle {
         match self
             .submit(
                 CpuOperation::SerializeBackupMetadata { metadata },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -693,7 +693,7 @@ impl CpuExecutorHandle {
         match self
             .submit(
                 CpuOperation::DecodePlaceIdentity { place_id },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -716,7 +716,7 @@ impl CpuExecutorHandle {
         match self
             .submit(
                 CpuOperation::BuildPlaceSummaries { rows },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -804,7 +804,7 @@ impl CpuExecutorHandle {
                     maximum_bytes,
                     truncated,
                 },
-                SubmissionMode::Try,
+                SubmissionMode::Request,
             )
             .await?
         {
@@ -1003,7 +1003,7 @@ impl CpuExecutorHandle {
         latitude: Option<f64>,
         longitude: Option<f64>,
     ) -> Result<DerivedMediaLocation, ExecutorError> {
-        self.derive_media_location(latitude, longitude, SubmissionMode::Try)
+        self.derive_media_location(latitude, longitude, SubmissionMode::Request)
             .await
     }
 
@@ -1127,15 +1127,17 @@ impl CpuExecutorHandle {
         const OPERATION: &str = "supervise_child_process";
         let admission = self.child_process_admission.acquire().await;
         let (reply, response) = oneshot::channel();
-        self.ingress.submit_cpu(
-            CpuCommand::with_child_process_admission(
-                CpuOperation::SuperviseChildProcess { spec },
-                reply,
-                admission,
-            ),
-            SubmissionMode::Durable,
-            OPERATION,
-        )?;
+        self.ingress
+            .submit_cpu(
+                CpuCommand::with_child_process_admission(
+                    CpuOperation::SuperviseChildProcess { spec },
+                    reply,
+                    admission,
+                ),
+                SubmissionMode::Durable,
+                OPERATION,
+            )
+            .await?;
         match response
             .await
             .map_err(|_| ExecutorError::shutting_down(OPERATION))??
@@ -1153,7 +1155,8 @@ impl CpuExecutorHandle {
         let operation_name = operation.name();
         let (reply, response) = oneshot::channel();
         self.ingress
-            .submit_cpu(CpuCommand::new(operation, reply), mode, operation_name)?;
+            .submit_cpu(CpuCommand::new(operation, reply), mode, operation_name)
+            .await?;
         response
             .await
             .map_err(|_| ExecutorError::shutting_down(operation_name))?

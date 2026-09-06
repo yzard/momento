@@ -45,10 +45,11 @@ async fn request_with_body(
     body: Body,
 ) -> (StatusCode, String) {
     let admission = momento_api::runtime::HttpRequestAdmission::acquire(&executors.scheduler)
+        .await
         .expect("request admission");
     let parsed_method = Method::from_bytes(method.as_bytes()).expect("method");
     if (request_mutates_staging(&parsed_method) || method == "PROPFIND")
-        && admission.convert_to_stream().is_err()
+        && admission.convert_to_stream().await.is_err()
     {
         panic!("stream admission");
     }

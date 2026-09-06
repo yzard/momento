@@ -133,7 +133,7 @@ impl RuntimeSizing {
         validate_range(
             "sqlite_workers",
             configuration.sqlite_workers,
-            1,
+            2,
             MAX_SQLITE_WORKERS,
         )?;
         Self::new(configuration)
@@ -147,6 +147,12 @@ impl RuntimeSizing {
         configuration: &ThreadPoolConfig,
         enforce_runtime_budget: bool,
     ) -> Result<Self, RuntimeSizingError> {
+        validate_range(
+            "sqlite_workers",
+            configuration.sqlite_workers,
+            2,
+            MAX_SQLITE_WORKERS,
+        )?;
         let cpu_workers = widen(configuration.cpu_workers)?;
         let io_workers = widen(configuration.io_workers)?;
         let sqlite_workers = widen(configuration.sqlite_workers)?;
@@ -518,7 +524,7 @@ fn maximum_feasible_workers(
     let (minimum, maximum): (usize, usize) = match field {
         WorkerField::Cpu => (1, MAX_CPU_WORKERS),
         WorkerField::Io => (4, MAX_IO_WORKERS),
-        WorkerField::Sqlite => (1, MAX_SQLITE_WORKERS),
+        WorkerField::Sqlite => (2, MAX_SQLITE_WORKERS),
     };
     let mut feasible = minimum.saturating_sub(1);
     for candidate in minimum..=maximum {
