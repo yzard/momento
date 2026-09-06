@@ -172,13 +172,18 @@ duplicate-group and face-group browsing uses normal authenticated access and fil
 The LLM WebSocket uses the configured client ID and shared API key rather than a user JWT.
 
 Metadata jobs use `queued`, `processing`, `cancelling`, `cancelled`, `completed`, and `failed`
-states. Workers atomically claim rows, reclaim expired processing leases, retry through
+states. Workers atomically claim rows, recover orphaned claims on startup, retry through
 `available_at`, and verify every enabled task's prepared inputs before completion. Cancelling moves
 queued jobs directly to `cancelled` and lets a processing owner settle from `cancelling` to
 `cancelled` without committing metadata. Metadata cleanup removes generated metadata and related AI
 data without scheduling regeneration; a later explicit generate action queues missing, failed, and
 cancelled metadata work. Cleanup currently deletes matching AI job rows directly; do not claim that
 cleanup uses the cancellation outbox unless that implementation is changed.
+The durable cleanup operation is `metadata_clean_operations`, with its SQL grouped under
+`queries::metadata_clean`; generation and cancellation SQL stays under `queries::metadata_jobs`.
+Cleanup phases never enqueue regeneration. A new rerun requested after cancellation survives both
+normal worker settlement and startup recovery; recovery consumes the rerun flag when it queues that
+new attempt.
 
 ### Prepared input contract
 

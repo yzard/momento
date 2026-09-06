@@ -776,6 +776,56 @@ async fn startup_recovery_settles_a_cancelling_metadata_claim_without_requeueing
 }
 
 #[tokio::test]
+async fn startup_recovery_preserves_reruns_requested_after_cancellation() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "recover-cancelled-rerun.jpg");
+    let connection = pool.get().expect("connection");
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, claim_token, claimed_at, attempts, last_error) VALUES (?, 'cancelling', ?, datetime('now'), 3, 'previous failure')",
+            rusqlite::params![media_id, "00000000-0000-0000-0000-000000000045"],
+        )
+        .expect("cancelling job");
+    connection
+        .execute(
+            momento_api::database::queries::metadata_jobs::REQUEST_RERUN,
+            [media_id],
+        )
+        .expect("new generation request");
+    drop(connection);
+
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    assert_eq!(
+        executors
+            .sqlite
+            .recover_metadata_claims_durable()
+            .await
+            .expect("recover"),
+        1
+    );
+    let recovered = pool.get().expect("connection").query_row(
+        "SELECT status, claim_token, rerun_requested, attempts, completed_at, last_error FROM media_metadata_jobs WHERE media_id = ?",
+        [media_id],
+        |row| Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        )),
+    ).expect("recovered job");
+    assert_eq!(recovered, ("queued".to_string(), None, 0, 0, None, None));
+    let claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .expect("claim requested generation")
+        .expect("queued generation");
+    assert_eq!(claim.media_id, media_id);
+}
+
+#[tokio::test]
 async fn a_new_rerun_request_after_cancellation_is_not_lost() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "cancelled-rerun.jpg");

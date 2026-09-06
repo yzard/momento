@@ -13,7 +13,81 @@ fn fresh_schema_records_the_source_owned_database_identity() {
         .expect("schema version");
 
     assert_eq!(application_id, 0x4d4f_4d4f);
-    assert_eq!(schema_version, 1);
+    assert_eq!(schema_version, 2);
+}
+
+#[test]
+fn metadata_job_schema_enforces_claims_for_active_states_only() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "metadata-schema.jpg");
+    let connection = pool.get().expect("connection");
+    for status in [
+        "queued",
+        "processing",
+        "cancelling",
+        "cancelled",
+        "completed",
+        "failed",
+    ] {
+        let active = matches!(status, "processing" | "cancelling");
+        for token in [
+            None,
+            Some("invalid"),
+            Some("00000000-0000-0000-0000-000000000046"),
+        ] {
+            let inserted = connection.execute(
+                "INSERT INTO media_metadata_jobs (media_id, status, claim_token) VALUES (?, ?, ?)",
+                rusqlite::params![media_id, status, token],
+            );
+            let valid = if active {
+                token.is_some_and(|token| token.len() == 36)
+            } else {
+                token.is_none()
+            };
+            assert_eq!(inserted.is_ok(), valid, "status={status}, token={token:?}");
+            connection
+                .execute(
+                    "DELETE FROM media_metadata_jobs WHERE media_id = ?",
+                    [media_id],
+                )
+                .expect("remove test job");
+        }
+    }
+}
+
+#[test]
+fn metadata_clean_schema_rejects_regeneration_phases() {
+    let pool = create_test_db();
+    let connection = pool.get().expect("connection");
+    connection.execute(
+        "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count) VALUES ('clean-schema', 'metadata_clean', 'metadata', 'all', 'prepared', 1)",
+        [],
+    ).expect("cleanup journal");
+    connection
+        .execute(
+            queries::metadata_clean::INSERT_CLEAN_STATE,
+            ["clean-schema"],
+        )
+        .expect("clean operation");
+    for phase in ["metadata_jobs", "metadata", "activate_cleanup"] {
+        connection
+            .execute(
+                "UPDATE metadata_clean_operations SET phase = ? WHERE id = 1",
+                [phase],
+            )
+            .expect("current cleanup phase");
+    }
+    for phase in ["queue_imported", "dirty_imported", "unknown"] {
+        assert!(
+            connection
+                .execute(
+                    "UPDATE metadata_clean_operations SET phase = ? WHERE id = 1",
+                    [phase],
+                )
+                .is_err(),
+            "invalid clean phase {phase}"
+        );
+    }
 }
 
 #[test]
@@ -41,6 +115,7 @@ fn creates_current_schema_without_removed_tables() {
         "llm_job_results",
         "media_similarity_failures",
         "schema_version",
+        "metadata_reset_operations",
     ] {
         let exists: i64 = connection
             .query_row(

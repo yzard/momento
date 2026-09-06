@@ -89,13 +89,13 @@ async fn clearing_metadata_also_clears_llm_text_models() {
 #[tokio::test]
 async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() {
     let (_app, pool) = create_test_app();
-    let user_id = create_test_user(&pool, "metadata-reset-page", "reset-page@example.com");
+    let user_id = create_test_user(&pool, "metadata-clean-page", "clean-page@example.com");
     let connection = pool.get().expect("database connection");
     for index in 0..300 {
         connection
             .execute(
                 "INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (?, ?, ?, ?, 'image', 'imported', 'local')",
-                params![user_id, format!("reset-{index}.jpg"), format!("reset-{index}.jpg"), format!("reset-{index}.jpg")],
+                params![user_id, format!("clean-{index}.jpg"), format!("clean-{index}.jpg"), format!("clean-{index}.jpg")],
             )
             .expect("media");
         let media_id = connection.last_insert_rowid();
@@ -111,7 +111,7 @@ async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() 
     let mut connection = pool.get().expect("database connection");
     assert_eq!(
         clean_metadata_page(&mut connection, Some("metadata-clean-resume"))
-            .expect("initialize reset"),
+            .expect("initialize clean"),
         CleanMetadataStepOutcome::Progressed
     );
     assert_eq!(
@@ -133,7 +133,7 @@ async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() 
                 .sqlite
                 .start_ai_feature_request(feature, "manual".to_string(), None)
                 .await
-                .expect("AI start while reset is active"),
+                .expect("AI start while clean is active"),
             0
         );
     }
@@ -157,11 +157,11 @@ async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() 
 
     while connection
         .query_row(
-            "SELECT phase FROM metadata_reset_operations WHERE id = 1",
+            "SELECT phase FROM metadata_clean_operations WHERE id = 1",
             [],
             |row| row.get::<_, String>(0),
         )
-        .expect("reset phase")
+        .expect("clean phase")
         != "metadata_sources"
     {
         assert_eq!(
@@ -187,18 +187,18 @@ async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() 
         .sqlite
         .clean_metadata_request("unused-new-clean-id".to_string())
         .await
-        .expect("resume reset");
+        .expect("resume clean");
     assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 300 });
 
     let connection = pool.get().expect("database connection");
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM metadata_reset_operations",
+                "SELECT COUNT(*) FROM metadata_clean_operations",
                 [],
                 |row| { row.get::<_, i64>(0) }
             )
-            .expect("reset state count"),
+            .expect("clean state count"),
         0
     );
     assert_eq!(
@@ -226,35 +226,35 @@ async fn metadata_clean_pages_large_tables_and_resumes_the_existing_operation() 
 #[tokio::test]
 async fn metadata_clean_retires_result_journals_before_removing_receipts() {
     let (_app, pool) = create_test_app();
-    let media_id = create_test_media(&pool, "metadata-reset-result.jpg");
+    let media_id = create_test_media(&pool, "metadata-clean-result.jpg");
     let connection = pool.get().expect("database connection");
     connection
         .execute(
-            "INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('metadata-reset-result-job', ?, 'ocr', 'submitted', 1)",
+            "INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES ('metadata-clean-result-job', ?, 'ocr', 'submitted', 1)",
             [media_id],
         )
         .expect("submitted job");
     connection
         .execute(
-            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, product_target, product_version, completion_outcome, entry_count) VALUES ('metadata-reset-result-group', 'llm_result_receive', 'llm_result', 'metadata-reset-result-job', 'completed', 'llm_result_inbox', 1, 'published', 1)",
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, product_target, product_version, completion_outcome, entry_count) VALUES ('metadata-clean-result-group', 'llm_result_receive', 'llm_result', 'metadata-clean-result-job', 'completed', 'llm_result_inbox', 1, 'published', 1)",
             [],
         )
         .expect("result group");
     connection
         .execute(
-            "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path, expected_size, state) VALUES ('metadata-reset-result-group', 0, 'publish', 'journal', 'llm-results/result.tmp', 'llm-results/result.records', 24, 'committed')",
+            "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path, expected_size, state) VALUES ('metadata-clean-result-group', 0, 'publish', 'journal', 'llm-results/result.tmp', 'llm-results/result.records', 24, 'committed')",
             [],
         )
         .expect("result entry");
     connection
         .execute_batch(
-            "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, journal_group_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('metadata-reset-result-journal-space', 'journal', 'llm_result', 'metadata-reset-result-job', 'metadata-reset-result-group', 'test', 4096, 'active');
-             INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('metadata-reset-result-sqlite-space', 'sqlite', 'llm_result', 'metadata-reset-result-job', 'test', 4096, 'active');",
+            "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, journal_group_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('metadata-clean-result-journal-space', 'journal', 'llm_result', 'metadata-clean-result-job', 'metadata-clean-result-group', 'test', 4096, 'active');
+             INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('metadata-clean-result-sqlite-space', 'sqlite', 'llm_result', 'metadata-clean-result-job', 'test', 4096, 'active');",
         )
         .expect("result reservations");
     connection
         .execute(
-            "INSERT INTO llm_result_receipts (job_id, attempt, job_version, media_id, task, result_status, model_type, model_version, encoding, record_count, byte_size, content_hash, journal_group_id, sqlite_reservation_id, inbox_path, receive_token, state, result_product_version, received_at) VALUES ('metadata-reset-result-job', 1, 1, ?, 'ocr', 'completed', 'ocr', 'test', 'momento-result-records-v1', 1, 24, ?, 'metadata-reset-result-group', 'metadata-reset-result-sqlite-space', 'llm-results/result.records', '00000000-0000-0000-0000-000000000006', 'received', 1, datetime('now'))",
+            "INSERT INTO llm_result_receipts (job_id, attempt, job_version, media_id, task, result_status, model_type, model_version, encoding, record_count, byte_size, content_hash, journal_group_id, sqlite_reservation_id, inbox_path, receive_token, state, result_product_version, received_at) VALUES ('metadata-clean-result-job', 1, 1, ?, 'ocr', 'completed', 'ocr', 'test', 'momento-result-records-v1', 1, 24, ?, 'metadata-clean-result-group', 'metadata-clean-result-sqlite-space', 'llm-results/result.records', '00000000-0000-0000-0000-000000000006', 'received', 1, datetime('now'))",
             params![media_id, "0".repeat(64)],
         )
         .expect("result receipt");
@@ -270,7 +270,7 @@ async fn metadata_clean_retires_result_journals_before_removing_receipts() {
     let connection = pool.get().expect("database connection");
     let (state, target, outcome): (String, Option<String>, Option<String>) = connection
         .query_row(
-            "SELECT state, product_target, completion_outcome FROM file_operation_groups WHERE id = 'metadata-reset-result-group'",
+            "SELECT state, product_target, completion_outcome FROM file_operation_groups WHERE id = 'metadata-clean-result-group'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -281,7 +281,7 @@ async fn metadata_clean_retires_result_journals_before_removing_receipts() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT cleanup_state FROM file_operation_entries WHERE group_id = 'metadata-reset-result-group'",
+                "SELECT cleanup_state FROM file_operation_entries WHERE group_id = 'metadata-clean-result-group'",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -299,7 +299,7 @@ async fn metadata_clean_retires_result_journals_before_removing_receipts() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT COUNT(*) FROM data_dir_space_reservations WHERE owner_id = 'metadata-reset-result-job' AND state != 'released'",
+                "SELECT COUNT(*) FROM data_dir_space_reservations WHERE owner_id = 'metadata-clean-result-job' AND state != 'released'",
                 [],
                 |row| row.get::<_, i64>(0),
             )

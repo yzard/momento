@@ -913,19 +913,140 @@ pub mod metadata_jobs {
     UNION ALL
     SELECT 'cleaning'
          , COUNT(*)
-      FROM metadata_reset_operations
+      FROM metadata_clean_operations
      HAVING COUNT(*) > 0
     "#;
 
+    pub const SELECT_INPUT_PATHS: &str =
+        "SELECT storage_root, file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
+    pub const CLAIM_NEXT_QUEUED: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = 'processing'
+         , claim_token = ?
+         , claimed_at = datetime('now')
+         , attempts = attempts + 1
+         , updated_at = datetime('now')
+     WHERE media_id = (
+               SELECT media_id
+                 FROM media_metadata_jobs
+                WHERE status = 'queued'
+                  AND available_at <= datetime('now')
+                  AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM file_operation_groups AS g
+                       WHERE g.owner_kind = 'metadata_generation'
+                         AND g.owner_id = CAST(media_metadata_jobs.media_id AS TEXT)
+                         AND g.cancel_requested = 1
+                         AND g.state NOT IN ('cleaned', 'rolled_back')
+                  )
+                ORDER BY media_id
+                LIMIT 1
+           )
+       AND status = 'queued'
+    RETURNING media_id, claim_token
+    "#;
+    pub const NEXT_AVAILABLE_DELAY_SECONDS: &str = r#"
+    SELECT CAST(
+               MAX(1, unixepoch(MIN(available_at)) - unixepoch('now'))
+               AS INTEGER
+           )
+      FROM media_metadata_jobs
+     WHERE status = 'queued'
+       AND available_at > datetime('now')
+       AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
+    "#;
+    pub const MARK_COMPLETED: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = CASE
+               WHEN rerun_requested = 1 THEN 'queued'
+               WHEN status = 'cancelling' THEN 'cancelled'
+               ELSE 'completed'
+           END
+         , claim_token = NULL
+         , attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END
+         , rerun_requested = 0
+         , available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END
+         , claimed_at = NULL
+         , completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END
+         , last_error = NULL
+         , updated_at = datetime('now')
+     WHERE media_id = ?
+       AND claim_token = ?
+       AND status IN ('processing', 'cancelling')
+    "#;
+    pub const MARK_RETRY: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = CASE
+               WHEN rerun_requested = 1 THEN 'queued'
+               WHEN status = 'cancelling' THEN 'cancelled'
+               ELSE 'queued'
+           END
+         , claim_token = NULL
+         , attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END
+         , rerun_requested = 0
+         , available_at = CASE
+               WHEN rerun_requested = 1 THEN datetime('now')
+               ELSE datetime('now', '+30 seconds')
+           END
+         , claimed_at = NULL
+         , completed_at = CASE
+               WHEN status = 'cancelling' AND rerun_requested = 0 THEN datetime('now')
+               ELSE NULL
+           END
+         , last_error = CASE WHEN status = 'cancelling' OR rerun_requested = 1 THEN NULL ELSE ? END
+         , updated_at = datetime('now')
+     WHERE media_id = ?
+       AND claim_token = ?
+       AND status IN ('processing', 'cancelling')
+    "#;
+    pub const RECOVER_ORPHANED_CLAIMS: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = CASE
+               WHEN rerun_requested = 1 THEN 'queued'
+               WHEN status = 'cancelling' THEN 'cancelled'
+               ELSE 'queued'
+           END
+         , claim_token = NULL
+         , attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END
+         , rerun_requested = 0
+         , available_at = datetime('now')
+         , claimed_at = NULL
+         , completed_at = CASE
+               WHEN status = 'cancelling' AND rerun_requested = 0 THEN datetime('now')
+               ELSE NULL
+           END
+         , last_error = CASE WHEN status = 'cancelling' OR rerun_requested = 1 THEN NULL ELSE last_error END
+         , updated_at = datetime('now')
+     WHERE status IN ('processing', 'cancelling')
+       AND claim_token IS NOT NULL
+    "#;
+    pub const VERIFY_CLAIM: &str = r#"
+    SELECT 1
+      FROM media_metadata_jobs
+     WHERE media_id = ?
+       AND claim_token = ?
+       AND status = 'processing'
+    "#;
+    pub const SELECT_FAILURES: &str = r#"
+    SELECT last_error
+      FROM media_metadata_jobs
+     WHERE status = 'failed'
+       AND last_error IS NOT NULL
+     ORDER BY updated_at DESC
+     LIMIT 100
+    "#;
+}
+
+pub mod metadata_clean {
     pub const SELECT_CLEAN_STATE: &str = r#"
     SELECT cleanup_group_id, phase, media_cursor, media_count
-      FROM metadata_reset_operations
+      FROM metadata_clean_operations
      WHERE id = 1
     "#;
     pub const IS_CLEAN_ACTIVE: &str =
-        "SELECT EXISTS (SELECT 1 FROM metadata_reset_operations WHERE id = 1)";
+        "SELECT EXISTS (SELECT 1 FROM metadata_clean_operations WHERE id = 1)";
     pub const INSERT_CLEAN_STATE: &str = r#"
-    INSERT INTO metadata_reset_operations (
+    INSERT INTO metadata_clean_operations (
         id, cleanup_group_id, phase, media_cursor, media_count
     )
     VALUES (
@@ -1007,17 +1128,17 @@ pub mod metadata_jobs {
       , updated_at = datetime('now')
     "#;
     pub const UPDATE_CLEAN_CURSOR: &str = r#"
-    UPDATE metadata_reset_operations
+    UPDATE metadata_clean_operations
        SET media_cursor = ?, updated_at = datetime('now')
      WHERE id = 1 AND phase = ?
     "#;
     pub const ADVANCE_CLEAN_PHASE: &str = r#"
-    UPDATE metadata_reset_operations
+    UPDATE metadata_clean_operations
        SET phase = ?, media_cursor = 0, updated_at = datetime('now')
      WHERE id = 1 AND phase = ?
     "#;
     pub const DELETE_CLEAN_STATE: &str =
-        "DELETE FROM metadata_reset_operations WHERE id = 1 AND phase = 'activate_cleanup'";
+        "DELETE FROM metadata_clean_operations WHERE id = 1 AND phase = 'activate_cleanup'";
     pub const DELETE_LLM_RESULT_STAGING_PAGE: &str = "DELETE FROM llm_result_staging WHERE rowid IN (SELECT rowid FROM llm_result_staging ORDER BY rowid LIMIT ?)";
     pub const DELETE_LLM_RESULT_RECEIPTS_PAGE: &str = "DELETE FROM llm_result_receipts WHERE rowid IN (SELECT rowid FROM llm_result_receipts ORDER BY rowid LIMIT ?)";
     pub const RELEASE_LLM_RESERVATIONS_PAGE: &str = "UPDATE data_dir_space_reservations SET state = 'released', version = version + 1, updated_at = datetime('now') WHERE id IN (SELECT id FROM data_dir_space_reservations WHERE state = 'active' AND owner_kind IN ('llm_result', 'llm_result_cleanup') ORDER BY id LIMIT ?)";
@@ -1062,57 +1183,14 @@ pub mod metadata_jobs {
     pub const DELETE_RTREE_PAGE: &str = "DELETE FROM media_rtree WHERE rowid IN (SELECT rowid FROM media_rtree ORDER BY rowid LIMIT ?)";
     pub const DELETE_METADATA_SOURCES_PAGE: &str = "DELETE FROM media_metadata_sources WHERE rowid IN (SELECT rowid FROM media_metadata_sources ORDER BY rowid LIMIT ?)";
     pub const DELETE_METADATA_PAGE: &str = "DELETE FROM media_metadata WHERE rowid IN (SELECT rowid FROM media_metadata ORDER BY rowid LIMIT ?)";
-    pub const SELECT_INPUT_PATHS: &str =
-        "SELECT storage_root, file_path FROM media_ai_inputs WHERE media_id = ? AND task = ? ORDER BY sequence";
-    pub const CLAIM_NEXT_QUEUED: &str = r#"
-    UPDATE media_metadata_jobs
-       SET status = 'processing'
-         , claim_token = ?
-         , claimed_at = datetime('now')
-         , attempts = attempts + 1
-         , updated_at = datetime('now')
-     WHERE media_id = (
-               SELECT media_id
-                 FROM media_metadata_jobs
-                WHERE status = 'queued'
-                  AND available_at <= datetime('now')
-                  AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM file_operation_groups AS g
-                       WHERE g.owner_kind = 'metadata_generation'
-                         AND g.owner_id = CAST(media_metadata_jobs.media_id AS TEXT)
-                         AND g.cancel_requested = 1
-                         AND g.state NOT IN ('cleaned', 'rolled_back')
-                  )
-                ORDER BY media_id
-                LIMIT 1
-           )
-       AND status = 'queued'
-    RETURNING media_id, claim_token
-    "#;
-    pub const NEXT_AVAILABLE_DELAY_SECONDS: &str = r#"
-    SELECT CAST(
-               MAX(1, unixepoch(MIN(available_at)) - unixepoch('now'))
-               AS INTEGER
-           )
-      FROM media_metadata_jobs
-     WHERE status = 'queued'
-       AND available_at > datetime('now')
-       AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
-    "#;
-    pub const MARK_COMPLETED: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' WHEN status = 'cancelling' THEN 'cancelled' ELSE 'completed' END, claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE available_at END, claimed_at = NULL, completed_at = CASE WHEN rerun_requested = 1 THEN NULL ELSE datetime('now') END, last_error = NULL, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status IN ('processing', 'cancelling')";
-    pub const MARK_RETRY: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN rerun_requested = 1 THEN 'queued' WHEN status = 'cancelling' THEN 'cancelled' ELSE 'queued' END, claim_token = NULL, attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END, rerun_requested = 0, available_at = CASE WHEN rerun_requested = 1 THEN datetime('now') ELSE datetime('now', '+30 seconds') END, claimed_at = NULL, completed_at = CASE WHEN status = 'cancelling' AND rerun_requested = 0 THEN datetime('now') ELSE completed_at END, last_error = CASE WHEN status = 'cancelling' OR rerun_requested = 1 THEN NULL ELSE ? END, updated_at = datetime('now') WHERE media_id = ? AND claim_token = ? AND status IN ('processing', 'cancelling')";
-    pub const RECOVER_ORPHANED_CLAIMS: &str = "UPDATE media_metadata_jobs SET status = CASE WHEN status = 'cancelling' THEN 'cancelled' ELSE 'queued' END, claim_token = NULL, available_at = datetime('now'), claimed_at = NULL, completed_at = CASE WHEN status = 'cancelling' THEN datetime('now') ELSE completed_at END, updated_at = datetime('now') WHERE status IN ('processing', 'cancelling') AND claim_token IS NOT NULL";
-    pub const VERIFY_CLAIM: &str = "SELECT 1 FROM media_metadata_jobs WHERE media_id = ? AND claim_token = ? AND status = 'processing'";
-    pub const SELECT_FAILURES: &str = "SELECT last_error FROM media_metadata_jobs WHERE status = 'failed' AND last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 100";
 }
 
 pub mod ai_jobs {
-    pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_SCREENSHOT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'screenshot_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'screenshot_detection') AND NOT EXISTS (SELECT 1 FROM media_screenshot_classifications WHERE media_screenshot_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'screenshot_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_DOCUMENT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'document_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'document_detection') AND NOT EXISTS (SELECT 1 FROM media_document_classifications WHERE media_document_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'document_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_SCREENSHOT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'screenshot_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'screenshot_detection') AND NOT EXISTS (SELECT 1 FROM media_screenshot_classifications WHERE media_screenshot_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'screenshot_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub const INSERT_DOCUMENT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'document_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'document_detection') AND NOT EXISTS (SELECT 1 FROM media_document_classifications WHERE media_document_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'document_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') AND NOT EXISTS (SELECT 1 FROM llm_cancellation_scopes WHERE llm_cancellation_scopes.scope = 'all' OR (llm_cancellation_scopes.scope = 'task' AND llm_cancellation_scopes.task = llm_jobs.task)) ORDER BY created_at LIMIT ?";
     pub const NEXT_AVAILABLE_DELAY_SECONDS: &str = r#"
     WITH future_work(ready_at) AS (
@@ -1120,7 +1198,7 @@ pub mod ai_jobs {
           FROM llm_jobs
          WHERE status = 'queued'
            AND available_at > datetime('now')
-           AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+           AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
            AND NOT EXISTS (
                    SELECT 1
                      FROM llm_cancellation_scopes
@@ -1141,7 +1219,7 @@ pub mod ai_jobs {
            )
       FROM future_work
     "#;
-    pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', state_version = state_version + 1, claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)";
+    pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', state_version = state_version + 1, claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)";
     pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', state_version = state_version + 1, attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
     pub const REQUEUE_AMBIGUOUS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const REQUEUE_DEFERRED: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, available_at = datetime('now', '+' || ? || ' seconds'), last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
@@ -1895,7 +1973,7 @@ pub mod llm_callback {
         UPDATE llm_result_receipts
            SET state = 'processing', claim_token = ?, updated_at = datetime('now')
          WHERE job_id = ? AND state = 'received' AND claim_token IS NULL
-           AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations)
+           AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
     "#;
     pub const RELEASE_RESULT_RECEIPT_CLAIM: &str = r#"
         UPDATE llm_result_receipts
@@ -3388,7 +3466,7 @@ pub mod deduplicate {
     pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
     pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
     pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";
-    pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_reset_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
+    pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
     pub const REQUEUE_MISSING_INPUT_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, last_error = NULL, claimed_at = NULL, completed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND task = 'image_clustering' AND status = 'failed' AND last_error = 'missing prepared AI inputs' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = 'image_clustering')";
     pub const SELECT_ACTIVE_RUNS: &str =
         "SELECT id, status FROM media_similarity_runs WHERE status IN ('running', 'cancelling')";

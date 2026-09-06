@@ -264,7 +264,7 @@ async fn metadata_status_returns_complete_failure_diagnostics() {
 #[tokio::test]
 async fn metadata_clean_clears_durable_ai_input_records() {
     let (_application, pool) = create_test_app();
-    let media_id = create_test_user(&pool, "metadata-reset", "metadata-reset@example.com");
+    let media_id = create_test_user(&pool, "metadata-clean", "metadata-clean@example.com");
     let connection = pool.get().expect("connection");
     connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source) VALUES (?, 'test.jpg', 'test.jpg', 'test.jpg', 'image', 'imported', 'local')", [media_id]).expect("media");
     let imported_media_id = connection.last_insert_rowid();
@@ -274,7 +274,7 @@ async fn metadata_clean_clears_durable_ai_input_records() {
         .sqlite
         .clean_metadata_request("metadata-clean-inputs".to_string())
         .await
-        .expect("reset");
+        .expect("clean");
     assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 1 });
     let connection = pool.get().expect("connection");
     let count: i64 = connection
@@ -290,9 +290,9 @@ async fn metadata_clean_clears_durable_ai_input_records() {
 #[tokio::test]
 async fn metadata_clean_removes_ai_jobs_results_and_similarity_index() {
     let (_application, pool) = create_test_app();
-    let media_id = create_test_media(&pool, "metadata-reset-derived.jpg");
+    let media_id = create_test_media(&pool, "metadata-clean-derived.jpg");
     let connection = pool.get().expect("connection");
-    connection.execute("INSERT INTO llm_jobs (id, media_id, task, status) VALUES ('reset-job', ?, 'ocr', 'completed')", [media_id]).expect("job");
+    connection.execute("INSERT INTO llm_jobs (id, media_id, task, status) VALUES ('clean-job', ?, 'ocr', 'completed')", [media_id]).expect("job");
     connection.execute("INSERT INTO media_text (media_id, model_type, model_version, string) VALUES (?, 'ocr', 'test', 'text')", [media_id]).expect("text");
     connection.execute("INSERT INTO media_text_inputs (media_id, model_type, sequence, model_version, string) VALUES (?, 'ocr', 0, 'test', 'frame text')", [media_id]).expect("input text");
     connection.execute("INSERT INTO media_similarity_index (media_id, content_hash, model_version, preprocessing_version, embedding, perceptual_hash, processing_status) VALUES (?, 'hash', 'test', 'test', X'00000000', 0, 1)", [media_id]).expect("index");
@@ -302,7 +302,7 @@ async fn metadata_clean_removes_ai_jobs_results_and_similarity_index() {
         .sqlite
         .clean_metadata_request("metadata-clean-derived".to_string())
         .await
-        .expect("reset");
+        .expect("clean");
     assert_eq!(outcome, CleanMetadataOutcome::Cleaned { media_count: 1 });
     let connection = pool.get().expect("connection");
     for table in [

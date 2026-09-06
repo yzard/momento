@@ -50,7 +50,7 @@ pub fn clean_metadata_page(
     cleanup_group_id: Option<&str>,
 ) -> rusqlite::Result<CleanMetadataStepOutcome> {
     let existing = connection
-        .query_row(queries::metadata_jobs::SELECT_CLEAN_STATE, [], |_| Ok(()))
+        .query_row(queries::metadata_clean::SELECT_CLEAN_STATE, [], |_| Ok(()))
         .optional()?;
     if existing.is_none() {
         let Some(cleanup_group_id) = cleanup_group_id else {
@@ -58,13 +58,13 @@ pub fn clean_metadata_page(
         };
         let plan = metadata_clean_cleanup_plan(cleanup_group_id)?;
         let prepare = crate::io::journal::prepare_file_operation_with(connection, plan, |tx| {
-            tx.execute(queries::metadata_jobs::CANCEL_LLM_JOBS_FOR_CLEAN, [])?;
+            tx.execute(queries::metadata_clean::CANCEL_LLM_JOBS_FOR_CLEAN, [])?;
             tx.execute(
-                queries::metadata_jobs::DISCARD_LLM_RESULT_RECEIPTS_FOR_CLEAN,
+                queries::metadata_clean::DISCARD_LLM_RESULT_RECEIPTS_FOR_CLEAN,
                 [],
             )?;
             tx.execute(
-                queries::metadata_jobs::INSERT_CLEAN_STATE,
+                queries::metadata_clean::INSERT_CLEAN_STATE,
                 [cleanup_group_id],
             )?;
             Ok(())
@@ -155,7 +155,7 @@ fn advance_metadata_clean_page(
 ) -> rusqlite::Result<CleanMetadataStepOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (cleanup_group_id, phase, media_cursor, media_count) =
-        transaction.query_row(queries::metadata_jobs::SELECT_CLEAN_STATE, [], |row| {
+        transaction.query_row(queries::metadata_clean::SELECT_CLEAN_STATE, [], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -167,7 +167,7 @@ fn advance_metadata_clean_page(
     if phase == "metadata_jobs" {
         let media_ids = {
             let mut statement =
-                transaction.prepare(queries::metadata_jobs::SELECT_IMPORTED_PAGE)?;
+                transaction.prepare(queries::metadata_clean::SELECT_IMPORTED_PAGE)?;
             let media_ids = statement
                 .query_map(params![media_cursor, METADATA_CLEAN_PAGE_SIZE], |row| {
                     row.get::<_, i64>(0)
@@ -177,10 +177,10 @@ fn advance_metadata_clean_page(
         };
         if let Some(last_media_id) = media_ids.last().copied() {
             for media_id in media_ids {
-                transaction.execute(queries::metadata_jobs::CLEAN_JOB_FOR_MEDIA, [media_id])?;
+                transaction.execute(queries::metadata_clean::CLEAN_JOB_FOR_MEDIA, [media_id])?;
             }
             transaction.execute(
-                queries::metadata_jobs::UPDATE_CLEAN_CURSOR,
+                queries::metadata_clean::UPDATE_CLEAN_CURSOR,
                 params![last_media_id, phase],
             )?;
         } else {
@@ -193,7 +193,7 @@ fn advance_metadata_clean_page(
     if phase == "llm_result_groups" {
         let group_ids = {
             let mut statement =
-                transaction.prepare(queries::metadata_jobs::SELECT_LLM_RESULT_GROUPS_PAGE)?;
+                transaction.prepare(queries::metadata_clean::SELECT_LLM_RESULT_GROUPS_PAGE)?;
             let group_ids = statement
                 .query_map([METADATA_CLEAN_PAGE_SIZE], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -204,19 +204,21 @@ fn advance_metadata_clean_page(
         } else {
             for group_id in group_ids {
                 transaction.execute(
-                    queries::metadata_jobs::RETIRE_LLM_RESULT_GROUP_ENTRIES,
+                    queries::metadata_clean::RETIRE_LLM_RESULT_GROUP_ENTRIES,
                     [&group_id],
                 )?;
                 transaction.execute(
-                    queries::metadata_jobs::RELEASE_LLM_RESULT_GROUP_CLAIMS,
+                    queries::metadata_clean::RELEASE_LLM_RESULT_GROUP_CLAIMS,
                     [&group_id],
                 )?;
                 transaction.execute(
-                    queries::metadata_jobs::RELEASE_LLM_RESULT_GROUP_RESERVATIONS,
+                    queries::metadata_clean::RELEASE_LLM_RESULT_GROUP_RESERVATIONS,
                     [&group_id],
                 )?;
-                transaction
-                    .execute(queries::metadata_jobs::RETIRE_LLM_RESULT_GROUP, [&group_id])?;
+                transaction.execute(
+                    queries::metadata_clean::RETIRE_LLM_RESULT_GROUP,
+                    [&group_id],
+                )?;
             }
         }
         transaction.commit()?;
@@ -231,7 +233,7 @@ fn advance_metadata_clean_page(
         if activated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let deleted = transaction.execute(queries::metadata_jobs::DELETE_CLEAN_STATE, [])?;
+        let deleted = transaction.execute(queries::metadata_clean::DELETE_CLEAN_STATE, [])?;
         if deleted != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -254,7 +256,7 @@ fn advance_metadata_clean_phase(
 ) -> rusqlite::Result<()> {
     let next_phase = metadata_clean_next_phase(current_phase)?;
     let changed = transaction.execute(
-        queries::metadata_jobs::ADVANCE_CLEAN_PHASE,
+        queries::metadata_clean::ADVANCE_CLEAN_PHASE,
         params![next_phase, current_phase],
     )?;
     if changed != 1 {
@@ -316,57 +318,57 @@ fn metadata_clean_next_phase(current: &str) -> rusqlite::Result<&'static str> {
 
 fn metadata_clean_delete_query(phase: &str) -> rusqlite::Result<&'static str> {
     let query = match phase {
-        "llm_result_staging" => queries::metadata_jobs::DELETE_LLM_RESULT_STAGING_PAGE,
-        "llm_result_receipts" => queries::metadata_jobs::DELETE_LLM_RESULT_RECEIPTS_PAGE,
-        "llm_reservations" => queries::metadata_jobs::RELEASE_LLM_RESERVATIONS_PAGE,
-        "llm_job_cancellations" => queries::metadata_jobs::DELETE_LLM_JOB_CANCELLATIONS_PAGE,
-        "llm_cancellation_scopes" => queries::metadata_jobs::DELETE_LLM_CANCELLATION_SCOPES_PAGE,
-        "llm_jobs" => queries::metadata_jobs::DELETE_LLM_JOBS_PAGE,
-        "text_inputs" => queries::metadata_jobs::DELETE_TEXT_INPUTS_PAGE,
-        "text" => queries::metadata_jobs::DELETE_TEXT_PAGE,
-        "aesthetic_inputs" => queries::metadata_jobs::DELETE_AESTHETIC_INPUTS_PAGE,
-        "aesthetics" => queries::metadata_jobs::DELETE_AESTHETICS_PAGE,
-        "screenshot_inputs" => queries::metadata_jobs::DELETE_SCREENSHOT_INPUTS_PAGE,
-        "screenshots" => queries::metadata_jobs::DELETE_SCREENSHOTS_PAGE,
-        "document_inputs" => queries::metadata_jobs::DELETE_DOCUMENT_INPUTS_PAGE,
-        "documents" => queries::metadata_jobs::DELETE_DOCUMENTS_PAGE,
-        "face_finalization_faces" => queries::metadata_jobs::DELETE_FACE_FINALIZATION_FACES_PAGE,
+        "llm_result_staging" => queries::metadata_clean::DELETE_LLM_RESULT_STAGING_PAGE,
+        "llm_result_receipts" => queries::metadata_clean::DELETE_LLM_RESULT_RECEIPTS_PAGE,
+        "llm_reservations" => queries::metadata_clean::RELEASE_LLM_RESERVATIONS_PAGE,
+        "llm_job_cancellations" => queries::metadata_clean::DELETE_LLM_JOB_CANCELLATIONS_PAGE,
+        "llm_cancellation_scopes" => queries::metadata_clean::DELETE_LLM_CANCELLATION_SCOPES_PAGE,
+        "llm_jobs" => queries::metadata_clean::DELETE_LLM_JOBS_PAGE,
+        "text_inputs" => queries::metadata_clean::DELETE_TEXT_INPUTS_PAGE,
+        "text" => queries::metadata_clean::DELETE_TEXT_PAGE,
+        "aesthetic_inputs" => queries::metadata_clean::DELETE_AESTHETIC_INPUTS_PAGE,
+        "aesthetics" => queries::metadata_clean::DELETE_AESTHETICS_PAGE,
+        "screenshot_inputs" => queries::metadata_clean::DELETE_SCREENSHOT_INPUTS_PAGE,
+        "screenshots" => queries::metadata_clean::DELETE_SCREENSHOTS_PAGE,
+        "document_inputs" => queries::metadata_clean::DELETE_DOCUMENT_INPUTS_PAGE,
+        "documents" => queries::metadata_clean::DELETE_DOCUMENTS_PAGE,
+        "face_finalization_faces" => queries::metadata_clean::DELETE_FACE_FINALIZATION_FACES_PAGE,
         "face_finalization_anchors" => {
-            queries::metadata_jobs::DELETE_FACE_FINALIZATION_ANCHORS_PAGE
+            queries::metadata_clean::DELETE_FACE_FINALIZATION_ANCHORS_PAGE
         }
-        "face_finalization_groups" => queries::metadata_jobs::DELETE_FACE_FINALIZATION_GROUPS_PAGE,
-        "face_representatives" => queries::metadata_jobs::DELETE_FACE_REPRESENTATIVES_PAGE,
-        "face_members" => queries::metadata_jobs::DELETE_FACE_MEMBERS_PAGE,
-        "face_groups" => queries::metadata_jobs::DELETE_FACE_GROUPS_PAGE,
-        "face_finalizations" => queries::metadata_jobs::DELETE_FACE_FINALIZATIONS_PAGE,
-        "face_generation_state" => queries::metadata_jobs::DELETE_FACE_GENERATION_STATE_PAGE,
-        "face_manual_state" => queries::metadata_jobs::DELETE_FACE_MANUAL_STATE_PAGE,
-        "face_generations" => queries::metadata_jobs::DELETE_FACE_GENERATIONS_PAGE,
-        "face_runs" => queries::metadata_jobs::DELETE_FACE_RUNS_PAGE,
-        "face_results" => queries::metadata_jobs::DELETE_FACE_RESULTS_PAGE,
-        "media_faces" => queries::metadata_jobs::DELETE_MEDIA_FACES_PAGE,
+        "face_finalization_groups" => queries::metadata_clean::DELETE_FACE_FINALIZATION_GROUPS_PAGE,
+        "face_representatives" => queries::metadata_clean::DELETE_FACE_REPRESENTATIVES_PAGE,
+        "face_members" => queries::metadata_clean::DELETE_FACE_MEMBERS_PAGE,
+        "face_groups" => queries::metadata_clean::DELETE_FACE_GROUPS_PAGE,
+        "face_finalizations" => queries::metadata_clean::DELETE_FACE_FINALIZATIONS_PAGE,
+        "face_generation_state" => queries::metadata_clean::DELETE_FACE_GENERATION_STATE_PAGE,
+        "face_manual_state" => queries::metadata_clean::DELETE_FACE_MANUAL_STATE_PAGE,
+        "face_generations" => queries::metadata_clean::DELETE_FACE_GENERATIONS_PAGE,
+        "face_runs" => queries::metadata_clean::DELETE_FACE_RUNS_PAGE,
+        "face_results" => queries::metadata_clean::DELETE_FACE_RESULTS_PAGE,
+        "media_faces" => queries::metadata_clean::DELETE_MEDIA_FACES_PAGE,
         "similarity_cluster_members" => {
-            queries::metadata_jobs::DELETE_SIMILARITY_CLUSTER_MEMBERS_PAGE
+            queries::metadata_clean::DELETE_SIMILARITY_CLUSTER_MEMBERS_PAGE
         }
-        "similarity_clusters" => queries::metadata_jobs::DELETE_SIMILARITY_CLUSTERS_PAGE,
+        "similarity_clusters" => queries::metadata_clean::DELETE_SIMILARITY_CLUSTERS_PAGE,
         "similarity_dirty_snapshot" => {
-            queries::metadata_jobs::DELETE_SIMILARITY_DIRTY_SNAPSHOT_PAGE
+            queries::metadata_clean::DELETE_SIMILARITY_DIRTY_SNAPSHOT_PAGE
         }
-        "similarity_edges" => queries::metadata_jobs::DELETE_SIMILARITY_EDGES_PAGE,
-        "similarity_labels" => queries::metadata_jobs::DELETE_SIMILARITY_LABELS_PAGE,
-        "similarity_finalizations" => queries::metadata_jobs::DELETE_SIMILARITY_FINALIZATIONS_PAGE,
+        "similarity_edges" => queries::metadata_clean::DELETE_SIMILARITY_EDGES_PAGE,
+        "similarity_labels" => queries::metadata_clean::DELETE_SIMILARITY_LABELS_PAGE,
+        "similarity_finalizations" => queries::metadata_clean::DELETE_SIMILARITY_FINALIZATIONS_PAGE,
         "similarity_generation_state" => {
-            queries::metadata_jobs::DELETE_SIMILARITY_GENERATION_STATE_PAGE
+            queries::metadata_clean::DELETE_SIMILARITY_GENERATION_STATE_PAGE
         }
-        "similarity_generations" => queries::metadata_jobs::DELETE_SIMILARITY_GENERATIONS_PAGE,
-        "similarity_bands" => queries::metadata_jobs::DELETE_SIMILARITY_BANDS_PAGE,
-        "similarity_index" => queries::metadata_jobs::DELETE_SIMILARITY_INDEX_PAGE,
-        "similarity_dirty" => queries::metadata_jobs::DELETE_SIMILARITY_DIRTY_PAGE,
-        "similarity_runs" => queries::metadata_jobs::DELETE_SIMILARITY_RUNS_PAGE,
-        "ai_inputs" => queries::metadata_jobs::DELETE_AI_INPUTS_PAGE,
-        "rtree" => queries::metadata_jobs::DELETE_RTREE_PAGE,
-        "metadata_sources" => queries::metadata_jobs::DELETE_METADATA_SOURCES_PAGE,
-        "metadata" => queries::metadata_jobs::DELETE_METADATA_PAGE,
+        "similarity_generations" => queries::metadata_clean::DELETE_SIMILARITY_GENERATIONS_PAGE,
+        "similarity_bands" => queries::metadata_clean::DELETE_SIMILARITY_BANDS_PAGE,
+        "similarity_index" => queries::metadata_clean::DELETE_SIMILARITY_INDEX_PAGE,
+        "similarity_dirty" => queries::metadata_clean::DELETE_SIMILARITY_DIRTY_PAGE,
+        "similarity_runs" => queries::metadata_clean::DELETE_SIMILARITY_RUNS_PAGE,
+        "ai_inputs" => queries::metadata_clean::DELETE_AI_INPUTS_PAGE,
+        "rtree" => queries::metadata_clean::DELETE_RTREE_PAGE,
+        "metadata_sources" => queries::metadata_clean::DELETE_METADATA_SOURCES_PAGE,
+        "metadata" => queries::metadata_clean::DELETE_METADATA_PAGE,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
     Ok(query)

@@ -125,7 +125,7 @@ pub(crate) fn start_feature_on_connection(
     scheduled_for: Option<&str>,
 ) -> rusqlite::Result<usize> {
     let transaction = connection.unchecked_transaction()?;
-    if transaction.query_row(queries::metadata_jobs::IS_CLEAN_ACTIVE, [], |row| {
+    if transaction.query_row(queries::metadata_clean::IS_CLEAN_ACTIVE, [], |row| {
         row.get::<_, bool>(0)
     })? {
         transaction.rollback()?;

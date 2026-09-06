@@ -343,7 +343,7 @@ CREATE TABLE IF NOT EXISTS media_metadata_jobs (
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS metadata_reset_operations (
+CREATE TABLE IF NOT EXISTS metadata_clean_operations (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     cleanup_group_id TEXT NOT NULL UNIQUE,
     phase TEXT NOT NULL CHECK(phase IN (

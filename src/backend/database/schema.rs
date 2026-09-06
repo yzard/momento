@@ -3,7 +3,7 @@ use rusqlite::Connection;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const MOMENTO_APPLICATION_ID: i64 = 0x4d4f_4d4f;
-const MOMENTO_SCHEMA_VERSION: i64 = 1;
+const MOMENTO_SCHEMA_VERSION: i64 = 2;
 
 pub mod sql {
     pub const PRAGMA_FOREIGN_KEYS_ON: &str = "PRAGMA foreign_keys = ON";
