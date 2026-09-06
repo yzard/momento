@@ -1,6 +1,10 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+pub(crate) const THUMBNAILS_MAX_SIZE: u32 = 400;
+pub(crate) const THUMBNAILS_TINY_SIZE: u32 = 48;
+pub(crate) const THUMBNAILS_QUALITY: u8 = 85;
+
 pub(crate) const SERVER_HOST: &str = "0.0.0.0";
 pub(crate) const SERVER_PORT: u16 = 8000;
 pub(crate) const SERVER_DEBUG: bool = false;
@@ -46,28 +50,12 @@ pub(crate) const IMAGE_AESTHETICS_CRON: &str = "0 5 * * *";
 pub(crate) const SCREENSHOT_DETECTION_CRON: &str = "0 6 * * *";
 pub(crate) const DOCUMENT_DETECTION_CRON: &str = "0 7 * * *";
 
-pub(crate) mod fallback {
-    pub(crate) const SECURITY_SECRET_KEY: &str = "change-me-in-production-use-openssl-rand-hex-32";
-    pub(crate) const THUMBNAILS_MAX_SIZE: u32 = 400;
-    pub(crate) const THUMBNAILS_TINY_SIZE: u32 = 48;
-    pub(crate) const THUMBNAILS_QUALITY: u8 = 85;
-    pub(crate) const LLM_ENABLED: bool = false;
-    pub(crate) const LLM_SERVER_ADDRESS: &str = "127.0.0.1:8100";
-    pub(crate) const LLM_CLIENT_ID: &str = "";
-    pub(crate) const LLM_API_KEY: &str = "";
-}
-
-mod template {
-    pub(super) const SECURITY_SECRET_KEY: &str =
-        "playground-only-change-this-secret-before-exposing-the-server";
-    pub(super) const THUMBNAILS_MAX_SIZE: u32 = 1200;
-    pub(super) const THUMBNAILS_TINY_SIZE: u32 = 300;
-    pub(super) const THUMBNAILS_QUALITY: u8 = 85;
-    pub(super) const LLM_ENABLED: bool = true;
-    pub(super) const LLM_SERVER_ADDRESS: &str = "${LLM_SERVICE_ADDRESS}";
-    pub(super) const LLM_CLIENT_ID: &str = "playground";
-    pub(super) const LLM_API_KEY: &str = "change-me-llm-service-key";
-}
+pub(crate) const SECURITY_SECRET_KEY: &str = "change-me-in-production-use-openssl-rand-hex-32";
+pub(crate) const LLM_ENABLED: bool = false;
+pub(crate) const LLM_SERVER_ADDRESS: &str = "127.0.0.1:8100";
+pub(crate) const LLM_CLIENT_ID: &str = "";
+pub(crate) const LLM_API_KEY: &str = "";
+pub(crate) const TRUSTED_PROXY_IP_ADDRESSES: &[IpAddr] = &[];
 
 pub(crate) fn server_host() -> String {
     SERVER_HOST.to_string()
@@ -98,7 +86,7 @@ pub(crate) fn server_api_request_body_max_bytes() -> usize {
 }
 
 pub(crate) fn security_secret_key() -> String {
-    fallback::SECURITY_SECRET_KEY.to_string()
+    SECURITY_SECRET_KEY.to_string()
 }
 
 pub(crate) fn access_token_expire_minutes() -> i64 {
@@ -134,7 +122,7 @@ pub(crate) fn password_lockout_seconds() -> u64 {
 }
 
 pub(crate) fn trusted_proxy_ip_addresses() -> Vec<IpAddr> {
-    Vec::new()
+    TRUSTED_PROXY_IP_ADDRESSES.to_vec()
 }
 
 pub(crate) fn refresh_token_cleanup_interval_seconds() -> u64 {
@@ -186,15 +174,15 @@ pub(crate) fn backup_session_expiry_hours() -> u64 {
 }
 
 pub(crate) fn thumbnails_max_size() -> u32 {
-    fallback::THUMBNAILS_MAX_SIZE
+    THUMBNAILS_MAX_SIZE
 }
 
 pub(crate) fn thumbnails_tiny_size() -> u32 {
-    fallback::THUMBNAILS_TINY_SIZE
+    THUMBNAILS_TINY_SIZE
 }
 
 pub(crate) fn thumbnails_quality() -> u8 {
-    fallback::THUMBNAILS_QUALITY
+    THUMBNAILS_QUALITY
 }
 
 pub(crate) fn ocr_cron() -> String {
@@ -226,19 +214,19 @@ pub(crate) fn document_detection_cron() -> String {
 }
 
 pub(crate) fn llm_server_address() -> String {
-    fallback::LLM_SERVER_ADDRESS.to_string()
+    LLM_SERVER_ADDRESS.to_string()
 }
 
 pub(crate) fn llm_enabled() -> bool {
-    fallback::LLM_ENABLED
+    LLM_ENABLED
 }
 
 pub(crate) fn llm_client_id() -> String {
-    fallback::LLM_CLIENT_ID.to_string()
+    LLM_CLIENT_ID.to_string()
 }
 
 pub(crate) fn llm_api_key() -> String {
-    fallback::LLM_API_KEY.to_string()
+    LLM_API_KEY.to_string()
 }
 
 pub(crate) fn face_group_similarity_threshold() -> f32 {
@@ -274,10 +262,6 @@ pub(crate) fn render_template(source: &str) -> String {
         ("{{SERVER_HOST}}", SERVER_HOST.to_string()),
         ("{{SERVER_PORT}}", SERVER_PORT.to_string()),
         ("{{SERVER_DEBUG}}", SERVER_DEBUG.to_string()),
-        (
-            "{{SERVER_RESET_ADMIN_PASSWORD}}",
-            SERVER_RESET_ADMIN_PASSWORD.to_string(),
-        ),
         ("{{SERVER_DATA_DIR}}", SERVER_DATA_DIR.to_string()),
         ("{{SERVER_STATIC_DIR}}", SERVER_STATIC_DIR.to_string()),
         (
@@ -295,10 +279,6 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{THREAD_POOL_SQLITE_WORKERS}}",
             THREAD_POOL_SQLITE_WORKERS.to_string(),
-        ),
-        (
-            "{{SECURITY_SECRET_KEY}}",
-            template::SECURITY_SECRET_KEY.to_string(),
         ),
         (
             "{{ACCESS_TOKEN_EXPIRE_MINUTES}}",
@@ -374,25 +354,21 @@ pub(crate) fn render_template(source: &str) -> String {
             "{{BACKUP_SESSION_EXPIRY_HOURS}}",
             BACKUP_SESSION_EXPIRY_HOURS.to_string(),
         ),
+        ("{{THUMBNAILS_MAX_SIZE}}", THUMBNAILS_MAX_SIZE.to_string()),
+        ("{{THUMBNAILS_TINY_SIZE}}", THUMBNAILS_TINY_SIZE.to_string()),
+        ("{{THUMBNAILS_QUALITY}}", THUMBNAILS_QUALITY.to_string()),
         (
-            "{{THUMBNAILS_MAX_SIZE}}",
-            template::THUMBNAILS_MAX_SIZE.to_string(),
+            "{{TRUSTED_PROXY_IP_ADDRESSES}}",
+            toml::Value::Array(
+                TRUSTED_PROXY_IP_ADDRESSES
+                    .iter()
+                    .map(|address| toml::Value::String(address.to_string()))
+                    .collect(),
+            )
+            .to_string(),
         ),
-        (
-            "{{THUMBNAILS_TINY_SIZE}}",
-            template::THUMBNAILS_TINY_SIZE.to_string(),
-        ),
-        (
-            "{{THUMBNAILS_QUALITY}}",
-            template::THUMBNAILS_QUALITY.to_string(),
-        ),
-        ("{{LLM_ENABLED}}", template::LLM_ENABLED.to_string()),
-        (
-            "{{LLM_SERVER_ADDRESS}}",
-            template::LLM_SERVER_ADDRESS.to_string(),
-        ),
-        ("{{LLM_CLIENT_ID}}", template::LLM_CLIENT_ID.to_string()),
-        ("{{LLM_API_KEY}}", template::LLM_API_KEY.to_string()),
+        ("{{LLM_ENABLED}}", LLM_ENABLED.to_string()),
+        ("{{LLM_CLIENT_ID}}", LLM_CLIENT_ID.to_string()),
         (
             "{{FACE_GROUP_SIMILARITY_THRESHOLD}}",
             format!("{FACE_GROUP_SIMILARITY_THRESHOLD:.2}"),

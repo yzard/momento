@@ -35,7 +35,7 @@ password_attempts_per_identity = {{PASSWORD_ATTEMPTS_PER_IDENTITY}}
 password_attempts_per_source = {{PASSWORD_ATTEMPTS_PER_SOURCE}}
 password_lockout_seconds = {{PASSWORD_LOCKOUT_SECONDS}}
 # Forwarded client addresses are used only when the direct peer is in this explicit list.
-trusted_proxy_ip_addresses = []
+trusted_proxy_ip_addresses = {{TRUSTED_PROXY_IP_ADDRESSES}}
 refresh_token_cleanup_interval_seconds = {{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}
 
 [media_process]
@@ -69,7 +69,7 @@ thumbnails_quality = {{THUMBNAILS_QUALITY}}
 # The API initiates one authenticated WebSocket to llm-service.
 enabled = {{LLM_ENABLED}}
 # Docker Compose supplies this private service address.
-server_address = "{{LLM_SERVER_ADDRESS}}"
+server_address = "${LLM_SERVICE_ADDRESS}"
 client_id = "{{LLM_CLIENT_ID}}"
 # This must exactly match server.api_key in config_llm.toml.
 api_key = "${LLM_SERVICE_API_KEY}"

@@ -770,8 +770,9 @@ fn test_save_default_config_round_trips() {
     assert_eq!(config.server.port, 8000);
     assert_eq!(config.server.api_request_body_max_bytes, 8_388_608);
     assert!(!config.server.reset_admin_password);
-    assert!(config.llm.enabled);
-    assert_eq!(config.metadata.thumbnails_max_size, 1200);
+    assert!(!config.llm.enabled);
+    assert_eq!(config.metadata.thumbnails_max_size, 400);
+    assert_eq!(config.metadata.thumbnails_tiny_size, 48);
 
     assert_eq!(generated, default_config_template());
     assert!(generated.contains("Five-field cron expressions"));
@@ -790,7 +791,7 @@ fn test_save_default_config_round_trips() {
     assert!(generated["webdav"].get("processing").is_none());
     assert_eq!(
         generated["metadata"]["thumbnails_max_size"].as_integer(),
-        Some(1200)
+        Some(400)
     );
     assert!(generated.get("thumbnails").is_none());
     assert!(generated.get("reverse_geocoding").is_none());

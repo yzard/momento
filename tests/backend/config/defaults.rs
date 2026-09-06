@@ -53,7 +53,10 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         (template_threshold - f64::from(runtime_defaults.face_group.similarity_threshold)).abs()
             < f64::from(f32::EPSILON)
     );
-    assert_eq!(template["llm"]["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        template["llm"]["enabled"].as_bool(),
+        Some(runtime_defaults.llm.enabled)
+    );
     assert!(!runtime_defaults.llm.enabled);
     for removed_field in [
         "ocr_enabled",
@@ -121,4 +124,77 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
         Some("0 7 * * *")
     );
     assert!(!default_config_template().contains("{{"));
+}
+
+#[test]
+fn thumbnail_defaults_match_for_template_runtime_and_omitted_fields() {
+    let template: toml::Value = toml::from_str(default_config_template()).expect("valid template");
+    let runtime = Config::default();
+    for (field, value, expected) in [
+        (
+            "thumbnails_max_size",
+            i64::from(runtime.metadata.thumbnails_max_size),
+            400,
+        ),
+        (
+            "thumbnails_tiny_size",
+            i64::from(runtime.metadata.thumbnails_tiny_size),
+            48,
+        ),
+        (
+            "thumbnails_quality",
+            i64::from(runtime.metadata.thumbnails_quality),
+            85,
+        ),
+    ] {
+        assert_eq!(value, expected, "runtime default for {field}");
+        assert_eq!(template["metadata"][field].as_integer(), Some(expected));
+    }
+    for (contents, quality) in [
+        ("", 85),
+        ("[metadata]\n", 85),
+        ("[metadata]\nthumbnails_quality = 90\n", 90),
+    ] {
+        let config: Config = toml::from_str(contents).expect("omitted fields have defaults");
+        assert_eq!(config.metadata.thumbnails_max_size, 400);
+        assert_eq!(config.metadata.thumbnails_tiny_size, 48);
+        assert_eq!(config.metadata.thumbnails_quality, quality);
+    }
+}
+
+#[test]
+fn all_generated_defaults_match_runtime_and_omitted_sections() {
+    let mut expected = Config::default();
+    // These four fields are explicit container environment bindings, not alternate defaults.
+    expected.security.secret_key = "test-secret".to_string();
+    expected.llm.api_key = "test-api-key".to_string();
+    let resolved = momento_api::config::resolve_config_environment(
+        default_config_template(),
+        Some(&expected.llm.server_address),
+        None,
+        Some(&expected.security.secret_key),
+        Some(&expected.llm.api_key),
+    )
+    .expect("resolve explicit deployment bindings");
+    let generated: Config = toml::from_str(&resolved).expect("deserialize generated defaults");
+    assert_eq!(
+        toml::Value::try_from(generated).unwrap(),
+        toml::Value::try_from(expected).unwrap()
+    );
+    let runtime = toml::Value::try_from(Config::default()).unwrap();
+    let omitted: Config = toml::from_str("").unwrap();
+    assert_eq!(toml::Value::try_from(omitted).unwrap(), runtime);
+    for section in runtime
+        .as_table()
+        .unwrap()
+        .keys()
+        .filter(|section| section.as_str() != "thread_pool")
+    {
+        let config: Config = toml::from_str(&format!("[{section}]\n")).unwrap();
+        assert_eq!(
+            toml::Value::try_from(config).unwrap(),
+            runtime,
+            "empty {section}"
+        );
+    }
 }

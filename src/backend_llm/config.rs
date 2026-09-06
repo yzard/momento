@@ -84,7 +84,7 @@ impl Default for ServerConfig {
         Self {
             host: defaults::server_host(),
             port: defaults::SERVER_PORT,
-            api_key: defaults::fallback::SERVER_API_KEY.to_string(),
+            api_key: defaults::SERVER_API_KEY.to_string(),
             data_dir: defaults::server_data_dir(),
         }
     }
@@ -108,17 +108,13 @@ impl ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "ServiceConfigInput")]
 pub struct ServiceConfig {
-    #[serde(default = "defaults::service_enabled")]
     pub enabled: bool,
     pub model_type: String,
-    #[serde(default = "defaults::service_startup_timeout_seconds")]
     pub startup_timeout_seconds: u64,
-    #[serde(default = "defaults::service_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
-    #[serde(default = "defaults::service_max_tokens")]
     pub max_tokens: u32,
     pub minimum_face_likelihood: Option<f64>,
     pub minimum_face_resolution_pixels: Option<u32>,
@@ -129,6 +125,49 @@ pub struct ServiceConfig {
     pub max_concurrent_jobs: Option<usize>,
     pub processing_concurrency: Option<usize>,
     pub model_concurrency: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceConfigInput {
+    #[serde(default = "defaults::service_enabled")]
+    enabled: bool,
+    model_type: String,
+    startup_timeout_seconds: Option<u64>,
+    request_timeout_seconds: Option<u64>,
+    #[serde(default = "defaults::service_max_tokens")]
+    max_tokens: u32,
+    minimum_face_likelihood: Option<f64>,
+    minimum_face_resolution_pixels: Option<u32>,
+    face_detection_size: Option<u32>,
+    recognition_batch_size: Option<usize>,
+    recognition_batch_wait_milliseconds: Option<u64>,
+    model_batch_wait_milliseconds: Option<u64>,
+    max_concurrent_jobs: Option<usize>,
+    processing_concurrency: Option<usize>,
+    model_concurrency: Option<usize>,
+}
+
+impl From<ServiceConfigInput> for ServiceConfig {
+    fn from(input: ServiceConfigInput) -> Self {
+        let (startup_timeout, request_timeout) = defaults::service_timeouts(&input.model_type);
+        Self {
+            enabled: input.enabled,
+            model_type: input.model_type,
+            startup_timeout_seconds: input.startup_timeout_seconds.unwrap_or(startup_timeout),
+            request_timeout_seconds: input.request_timeout_seconds.unwrap_or(request_timeout),
+            max_tokens: input.max_tokens,
+            minimum_face_likelihood: input.minimum_face_likelihood,
+            minimum_face_resolution_pixels: input.minimum_face_resolution_pixels,
+            face_detection_size: input.face_detection_size,
+            recognition_batch_size: input.recognition_batch_size,
+            recognition_batch_wait_milliseconds: input.recognition_batch_wait_milliseconds,
+            model_batch_wait_milliseconds: input.model_batch_wait_milliseconds,
+            max_concurrent_jobs: input.max_concurrent_jobs,
+            processing_concurrency: input.processing_concurrency,
+            model_concurrency: input.model_concurrency,
+        }
+    }
 }
 
 impl ServiceConfig {

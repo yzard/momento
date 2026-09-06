@@ -251,9 +251,9 @@ pub struct MetadataConfig {
 impl Default for MetadataConfig {
     fn default() -> Self {
         Self {
-            thumbnails_max_size: defaults::fallback::THUMBNAILS_MAX_SIZE,
-            thumbnails_tiny_size: defaults::fallback::THUMBNAILS_TINY_SIZE,
-            thumbnails_quality: defaults::fallback::THUMBNAILS_QUALITY,
+            thumbnails_max_size: defaults::THUMBNAILS_MAX_SIZE,
+            thumbnails_tiny_size: defaults::THUMBNAILS_TINY_SIZE,
+            thumbnails_quality: defaults::THUMBNAILS_QUALITY,
         }
     }
 }
@@ -333,10 +333,10 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            enabled: defaults::fallback::LLM_ENABLED,
+            enabled: defaults::LLM_ENABLED,
             server_address: defaults::llm_server_address(),
-            client_id: defaults::fallback::LLM_CLIENT_ID.to_string(),
-            api_key: defaults::fallback::LLM_API_KEY.to_string(),
+            client_id: defaults::LLM_CLIENT_ID.to_string(),
+            api_key: defaults::LLM_API_KEY.to_string(),
             ocr_cron: defaults::ocr_cron(),
             image_tagging_cron: defaults::image_tagging_cron(),
             deduplicate_cron: defaults::deduplicate_cron(),

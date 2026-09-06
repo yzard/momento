@@ -12,53 +12,45 @@ pub(crate) const RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const RESULT_DELIVERY_RETRY_DELAY_SECONDS: u64 = 30;
 pub(crate) const RESULT_DELIVERY_MAX_ATTEMPTS: usize = 10;
 pub(crate) const RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES: usize = 16;
-pub(crate) const SERVICE_ENABLED: bool = false;
+pub(crate) const SERVICE_ENABLED: bool = true;
 pub(crate) const SERVICE_STARTUP_TIMEOUT_SECONDS: u64 = 300;
 pub(crate) const SERVICE_REQUEST_TIMEOUT_SECONDS: u64 = 180;
 pub(crate) const SERVICE_MAX_TOKENS: u32 = 8192;
 
-pub(crate) mod fallback {
-    pub(crate) const SERVER_API_KEY: &str = "";
-}
-
-mod template {
-    pub(super) const SERVER_API_KEY: &str = "change-me-llm-service-key";
-    pub(super) const SERVICE_ENABLED: bool = true;
-    pub(super) const OCR_STARTUP_TIMEOUT_SECONDS: u64 = 1800;
-    pub(super) const OCR_REQUEST_TIMEOUT_SECONDS: u64 = 1800;
-    pub(super) const OCR_MAX_TOKENS: u32 = 8192;
-    pub(super) const OCR_MAX_CONCURRENT_JOBS: usize = 100;
-    pub(super) const IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
-    pub(super) const IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const IMAGE_TAGGING_MAX_CONCURRENT_JOBS: usize = 16;
-    pub(super) const IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
-    pub(super) const IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const IMAGE_CLUSTERING_PROCESSING_CONCURRENCY: usize = 16;
-    pub(super) const IMAGE_CLUSTERING_MODEL_CONCURRENCY: usize = 16;
-    pub(super) const IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS: u64 = 5;
-    pub(super) const IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS: u64 = 900;
-    pub(super) const IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const IMAGE_AESTHETICS_PROCESSING_CONCURRENCY: usize = 16;
-    pub(super) const IMAGE_AESTHETICS_MODEL_CONCURRENCY: usize = 64;
-    pub(super) const IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS: u64 = 5;
-    pub(super) const FACE_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 900;
-    pub(super) const FACE_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const FACE_DETECTION_PROCESSING_CONCURRENCY: usize = 8;
-    pub(super) const FACE_DETECTION_MODEL_CONCURRENCY: usize = 8;
-    pub(super) const FACE_DETECTION_SIZE: u32 = 960;
-    pub(super) const FACE_RECOGNITION_BATCH_SIZE: usize = 64;
-    pub(super) const FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS: u64 = 5;
-    pub(super) const MINIMUM_FACE_LIKELIHOOD: f64 = 0.6;
-    pub(super) const MINIMUM_FACE_RESOLUTION_PIXELS: u32 = 100;
-    pub(super) const SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
-    pub(super) const SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const SCREENSHOT_DETECTION_PROCESSING_CONCURRENCY: usize = 8;
-    pub(super) const SCREENSHOT_DETECTION_MODEL_CONCURRENCY: usize = 8;
-    pub(super) const DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
-    pub(super) const DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-    pub(super) const DOCUMENT_DETECTION_PROCESSING_CONCURRENCY: usize = 8;
-    pub(super) const DOCUMENT_DETECTION_MODEL_CONCURRENCY: usize = 8;
-}
+pub(crate) const SERVER_API_KEY: &str = "";
+pub(crate) const OCR_STARTUP_TIMEOUT_SECONDS: u64 = 1800;
+pub(crate) const OCR_REQUEST_TIMEOUT_SECONDS: u64 = 1800;
+pub(crate) const OCR_MAX_CONCURRENT_JOBS: usize = 100;
+pub(crate) const IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
+pub(crate) const IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+pub(crate) const IMAGE_TAGGING_MAX_CONCURRENT_JOBS: usize = 16;
+pub(crate) const IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
+pub(crate) const IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+pub(crate) const IMAGE_CLUSTERING_PROCESSING_CONCURRENCY: usize = 16;
+pub(crate) const IMAGE_CLUSTERING_MODEL_CONCURRENCY: usize = 16;
+pub(crate) const IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS: u64 = 5;
+pub(crate) const IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS: u64 = 900;
+pub(crate) const IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+pub(crate) const IMAGE_AESTHETICS_PROCESSING_CONCURRENCY: usize = 16;
+pub(crate) const IMAGE_AESTHETICS_MODEL_CONCURRENCY: usize = 64;
+pub(crate) const IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS: u64 = 5;
+pub(crate) const FACE_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 900;
+pub(crate) const FACE_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+pub(crate) const FACE_DETECTION_PROCESSING_CONCURRENCY: usize = 8;
+pub(crate) const FACE_DETECTION_MODEL_CONCURRENCY: usize = 8;
+pub(crate) const FACE_DETECTION_SIZE: u32 = 960;
+pub(crate) const FACE_RECOGNITION_BATCH_SIZE: usize = 64;
+pub(crate) const FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS: u64 = 5;
+pub(crate) const MINIMUM_FACE_LIKELIHOOD: f64 = 0.6;
+pub(crate) const MINIMUM_FACE_RESOLUTION_PIXELS: u32 = 100;
+pub(crate) const SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
+pub(crate) const SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+pub(crate) const SCREENSHOT_DETECTION_PROCESSING_CONCURRENCY: usize = 8;
+pub(crate) const SCREENSHOT_DETECTION_MODEL_CONCURRENCY: usize = 8;
+pub(crate) const DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS: u64 = 60;
+pub(crate) const DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS: u64 = 180;
+pub(crate) const DOCUMENT_DETECTION_PROCESSING_CONCURRENCY: usize = 8;
+pub(crate) const DOCUMENT_DETECTION_MODEL_CONCURRENCY: usize = 8;
 
 pub(crate) fn server_host() -> String {
     SERVER_HOST.to_string()
@@ -73,7 +65,7 @@ pub(crate) fn server_data_dir() -> PathBuf {
 }
 
 pub(crate) fn server_api_key() -> String {
-    fallback::SERVER_API_KEY.to_string()
+    SERVER_API_KEY.to_string()
 }
 
 pub(crate) fn scheduler_idle_shutdown_seconds() -> u64 {
@@ -108,12 +100,38 @@ pub(crate) fn service_enabled() -> bool {
     SERVICE_ENABLED
 }
 
-pub(crate) fn service_startup_timeout_seconds() -> u64 {
-    SERVICE_STARTUP_TIMEOUT_SECONDS
-}
-
-pub(crate) fn service_request_timeout_seconds() -> u64 {
-    SERVICE_REQUEST_TIMEOUT_SECONDS
+pub(crate) fn service_timeouts(model_type: &str) -> (u64, u64) {
+    match model_type {
+        "ocr" => (OCR_STARTUP_TIMEOUT_SECONDS, OCR_REQUEST_TIMEOUT_SECONDS),
+        "image_tagging" => (
+            IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS,
+            IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS,
+        ),
+        "image_clustering" => (
+            IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS,
+            IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS,
+        ),
+        "image_aesthetics" => (
+            IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS,
+            IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS,
+        ),
+        "face_detection" => (
+            FACE_DETECTION_STARTUP_TIMEOUT_SECONDS,
+            FACE_DETECTION_REQUEST_TIMEOUT_SECONDS,
+        ),
+        "screenshot_detection" => (
+            SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS,
+            SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS,
+        ),
+        "document_detection" => (
+            DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS,
+            DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS,
+        ),
+        _ => (
+            SERVICE_STARTUP_TIMEOUT_SECONDS,
+            SERVICE_REQUEST_TIMEOUT_SECONDS,
+        ),
+    }
 }
 
 pub(crate) fn service_max_tokens() -> u32 {
@@ -124,7 +142,6 @@ pub(crate) fn render_template(source: &str) -> String {
     let replacements = [
         ("{{SERVER_HOST}}", SERVER_HOST.to_string()),
         ("{{SERVER_PORT}}", SERVER_PORT.to_string()),
-        ("{{SERVER_API_KEY}}", template::SERVER_API_KEY.to_string()),
         ("{{SERVER_DATA_DIR}}", SERVER_DATA_DIR.to_string()),
         (
             "{{SCHEDULER_IDLE_SHUTDOWN_SECONDS}}",
@@ -162,139 +179,136 @@ pub(crate) fn render_template(source: &str) -> String {
             "{{RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES}}",
             RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES.to_string(),
         ),
-        ("{{SERVICE_ENABLED}}", template::SERVICE_ENABLED.to_string()),
+        ("{{SERVICE_ENABLED}}", SERVICE_ENABLED.to_string()),
         (
             "{{OCR_STARTUP_TIMEOUT_SECONDS}}",
-            template::OCR_STARTUP_TIMEOUT_SECONDS.to_string(),
+            OCR_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{OCR_REQUEST_TIMEOUT_SECONDS}}",
-            template::OCR_REQUEST_TIMEOUT_SECONDS.to_string(),
+            OCR_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
-        ("{{OCR_MAX_TOKENS}}", template::OCR_MAX_TOKENS.to_string()),
+        ("{{OCR_MAX_TOKENS}}", SERVICE_MAX_TOKENS.to_string()),
         (
             "{{OCR_MAX_CONCURRENT_JOBS}}",
-            template::OCR_MAX_CONCURRENT_JOBS.to_string(),
+            OCR_MAX_CONCURRENT_JOBS.to_string(),
         ),
         (
             "{{IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS}}",
-            template::IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS.to_string(),
+            IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS}}",
-            template::IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS.to_string(),
+            IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{IMAGE_TAGGING_MAX_CONCURRENT_JOBS}}",
-            template::IMAGE_TAGGING_MAX_CONCURRENT_JOBS.to_string(),
+            IMAGE_TAGGING_MAX_CONCURRENT_JOBS.to_string(),
         ),
         (
             "{{IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS}}",
-            template::IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS.to_string(),
+            IMAGE_CLUSTERING_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS}}",
-            template::IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS.to_string(),
+            IMAGE_CLUSTERING_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{IMAGE_CLUSTERING_PROCESSING_CONCURRENCY}}",
-            template::IMAGE_CLUSTERING_PROCESSING_CONCURRENCY.to_string(),
+            IMAGE_CLUSTERING_PROCESSING_CONCURRENCY.to_string(),
         ),
         (
             "{{IMAGE_CLUSTERING_MODEL_CONCURRENCY}}",
-            template::IMAGE_CLUSTERING_MODEL_CONCURRENCY.to_string(),
+            IMAGE_CLUSTERING_MODEL_CONCURRENCY.to_string(),
         ),
         (
             "{{IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS}}",
-            template::IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS.to_string(),
+            IMAGE_CLUSTERING_MODEL_BATCH_WAIT_MILLISECONDS.to_string(),
         ),
         (
             "{{IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS}}",
-            template::IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS.to_string(),
+            IMAGE_AESTHETICS_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS}}",
-            template::IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS.to_string(),
+            IMAGE_AESTHETICS_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{IMAGE_AESTHETICS_PROCESSING_CONCURRENCY}}",
-            template::IMAGE_AESTHETICS_PROCESSING_CONCURRENCY.to_string(),
+            IMAGE_AESTHETICS_PROCESSING_CONCURRENCY.to_string(),
         ),
         (
             "{{IMAGE_AESTHETICS_MODEL_CONCURRENCY}}",
-            template::IMAGE_AESTHETICS_MODEL_CONCURRENCY.to_string(),
+            IMAGE_AESTHETICS_MODEL_CONCURRENCY.to_string(),
         ),
         (
             "{{IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS}}",
-            template::IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS.to_string(),
+            IMAGE_AESTHETICS_MODEL_BATCH_WAIT_MILLISECONDS.to_string(),
         ),
         (
             "{{FACE_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
-            template::FACE_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
+            FACE_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{FACE_DETECTION_REQUEST_TIMEOUT_SECONDS}}",
-            template::FACE_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
+            FACE_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{FACE_DETECTION_PROCESSING_CONCURRENCY}}",
-            template::FACE_DETECTION_PROCESSING_CONCURRENCY.to_string(),
+            FACE_DETECTION_PROCESSING_CONCURRENCY.to_string(),
         ),
         (
             "{{FACE_DETECTION_MODEL_CONCURRENCY}}",
-            template::FACE_DETECTION_MODEL_CONCURRENCY.to_string(),
+            FACE_DETECTION_MODEL_CONCURRENCY.to_string(),
         ),
-        (
-            "{{FACE_DETECTION_SIZE}}",
-            template::FACE_DETECTION_SIZE.to_string(),
-        ),
+        ("{{FACE_DETECTION_SIZE}}", FACE_DETECTION_SIZE.to_string()),
         (
             "{{FACE_RECOGNITION_BATCH_SIZE}}",
-            template::FACE_RECOGNITION_BATCH_SIZE.to_string(),
+            FACE_RECOGNITION_BATCH_SIZE.to_string(),
         ),
         (
             "{{FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS}}",
-            template::FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS.to_string(),
+            FACE_RECOGNITION_BATCH_WAIT_MILLISECONDS.to_string(),
         ),
         (
             "{{MINIMUM_FACE_LIKELIHOOD}}",
-            format!("{:.2}", template::MINIMUM_FACE_LIKELIHOOD),
+            format!("{:.2}", MINIMUM_FACE_LIKELIHOOD),
         ),
         (
             "{{MINIMUM_FACE_RESOLUTION_PIXELS}}",
-            template::MINIMUM_FACE_RESOLUTION_PIXELS.to_string(),
+            MINIMUM_FACE_RESOLUTION_PIXELS.to_string(),
         ),
         (
             "{{SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
-            template::SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
+            SCREENSHOT_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS}}",
-            template::SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
+            SCREENSHOT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{SCREENSHOT_DETECTION_PROCESSING_CONCURRENCY}}",
-            template::SCREENSHOT_DETECTION_PROCESSING_CONCURRENCY.to_string(),
+            SCREENSHOT_DETECTION_PROCESSING_CONCURRENCY.to_string(),
         ),
         (
             "{{SCREENSHOT_DETECTION_MODEL_CONCURRENCY}}",
-            template::SCREENSHOT_DETECTION_MODEL_CONCURRENCY.to_string(),
+            SCREENSHOT_DETECTION_MODEL_CONCURRENCY.to_string(),
         ),
         (
             "{{DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS}}",
-            template::DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
+            DOCUMENT_DETECTION_STARTUP_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS}}",
-            template::DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
+            DOCUMENT_DETECTION_REQUEST_TIMEOUT_SECONDS.to_string(),
         ),
         (
             "{{DOCUMENT_DETECTION_PROCESSING_CONCURRENCY}}",
-            template::DOCUMENT_DETECTION_PROCESSING_CONCURRENCY.to_string(),
+            DOCUMENT_DETECTION_PROCESSING_CONCURRENCY.to_string(),
         ),
         (
             "{{DOCUMENT_DETECTION_MODEL_CONCURRENCY}}",
-            template::DOCUMENT_DETECTION_MODEL_CONCURRENCY.to_string(),
+            DOCUMENT_DETECTION_MODEL_CONCURRENCY.to_string(),
         ),
     ];
 
