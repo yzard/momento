@@ -436,16 +436,113 @@ async fn thumbnail_endpoints_require_a_persisted_thumbnail_reference() {
 
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {}", access_token(user_id));
-    server
-        .get(&format!("/api/v1/media/{media_id}/thumbnail"))
-        .add_header(AUTHORIZATION, authorization.clone())
-        .await
-        .assert_status_not_found();
+    for endpoint in ["thumbnail", "thumbnail/tiny"] {
+        let response = server
+            .get(&format!("/api/v1/media/{media_id}/{endpoint}"))
+            .add_header(AUTHORIZATION, authorization.clone())
+            .await;
+        response.assert_status(StatusCode::CONFLICT);
+        response.assert_header(CACHE_CONTROL, "no-store");
+        assert_eq!(response.json::<Value>()["code"], "thumbnail_not_ready");
+    }
 
     server
         .post("/api/v1/thumbnail/get")
         .add_header(AUTHORIZATION, authorization)
         .json(&json!({"mediaIds": [media_id]}))
+        .await
+        .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn thumbnail_readiness_preserves_access_checks_and_recovers_after_publication() {
+    let (app, pool) = create_test_app();
+    let owner_id = create_test_user(&pool, "thumbnail-owner", "thumbnail-owner@example.com");
+    let other_id = create_test_user(&pool, "thumbnail-other", "thumbnail-other@example.com");
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "pending.jpg",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, owner_id);
+    pool.get()
+        .unwrap()
+        .execute("DELETE FROM media_metadata WHERE media_id = ?", [media_id])
+        .unwrap();
+    let server = TestServer::new(app).expect("server");
+    let authorization = format!("Bearer {}", access_token(owner_id));
+    for endpoint in ["thumbnail", "thumbnail/tiny"] {
+        let url = format!("/api/v1/media/{media_id}/{endpoint}");
+        server.get(&url).await.assert_status_unauthorized();
+        server
+            .get(&url)
+            .add_header(AUTHORIZATION, format!("Bearer {}", access_token(other_id)))
+            .await
+            .assert_status_not_found();
+        let response = server
+            .get(&url)
+            .add_header(AUTHORIZATION, authorization.clone())
+            .await;
+        response.assert_status(StatusCode::CONFLICT);
+        assert_eq!(response.json::<Value>()["code"], "thumbnail_not_ready");
+    }
+
+    pool.get()
+        .unwrap()
+        .execute(
+            "INSERT INTO media_metadata (media_id, thumbnail_path) VALUES (?, 'published.jpg')",
+            [media_id],
+        )
+        .unwrap();
+    for (endpoint, root) in [
+        ("thumbnail", "thumbnails"),
+        ("thumbnail/tiny", "thumbnails_tiny"),
+    ] {
+        let url = format!("/api/v1/media/{media_id}/{endpoint}");
+        server
+            .get(&url)
+            .add_header(AUTHORIZATION, authorization.clone())
+            .await
+            .assert_status_not_found();
+        std::fs::write(
+            test_data_directory(&pool).join(root).join("published.jpg"),
+            b"thumbnail",
+        )
+        .unwrap();
+        let response = server
+            .get(&url)
+            .add_header(AUTHORIZATION, authorization.clone())
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.as_bytes().as_ref(), b"thumbnail");
+    }
+
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE media_metadata SET thumbnail_path = NULL WHERE media_id = ?",
+            [media_id],
+        )
+        .unwrap();
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE media_access SET deleted_at = datetime('now') WHERE media_id = ?",
+            [media_id],
+        )
+        .unwrap();
+    let trash_url = format!("/api/v1/trash/{media_id}/thumbnail/tiny");
+    let response = server
+        .get(&trash_url)
+        .add_header(AUTHORIZATION, authorization)
+        .await;
+    response.assert_status(StatusCode::CONFLICT);
+    assert_eq!(response.json::<Value>()["code"], "thumbnail_not_ready");
+    server
+        .get(&trash_url)
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(other_id)))
         .await
         .assert_status_not_found();
 }

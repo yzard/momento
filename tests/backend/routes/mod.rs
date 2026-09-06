@@ -12,6 +12,7 @@ mod map;
 mod media;
 mod metadata;
 mod places;
+mod public;
 mod share;
 mod trash;
 mod users;

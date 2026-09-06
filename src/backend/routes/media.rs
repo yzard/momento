@@ -515,8 +515,7 @@ async fn serve_thumbnail(
     deleted: bool,
 ) -> AppResult<Response> {
     let media = load_binary_media_info(state, user_id, media_id, deleted).await?;
-    let path = thumbnail_relative_path(media.thumbnail_path.as_deref())
-        .ok_or_else(|| AppError::NotFound("Thumbnail path is invalid".to_string()))?;
+    let path = thumbnail_relative_path(media.thumbnail_path.as_deref())?;
     serve_file(
         &state.executors.file_io,
         thumbnail_storage_root(size),
@@ -627,6 +626,8 @@ pub(super) fn unique_batch_ids(media_ids: Vec<i64>) -> AppResult<Vec<i64>> {
 
 pub(super) fn thumbnail_relative_path(
     thumbnail_path: Option<&str>,
-) -> Option<NormalizedStoragePath> {
-    thumbnail_path.and_then(|path| NormalizedStoragePath::parse(path).ok())
+) -> AppResult<NormalizedStoragePath> {
+    let path = thumbnail_path.ok_or(AppError::ThumbnailNotReady)?;
+    NormalizedStoragePath::parse(path)
+        .map_err(|_| AppError::NotFound("Thumbnail path is invalid".to_string()))
 }

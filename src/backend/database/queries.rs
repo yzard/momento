@@ -3116,9 +3116,10 @@ pub mod public {
     "#;
 
     pub const SELECT_MEDIA_THUMBNAIL: &str = r#"
-    SELECT thumbnail_path
-      FROM media_metadata
-     WHERE media_id = ?
+    SELECT mm.thumbnail_path
+      FROM media AS m
+      LEFT JOIN media_metadata AS mm ON mm.media_id = m.id
+     WHERE m.id = ?
     "#;
 }
 

@@ -243,13 +243,12 @@ async fn get_shared_thumbnail(
             return Err(AppError::NotFound("Media not found".to_string()));
         }
         PublicThumbnailAccessOutcome::Unavailable => {
-            return Err(AppError::NotFound("Thumbnail not available".to_string()));
+            return Err(AppError::ThumbnailNotReady);
         }
         PublicThumbnailAccessOutcome::Found(path) => path,
     };
 
-    let relative_path = NormalizedStoragePath::parse(&thumbnail_path)
-        .map_err(|_| AppError::NotFound("Thumbnail path is invalid".to_string()))?;
+    let relative_path = super::media::thumbnail_relative_path(Some(&thumbnail_path))?;
 
     serve_file(
         &state.executors.file_io,

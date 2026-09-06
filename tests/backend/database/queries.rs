@@ -3,6 +3,39 @@ use momento_api::database::queries;
 use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
 
 #[test]
+fn thumbnail_query_distinguishes_missing_media_from_missing_metadata() {
+    use rusqlite::OptionalExtension;
+
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "thumbnail-query.jpg");
+    let connection = pool.get().expect("connection");
+    let read_thumbnail = |id| {
+        connection
+            .query_row(queries::public::SELECT_MEDIA_THUMBNAIL, [id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .expect("thumbnail query")
+    };
+    assert_eq!(read_thumbnail(-1), None);
+    assert_eq!(read_thumbnail(media_id), Some(None));
+    connection
+        .execute("DELETE FROM media_metadata WHERE media_id = ?", [media_id])
+        .expect("remove metadata");
+    assert_eq!(read_thumbnail(media_id), Some(None));
+    connection
+        .execute(
+            "INSERT INTO media_metadata (media_id, thumbnail_path) VALUES (?, 'ready.jpg')",
+            [media_id],
+        )
+        .expect("publish thumbnail");
+    assert_eq!(
+        read_thumbnail(media_id),
+        Some(Some("ready.jpg".to_string()))
+    );
+}
+
+#[test]
 fn visible_cluster_page_canonicalizes_user_specific_media_sets() {
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "query-viewer", "query-viewer@example.com");

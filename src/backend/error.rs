@@ -40,6 +40,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Thumbnail is not ready")]
+    ThumbnailNotReady,
+
     #[error("Bad request: {0}")]
     BadRequest(String),
 
@@ -128,6 +131,17 @@ impl IntoResponse for AppError {
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone(), None),
             AppError::Validation(message) => (StatusCode::BAD_REQUEST, message.clone(), None),
             AppError::Conflict(message) => (StatusCode::CONFLICT, message.clone(), None),
+            AppError::ThumbnailNotReady => {
+                return (
+                    StatusCode::CONFLICT,
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    r#"{"detail":"Thumbnail is not ready","code":"thumbnail_not_ready"}"#,
+                )
+                    .into_response();
+            }
             AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone(), None),
             AppError::PayloadTooLarge(message) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, message.clone(), None)

@@ -287,5 +287,7 @@ async fn place_thumbnail_requires_a_persisted_thumbnail_reference() {
         .get(&format!("/api/v1/places/{place_id}/thumbnail"))
         .add_header(AUTHORIZATION, authorization)
         .await;
-    response.assert_status_not_found();
+    response.assert_status(axum::http::StatusCode::CONFLICT);
+    response.assert_header("cache-control", "no-store");
+    assert_eq!(response.json::<Value>()["code"], "thumbnail_not_ready");
 }

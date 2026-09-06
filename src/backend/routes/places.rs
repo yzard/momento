@@ -42,11 +42,7 @@ async fn get_place_thumbnail(
         .load_place_cover_request(identity_query(current_user.id, identity))
         .await?
         .ok_or_else(|| AppError::NotFound("Place not found".to_string()))?;
-    let Some(thumbnail_path) =
-        super::media::thumbnail_relative_path(cover.thumbnail_path.as_deref())
-    else {
-        return Err(AppError::NotFound("Place thumbnail not found".to_string()));
-    };
+    let thumbnail_path = super::media::thumbnail_relative_path(cover.thumbnail_path.as_deref())?;
     serve_file(
         &state.executors.file_io,
         StorageRootId::PlaceThumbnails,

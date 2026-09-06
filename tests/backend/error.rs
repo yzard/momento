@@ -33,6 +33,20 @@ fn authentication_rate_limits_return_retry_after_without_internal_details() {
 }
 
 #[tokio::test]
+async fn thumbnail_not_ready_has_a_stable_response_without_an_executor() {
+    let response = AppError::ThumbnailNotReady.into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = to_bytes(response.into_body(), 1024)
+        .await
+        .expect("response body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(body["code"], "thumbnail_not_ready");
+    assert_eq!(body["detail"], "Thumbnail is not ready");
+}
+
+#[tokio::test]
 async fn password_change_errors_have_a_stable_machine_readable_code() {
     let response = render_error(AppError::PasswordChangeRequired).await;
 
