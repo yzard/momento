@@ -10,6 +10,16 @@ Momento is a self-hosted photo and video management service with optional AI fea
 
 Momento stores its application data in SQLite and keeps original media, thumbnails, previews, and AI inputs on the local filesystem.
 
+Metadata generates 2048px browser previews only for supported camera RAW formats
+(DNG, CR2/CR3, NEF/NRW, ARW, RW2, ORF, RAF, PEF, SRW, and RAW). Other photos,
+including HEIC, use their original bytes in the viewer; display support depends on the browser.
+The viewer's **Download original** button downloads the unchanged source file, including RAW and
+video files. ImageMagick permits up to 1 GiB of memory-mapped pixel cache per conversion,
+with temporary cache files kept in the mounted data directory.
+Normal thumbnails default to a 400px square crop. Tiny thumbnails default to 48px and are
+generated from the normal thumbnail for both photos and videos, without decoding the original
+again. `thumbnail_places` preserves the original aspect ratio with a default 400px maximum edge.
+
 ## Key Points
 
 - Self-hosted photo and video library.

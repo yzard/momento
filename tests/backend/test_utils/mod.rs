@@ -499,3 +499,16 @@ fn test_multiple_media_with_gps() {
     assert_eq!(lat2, 51.5074);
     assert_eq!(lon2, -0.1278);
 }
+#[derive(Clone, Default)]
+pub struct LogBuffer(pub std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

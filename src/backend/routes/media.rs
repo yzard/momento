@@ -586,13 +586,20 @@ fn resolve_preview_path(
         return Err(AppError::NotFound("Preview not found".to_string()));
     }
 
-    let web_compatible = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-    if let Some(mime_type) = &media.mime_type {
-        if web_compatible.contains(&mime_type.as_str()) {
-            let relative_path = NormalizedStoragePath::parse(&media.file_path)
-                .map_err(|_| AppError::NotFound("Media file path is invalid".to_string()))?;
-            return Ok((StorageRootId::Originals, relative_path, mime_type.clone()));
-        }
+    if !crate::constants::is_camera_raw_image(
+        std::path::Path::new(&media.file_path),
+        media.mime_type.as_deref(),
+    ) {
+        let relative_path = NormalizedStoragePath::parse(&media.file_path)
+            .map_err(|_| AppError::NotFound("Media file path is invalid".to_string()))?;
+        return Ok((
+            StorageRootId::Originals,
+            relative_path,
+            media
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+        ));
     }
 
     let relative_path = media

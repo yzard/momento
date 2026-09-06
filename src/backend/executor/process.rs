@@ -1268,7 +1268,7 @@ pub fn image_magick_resource_arguments(config: &MediaProcessConfig) -> Vec<OsStr
         format!("{IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES}MiB").into(),
         "-limit".into(),
         "map".into(),
-        "0MiB".into(),
+        "1024MiB".into(),
         "-limit".into(),
         "disk".into(),
         "4096MiB".into(),

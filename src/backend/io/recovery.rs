@@ -403,12 +403,14 @@ async fn recover_file_operations(
                 grant.retain_first_entry();
                 let discarding_product = grant.discarding_product();
                 let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
+                let diagnostic_entry = grant.entries_mut()[0].clone();
                 let mut lease = match acquire_verified_journal_mutation(executors, ticket, grant)
                     .await
-                {
+                    .inspect_err(|error| {
+                        log_cleanup_failure(&group.group_id, &diagnostic_entry, error)
+                    }) {
                     Ok(lease) => lease,
                     Err(error) if discarding_product => {
-                        tracing::warn!(group_id = %group.group_id, %error, "Discard cleanup deferred; retaining ownership for retry");
                         yield_progress_to_tail(executors, group.group_id, group.version).await?;
                         return Err(error);
                     }
@@ -437,11 +439,12 @@ async fn recover_file_operations(
                     .file_io
                     .apply_next_journal_entry_durable(&mut lease)
                     .await
-                {
+                    .inspect_err(|error| {
+                        log_cleanup_failure(&group.group_id, &diagnostic_entry, error)
+                    }) {
                     Ok(applied) => applied,
                     Err(error) if discarding_product => {
                         drop(lease);
-                        tracing::warn!(group_id = %group.group_id, %error, "Discard cleanup deferred; retaining ownership for retry");
                         yield_progress_to_tail(executors, group.group_id, group.version).await?;
                         return Err(error);
                     }
@@ -782,6 +785,24 @@ fn is_permanent_file_failure(kind: ExecutorErrorKind) -> bool {
             | ExecutorErrorKind::FileConflict
             | ExecutorErrorKind::FileInvalidData
     )
+}
+
+fn log_cleanup_failure(
+    group_id: &str,
+    entry: &super::journal::AuthorizedJournalEntry,
+    error: &ExecutorError,
+) {
+    tracing::warn!(
+        group_id,
+        sequence = entry.sequence,
+        storage_root = ?entry.storage_root,
+        source_path = ?entry.source_path.as_ref().map(|path| path.relative_path()),
+        temporary_path = ?entry.temporary_path.as_ref().map(|path| path.relative_path()),
+        destination_path = ?entry.destination_path.as_ref().map(|path| path.relative_path()),
+        error_kind = ?error.kind,
+        error_message = %error,
+        "Journal cleanup failed; retaining recovery evidence"
+    );
 }
 
 async fn record_permanent_failure(

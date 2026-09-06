@@ -16,7 +16,7 @@ vi.mock('../../../src/frontend/api/places', () => ({
   placesApi: {
     list: mocks.list,
     get: mocks.get,
-    getThumbnail: mocks.loadThumbnail,
+    getThumbnailPlaces: mocks.loadThumbnail,
   },
 }))
 vi.mock('../../../src/frontend/components/timeline/PhotoGrid', () => ({
@@ -73,7 +73,7 @@ describe('Places page', () => {
     observedElements.length = 0
     mocks.list.mockReset()
     mocks.get.mockReset()
-    mocks.loadThumbnail.mockReset().mockResolvedValue('place-thumbnail')
+    mocks.loadThumbnail.mockReset().mockResolvedValue('thumbnail_places')
     mocks.photoGrid.mockReset()
     mocks.lightbox.mockReset()
     vi.stubGlobal(

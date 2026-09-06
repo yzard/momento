@@ -16,7 +16,7 @@ import { useLazyImage } from '../hooks/useLazyImage'
 import { useLightbox } from '../hooks/useLightbox'
 
 const PAGE_LIMIT = 100
-const placeThumbnailLoader = { load: placesApi.getThumbnail }
+const thumbnailPlacesLoader = { load: placesApi.getThumbnailPlaces }
 
 export default function Places() {
   const { placeId } = useParams()
@@ -107,7 +107,7 @@ function PlaceList() {
 function PlaceCard({ place }: { place: PlaceSummary }) {
   const { targetRef: cardRef, imageUrl: thumbnailUrl } = useLazyImage<HTMLAnchorElement, string>({
     resourceId: place.placeId,
-    loader: placeThumbnailLoader,
+    loader: thumbnailPlacesLoader,
     getCachedUrl: null,
     rootMargin: '400px',
   })

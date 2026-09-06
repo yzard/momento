@@ -24,6 +24,9 @@ const IMAGE_FORMATS: &[(&str, &str)] = &[
     (".heic", "image/heic"),
     (".heif", "image/heic"),
     (".avif", "image/avif"),
+];
+
+const CAMERA_RAW_FORMATS: &[(&str, &str)] = &[
     (".dng", "image/x-adobe-dng"),
     (".cr2", "image/x-canon-cr2"),
     (".cr3", "image/x-canon-cr3"),
@@ -50,6 +53,7 @@ const VIDEO_FORMATS: &[(&str, &str)] = &[
 pub static IMAGE_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     IMAGE_FORMATS
         .iter()
+        .chain(CAMERA_RAW_FORMATS.iter())
         .map(|(extension, _)| *extension)
         .collect()
 });
@@ -71,6 +75,16 @@ pub static SUPPORTED_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 
 pub fn image_mime_type(file_path: &Path) -> Option<&'static str> {
     mime_type_for_path(file_path, IMAGE_FORMATS)
+        .or_else(|| mime_type_for_path(file_path, CAMERA_RAW_FORMATS))
+}
+
+pub fn is_camera_raw_image(file_path: &Path, mime_type: Option<&str>) -> bool {
+    mime_type_for_path(file_path, CAMERA_RAW_FORMATS).is_some()
+        || mime_type.is_some_and(|mime_type| {
+            CAMERA_RAW_FORMATS
+                .iter()
+                .any(|(_, raw_mime_type)| raw_mime_type.eq_ignore_ascii_case(mime_type))
+        })
 }
 
 pub fn video_mime_type(file_path: &Path) -> Option<&'static str> {

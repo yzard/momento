@@ -196,7 +196,7 @@ private fun PlaceTiles(
 @Composable
 private fun PlaceTile(place: Place, repository: MomentoRepository, select: () -> Unit) {
     val thumbnail by produceState<ByteArray?>(null, place.placeId) {
-        value = when (val requestResult = runRequest { repository.placeThumbnail(place.placeId) }) {
+        value = when (val requestResult = runRequest { repository.thumbnailPlaces(place.placeId) }) {
             is RequestResult.Success -> requestResult.response
             is RequestResult.Failure -> null
         }

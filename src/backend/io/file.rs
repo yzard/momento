@@ -30,7 +30,7 @@ pub enum StorageRootId {
     Originals,
     Thumbnails,
     TinyThumbnails,
-    PlaceThumbnails,
+    ThumbnailPlaces,
     Previews,
     Imports,
     Albums,
@@ -921,7 +921,7 @@ impl StorageRootId {
         Self::Originals,
         Self::Thumbnails,
         Self::TinyThumbnails,
-        Self::PlaceThumbnails,
+        Self::ThumbnailPlaces,
         Self::Previews,
         Self::Imports,
         Self::Albums,
@@ -938,7 +938,7 @@ impl StorageRootId {
             Self::Originals => "originals",
             Self::Thumbnails => "thumbnails",
             Self::TinyThumbnails => "tiny_thumbnails",
-            Self::PlaceThumbnails => "place_thumbnails",
+            Self::ThumbnailPlaces => "thumbnail_places",
             Self::Previews => "previews",
             Self::Imports => "imports",
             Self::Albums => "albums",
@@ -954,7 +954,6 @@ impl StorageRootId {
     pub const fn directory_name(self) -> &'static str {
         match self {
             Self::TinyThumbnails => "thumbnails_tiny",
-            Self::PlaceThumbnails => "thumbnails_places",
             Self::WebDav => "webdav",
             _ => self.as_str(),
         }

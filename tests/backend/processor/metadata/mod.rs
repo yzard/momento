@@ -13,6 +13,77 @@ use std::fs;
 mod clean;
 mod reverse_geocoding;
 
+async fn assert_tiny_is_derived_from_thumbnail(
+    executors: &momento_api::runtime::ExecutorHandles,
+    data_directory: &std::path::Path,
+    thumbnail_path: &str,
+    config: &Config,
+) {
+    use momento_api::processor::thumbnails::{
+        generate_image_thumbnail, ArtifactPublicationOwner, StorageMediaFile,
+    };
+    let source = StorageMediaFile {
+        storage_root: StorageRootId::Thumbnails,
+        path: NormalizedStoragePath::parse(thumbnail_path).expect("thumbnail path"),
+    };
+    let output = StorageMediaFile {
+        storage_root: StorageRootId::Previews,
+        path: NormalizedStoragePath::parse("expected-tiny.jpg").expect("expected path"),
+    };
+    generate_image_thumbnail(
+        executors,
+        &source,
+        &output,
+        config.metadata.thumbnails_tiny_size,
+        config.metadata.thumbnails_quality,
+        &config.media_process,
+        ArtifactPublicationOwner::JournalGroup,
+    )
+    .await
+    .expect("reference tiny");
+    assert_eq!(
+        fs::read(data_directory.join("thumbnails_tiny").join(thumbnail_path)).expect("tiny"),
+        fs::read(data_directory.join("previews/expected-tiny.jpg")).expect("reference tiny")
+    );
+}
+
+#[tokio::test]
+async fn tiny_thumbnail_reuses_the_normal_thumbnail_pixels() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "pattern.png");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
+    image::RgbImage::from_fn(800, 600, |x, y| {
+        image::Rgb([
+            ((x * 17 + y * 31) % 256) as u8,
+            ((x * 47 + y * 13) % 256) as u8,
+            ((x * 7 + y * 53) % 256) as u8,
+        ])
+    })
+    .save(data_directory.join("originals/pattern.png"))
+    .expect("pattern");
+    pool.get().expect("database").execute(
+        "UPDATE media SET file_path = 'pattern.png', mime_type = 'image/png', import_state = 'imported' WHERE id = ?",
+        [media_id]).expect("media");
+    let claim = claim_metadata_job(&pool, &executors, media_id).await;
+    let config = Config::default();
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors, media_id, &claim, &config,
+    )
+    .await
+    .expect("metadata");
+    let thumbnail_path: String = pool
+        .get()
+        .expect("database")
+        .query_row(
+            "SELECT thumbnail_path FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("thumbnail");
+    assert_tiny_is_derived_from_thumbnail(&executors, &data_directory, &thumbnail_path, &config)
+        .await;
+}
+
 async fn claim_metadata_job(
     pool: &momento_api::database::DbPool,
     executors: &momento_api::runtime::ExecutorHandles,
@@ -82,7 +153,7 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
         assert_eq!(input_path, relative_path);
         assert_eq!(mime_type, "image/qoi");
     }
-    let (thumbnail_path, preview_path, artifact_version): (String, String, i64) = connection
+    let (thumbnail_path, preview_path, artifact_version): (String, Option<String>, i64) = connection
         .query_row(
             "SELECT thumbnail_path, preview_path, artifact_version FROM media_metadata WHERE media_id = ?",
             [media_id],
@@ -91,12 +162,11 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
         .expect("metadata artifact generation");
     assert_eq!(artifact_version, 1);
     assert!(thumbnail_path.contains(&format!("v1-{claim_token}")));
-    assert!(preview_path.contains(&format!("v1-{claim_token}")));
+    assert!(preview_path.is_none());
     for (root, path) in [
         ("thumbnails", thumbnail_path.as_str()),
         ("thumbnails_tiny", thumbnail_path.as_str()),
-        ("thumbnails_places", thumbnail_path.as_str()),
-        ("previews", preview_path.as_str()),
+        ("thumbnail_places", thumbnail_path.as_str()),
     ] {
         assert!(
             data_directory.join(root).join(path).is_file(),
@@ -110,7 +180,7 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("metadata product group");
-    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 4));
+    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 3));
     let reserved_artifact_bytes: i64 = connection
         .query_row(
             "SELECT r.reserved_peak_additional_bytes FROM data_dir_space_reservations AS r JOIN file_operation_groups AS g ON g.id = r.journal_group_id WHERE g.kind = 'metadata_artifacts'",
@@ -122,10 +192,9 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
     let tiny_thumbnail_size = i64::from(config.metadata.thumbnails_tiny_size);
     let thumbnail_bound = thumbnail_size * thumbnail_size * 8 + 1_048_576;
     let tiny_thumbnail_bound = tiny_thumbnail_size * tiny_thumbnail_size * 8 + 1_048_576;
-    let web_preview_bound = 2_048_i64 * 2_048 * 8 + 1_048_576;
     assert_eq!(
         reserved_artifact_bytes,
-        thumbnail_bound * 2 + tiny_thumbnail_bound + web_preview_bound
+        thumbnail_bound * 2 + tiny_thumbnail_bound
     );
     assert!(reserved_artifact_bytes < 512 * 1024 * 1024);
     drop(connection);
@@ -293,6 +362,22 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
         )
         .expect("video metadata dimensions");
     assert_eq!(video_dimensions, (64, 32));
+    let thumbnail_path: String = pool
+        .get()
+        .expect("database")
+        .query_row(
+            "SELECT thumbnail_path FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .expect("video thumbnail");
+    assert_tiny_is_derived_from_thumbnail(
+        &executors,
+        &data_directory,
+        &thumbnail_path,
+        &Config::default(),
+    )
+    .await;
 
     momento_api::processor::metadata::generate_media_metadata(
         &executors,

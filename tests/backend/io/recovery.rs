@@ -5,6 +5,70 @@ use momento_api::io::recovery::{
 use sha2::Digest;
 
 #[tokio::test]
+async fn source_cleanup_permission_failure_is_logged_without_losing_the_source() {
+    use std::os::unix::fs::PermissionsExt;
+    use tracing::instrument::WithSubscriber;
+
+    let pool = crate::test_utils::create_test_db();
+    let (executors, directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let parent = directory.join("imports/locked");
+    std::fs::create_dir(&parent).unwrap();
+    let source = parent.join("photo.jpg");
+    std::fs::write(&source, b"original").unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+    pool.get().unwrap().execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, completion_outcome, entry_count, version) VALUES ('permission-cleanup', 'import_source_cleanup', 'import', '1', 'cleanup_pending', 'published', 1, 2)", []).unwrap();
+    pool.get().unwrap().execute("INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, source_path) VALUES ('permission-cleanup', 0, 'cleanup', 'imports', 'locked/photo.jpg')", []).unwrap();
+    let buffer = crate::test_utils::LogBuffer::default();
+    let writer = buffer.clone();
+    let subscriber = std::sync::Arc::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    let recovered = recover_generic_file_operations(&executors)
+        .with_subscriber(subscriber.clone())
+        .await;
+    // Restore fixture access before asserting so a failed test can clean up.
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    recovered.unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), b"original");
+    let state: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM file_operation_groups WHERE id='permission-cleanup'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "cleanup_failed");
+    // A failed group must not be selected and logged again on every sweep.
+    assert_eq!(
+        recover_generic_file_operations(&executors)
+            .with_subscriber(subscriber.clone())
+            .await
+            .unwrap(),
+        0
+    );
+    let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    for text in [
+        "WARN",
+        "Journal cleanup failed",
+        "permission-cleanup",
+        "locked/photo.jpg",
+        "Imports",
+        "FilePermission",
+        "Permission denied",
+    ] {
+        assert!(log.contains(text), "missing {text}: {log}");
+    }
+    assert_eq!(log.matches("Journal cleanup failed").count(), 1);
+}
+
+#[tokio::test]
 async fn completed_result_cleanup_does_not_block_startup() {
     let pool = crate::test_utils::create_test_db();
     let (executors, directory) =
@@ -191,7 +255,7 @@ async fn interrupted_products_discard_corrupt_partial_files_without_the_expired_
             let roots = [
                 "thumbnails",
                 "tiny_thumbnails",
-                "place_thumbnails",
+                "thumbnail_places",
                 "previews",
             ];
             for (sequence, root) in roots.iter().enumerate() {

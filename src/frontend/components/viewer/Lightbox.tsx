@@ -8,7 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, Loader2, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, Loader2, X } from 'lucide-react'
 import { useLocation } from 'react-router-dom'
 
 import { mediaApi } from '../../api/media'
@@ -24,6 +24,46 @@ interface LightboxProps {
 }
 
 const ZOOM_SCALE = 2
+
+function DownloadOriginal({ media }: { media: Media }) {
+  const [isDownloading, setIsDownloading] = useState(false)
+  const [error, setError] = useState(false)
+  const download = async () => {
+    setIsDownloading(true)
+    setError(false)
+    try {
+      const url = await mediaApi.getFileStreamURL(media.id)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = media.originalFilename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+    } catch {
+      setError(true)
+    } finally {
+      setIsDownloading(false)
+    }
+  }
+  return (
+    <div className="mb-4">
+      <button
+        type="button"
+        onClick={() => void download()}
+        disabled={isDownloading}
+        className="flex items-center gap-2 rounded border border-border px-3 py-2 disabled:opacity-50"
+      >
+        <Download className="h-4 w-4" />
+        {isDownloading ? 'Preparing download…' : 'Download original'}
+      </button>
+      {error && (
+        <p role="alert" className="mt-2 text-sm text-destructive">
+          Unable to download original. Please try again.
+        </p>
+      )}
+    </div>
+  )
+}
 
 function useLightboxHistory(onClose: () => void): () => void {
   const location = useLocation()
@@ -326,6 +366,7 @@ export default function Lightbox({
         />
       </div>
       <aside className="h-full w-[320px] shrink-0 overflow-y-auto border-l border-border bg-card p-6">
+        <DownloadOriginal key={mediaState.currentMedia.id} media={mediaState.currentMedia} />
         <MediaDetails
           media={mediaState.currentMedia}
           className="border-0 bg-transparent p-0 shadow-none"

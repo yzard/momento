@@ -74,8 +74,8 @@ class MomentoApiContractTest {
     }
 
     @Test fun collectionThumbnailsUseBinaryGetRoutes() {
-        val placeThumbnail = LibraryApi::class.java.getMethod(
-            "placeThumbnail",
+        val thumbnailPlaces = LibraryApi::class.java.getMethod(
+            "thumbnailPlaces",
             String::class.java,
             kotlin.coroutines.Continuation::class.java,
         )
@@ -87,7 +87,7 @@ class MomentoApiContractTest {
 
         assertEquals(
             "api/v1/places/{placeId}/thumbnail",
-            requireNotNull(placeThumbnail.getAnnotation(GET::class.java)).value,
+            requireNotNull(thumbnailPlaces.getAnnotation(GET::class.java)).value,
         )
         assertEquals(
             "api/v1/faces/groups/{faceGroupId}/thumbnail",

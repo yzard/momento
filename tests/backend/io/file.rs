@@ -7,6 +7,11 @@ use momento_api::io::file::{
 
 #[test]
 fn storage_roots_are_closed_unique_and_counted() {
+    assert_eq!(StorageRootId::ThumbnailPlaces.as_str(), "thumbnail_places");
+    assert_eq!(
+        StorageRootId::ThumbnailPlaces.directory_name(),
+        "thumbnail_places"
+    );
     assert_eq!(StorageRootId::ALL.len(), StorageRootId::COUNT);
     let names = StorageRootId::ALL
         .into_iter()

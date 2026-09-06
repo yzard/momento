@@ -5,21 +5,9 @@ use momento_api::logging::{
 
 #[tokio::test]
 async fn request_failure_logs_include_the_response_cause_and_request_path() {
-    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
     use tracing::instrument::WithSubscriber;
-    #[derive(Clone)]
-    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let buffer = LogBuffer(Arc::new(Mutex::new(Vec::new())));
+    let buffer = crate::test_utils::LogBuffer::default();
     let writer = buffer.clone();
     let subscriber = tracing_subscriber::fmt()
         .without_time()

@@ -323,7 +323,7 @@ async fn converted_preview_uses_the_atomically_persisted_generation_path() {
     );
     let media_id = create_test_media_with_gps_and_date(
         &pool,
-        "preview-generation.heic",
+        "preview-generation.nef",
         40.0,
         -74.0,
         "2024-01-15T10:30:00",
@@ -341,10 +341,10 @@ async fn converted_preview_uses_the_atomically_persisted_generation_path() {
     let connection = pool.get().expect("database");
     connection
         .execute(
-            "UPDATE media SET mime_type = 'image/heic' WHERE id = ?",
+            "UPDATE media SET mime_type = 'image/x-nikon-nef' WHERE id = ?",
             [media_id],
         )
-        .expect("HEIC media");
+        .expect("RAW media");
     drop(connection);
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {}", access_token(user_id));
@@ -368,6 +368,49 @@ async fn converted_preview_uses_the_atomically_persisted_generation_path() {
         .await;
     response.assert_status_ok();
     assert_eq!(response.as_bytes(), generation_path.as_bytes());
+}
+
+#[tokio::test]
+async fn non_raw_preview_serves_original_even_when_a_converted_preview_exists() {
+    let (app, pool) = create_test_app();
+    let user_id = create_test_user(&pool, "original-preview", "original-preview@example.com");
+    let media_id = create_test_media_with_gps_and_date(
+        &pool,
+        "photo.heic",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media_id, user_id);
+    let data_directory = test_data_directory(&pool);
+    let server = TestServer::new(app).expect("server");
+    for (filename, mime_type) in [
+        ("photo.heic", "image/heic"),
+        ("photo.qoi", "image/qoi"),
+        ("photo.tiff", "image/tiff"),
+    ] {
+        std::fs::write(
+            data_directory.join("originals").join(filename),
+            b"original bytes",
+        )
+        .expect("original");
+        let connection = pool.get().expect("database");
+        connection
+            .execute(
+                "UPDATE media SET file_path = ?, mime_type = ? WHERE id = ?",
+                rusqlite::params![filename, mime_type, media_id],
+            )
+            .expect("media format");
+        connection.execute("UPDATE media_metadata SET preview_path = 'obsolete-preview.jpg' WHERE media_id = ?", [media_id]).expect("obsolete preview");
+        drop(connection);
+        let response = server
+            .get(&format!("/api/v1/media/{media_id}/preview"))
+            .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user_id)))
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.as_bytes().as_ref(), b"original bytes");
+        response.assert_header("content-type", mime_type);
+    }
 }
 
 #[tokio::test]

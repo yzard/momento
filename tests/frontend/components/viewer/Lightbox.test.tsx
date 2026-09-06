@@ -35,7 +35,53 @@ describe('Lightbox', () => {
     ])
   })
 
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it.each(['photo.nef', 'photo.heic', 'video.mp4'])(
+    'downloads original bytes for %s',
+    async (filename) => {
+      mocks.getBatch.mockResolvedValueOnce([
+        {
+          id: 1,
+          mediaType: filename.endsWith('mp4') ? 'video' : 'image',
+          originalFilename: filename,
+        },
+      ])
+      const clicked: HTMLAnchorElement[] = []
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+        this: HTMLAnchorElement
+      ) {
+        clicked.push(this)
+      })
+      render(
+        <MemoryRouter>
+          <Lightbox mediaIds={[1]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+        </MemoryRouter>
+      )
+      fireEvent.click(await screen.findByRole('button', { name: 'Download original' }))
+      await waitFor(() => expect(clicked).toHaveLength(1))
+      expect(clicked[0].getAttribute('href')).toBe('/stream/1')
+      expect(clicked[0].download).toBe(filename)
+      expect(document.body.contains(clicked[0])).toBe(false)
+    }
+  )
+
+  it('shows download errors and permits retry', async () => {
+    mocks.getFileStreamURL.mockRejectedValueOnce(new Error('unavailable'))
+    render(
+      <MemoryRouter>
+        <Lightbox mediaIds={[1]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+      </MemoryRouter>
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Download original' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('Unable to download original')
+    expect(screen.getByRole('button', { name: 'Download original' }).hasAttribute('disabled')).toBe(
+      false
+    )
+  })
 
   it('updates the binary preview URL when the selected media changes', async () => {
     const view = render(

@@ -131,16 +131,19 @@ pub async fn generate_media_metadata(
         .join(media_id.to_string())
         .join(format!("v{artifact_version}-{claim_token}"))
         .join("thumbnail.jpg");
-    let preview_relative =
-        if media_type == "image" && !is_web_compatible_image(media.mime_type.as_deref()) {
-            let preview_path = PathBuf::from("media")
-                .join(media_id.to_string())
-                .join(format!("v{artifact_version}-{claim_token}"))
-                .join("preview.jpg");
-            Some(preview_path.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+    let preview_relative = if media_type == "image"
+        && crate::constants::is_camera_raw_image(
+            std::path::Path::new(&file_path),
+            media.mime_type.as_deref(),
+        ) {
+        let preview_path = PathBuf::from("media")
+            .join(media_id.to_string())
+            .join(format!("v{artifact_version}-{claim_token}"))
+            .join("preview.jpg");
+        Some(preview_path.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     let thumbnail_path =
         crate::io::file::NormalizedStoragePath::parse(&thumbnail_relative.to_string_lossy())
             .map_err(|error| error.to_string())?;
@@ -154,7 +157,7 @@ pub async fn generate_media_metadata(
             thumbnail_path.clone(),
         ),
         (
-            crate::io::file::StorageRootId::PlaceThumbnails,
+            crate::io::file::StorageRootId::ThumbnailPlaces,
             thumbnail_path,
         ),
     ];
@@ -270,7 +273,7 @@ async fn retire_previous_metadata_artifacts(
                 for storage_root in [
                     crate::io::file::StorageRootId::Thumbnails,
                     crate::io::file::StorageRootId::TinyThumbnails,
-                    crate::io::file::StorageRootId::PlaceThumbnails,
+                    crate::io::file::StorageRootId::ThumbnailPlaces,
                 ] {
                     if let Err(error) = crate::processor::artifact::retire_artifact(
                         executors,
@@ -311,13 +314,6 @@ async fn retire_previous_metadata_artifacts(
     }
 }
 
-fn is_web_compatible_image(mime_type: Option<&str>) -> bool {
-    matches!(
-        mime_type,
-        Some("image/jpeg" | "image/png" | "image/webp" | "image/gif")
-    )
-}
-
 fn is_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -346,7 +342,7 @@ async fn generate_metadata_artifact_batch(
     };
     let thumbnail = target(0, "thumbnail")?;
     let tiny_thumbnail = target(1, "tiny thumbnail")?;
-    let place_thumbnail = target(2, "place thumbnail")?;
+    let thumbnail_places = target(2, "thumbnail_places")?;
     generate_prepared_thumbnail(
         executors,
         media_type,
@@ -358,14 +354,14 @@ async fn generate_metadata_artifact_batch(
     )
     .await
     .map_err(|error| format!("thumbnail generation failed: {error}"))?;
-    generate_prepared_thumbnail(
+    generate_image_thumbnail_prepared(
         executors,
-        media_type,
-        original,
+        &thumbnail,
         &tiny_thumbnail,
         config.metadata.thumbnails_tiny_size,
+        config.metadata.thumbnails_quality,
         output_limits[1],
-        config,
+        &config.media_process,
     )
     .await
     .map_err(|error| format!("tiny thumbnail generation failed: {error}"))?;
@@ -373,26 +369,26 @@ async fn generate_metadata_artifact_batch(
         generate_image_preview_prepared(
             executors,
             original,
-            &place_thumbnail,
+            &thumbnail_places,
             config.metadata.thumbnails_max_size,
             config.metadata.thumbnails_quality,
             output_limits[2],
             &config.media_process,
         )
         .await
-        .map_err(|error| format!("place thumbnail generation failed: {error}"))?;
+        .map_err(|error| format!("thumbnail_places generation failed: {error}"))?;
     } else {
         generate_video_preview_prepared(
             executors,
             original,
-            &place_thumbnail,
+            &thumbnail_places,
             config.metadata.thumbnails_max_size,
             config.metadata.thumbnails_quality,
             output_limits[2],
             &config.media_process,
         )
         .await
-        .map_err(|error| format!("place thumbnail generation failed: {error}"))?;
+        .map_err(|error| format!("thumbnail_places generation failed: {error}"))?;
     }
     if include_web_preview {
         let preview = target(3, "web preview")?;

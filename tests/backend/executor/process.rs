@@ -83,7 +83,7 @@ fn image_magick_arguments_omit_the_time_limit() {
     assert!(arguments.iter().any(|argument| argument == "memory"));
     assert!(arguments.iter().any(|argument| argument == "disk"));
     assert_eq!(argument_value(&arguments, "memory"), "256MiB");
-    assert_eq!(argument_value(&arguments, "map"), "0MiB");
+    assert_eq!(argument_value(&arguments, "map"), "1024MiB");
     assert_eq!(argument_value(&arguments, "disk"), "4096MiB");
     assert_eq!(argument_value(&arguments, "thread"), "1");
 }

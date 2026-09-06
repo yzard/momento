@@ -38,7 +38,7 @@ fn insert_aesthetics(pool: &momento_api::database::DbPool, media_id: i64, score:
         .expect("aesthetics");
 }
 
-fn set_place_thumbnail(pool: &momento_api::database::DbPool, media_id: i64, bytes: &[u8]) {
+fn set_thumbnail_places(pool: &momento_api::database::DbPool, media_id: i64, bytes: &[u8]) {
     let relative_path = format!("{media_id}/thumbnail.jpg");
     pool.get()
         .expect("connection")
@@ -48,11 +48,11 @@ fn set_place_thumbnail(pool: &momento_api::database::DbPool, media_id: i64, byte
         )
         .expect("thumbnail path");
     let thumbnail_path = test_data_directory(pool)
-        .join("thumbnails_places")
+        .join("thumbnail_places")
         .join(&relative_path);
     std::fs::create_dir_all(thumbnail_path.parent().expect("thumbnail parent"))
         .expect("thumbnail directory");
-    std::fs::write(thumbnail_path, bytes).expect("place thumbnail");
+    std::fs::write(thumbnail_path, bytes).expect("thumbnail_places");
 }
 
 #[tokio::test]
@@ -135,8 +135,8 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
     }
     insert_aesthetics(&pool, iconic_media, 0.8);
     insert_aesthetics(&pool, cluttered_media, 0.9);
-    set_place_thumbnail(&pool, iconic_media, &[1, 2, 3]);
-    set_place_thumbnail(&pool, cluttered_media, &[4, 5, 6]);
+    set_thumbnail_places(&pool, iconic_media, &[1, 2, 3]);
+    set_thumbnail_places(&pool, cluttered_media, &[4, 5, 6]);
     let connection = pool.get().expect("connection");
     connection
         .execute(
@@ -171,7 +171,7 @@ async fn place_cover_uses_hybrid_score_and_detail_paginates() {
     set_place(&pool, new_best_media, "Paris", None, "France");
     grant_media_access(&pool, new_best_media, user_id);
     insert_aesthetics(&pool, new_best_media, 1.0);
-    set_place_thumbnail(&pool, new_best_media, &[7, 8, 9]);
+    set_thumbnail_places(&pool, new_best_media, &[7, 8, 9]);
     let updated_thumbnail = server
         .get(&format!("/api/v1/places/{place_id}/thumbnail"))
         .add_header(AUTHORIZATION, authorization.clone())
@@ -240,7 +240,7 @@ async fn invalid_place_identifiers_and_limits_are_rejected() {
 }
 
 #[tokio::test]
-async fn place_thumbnail_requires_a_persisted_thumbnail_reference() {
+async fn thumbnail_places_requires_a_persisted_thumbnail_reference() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(
         &pool,
@@ -264,7 +264,7 @@ async fn place_thumbnail_requires_a_persisted_thumbnail_reference() {
         )
         .expect("legacy media path");
     let guessed_thumbnail = test_data_directory(&pool)
-        .join("thumbnails_places")
+        .join("thumbnail_places")
         .join("legacy/legacy-place.jpg");
     std::fs::create_dir_all(guessed_thumbnail.parent().expect("thumbnail parent"))
         .expect("thumbnail directory");
