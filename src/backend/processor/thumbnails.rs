@@ -89,35 +89,6 @@ pub async fn generate_image_thumbnail(
     .await
 }
 
-pub async fn generate_video_thumbnail(
-    executors: &ExecutorHandles,
-    source: &StorageMediaFile,
-    output: &StorageMediaFile,
-    max_size: u32,
-    quality: u8,
-    process_config: &MediaProcessConfig,
-    owner: ArtifactPublicationOwner<'_>,
-) -> Result<(), String> {
-    let maximum_output_bytes = maximum_jpeg_output_bytes(
-        max_size,
-        process_config.maximum_normalized_image_output_bytes as u64,
-    )?;
-    generate_video_variant(
-        executors,
-        source,
-        output,
-        ImageVariantSpec {
-            maximum_size: max_size,
-            maximum_output_bytes,
-            quality,
-            variant: ImageVariant::CroppedThumbnail,
-        },
-        process_config,
-        OutputMode::Managed(owner),
-    )
-    .await
-}
-
 pub async fn generate_image_preview(
     executors: &ExecutorHandles,
     source: &StorageMediaFile,
@@ -132,35 +103,6 @@ pub async fn generate_image_preview(
         process_config.maximum_normalized_image_output_bytes as u64,
     )?;
     generate_image_variant_with_fallback(
-        executors,
-        source,
-        output,
-        ImageVariantSpec {
-            maximum_size: max_size,
-            maximum_output_bytes,
-            quality,
-            variant: ImageVariant::AspectRatioPreview,
-        },
-        process_config,
-        OutputMode::Managed(owner),
-    )
-    .await
-}
-
-pub async fn generate_video_preview(
-    executors: &ExecutorHandles,
-    source: &StorageMediaFile,
-    output: &StorageMediaFile,
-    max_size: u32,
-    quality: u8,
-    process_config: &MediaProcessConfig,
-    owner: ArtifactPublicationOwner<'_>,
-) -> Result<(), String> {
-    let maximum_output_bytes = maximum_jpeg_output_bytes(
-        max_size,
-        process_config.maximum_normalized_image_output_bytes as u64,
-    )?;
-    generate_video_variant(
         executors,
         source,
         output,
@@ -201,7 +143,7 @@ pub(crate) async fn generate_image_thumbnail_prepared(
     .await
 }
 
-pub(crate) async fn generate_video_thumbnail_prepared(
+pub async fn generate_video_thumbnail_prepared(
     executors: &ExecutorHandles,
     source: &StorageMediaFile,
     output: &StorageMediaFile,
@@ -236,31 +178,6 @@ pub(crate) async fn generate_image_preview_prepared(
     process_config: &MediaProcessConfig,
 ) -> Result<(), String> {
     generate_image_variant_with_fallback(
-        executors,
-        source,
-        output,
-        ImageVariantSpec {
-            maximum_size: max_size,
-            maximum_output_bytes,
-            quality,
-            variant: ImageVariant::AspectRatioPreview,
-        },
-        process_config,
-        OutputMode::Prepared,
-    )
-    .await
-}
-
-pub(crate) async fn generate_video_preview_prepared(
-    executors: &ExecutorHandles,
-    source: &StorageMediaFile,
-    output: &StorageMediaFile,
-    max_size: u32,
-    quality: u8,
-    maximum_output_bytes: u64,
-    process_config: &MediaProcessConfig,
-) -> Result<(), String> {
-    generate_video_variant(
         executors,
         source,
         output,
@@ -409,16 +326,10 @@ async fn generate_video_variant(
     process_config: &MediaProcessConfig,
     mode: OutputMode<'_>,
 ) -> Result<(), String> {
-    let filter = match spec.variant {
-        ImageVariant::CroppedThumbnail => format!(
-            "scale={0}:{0}:force_original_aspect_ratio=increase,crop={0}:{0}",
-            spec.maximum_size
-        ),
-        ImageVariant::AspectRatioPreview => format!(
-            "scale={0}:{0}:force_original_aspect_ratio=decrease",
-            spec.maximum_size
-        ),
-    };
+    let filter = format!(
+        "scale={0}:{0}:force_original_aspect_ratio=increase,crop={0}:{0}",
+        spec.maximum_size
+    );
     let quantizer = 2_u16 + (u16::from(100_u8.saturating_sub(spec.quality)) * 29 / 100);
     let mut arguments = ffmpeg_single_thread_arguments();
     arguments.extend([

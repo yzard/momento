@@ -44,6 +44,6 @@ export const placesApi = {
     return response.data
   },
 
-  getThumbnailPlaces: async (placeId: string): Promise<string> =>
+  getCover: async (placeId: string): Promise<string> =>
     `/api/v1/places/${encodeURIComponent(placeId)}/thumbnail`,
 }

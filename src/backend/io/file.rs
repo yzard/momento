@@ -30,7 +30,6 @@ pub enum StorageRootId {
     Originals,
     Thumbnails,
     TinyThumbnails,
-    ThumbnailPlaces,
     Previews,
     Imports,
     Albums,
@@ -915,13 +914,12 @@ impl fmt::Display for StorageRootUnavailable {
 impl std::error::Error for StorageRootUnavailable {}
 
 impl StorageRootId {
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 12;
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::Originals,
         Self::Thumbnails,
         Self::TinyThumbnails,
-        Self::ThumbnailPlaces,
         Self::Previews,
         Self::Imports,
         Self::Albums,
@@ -938,7 +936,6 @@ impl StorageRootId {
             Self::Originals => "originals",
             Self::Thumbnails => "thumbnails",
             Self::TinyThumbnails => "tiny_thumbnails",
-            Self::ThumbnailPlaces => "thumbnail_places",
             Self::Previews => "previews",
             Self::Imports => "imports",
             Self::Albums => "albums",

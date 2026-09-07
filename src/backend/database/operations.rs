@@ -95,11 +95,6 @@ fn metadata_clean_cleanup_plan(cleanup_group_id: &str) -> rusqlite::Result<FileO
             media_path.clone(),
             "tiny_thumbnails",
         ),
-        (
-            StorageRootId::ThumbnailPlaces,
-            media_path,
-            "thumbnail_places",
-        ),
         (StorageRootId::Previews, faces_path, "face_crops"),
         (StorageRootId::Previews, ai_path, "ai_inputs"),
         (
@@ -2763,7 +2758,6 @@ fn media_cleanup_plan(
         for (root, role) in [
             (StorageRootId::Thumbnails, "thumbnail"),
             (StorageRootId::TinyThumbnails, "tiny_thumbnail"),
-            (StorageRootId::ThumbnailPlaces, "thumbnail_places"),
         ] {
             targets.push((
                 root,

@@ -2,7 +2,8 @@ use crate::test_utils::{create_test_db, test_executor_handles_with_data_director
 use momento_api::config::MediaProcessConfig;
 use momento_api::io::file::{NormalizedStoragePath, StorageRootId};
 use momento_api::processor::thumbnails::{
-    generate_image_preview, generate_video_preview, ArtifactPublicationOwner, StorageMediaFile,
+    generate_image_preview, generate_video_thumbnail_prepared, ArtifactPublicationOwner,
+    StorageMediaFile,
 };
 
 fn test_media_runtime() -> (momento_api::runtime::ExecutorHandles, std::path::PathBuf) {
@@ -116,7 +117,7 @@ async fn image_preview_decodes_qoi_without_changing_the_original() {
 }
 
 #[tokio::test]
-async fn video_preview_waits_for_ffmpeg_and_generates_output() {
+async fn video_thumbnail_waits_for_ffmpeg_and_generates_square_output() {
     let (executors, data_directory) = test_media_runtime();
     let source = data_directory.join("originals/source.mp4");
     let output = data_directory.join("previews/preview.jpg");
@@ -142,20 +143,20 @@ async fn video_preview_waits_for_ffmpeg_and_generates_output() {
     );
     let process_config = MediaProcessConfig::default();
 
-    generate_video_preview(
+    generate_video_thumbnail_prepared(
         &executors,
         &source_file,
         &output_file,
         32,
         85,
+        process_config.maximum_normalized_image_output_bytes as u64,
         &process_config,
-        ArtifactPublicationOwner::JournalGroup,
     )
     .await
     .expect("video preview");
 
     let preview = image::open(output).expect("generated video preview");
-    assert_eq!((preview.width(), preview.height()), (32, 16));
+    assert_eq!((preview.width(), preview.height()), (32, 32));
 }
 
 #[tokio::test]

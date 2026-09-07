@@ -140,7 +140,7 @@ signal.
 Momento owns every AI input reference. Photo tasks reference the immutable canonical original
 without resizing or creating a task-specific copy. Video-capable tasks share one lossless,
 full-resolution representative PNG frame below Momento previews; screenshot and document detection
-remain photo-only. UI thumbnails and thumbnail_places are separate presentation assets and are
+remain photo-only. UI thumbnails are presentation assets and are
 never AI inputs. The transport supports multiple ordered inputs even though current metadata
 generation creates one input per task. llm-service may decode the received bytes, apply orientation,
 and perform model-required tensor transforms, but it never reads Momento paths, generates task
@@ -643,14 +643,14 @@ visible media count descending, then city, state, and country ascending. Place i
 opaque encodings of the complete tuple. Manual GPS changes immediately recompute or clear the local
 reverse-geocoded fields so grouping cannot retain stale location names.
 
-Metadata generates a separate aspect-preserving thumbnail_places for UI cover rendering only.
+Place covers reuse normal thumbnails; WebGUI and Android crop them to 3:2 at display time.
 `image_aesthetics` uses the canonical photo original or the shared full-resolution video frame.
 Cover ranking prefers completed
 aesthetic inference and combines aesthetic 40%, scenic 25%, simplicity 20%, landscape 10%, and
 technical quality 5%, then applies OCR-clutter and dominant-face penalties. Media without an
 aesthetic result use a deterministic landscape, capture-date, and media-ID fallback. A user's place
 cover is always selected only from media visible to that user. Place cover selection is never
-stored or cached as a representative media ID. Every thumbnail_places request reruns the ranking
+stored or cached as a representative media ID. Every place cover request reruns the ranking
 against current metadata, aesthetic results, and active `media_access`, so changed membership is
 visible on the next request.
 

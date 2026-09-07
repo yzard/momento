@@ -20,7 +20,7 @@ afterEach(() => {
 
 describe('PasswordChangeForm', () => {
   it.each(['modal', 'settings'] as const)(
-    'identifies the account and password roles in the %s form',
+    'allows saved-password autofill for all three fields in the %s form',
     (layout) => {
       const { container } = render(<PasswordChangeForm onComplete={vi.fn()} layout={layout} />)
       const username = container.querySelector<HTMLInputElement>('input[name="username"]')
@@ -28,8 +28,8 @@ describe('PasswordChangeForm', () => {
       expect(username?.autocomplete).toBe('username')
       for (const [label, name, autocomplete] of [
         ['Current Password', 'currentPassword', 'current-password'],
-        ['New Password', 'newPassword', 'new-password'],
-        ['Confirm New Password', 'confirmPassword', 'new-password'],
+        ['New Password', 'newPassword', 'current-password'],
+        ['Confirm New Password', 'confirmPassword', 'current-password'],
       ]) {
         const input = screen.getByLabelText(label)
         expect(input.getAttribute('name')).toBe(name)
@@ -38,18 +38,18 @@ describe('PasswordChangeForm', () => {
     }
   )
 
-  it('submits autofilled DOM values without requiring input events', async () => {
+  it('submits the saved password filled into all three fields without requiring input events', async () => {
     const onComplete = vi.fn()
     render(<PasswordChangeForm onComplete={onComplete} layout="modal" />)
     const current = screen.getByLabelText<HTMLInputElement>('Current Password')
     const password = screen.getByLabelText<HTMLInputElement>('New Password')
     const confirm = screen.getByLabelText<HTMLInputElement>('Confirm New Password')
-    current.value = 'autofilled-current'
-    password.value = 'generated-password'
-    confirm.value = 'generated-password'
+    current.value = 'saved-password'
+    password.value = 'saved-password'
+    confirm.value = 'saved-password'
     fireEvent.submit(current.form!)
     await waitFor(() => expect(onComplete).toHaveBeenCalledOnce())
-    expect(mocks.changePassword).toHaveBeenCalledWith('autofilled-current', 'generated-password')
+    expect(mocks.changePassword).toHaveBeenCalledWith('saved-password', 'saved-password')
     expect(password.value).toBe('')
     expect(confirm.value).toBe('')
   })

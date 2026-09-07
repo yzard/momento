@@ -81,21 +81,18 @@ export default function PasswordChangeForm({ onComplete, layout }: PasswordChang
         <PasswordField
           id="currentPassword"
           label="Current Password"
-          autoComplete="current-password"
           minLength={null}
           inputClassName={inputClassName}
         />
         <PasswordField
           id="newPassword"
           label="New Password"
-          autoComplete="new-password"
           minLength={8}
           inputClassName={inputClassName}
         />
         <PasswordField
           id="confirmPassword"
           label="Confirm New Password"
-          autoComplete="new-password"
           minLength={null}
           inputClassName={inputClassName}
         />
@@ -118,12 +115,11 @@ export default function PasswordChangeForm({ onComplete, layout }: PasswordChang
 interface PasswordFieldProps {
   id: string
   label: string
-  autoComplete: 'current-password' | 'new-password'
   minLength: number | null
   inputClassName: string
 }
 
-function PasswordField({ id, label, autoComplete, minLength, inputClassName }: PasswordFieldProps) {
+function PasswordField({ id, label, minLength, inputClassName }: PasswordFieldProps) {
   return (
     <div className="space-y-2 group">
       <label
@@ -139,7 +135,7 @@ function PasswordField({ id, label, autoComplete, minLength, inputClassName }: P
         className={inputClassName}
         required
         minLength={minLength ?? undefined}
-        autoComplete={autoComplete}
+        autoComplete="current-password"
       />
       {id === 'newPassword' && (
         <p className="pl-1 text-xs font-medium text-muted-foreground">

@@ -166,7 +166,6 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
     for (root, path) in [
         ("thumbnails", thumbnail_path.as_str()),
         ("thumbnails_tiny", thumbnail_path.as_str()),
-        ("thumbnail_places", thumbnail_path.as_str()),
     ] {
         assert!(
             data_directory.join(root).join(path).is_file(),
@@ -180,7 +179,7 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("metadata product group");
-    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 3));
+    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 2));
     let reserved_artifact_bytes: i64 = connection
         .query_row(
             "SELECT r.reserved_peak_additional_bytes FROM data_dir_space_reservations AS r JOIN file_operation_groups AS g ON g.id = r.journal_group_id WHERE g.kind = 'metadata_artifacts'",
@@ -194,7 +193,7 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
     let tiny_thumbnail_bound = tiny_thumbnail_size * tiny_thumbnail_size * 8 + 1_048_576;
     assert_eq!(
         reserved_artifact_bytes,
-        thumbnail_bound * 2 + tiny_thumbnail_bound
+        thumbnail_bound + tiny_thumbnail_bound
     );
     assert!(reserved_artifact_bytes < 512 * 1024 * 1024);
     drop(connection);

@@ -19,7 +19,7 @@ interface LibraryApi {
     @POST("api/v1/album/reorder") suspend fun reorderAlbumMedia(@Body request: AlbumMediaRequest): MessageResponse
     @POST("api/v1/places/list") suspend fun places(@Body request: PageRequest): PlacesResponse
     @POST("api/v1/places/get") suspend fun place(@Body request: PlaceRequest): PlaceResponse
-    @GET("api/v1/places/{placeId}/thumbnail") suspend fun thumbnailPlaces(@Path("placeId") placeId: String): ResponseBody
+    @GET("api/v1/places/{placeId}/thumbnail") suspend fun placeCover(@Path("placeId") placeId: String): ResponseBody
     @POST("api/v1/faces/groups/list") suspend fun faces(@Body request: PageRequest): FacesResponse
     @POST("api/v1/faces/groups/get") suspend fun face(@Body request: FaceGroupRequest): FaceGroupMediaResponse
     @POST("api/v1/faces/groups/merge") suspend fun mergeFaces(@Body request: FaceMergeRequest): FaceMergeResponse

@@ -16,7 +16,7 @@ vi.mock('../../../src/frontend/api/places', () => ({
   placesApi: {
     list: mocks.list,
     get: mocks.get,
-    getThumbnailPlaces: mocks.loadThumbnail,
+    getCover: mocks.loadThumbnail,
   },
 }))
 vi.mock('../../../src/frontend/components/timeline/PhotoGrid', () => ({
@@ -73,7 +73,7 @@ describe('Places page', () => {
     observedElements.length = 0
     mocks.list.mockReset()
     mocks.get.mockReset()
-    mocks.loadThumbnail.mockReset().mockResolvedValue('thumbnail_places')
+    mocks.loadThumbnail.mockReset().mockResolvedValue('place-cover')
     mocks.photoGrid.mockReset()
     mocks.lightbox.mockReset()
     vi.stubGlobal(
@@ -145,6 +145,8 @@ describe('Places page', () => {
     })
 
     await waitFor(() => expect(mocks.loadThumbnail).toHaveBeenCalledWith('paris-france'))
+    expect(parisCard.className).toContain('aspect-[3/2]')
+    await waitFor(() => expect(parisCard.querySelector('img')?.className).toContain('object-cover'))
     await waitFor(() =>
       expect(parisCard.querySelector('img')?.getAttribute('loading')).toBe('lazy')
     )

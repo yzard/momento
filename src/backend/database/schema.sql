@@ -1014,7 +1014,7 @@ CREATE TABLE IF NOT EXISTS file_operation_entries (
     sequence INTEGER NOT NULL CHECK(sequence BETWEEN 0 AND 255),
     action TEXT NOT NULL CHECK(action IN ('publish', 'move', 'tombstone', 'cleanup')),
     storage_root TEXT NOT NULL CHECK(storage_root IN (
-        'originals', 'thumbnails', 'tiny_thumbnails', 'thumbnail_places', 'previews',
+        'originals', 'thumbnails', 'tiny_thumbnails', 'previews',
         'imports', 'albums', 'trash', 'webdav', 'backups', 'logs', 'journal', 'static'
     )),
     source_path TEXT,

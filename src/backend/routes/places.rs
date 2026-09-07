@@ -25,10 +25,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/places/list", post(list_places))
         .route("/places/get", post(get_place))
-        .route("/places/:place_id/thumbnail", get(get_thumbnail_places))
+        .route("/places/:place_id/thumbnail", get(get_place_cover))
 }
 
-async fn get_thumbnail_places(
+async fn get_place_cover(
     State(state): State<AppState>,
     Extension(admission): Extension<HttpRequestAdmission>,
     current_user: CurrentUser,
@@ -45,7 +45,7 @@ async fn get_thumbnail_places(
     let thumbnail_path = super::media::thumbnail_relative_path(cover.thumbnail_path.as_deref())?;
     serve_file(
         &state.executors.file_io,
-        StorageRootId::ThumbnailPlaces,
+        StorageRootId::Thumbnails,
         thumbnail_path,
         FileResponseOptions {
             admission: &admission,

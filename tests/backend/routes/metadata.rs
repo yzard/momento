@@ -329,7 +329,6 @@ async fn metadata_clean_commits_derived_tree_cleanup_to_the_generic_journal() {
     let derived_files = [
         data_directory.join("thumbnails/media/1/thumbnail.jpg"),
         data_directory.join("thumbnails_tiny/media/1/thumbnail.jpg"),
-        data_directory.join("thumbnail_places/media/1/thumbnail.jpg"),
         data_directory.join("previews/faces/1/face.jpg"),
         data_directory.join("previews/ai/1/frame.png"),
         data_directory.join("previews/media/1/preview.jpg"),

@@ -67,7 +67,7 @@ pub mod file_operations {
            AND NOT EXISTS (
                SELECT 1 FROM file_operation_entries
                 WHERE group_id = file_operation_groups.id
-                  AND (action != 'publish' OR storage_root NOT IN ('thumbnails', 'tiny_thumbnails', 'thumbnail_places', 'previews', 'journal'))
+                  AND (action != 'publish' OR storage_root NOT IN ('thumbnails', 'tiny_thumbnails', 'previews', 'journal'))
            )
     "#;
     pub const IS_DERIVED_PRODUCT_DISCARD: &str = r#"
@@ -80,7 +80,7 @@ pub mod file_operations {
            AND NOT EXISTS (
                SELECT 1 FROM file_operation_entries
                 WHERE group_id = file_operation_groups.id
-                  AND (action != 'publish' OR storage_root NOT IN ('thumbnails', 'tiny_thumbnails', 'thumbnail_places', 'previews', 'journal'))
+                  AND (action != 'publish' OR storage_root NOT IN ('thumbnails', 'tiny_thumbnails', 'previews', 'journal'))
            )
     "#;
     pub const SELECT_DERIVED_PRODUCT_DISCARD_ENTRIES: &str = r#"
@@ -89,7 +89,7 @@ pub mod file_operations {
                    SELECT 1 FROM media_metadata AS m
                     WHERE m.media_id = CAST(g.owner_id AS INTEGER)
                       AND g.owner_kind = 'metadata_generation'
-                      AND ((e.storage_root IN ('thumbnails', 'tiny_thumbnails', 'thumbnail_places') AND m.thumbnail_path = e.destination_path)
+                      AND ((e.storage_root IN ('thumbnails', 'tiny_thumbnails') AND m.thumbnail_path = e.destination_path)
                            OR (e.storage_root = 'previews' AND m.preview_path = e.destination_path))
                ) OR EXISTS (
                    SELECT 1 FROM media_faces AS f

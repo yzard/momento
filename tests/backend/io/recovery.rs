@@ -252,12 +252,7 @@ async fn interrupted_products_discard_corrupt_partial_files_without_the_expired_
                 "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, cancel_requested, entry_count, version) VALUES ('interrupted', ?, ?, '1', '00000000-0000-0000-0000-000000000091', 'publishing', ?, ?, 4, 6)",
                 rusqlite::params![kind, owner, if detached { None } else { Some(target) }, detached],
             ).unwrap();
-            let roots = [
-                "thumbnails",
-                "tiny_thumbnails",
-                "thumbnail_places",
-                "previews",
-            ];
+            let roots = ["thumbnails", "tiny_thumbnails", "previews", "previews"];
             for (sequence, root) in roots.iter().enumerate() {
                 connection.execute(
                     "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path, state, expected_size, expected_sha256) VALUES ('interrupted', ?, 'publish', ?, ?, ?, ?, 500, zeroblob(32))",

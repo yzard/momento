@@ -17,8 +17,7 @@ use crate::processor::artifact::ArtifactPublicationOwner;
 use crate::processor::media_processor::generate_complete_metadata;
 use crate::processor::thumbnails::{
     generate_image_preview_prepared, generate_image_thumbnail_prepared,
-    generate_video_preview_prepared, generate_video_thumbnail_prepared, maximum_jpeg_output_bytes,
-    StorageMediaFile,
+    generate_video_thumbnail_prepared, maximum_jpeg_output_bytes, StorageMediaFile,
 };
 use crate::runtime::ExecutorHandles;
 
@@ -156,10 +155,6 @@ pub async fn generate_media_metadata(
             crate::io::file::StorageRootId::TinyThumbnails,
             thumbnail_path.clone(),
         ),
-        (
-            crate::io::file::StorageRootId::ThumbnailPlaces,
-            thumbnail_path,
-        ),
     ];
     if let Some(path) = preview_relative.as_deref() {
         artifact_destinations.push((
@@ -273,7 +268,6 @@ async fn retire_previous_metadata_artifacts(
                 for storage_root in [
                     crate::io::file::StorageRootId::Thumbnails,
                     crate::io::file::StorageRootId::TinyThumbnails,
-                    crate::io::file::StorageRootId::ThumbnailPlaces,
                 ] {
                     if let Err(error) = crate::processor::artifact::retire_artifact(
                         executors,
@@ -330,7 +324,7 @@ async fn generate_metadata_artifact_batch(
     output_limits: &[u64],
     config: &Config,
 ) -> Result<(), String> {
-    let expected_outputs = if include_web_preview { 4 } else { 3 };
+    let expected_outputs = if include_web_preview { 3 } else { 2 };
     if output_limits.len() != expected_outputs {
         return Err("metadata artifact output limits do not match the batch".to_string());
     }
@@ -342,7 +336,6 @@ async fn generate_metadata_artifact_batch(
     };
     let thumbnail = target(0, "thumbnail")?;
     let tiny_thumbnail = target(1, "tiny thumbnail")?;
-    let thumbnail_places = target(2, "thumbnail_places")?;
     generate_prepared_thumbnail(
         executors,
         media_type,
@@ -365,40 +358,15 @@ async fn generate_metadata_artifact_batch(
     )
     .await
     .map_err(|error| format!("tiny thumbnail generation failed: {error}"))?;
-    if media_type == "image" {
-        generate_image_preview_prepared(
-            executors,
-            original,
-            &thumbnail_places,
-            config.metadata.thumbnails_max_size,
-            config.metadata.thumbnails_quality,
-            output_limits[2],
-            &config.media_process,
-        )
-        .await
-        .map_err(|error| format!("thumbnail_places generation failed: {error}"))?;
-    } else {
-        generate_video_preview_prepared(
-            executors,
-            original,
-            &thumbnail_places,
-            config.metadata.thumbnails_max_size,
-            config.metadata.thumbnails_quality,
-            output_limits[2],
-            &config.media_process,
-        )
-        .await
-        .map_err(|error| format!("thumbnail_places generation failed: {error}"))?;
-    }
     if include_web_preview {
-        let preview = target(3, "web preview")?;
+        let preview = target(2, "web preview")?;
         generate_image_preview_prepared(
             executors,
             original,
             &preview,
             2048,
             90,
-            output_limits[3],
+            output_limits[2],
             &config.media_process,
         )
         .await
@@ -451,7 +419,6 @@ fn metadata_artifact_output_limits(
     let mut limits = vec![
         thumbnail_limit,
         maximum_jpeg_output_bytes(tiny_thumbnail_size, configured_maximum_bytes)?,
-        thumbnail_limit,
     ];
     if include_web_preview {
         limits.push(maximum_jpeg_output_bytes(2048, configured_maximum_bytes)?);

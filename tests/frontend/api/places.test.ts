@@ -62,7 +62,7 @@ describe('placesApi', () => {
   })
 
   it('builds a freshly selected place binary thumbnail URL', async () => {
-    await expect(placesApi.getThumbnailPlaces('paris-france')).resolves.toBe(
+    await expect(placesApi.getCover('paris-france')).resolves.toBe(
       '/api/v1/places/paris-france/thumbnail'
     )
     expect(post).not.toHaveBeenCalled()

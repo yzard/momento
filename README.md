@@ -18,7 +18,7 @@ video files. ImageMagick permits up to 1 GiB of memory-mapped pixel cache per co
 with temporary cache files kept in the mounted data directory.
 Normal thumbnails default to a 400px square crop. Tiny thumbnails default to 48px and are
 generated from the normal thumbnail for both photos and videos, without decoding the original
-again. `thumbnail_places` preserves the original aspect ratio with a default 400px maximum edge.
+again. Place covers reuse normal thumbnails; WebGUI and Android crop them to 3:2 at display time.
 
 ## Key Points
 

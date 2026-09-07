@@ -40,15 +40,17 @@ export default function Login() {
       <LoginBrand />
       <div className="flex-1 flex items-center justify-center bg-background p-8 lg:p-16">
         <div className="w-full max-w-sm space-y-10 animate-fade-in">
-          <LoginForm
-            username={username}
-            password={password}
-            error={error}
-            isLoading={isLoading}
-            onUsernameChange={setUsername}
-            onPasswordChange={setPassword}
-            onSubmit={handleSubmit}
-          />
+          {!showChangePassword && (
+            <LoginForm
+              username={username}
+              password={password}
+              error={error}
+              isLoading={isLoading}
+              onUsernameChange={setUsername}
+              onPasswordChange={setPassword}
+              onSubmit={handleSubmit}
+            />
+          )}
           <div className="pt-8 text-center">
             <p className="text-xs font-medium text-muted-foreground/60 uppercase tracking-widest">
               v{MOMENTO_VERSION}
