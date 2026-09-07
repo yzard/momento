@@ -1274,7 +1274,10 @@ pub mod ai_jobs {
     "#;
     pub const SELECT_LATEST_FAILURES: &str = r#"
     WITH ranked_jobs AS (
-        SELECT task
+        SELECT id
+             , media_id
+             , attempts
+             , task
              , status
              , last_error
              , updated_at
@@ -1284,14 +1287,20 @@ pub mod ai_jobs {
                ) AS recency
           FROM llm_jobs
     )
-    SELECT task
-         , last_error
-      FROM ranked_jobs
+    SELECT r.task
+         , r.last_error
+         , r.id
+         , r.media_id
+         , r.attempts
+         , m.original_filename
+         , m.file_path
+      FROM ranked_jobs AS r
+      JOIN media AS m ON m.id = r.media_id
      WHERE recency = 1
        AND status = 'failed'
        AND last_error IS NOT NULL
-     ORDER BY task
-            , updated_at DESC
+     ORDER BY r.task
+            , r.updated_at DESC
     "#;
     pub const COUNT_ACTIVE_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_jobs WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
     pub const COUNT_PENDING_RESULT_CLEANUP_FOR_TASK: &str = r#"

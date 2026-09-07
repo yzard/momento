@@ -93,8 +93,11 @@ pub fn encode_failed_result(
     builder.push(
         ResultRecordKind::Failure,
         u32::MAX,
-        encode_failure(&FailurePayload { error })?,
+        encode_failure(&FailurePayload {
+            error: error.clone(),
+        })?,
     )?;
+    tracing::error!(job_id, media_id, task, attempt, inputs = ?inputs, error, "AI inference failed");
     builder.finish(ResultIdentity {
         job_id,
         media_id,

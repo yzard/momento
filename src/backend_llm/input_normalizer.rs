@@ -33,6 +33,24 @@ pub fn requires_raw_normalization(mime_type: &str) -> bool {
     )
 }
 
+/// Recognize non-RAW encodings without trusting a camera filename or MIME label.
+/// TIFF is deliberately absent: many genuine RAW formats use a TIFF container.
+pub fn encoded_image_mime_type(header: &[u8]) -> Option<&'static str> {
+    if header.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if header.starts_with(b"RIFF") && header.get(8..12) == Some(b"WEBP") {
+        return Some("image/webp");
+    }
+    None
+}
+
 pub const RAW_NORMALIZATION_ARGUMENTS: [&str; 9] =
     ["-dngsdk", "-w", "+M", "-o", "1", "-q", "3", "-T", "-Z"];
 

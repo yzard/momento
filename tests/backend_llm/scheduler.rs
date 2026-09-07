@@ -579,14 +579,20 @@ async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_re
         )
         .expect("scheduler"),
     );
-    let input_bytes = [b"first".to_vec(), b"second".to_vec()];
+    // A JPEG mislabeled as DNG must reach the runtime unchanged, without LibRaw.
+    let input_bytes = [b"\xff\xd8\xff\xe1first".to_vec(), b"second".to_vec()];
     let descriptors = input_bytes
         .iter()
         .enumerate()
         .map(|(sequence, bytes)| QueueInputDescriptor {
             sequence: sequence as u32,
-            filename: format!("document-{sequence}.jpg"),
-            mime_type: "image/jpeg".to_string(),
+            filename: format!("document-{sequence}.dng"),
+            mime_type: if sequence == 0 {
+                "image/x-adobe-dng"
+            } else {
+                "image/jpeg"
+            }
+            .to_string(),
             byte_size: bytes.len() as u64,
             content_hash: format!("{:x}", Sha256::digest(bytes)),
             input_kind: "image".to_string(),

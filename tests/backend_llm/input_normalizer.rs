@@ -3,6 +3,30 @@ use std::path::Path;
 use llm_service::input_normalizer::{requires_raw_normalization, runtime_input_path};
 
 #[test]
+fn encoded_headers_override_mislabeled_raw_but_not_real_raw_containers() {
+    use llm_service::input_normalizer::encoded_image_mime_type;
+    for (bytes, mime) in [
+        (&b"\xff\xd8\xff\xe1"[..], "image/jpeg"),
+        (&b"\x89PNG\r\n\x1a\n"[..], "image/png"),
+        (&b"GIF89a"[..], "image/gif"),
+        (&b"RIFF1234WEBP"[..], "image/webp"),
+    ] {
+        let detected = encoded_image_mime_type(bytes).unwrap();
+        assert_eq!(detected, mime);
+        assert!(!requires_raw_normalization(detected));
+    }
+    for bytes in [
+        &b"II\x2a\x00"[..],
+        &b"MM\x00\x2a"[..],
+        &b""[..],
+        &b"\xff\xd8"[..],
+        &b"RIFF1234WAVE"[..],
+    ] {
+        assert_eq!(encoded_image_mime_type(bytes), None);
+    }
+}
+
+#[test]
 fn raw_normalization_enables_dng_sdk_without_downsampling() {
     let arguments = llm_service::input_normalizer::RAW_NORMALIZATION_ARGUMENTS;
     assert_eq!(

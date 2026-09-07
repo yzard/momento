@@ -1348,6 +1348,51 @@ async fn finish_result_receipt(
         .file_session
         .take()
         .ok_or_else(|| "result Journal session is unavailable".to_string())?;
+    // Acquire before publication so deferral only discards an uncommitted temp
+    // file. Bound this wait: the socket also owns credits and heartbeats. Never
+    // cancel the subsequent file publication or SQLite commit on a timer.
+    let admission = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        scheduler.acquire_durable(
+            DurableSourceId::LlmResult,
+            SchedulerAdmissionKind::ExistingClaimCompletion,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        "LLM result receipt admission timed out; scheduler capacity unavailable".to_string()
+    })
+    .and_then(|admission| admission);
+    let _admission = match admission {
+        Ok(admission) => admission,
+        Err(error) => {
+            if let Err(abort_error) = file_io.abort_storage_session_durable(file_session).await {
+                tracing::warn!(job_id, error = %abort_error, "result receive temporary cleanup deferred to Journal recovery");
+            }
+            handoff_result_journal_rollback(
+                &session.journal_group_id,
+                1,
+                sqlite,
+                file_io,
+                scheduler,
+            )
+            .await;
+            tracing::warn!(
+                job_id,
+                media_id = session.manifest.media_id,
+                error,
+                "deferring LLM result receipt before publication"
+            );
+            return queue_result_control(
+                pending_controls,
+                ClientControlMessage::ResultReceiptDeferred {
+                    job_id: job_id.to_string(),
+                    attempt,
+                    retry_after_ms: 1_000,
+                },
+            );
+        }
+    };
     if let Err(error) = file_io.commit_storage_session_durable(file_session).await {
         handoff_result_journal_rollback(&session.journal_group_id, 1, sqlite, file_io, scheduler)
             .await;
@@ -1394,25 +1439,16 @@ async fn finish_result_receipt(
         return Err("result Journal publication did not complete".to_string());
     }
     drop(collected);
-    let received = match scheduler
-        .acquire_durable(
-            DurableSourceId::LlmResult,
-            SchedulerAdmissionKind::ExistingClaimCompletion,
-        )
+    let received = sqlite
+        .commit_llm_result_receipt_durable(CommitLlmResultReceipt {
+            job_id: job_id.to_string(),
+            attempt,
+            expected_job_version: session.job_version,
+            journal_group_id: session.journal_group_id.clone(),
+            expected_group_version: checkpoint.version,
+        })
         .await
-    {
-        Ok(_admission) => sqlite
-            .commit_llm_result_receipt_durable(CommitLlmResultReceipt {
-                job_id: job_id.to_string(),
-                attempt,
-                expected_job_version: session.job_version,
-                journal_group_id: session.journal_group_id.clone(),
-                expected_group_version: checkpoint.version,
-            })
-            .await
-            .map_err(|error| error.to_string()),
-        Err(error) => Err(error),
-    };
+        .map_err(|error| error.to_string());
     let receipt = match received {
         Ok(LlmResultReceiptOutcome::Received) => {
             scheduler.wake_llm_results();

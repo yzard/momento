@@ -543,7 +543,16 @@ pub(crate) fn status_on_connection(
     for row in transaction
         .prepare(queries::ai_jobs::SELECT_LATEST_FAILURES)?
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            let task: String = row.get(0)?;
+            let error: String = row.get(1)?;
+            let job_id: String = row.get(2)?;
+            let media_id: i64 = row.get(3)?;
+            let attempt: i64 = row.get(4)?;
+            let filename: String = row.get(5)?;
+            let original_path = config.server.data_dir.join("originals").join(row.get::<_, String>(6)?);
+            Ok((task.clone(), format!(
+                "task={task} job_id={job_id} media_id={media_id} attempt={attempt} filename={filename:?} original_path={original_path:?}: {error}"
+            )))
         })?
     {
         let (task, error) = row?;
@@ -584,9 +593,18 @@ pub(crate) fn status_on_connection(
     let face_groups = transaction.query_row(queries::faces::COUNT_GROUPS, [], |row| row.get(0))?;
     transaction.commit()?;
 
+    let mut deduplicate = deduplicate_status(run, ensembled_media, deduplicate_jobs);
+    let mut deduplicate_errors = deduplicate.error.take().into_iter().collect::<Vec<_>>();
+    deduplicate_errors.extend(
+        errors_by_task
+            .remove(AiFeature::Deduplicate.inference_task())
+            .unwrap_or_default(),
+    );
+    deduplicate.error = (!deduplicate_errors.is_empty()).then(|| deduplicate_errors.join("\n"));
+
     Ok(AiStatusResponse {
         tasks,
-        deduplicate: deduplicate_status(run, ensembled_media, deduplicate_jobs),
+        deduplicate,
         face_groups,
         schedules,
     })

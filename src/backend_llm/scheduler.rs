@@ -967,6 +967,7 @@ impl Scheduler {
                 .await
                 .map_err(|error| LoadInputsError::InvalidQueue(error.to_string()))?;
             let mut hasher = Sha256::new();
+            let mut header = Vec::with_capacity(12);
             let mut buffer = [0_u8; 64 * 1024];
             loop {
                 let read = file
@@ -976,6 +977,7 @@ impl Scheduler {
                 if read == 0 {
                     break;
                 }
+                header.extend_from_slice(&buffer[..read.min(12 - header.len())]);
                 hasher.update(&buffer[..read]);
             }
             if format!("{:x}", hasher.finalize()) != descriptor.content_hash {
@@ -983,8 +985,22 @@ impl Scheduler {
                     "queued input hash does not match manifest".to_string(),
                 ));
             }
+            let detected_mime = crate::input_normalizer::encoded_image_mime_type(&header);
+            let input_mime = detected_mime.unwrap_or(&descriptor.mime_type);
+            if input_mime != descriptor.mime_type {
+                warn!(
+                    job_id = manifest.job_id,
+                    media_id = manifest.media_id,
+                    task = manifest.task,
+                    sequence = descriptor.sequence,
+                    filename = descriptor.filename,
+                    declared_mime = descriptor.mime_type,
+                    detected_mime = input_mime,
+                    "AI input MIME differs from verified file header; using detected encoding"
+                );
+            }
             let (runtime_path, runtime_byte_size, runtime_content_hash, runtime_mime_type) =
-                if requires_raw_normalization(&descriptor.mime_type) {
+                if requires_raw_normalization(input_mime) {
                     let normalized = self
                         .prepare_normalized_input(job_path, descriptor)
                         .await
@@ -1000,7 +1016,7 @@ impl Scheduler {
                         path,
                         descriptor.byte_size,
                         descriptor.content_hash.clone(),
-                        descriptor.mime_type.clone(),
+                        input_mime.to_string(),
                     )
                 };
             inputs.push(InferenceInput {
@@ -1042,6 +1058,13 @@ impl Scheduler {
         {
             Ok(normalized) => normalized,
             Err(error) => {
+                let error = format!(
+                    "input_sequence={} filename={:?} mime_type={} content_hash={}: {error}",
+                    descriptor.sequence,
+                    descriptor.filename,
+                    descriptor.mime_type,
+                    descriptor.content_hash
+                );
                 warn!(
                     job_id,
                     sequence = descriptor.sequence,

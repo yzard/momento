@@ -40,6 +40,96 @@ use crate::test_utils::{create_test_db, create_test_media};
 const CLIENT_ID: &str = "momento-test";
 const API_KEY: &str = "test-key";
 
+#[tokio::test]
+async fn saturated_scheduler_defers_receipt_without_freezing_the_socket() {
+    use momento_api::runtime::{DurableSourceId, SchedulerAdmissionKind};
+    let pool = create_test_db();
+    let (executors, _directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let media_id = create_test_media(&pool, "receipt-capacity.jpg");
+    let job_id = "aa111111111111111111111111111111";
+    pool.get().unwrap().execute("INSERT INTO llm_jobs (id, media_id, task, status, attempts) VALUES (?, ?, 'ocr', 'submitted', 1)", rusqlite::params![job_id, media_id]).unwrap();
+    pool.get().unwrap().execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 0, 'image', 'originals', 'test.jpg', 'test.jpg', 'image/jpeg', 1, ?)", rusqlite::params![job_id, "0".repeat(64)]).unwrap();
+    let mut held = Vec::new();
+    for _ in 0..executors.scheduler.durable_capacity() {
+        held.push(
+            executors
+                .scheduler
+                .acquire_durable(
+                    DurableSourceId::Maintenance,
+                    SchedulerAdmissionKind::NewClaim,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let recovery_executors = executors.clone();
+    let (address, server) = start_server(true, move |mut socket| async move {
+        let (manifest, records) = completed_ocr_result(job_id, media_id, "text");
+        send_streamed_result(&mut socket, manifest, records).await;
+        assert!(matches!(
+            receive_client_control(&mut socket).await,
+            ClientControlMessage::ResultReceiptDeferred { .. }
+        ));
+        socket.send(Message::Ping(vec![1, 2, 3])).await.unwrap();
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Pong(bytes) => {
+                    assert_eq!(bytes, vec![1, 2, 3]);
+                    break;
+                }
+                Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.unwrap(),
+                other => panic!("unexpected socket response {other:?}"),
+            }
+        }
+        drop(held);
+        momento_api::io::recovery::recover_generic_file_operations(&recovery_executors)
+            .await
+            .unwrap();
+        let (manifest, records) = completed_ocr_result(job_id, media_id, "text");
+        send_streamed_result(&mut socket, manifest, records).await;
+        assert!(matches!(
+            receive_client_control(&mut socket).await,
+            ClientControlMessage::ResultReceived { .. }
+        ));
+    })
+    .await;
+    let _connection = LlmConnection::connect(
+        &address,
+        CLIENT_ID,
+        API_KEY,
+        executors.sqlite.clone(),
+        executors.file_io.clone(),
+        executors.scheduler.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+    let state: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM llm_result_receipts WHERE job_id = ?",
+            [job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "received");
+    let status: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM llm_jobs WHERE id = ?",
+            [job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "submitted");
+}
+
 type ServerSocket = WebSocketStream<TcpStream>;
 
 struct TestHandshake {

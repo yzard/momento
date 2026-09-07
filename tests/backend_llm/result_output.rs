@@ -126,6 +126,38 @@ fn failed_output_is_one_durable_failure_record() {
 }
 
 #[test]
+fn every_ai_failure_preserves_job_media_attempt_and_original_error() {
+    let inputs = vec![input(0), input(3)];
+    for task in [
+        "ocr",
+        "image_tagging",
+        "image_clustering",
+        "image_aesthetics",
+        "face_detection",
+        "screenshot_detection",
+        "document_detection",
+    ] {
+        let output = encode_failed_result(
+            "abcdefabcdefabcdefabcdefabcdefab",
+            136,
+            task,
+            2,
+            &inputs,
+            "RAW normalization: unsupported input".to_string(),
+        )
+        .unwrap();
+        assert_eq!(output.manifest.media_id, 136);
+        assert_eq!(output.manifest.task, task);
+        assert_eq!(output.manifest.attempt, 2);
+        assert_eq!(output.manifest.job_id, "abcdefabcdefabcdefabcdefabcdefab");
+        assert_eq!(
+            collect_result(&output, &inputs).failure.as_deref(),
+            Some("RAW normalization: unsupported input")
+        );
+    }
+}
+
+#[test]
 fn clustering_output_preserves_exact_float32_and_hash_fields() {
     let inputs = vec![input(3)];
     let embedding = (0..IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS)

@@ -1238,7 +1238,13 @@ async fn aggregate_status_reports_only_each_media_tasks_latest_job() {
     let face_status = task_status(&body, "face_detection");
     assert_eq!(face_status["jobs"]["completed"], 1);
     assert_eq!(face_status["jobs"]["failed"], 1);
-    assert_eq!(face_status["errors"], json!(["image could not be decoded"]));
+    let errors = face_status["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1);
+    let error = errors[0].as_str().unwrap();
+    assert!(error.contains("job_id=face-current-failure"));
+    assert!(error.contains(&format!("media_id={failed_media_id}")));
+    assert!(error.contains("failed-face.jpg"));
+    assert!(error.ends_with("image could not be decoded"));
 }
 
 #[tokio::test]

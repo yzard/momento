@@ -255,7 +255,7 @@ async fn submit_cycle(
     loop {
         if first_error.is_none() && in_flight.len() < maximum_in_flight {
             let capacity = maximum_in_flight - in_flight.len();
-            let jobs = {
+            let refill = async {
                 let _worker_permit = scheduler
                     .acquire_durable(
                         DurableSourceId::LlmSubmission,
@@ -266,7 +266,17 @@ async fn submit_cycle(
                     .sqlite
                     .claim_llm_submission_jobs_durable(capacity as u16)
                     .await
-                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())
+            };
+            // Refill may wait behind one of these submissions in the global
+            // admission FIFO. Keep polling it so that waiter can release its turn.
+            let jobs = refill_while_draining(refill, &mut in_flight, &mut first_error).await;
+            let jobs = match jobs {
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    Vec::new()
+                }
             };
             for job in jobs {
                 in_flight.push(submit_claimed_job(executors, connection, scheduler, job));
@@ -280,6 +290,32 @@ async fn submit_cycle(
         }
     }
 }
+
+async fn refill_while_draining<Refill, Submission, Jobs>(
+    refill: Refill,
+    in_flight: &mut FuturesUnordered<Submission>,
+    first_error: &mut Option<String>,
+) -> Result<Jobs, String>
+where
+    Refill: std::future::Future<Output = Result<Jobs, String>>,
+    Submission: std::future::Future<Output = Result<(), String>>,
+{
+    tokio::pin!(refill);
+    loop {
+        tokio::select! {
+            jobs = &mut refill => return jobs,
+            Some(result) = in_flight.next(), if !in_flight.is_empty() => {
+                if let Err(error) = result {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/processor/ai/submission.rs"]
+mod submission_tests;
 
 async fn submit_claimed_job(
     executors: &ExecutorHandles,

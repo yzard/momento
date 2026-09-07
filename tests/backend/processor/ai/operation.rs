@@ -3,6 +3,59 @@ use momento_api::processor::ai::operation::AiFeature;
 
 use crate::test_utils::{create_test_db, create_test_media};
 
+#[tokio::test]
+async fn every_ai_failure_identifies_the_job_and_original_media() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "trace-original.dng");
+    pool.get().unwrap().execute("INSERT INTO media_similarity_runs (id, trigger, status) VALUES (1, 'manual', 'completed')", []).unwrap();
+    pool.get()
+        .unwrap()
+        .execute(
+            "INSERT INTO face_grouping_runs (id, status) VALUES (1, 'completed')",
+            [],
+        )
+        .unwrap();
+    for (index, task) in [
+        "ocr",
+        "image_tagging",
+        "image_clustering",
+        "face_detection",
+        "image_aesthetics",
+        "screenshot_detection",
+        "document_detection",
+    ]
+    .iter()
+    .enumerate()
+    {
+        pool.get().unwrap().execute(
+            "INSERT INTO llm_jobs (id, media_id, task, status, attempts, last_error, deduplicate_run_id, face_grouping_run_id) VALUES (?1, ?2, ?3, 'failed', 2, 'decoder unsupported', CASE WHEN ?3 = 'image_clustering' THEN 1 END, CASE WHEN ?3 = 'face_detection' THEN 1 END)",
+            rusqlite::params![format!("{index:032x}"), media_id, task],
+        ).unwrap();
+    }
+    let status = crate::test_utils::test_executor_handles(pool)
+        .sqlite
+        .load_ai_status_durable(momento_api::config::Config::default(), Vec::new())
+        .await
+        .unwrap();
+    let json = serde_json::to_value(status).unwrap();
+    let text = json.to_string();
+    for task in [
+        "ocr",
+        "image_tagging",
+        "image_clustering",
+        "face_detection",
+        "image_aesthetics",
+        "screenshot_detection",
+        "document_detection",
+    ] {
+        assert!(text.contains(&format!("task={task} job_id=")), "{text}");
+    }
+    assert!(text.contains(&format!("media_id={media_id} attempt=2")));
+    assert!(text.contains("trace-original.dng"));
+    assert!(text.contains("original_path="));
+    assert!(text.contains("decoder unsupported"));
+}
+
 fn prepare_input(pool: &DbPool, media_id: i64, task: &str) {
     let connection = pool.get().expect("database connection");
     connection
