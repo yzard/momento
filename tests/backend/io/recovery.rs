@@ -5,6 +5,75 @@ use momento_api::io::recovery::{
 use sha2::Digest;
 
 #[tokio::test]
+async fn interrupted_import_rolls_back_only_owned_partial_files() {
+    for (owned, temporary, role, can_rollback) in [
+        (
+            true,
+            ".importing/.importing-interrupted",
+            "temporary_original",
+            true,
+        ),
+        (
+            true,
+            ".importing/sidecar-interrupted",
+            "temporary_sidecar",
+            true,
+        ),
+        (
+            false,
+            ".importing/.importing-interrupted",
+            "temporary_original",
+            false,
+        ),
+        (true, "unrelated-file", "temporary_original", false),
+    ] {
+        let pool = crate::test_utils::create_test_db();
+        let (executors, directory) =
+            crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+        std::fs::create_dir_all(directory.join("originals/.importing")).unwrap();
+        std::fs::write(directory.join("originals").join(temporary), b"partial").unwrap();
+        std::fs::write(directory.join("imports/source.mp4"), b"complete original").unwrap();
+        std::fs::write(
+            directory.join("originals/canonical.mp4"),
+            b"existing canonical",
+        )
+        .unwrap();
+        let connection = pool.get().unwrap();
+        connection.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count) VALUES ('partial-import', 'import_media_publication', 'import', '1', 'prepared', 1)", []).unwrap();
+        connection.execute("INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path, expected_size, expected_sha256) VALUES ('partial-import', 0, 'publish', 'originals', ?, 'canonical.mp4', 1000, zeroblob(32))", [temporary]).unwrap();
+        if owned {
+            connection.execute("INSERT INTO file_operation_path_claims (group_id, sequence, storage_root, relative_path, path_key, mode, scope, role) VALUES ('partial-import', 0, 'originals', ?, ?, 'write', 'exact', ?)", rusqlite::params![temporary, temporary, role]).unwrap();
+        }
+        drop(connection);
+        momento_api::io::recovery::rollback_prepared_file_operations_after_restart(&executors)
+            .await
+            .unwrap();
+        let recovery = recover_startup_critical_file_operations(&executors).await;
+        if can_rollback {
+            assert_eq!(recovery.unwrap(), 1);
+            assert!(!directory.join("originals").join(temporary).exists());
+            assert_eq!(
+                recover_startup_critical_file_operations(&executors)
+                    .await
+                    .unwrap(),
+                0
+            );
+        } else {
+            assert!(recovery.is_err());
+            assert!(directory.join("originals").join(temporary).exists());
+        }
+        assert_eq!(
+            std::fs::read(directory.join("imports/source.mp4")).unwrap(),
+            b"complete original"
+        );
+        assert_eq!(
+            std::fs::read(directory.join("originals/canonical.mp4")).unwrap(),
+            b"existing canonical"
+        );
+    }
+}
+
+#[tokio::test]
 async fn busy_journal_head_is_deferred_without_blocking_following_cleanup() {
     let pool = crate::test_utils::create_test_db();
     let (executors, directory) =

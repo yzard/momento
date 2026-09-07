@@ -453,16 +453,13 @@ async fn interrupted_import_recovery_rejects_an_unjournaled_original() {
             Ok((row.get(0)?, row.get(1)?))
         })
         .expect("import job");
-    assert_eq!(state, "failed");
+    assert_eq!(state, "importing");
     assert_eq!(metadata_count, 0);
     assert_eq!(recovered_filename, ".importing");
     assert_eq!(access_count, 0);
     assert!(original_path.is_file());
-    assert_eq!(import_job.0, "failed");
-    assert_eq!(
-        import_job.1.as_deref(),
-        Some("import interrupted by service restart")
-    );
+    assert_eq!(import_job.0, "interrupted");
+    assert!(import_job.1.is_none());
     drop(connection);
     let import_status = executors
         .sqlite
@@ -470,10 +467,15 @@ async fn interrupted_import_recovery_rejects_an_unjournaled_original() {
         .await
         .expect("import status")
         .job;
-    assert_eq!(
-        import_status.errors,
-        vec!["import interrupted by service restart"]
-    );
+    assert!(import_status.errors.is_empty());
+    assert!(matches!(
+        executors
+            .sqlite
+            .create_import_job_request(ImportSource::Local)
+            .await
+            .unwrap(),
+        momento_api::processor::import::CreateImportJobOutcome::Created(_)
+    ));
 }
 
 #[tokio::test]

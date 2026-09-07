@@ -321,6 +321,24 @@ pub mod file_operations {
     pub const COMPLETE_EMPTY_ROLLBACK: &str = "UPDATE file_operation_groups SET state = 'rolled_back', terminal_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND state = 'rollback_pending'";
     pub const VERIFY_ROLLBACK: &str = "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'rollback_pending'";
     pub const SELECT_PENDING_ROLLBACK_ENTRIES: &str = r#"
+        WITH rollback_entries AS (
+            SELECT e.*, g.kind,
+                   (g.kind = 'import_media_publication' AND g.owner_kind = 'import'
+                    AND e.storage_root = 'originals'
+                    AND (e.temporary_path GLOB '.importing/.importing-*'
+                         OR e.temporary_path GLOB '.importing/sidecar-*')
+                    AND EXISTS (
+                        SELECT 1 FROM file_operation_path_claims AS claim
+                         WHERE claim.group_id = e.group_id
+                           AND claim.storage_root = e.storage_root
+                           AND claim.relative_path = e.temporary_path
+                           AND claim.mode = 'write' AND claim.scope = 'exact'
+                           AND claim.role IN ('temporary_original', 'temporary_sidecar')
+                    )) AS incomplete_import
+              FROM file_operation_entries AS e
+              JOIN file_operation_groups AS g ON g.id = e.group_id
+             WHERE e.group_id = ? AND e.action = 'publish' AND e.state = 'prepared'
+        )
         SELECT e.sequence
              , e.action
              , e.storage_root
@@ -328,12 +346,10 @@ pub mod file_operations {
              , e.temporary_path
              , e.destination_path
              , e.tombstone_path
-             , CASE WHEN g.kind = 'llm_result_receive' THEN NULL ELSE e.expected_size END
-             , CASE WHEN g.kind = 'llm_result_receive' THEN NULL ELSE e.expected_sha256 END
-             , CASE WHEN g.kind = 'llm_result_receive' THEN NULL ELSE e.expected_version END
-          FROM file_operation_entries AS e
-          JOIN file_operation_groups AS g ON g.id = e.group_id
-         WHERE e.group_id = ? AND e.action = 'publish' AND e.state = 'prepared'
+             , CASE WHEN e.kind = 'llm_result_receive' OR e.incomplete_import THEN NULL ELSE e.expected_size END
+             , CASE WHEN e.kind = 'llm_result_receive' OR e.incomplete_import THEN NULL ELSE e.expected_sha256 END
+             , CASE WHEN e.kind = 'llm_result_receive' THEN NULL ELSE e.expected_version END
+          FROM rollback_entries AS e
       ORDER BY e.sequence DESC LIMIT ?
     "#;
     pub const ROLLBACK_ENTRY: &str = "UPDATE file_operation_entries SET state = 'rolled_back', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND action = 'publish' AND state = 'prepared'";
@@ -449,8 +465,10 @@ pub mod import {
 
     pub const SELECT_INTERRUPTED_PAGE: &str = r#"
     SELECT id
+         , user_id, import_source_root, import_source_path, import_source
+         , import_cleanup_source, import_cleanup_sidecar
       FROM media
-     WHERE import_state = 'importing'
+     WHERE import_state IN ('importing', 'recovering')
        AND id > ?
      ORDER BY id
      LIMIT ?
@@ -475,7 +493,8 @@ pub mod import {
       , created_at
       , import_state
       , import_source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?, 'unixepoch'), datetime('now')), 'importing', ?)
+      , import_source_root, import_source_path, import_cleanup_source, import_cleanup_sidecar
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?, 'unixepoch'), datetime('now')), 'importing', ?, ?, ?, ?, ?)
     ON CONFLICT DO NOTHING
     "#;
 
@@ -487,6 +506,11 @@ pub mod import {
      WHERE content_hash = ?
      LIMIT 1
     "#;
+
+    pub const SELECT_RECOVERY_STATE: &str = "SELECT import_state FROM media WHERE id = ?";
+    pub const REQUEUE_INTERRUPTED_MEDIA: &str = "UPDATE media SET import_state = 'recovering', content_hash = NULL WHERE id = ? AND import_state IN ('importing', 'recovering') AND import_source_root IS NOT NULL AND import_source_path IS NOT NULL AND NOT EXISTS (SELECT 1 FROM import_content_hash_claims WHERE content_hash = media.content_hash) AND NOT EXISTS (SELECT 1 FROM file_operation_groups WHERE owner_kind = 'import' AND owner_id = CAST(media.id AS TEXT) AND state NOT IN ('rolled_back', 'cleaned', 'completed'))";
+    pub const RETIRE_RECOVERED_DUPLICATE: &str = "DELETE FROM media WHERE id = ?1 AND id != ?2 AND import_state = 'recovering' AND EXISTS (SELECT 1 FROM media AS completed WHERE completed.id = ?2 AND completed.import_state = 'imported')";
+    pub const REUSE_RECOVERING_MEDIA: &str = "UPDATE media SET filename = ?1, file_path = ?2, file_size = ?3, content_hash = ?4, import_state = 'importing', import_error = NULL WHERE id = (SELECT id FROM media WHERE import_state = 'recovering' AND user_id = ?5 AND import_source_root = ?6 AND import_source_path = ?7 ORDER BY id LIMIT 1) RETURNING id";
 
     pub const UPDATE_EARLIER_CREATED_AT: &str = r#"
     UPDATE media
@@ -512,32 +536,11 @@ pub mod import {
          , import_error = ?
          , content_hash = NULL
      WHERE id = ?
-       AND import_state = 'importing'
-    "#;
-
-    pub const SELECT_INTERRUPTED: &str = r#"
-    SELECT id
-         , file_path
-         , original_filename
-         , user_id
-      FROM media
-     WHERE import_state = 'importing'
-     ORDER BY id
-    "#;
-    pub const FAIL_INTERRUPTED_JOBS: &str = r#"
-    UPDATE import_jobs
-       SET status = 'failed'
-         , completed_at = datetime('now')
-         , last_error = 'import interrupted by service restart'
-     WHERE status = 'running'
-    "#;
-    pub const RECORD_INTERRUPTED_JOB_ERRORS: &str = r#"
-    INSERT INTO import_job_errors (import_job_id, error)
-    SELECT id, 'import interrupted by service restart'
-      FROM import_jobs
-     WHERE status = 'running'
+       AND import_state IN ('importing', 'recovering')
     "#;
     pub const INSERT_JOB: &str = "INSERT INTO import_jobs (source, status) VALUES (?, 'running')";
+    pub const INTERRUPT_RESTARTED_JOBS: &str =
+        "UPDATE import_jobs SET status = 'interrupted' WHERE status = 'running'";
     pub const SELECT_LATEST_JOB_FOR_SOURCE: &str = "SELECT id, status, total_files, processed_files, successful_imports, failed_imports, started_at, completed_at, last_error FROM import_jobs WHERE source = ? ORDER BY id DESC LIMIT 1";
     pub const SELECT_JOB_ERRORS: &str =
         "SELECT error FROM import_job_errors WHERE import_job_id = ? ORDER BY id DESC LIMIT 100";

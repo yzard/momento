@@ -16,6 +16,124 @@ use sha2::{Digest, Sha256};
 
 use crate::test_utils::{create_test_db, create_test_user, lock_webdav_test, QOI_FIXTURE};
 
+#[tokio::test]
+async fn restart_recopies_persisted_source_and_reuses_media_id() {
+    for (root, import_source) in [
+        (StorageRootId::Imports, "local"),
+        (StorageRootId::WebDav, "webdav"),
+        (StorageRootId::Backups, "mobile_backup"),
+    ] {
+        assert_restart_recopies_source(root, import_source).await;
+    }
+}
+
+async fn assert_restart_recopies_source(root: StorageRootId, import_source: &str) {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "recopy", "recopy@example.com");
+    let (executors, directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let (_, source) = staged_file(&directory, root, "nested/photo.jpg");
+    let bytes = b"complete source bytes";
+    let connection = pool.get().unwrap();
+    connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source, import_source_root, import_source_path) VALUES (?, '.importing', 'photo.jpg', '.importing/interrupted', 'image', 'importing', ?, ?, 'nested/photo.jpg')", rusqlite::params![user_id, import_source, root.directory_name()]).unwrap();
+    let media_id = connection.last_insert_rowid();
+    drop(connection);
+    momento_api::processor::import::recover_interrupted_imports(&executors)
+        .await
+        .unwrap();
+    // A temporarily unavailable mount/source is not a terminal business failure.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let state: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT import_state FROM media WHERE id=?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "recovering");
+    std::fs::write(&source, bytes).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state: String = pool
+                .get()
+                .unwrap()
+                .query_row(
+                    "SELECT import_state FROM media WHERE id=?",
+                    [media_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if state == "imported" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("automatic source replay");
+    let path: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT file_path FROM media WHERE id=?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(directory.join("originals").join(path)).unwrap(),
+        bytes
+    );
+    assert_eq!(std::fs::read(source).unwrap(), bytes);
+    let count: i64 = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM media_metadata_jobs WHERE media_id=?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn recovery_marks_explicit_unsupported_media_failure() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "rejected", "rejected@example.com");
+    let (executors, _directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let connection = pool.get().unwrap();
+    connection.execute("INSERT INTO media (user_id, filename, original_filename, file_path, media_type, import_state, import_source_root, import_source_path) VALUES (?, 'source.txt', 'source.txt', '.importing/interrupted', 'image', 'importing', 'imports', 'source.txt')", [user_id]).unwrap();
+    let media_id = connection.last_insert_rowid();
+    drop(connection);
+    momento_api::processor::import::recover_interrupted_imports(&executors)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (state, error): (String, Option<String>) = pool
+                .get()
+                .unwrap()
+                .query_row(
+                    "SELECT import_state, import_error FROM media WHERE id=?",
+                    [media_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if state == "failed" {
+                assert!(error.unwrap().contains("unsupported media file"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("business rejection is terminal");
+}
+
 fn staged_file(
     data_directory: &std::path::Path,
     storage_root: StorageRootId,
@@ -138,7 +256,8 @@ async fn finish_deferred_import(
             momento_api::processor::import::ImportStagedFileOutcome::Completed(media_id) => {
                 return media_id;
             }
-            momento_api::processor::import::ImportStagedFileOutcome::SourceCleanupBusy => {
+            momento_api::processor::import::ImportStagedFileOutcome::SourceCleanupBusy
+            | momento_api::processor::import::ImportStagedFileOutcome::RecoveryPending(_) => {
                 panic!("unexpected source cleanup conflict in fixture")
             }
             momento_api::processor::import::ImportStagedFileOutcome::Deferred(prepared) => {
@@ -166,6 +285,7 @@ async fn qoi_import_uses_the_canonical_image_mime_type() {
         &format!("qoi-{}/lossless.QOI", uuid::Uuid::new_v4()),
     );
     std::fs::write(&source_path, QOI_FIXTURE).expect("QOI source");
+    let expected_source_path = staged_source.path.relative_path().to_string();
     let admission = executors
         .scheduler
         .acquire_durable(
@@ -203,6 +323,14 @@ async fn qoi_import_uses_the_canonical_image_mime_type() {
     assert_eq!(media_type, "image");
     assert_eq!(mime_type, "image/qoi");
     assert_eq!(metadata_status, "queued");
+    let source_descriptor: (String, String, bool, bool) = pool.get().unwrap().query_row(
+        "SELECT import_source_root, import_source_path, import_cleanup_source, import_cleanup_sidecar FROM media WHERE id=?",
+        [media_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(
+        source_descriptor,
+        ("imports".to_string(), expected_source_path, false, true)
+    );
 }
 
 #[tokio::test]

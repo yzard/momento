@@ -3,6 +3,79 @@ use momento_api::database::queries;
 use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
 
 #[test]
+fn import_recovery_preserves_active_owners_and_terminal_media() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "recover.jpg");
+    let connection = pool.get().unwrap();
+    let hash = "a".repeat(64);
+    connection.execute("UPDATE media SET import_state='importing', import_source_root='imports', import_source_path='nested/recover.jpg', content_hash=? WHERE id=?", rusqlite::params![hash, media_id]).unwrap();
+    let token = uuid::Uuid::new_v4().to_string();
+    connection
+        .execute(
+            queries::import::INSERT_CONTENT_HASH_CLAIM,
+            rusqlite::params![hash, token, "local"],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(queries::import::REQUEUE_INTERRUPTED_MEDIA, [media_id])
+            .unwrap(),
+        0
+    );
+    connection
+        .execute(queries::import::RECOVER_CONTENT_HASH_CLAIMS, [])
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(queries::import::REQUEUE_INTERRUPTED_MEDIA, [media_id])
+            .unwrap(),
+        1
+    );
+    let state: String = connection
+        .query_row(queries::import::SELECT_RECOVERY_STATE, [media_id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "recovering");
+    assert_eq!(
+        connection
+            .execute(
+                queries::import::MARK_FAILED,
+                rusqlite::params!["unsupported source", media_id]
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .execute(queries::import::REQUEUE_INTERRUPTED_MEDIA, [media_id])
+            .unwrap(),
+        0
+    );
+    connection
+        .execute(
+            "UPDATE media SET import_state='imported' WHERE id=?",
+            [media_id],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute(queries::import::REQUEUE_INTERRUPTED_MEDIA, [media_id])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .execute(
+                queries::import::MARK_FAILED,
+                rusqlite::params!["late failure", media_id]
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn thumbnail_query_distinguishes_missing_media_from_missing_metadata() {
     use rusqlite::OptionalExtension;
 

@@ -45,13 +45,14 @@ pub enum ImportStagedFileOutcome {
     Completed(i64),
     Deferred(Box<PreparedStagedImport>),
     SourceCleanupBusy,
+    RecoveryPending(i64),
 }
 
 impl ImportStagedFileOutcome {
     pub fn completed_media_id(self) -> Option<i64> {
         match self {
             Self::Completed(media_id) => Some(media_id),
-            Self::Deferred(_) | Self::SourceCleanupBusy => None,
+            Self::Deferred(_) | Self::SourceCleanupBusy | Self::RecoveryPending(_) => None,
         }
     }
 }
@@ -124,6 +125,8 @@ pub(crate) enum ImportTarget {
 
 #[derive(Debug)]
 pub(crate) struct AllocateImportMedia {
+    pub source: StagedImportFile,
+    pub cleanup: StagedImportCleanup,
     pub user_id: i64,
     pub temporary_filename: String,
     pub original_filename: String,
@@ -242,6 +245,18 @@ pub(crate) fn inspect_import_cleanup_on_connection(
 #[derive(Debug)]
 pub(crate) struct InterruptedImport {
     pub media_id: i64,
+    pub user_id: i64,
+    pub source: Option<StagedImportFile>,
+    pub import_source: ImportSource,
+    pub cleanup: StagedImportCleanup,
+}
+
+#[derive(Debug)]
+pub(crate) enum ImportRecoveryDisposition {
+    Ready,
+    Waiting,
+    Completed,
+    Failed,
 }
 
 #[derive(Debug)]
@@ -305,6 +320,27 @@ pub(crate) fn allocate_import_media_on_connection(
     connection: &rusqlite::Connection,
     request: AllocateImportMedia,
 ) -> rusqlite::Result<ImportTarget> {
+    let recovered = connection
+        .query_row(
+            queries::import::REUSE_RECOVERING_MEDIA,
+            rusqlite::params![
+                request.temporary_filename,
+                request.temporary_relative_path,
+                request.source_size,
+                request.content_hash,
+                request.user_id,
+                request.source.storage_root.as_str(),
+                request.source.path.relative_path()
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(media_id) = recovered {
+        return Ok(ImportTarget::New {
+            media_id,
+            temporary_relative_path: PathBuf::from(request.temporary_relative_path),
+        });
+    }
     let rows = connection.execute(
         queries::import::INSERT_IMPORTING_MEDIA,
         rusqlite::params![
@@ -318,6 +354,10 @@ pub(crate) fn allocate_import_media_on_connection(
             request.content_hash,
             request.source_modified_seconds,
             request.import_source.as_str(),
+            request.source.storage_root.as_str(),
+            request.source.path.relative_path(),
+            request.cleanup.source,
+            request.cleanup.supplemental_metadata,
         ],
     )?;
     if rows == 0 {
@@ -439,16 +479,48 @@ pub(crate) fn recover_interrupted_import_page_on_connection(
     limit: u16,
 ) -> rusqlite::Result<Vec<InterruptedImport>> {
     let transaction = connection.unchecked_transaction()?;
-    transaction.execute(queries::import::RECORD_INTERRUPTED_JOB_ERRORS, [])?;
-    transaction.execute(queries::import::FAIL_INTERRUPTED_JOBS, [])?;
+    if after_media_id == 0 {
+        // The scan itself is not durable; individual allocated media are replayed below.
+        // Do not leave an ownerless running scan blocking future import requests.
+        transaction.execute(queries::import::INTERRUPT_RESTARTED_JOBS, [])?;
+    }
     let imports = transaction
         .prepare(queries::import::SELECT_INTERRUPTED_PAGE)?
         .query_map(rusqlite::params![after_media_id, limit], |row| {
             Ok(InterruptedImport {
                 media_id: row.get(0)?,
+                user_id: row.get(1)?,
+                source: match (
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ) {
+                    (Some(root), Some(path)) => Some(StagedImportFile {
+                        storage_root: StorageRootId::try_from(root.as_str())
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        path: NormalizedStoragePath::parse(&path)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    }),
+                    _ => None,
+                },
+                import_source: match row.get::<_, String>(4)?.as_str() {
+                    "local" => ImportSource::Local,
+                    "webdav" => ImportSource::Webdav,
+                    "mobile_backup" => ImportSource::MobileBackup,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                },
+                cleanup: StagedImportCleanup {
+                    source: row.get(5)?,
+                    supplemental_metadata: row.get(6)?,
+                },
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    for interrupted in &imports {
+        transaction.execute(
+            queries::import::REQUEUE_INTERRUPTED_MEDIA,
+            [interrupted.media_id],
+        )?;
+    }
     transaction.commit()?;
     Ok(imports)
 }
@@ -779,9 +851,16 @@ pub async fn import_staged_file_to_completion(
                 attempt = resume_staged_file_import(*prepared, executors, &admission).await;
             }
             retry @ (Ok(ImportStagedFileOutcome::SourceCleanupBusy)
+            | Ok(ImportStagedFileOutcome::RecoveryPending(_))
             | Err(AppError::DatabaseBusy)) => {
+                let recovery_media_id = match &retry {
+                    Ok(ImportStagedFileOutcome::RecoveryPending(media_id)) => Some(*media_id),
+                    _ => None,
+                };
                 let reason = if matches!(retry, Ok(ImportStagedFileOutcome::SourceCleanupBusy)) {
                     "source cleanup paths are owned by another journal operation"
+                } else if recovery_media_id.is_some() {
+                    "waiting for partial import rollback before copying the source again"
                 } else {
                     "database is busy"
                 };
@@ -799,6 +878,25 @@ pub async fn import_staged_file_to_completion(
                     )
                     .await
                     .map_err(AppError::Unavailable)?;
+                if let Some(media_id) = recovery_media_id {
+                    match retry_import_sqlite_operation("update_import_recovery", || {
+                        executors.sqlite.update_import_recovery(media_id, None)
+                    })
+                    .await?
+                    {
+                        ImportRecoveryDisposition::Ready => {}
+                        ImportRecoveryDisposition::Completed => return Ok(media_id),
+                        ImportRecoveryDisposition::Failed => {
+                            return Err(AppError::BadRequest(
+                                "import was rejected by the business operation".to_string(),
+                            ))
+                        }
+                        ImportRecoveryDisposition::Waiting => {
+                            attempt = Ok(ImportStagedFileOutcome::RecoveryPending(media_id));
+                            continue;
+                        }
+                    }
+                }
                 attempt = import_staged_file(
                     staged_source.clone(),
                     import_source,
@@ -1880,6 +1978,8 @@ async fn attempt_prepared_staged_import(
     let temporary_relative_path_string = temporary_relative_path.to_string_lossy().into_owned();
     let import_target = retry_import_sqlite_operation("allocate_import_media", || {
         sqlite.allocate_import_media_durable(AllocateImportMedia {
+            source: source.clone(),
+            cleanup,
             user_id,
             temporary_filename: temporary_filename.clone(),
             original_filename: original_filename.clone(),
@@ -2021,6 +2121,14 @@ async fn attempt_prepared_staged_import(
     .await;
 
     if let Err(error) = result {
+        if !matches!(
+            error,
+            AppError::Validation(_) | AppError::BadRequest(_) | AppError::UnprocessableEntity(_)
+        ) {
+            tracing::warn!(media_id, %error, "Import interrupted; retaining source for automatic recovery");
+            executors.scheduler.wake_journal_recovery();
+            return Ok(ImportStagedFileOutcome::RecoveryPending(media_id));
+        }
         let failure_detail = bounded_error_detail(&error.to_string());
         if let Err(mark_error) = retry_import_sqlite_operation("mark_import_media_failed", || {
             sqlite.mark_import_media_failed_durable(media_id, failure_detail.clone())
@@ -2280,22 +2388,144 @@ pub async fn recover_interrupted_imports(
 ) -> AppResult<()> {
     let sqlite = &executors.sqlite;
     let mut after_media_id = 0_i64;
+    let mut pending = VecDeque::new();
     loop {
         let interrupted_imports = sqlite
             .recover_interrupted_import_page_durable(after_media_id, 256)
             .await?;
         if interrupted_imports.is_empty() {
-            return Ok(());
+            break;
         }
         for interrupted in interrupted_imports {
             let media_id = interrupted.media_id;
             after_media_id = media_id;
-            let _ = sqlite
-                .mark_import_media_failed_durable(
-                    media_id,
-                    "import product was not atomically finalized".to_string(),
-                )
-                .await?;
+            if interrupted.source.is_none() {
+                tracing::error!(media_id, "Import recovery requires a persisted source path; preserving unfinished media without marking failure");
+                continue;
+            }
+            pending.push_back(interrupted);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let recovery_executors = executors.clone();
+    executors
+        .scheduler
+        .spawn_control(run_import_recovery_queue(recovery_executors, pending));
+    Ok(())
+}
+
+async fn run_import_recovery_queue(
+    recovery_executors: crate::runtime::ExecutorHandles,
+    mut pending: VecDeque<InterruptedImport>,
+) {
+    let mut remaining_in_pass = pending.len();
+    while let Some(interrupted) = pending.pop_front() {
+        let durable_source = match interrupted.import_source {
+            ImportSource::Local => DurableSourceId::LocalImport,
+            ImportSource::Webdav => DurableSourceId::WebDavImport,
+            ImportSource::MobileBackup => DurableSourceId::BackupImport,
+        };
+        let admission = match recovery_executors
+            .scheduler
+            .acquire_durable(
+                durable_source,
+                SchedulerAdmissionKind::ExistingClaimCompletion,
+            )
+            .await
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                tracing::warn!(%error, "Import recovery stopped; persisted sources remain queued");
+                return;
+            }
+        };
+        let attempt = async {
+            match recovery_executors
+                .sqlite
+                .update_import_recovery(interrupted.media_id, None)
+                .await?
+            {
+                ImportRecoveryDisposition::Ready => {}
+                ImportRecoveryDisposition::Waiting => {
+                    return Ok(ImportStagedFileOutcome::SourceCleanupBusy)
+                }
+                ImportRecoveryDisposition::Completed => {
+                    return Ok(ImportStagedFileOutcome::Completed(interrupted.media_id))
+                }
+                ImportRecoveryDisposition::Failed => {
+                    return Err(AppError::BadRequest(
+                        "import was rejected by the business operation".to_string(),
+                    ))
+                }
+            }
+            import_staged_file(
+                interrupted
+                    .source
+                    .clone()
+                    .expect("validated recovery source"),
+                interrupted.import_source,
+                interrupted.user_id,
+                &recovery_executors,
+                interrupted.cleanup,
+                &admission,
+            )
+            .await
+        }
+        .await;
+        match attempt {
+            Ok(ImportStagedFileOutcome::Completed(completed)) => {
+                if let Err(error) = recovery_executors
+                    .sqlite
+                    .update_import_recovery(interrupted.media_id, Some(completed))
+                    .await
+                {
+                    tracing::warn!(%error, "Could not settle recovered duplicate import");
+                    pending.push_back(interrupted);
+                } else {
+                    recovery_executors.scheduler.wake_metadata();
+                    tracing::info!(
+                        media_id = completed,
+                        "Import automatically recovered from its original source"
+                    );
+                }
+            }
+            Ok(ImportStagedFileOutcome::Deferred(prepared)) => {
+                // Hash ownership was busy before allocation/copy. Close the source
+                // handle rather than retaining one descriptor per queued file.
+                drop(prepared);
+                pending.push_back(interrupted);
+            }
+            Err(error)
+                if matches!(
+                    error,
+                    AppError::Validation(_)
+                        | AppError::BadRequest(_)
+                        | AppError::UnprocessableEntity(_)
+                ) =>
+            {
+                if let Err(write_error) = recovery_executors
+                    .sqlite
+                    .mark_import_media_failed_durable(interrupted.media_id, error.to_string())
+                    .await
+                {
+                    tracing::warn!(%write_error, "Could not persist import business failure");
+                    pending.push_back(interrupted);
+                }
+            }
+            other => {
+                if let Err(error) = other {
+                    tracing::warn!(media_id = interrupted.media_id, source = ?interrupted.source, %error, "Import recovery deferred; source retained");
+                }
+                pending.push_back(interrupted);
+            }
+        }
+        drop(admission);
+        remaining_in_pass -= 1;
+        if remaining_in_pass == 0 && !pending.is_empty() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            remaining_in_pass = pending.len();
         }
     }
 }

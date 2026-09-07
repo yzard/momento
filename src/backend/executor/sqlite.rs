@@ -325,6 +325,10 @@ pub(crate) enum SqliteOperation {
     },
     AllocateImportMedia(AllocateImportMedia),
     FinalizeImportMedia(FinalizeImportMedia),
+    UpdateImportRecovery {
+        media_id: i64,
+        completed_media_id: Option<i64>,
+    },
     MarkImportMediaFailed {
         media_id: i64,
         error: String,
@@ -598,6 +602,7 @@ impl SqliteOperation {
             Self::AllocateImportMedia(_) => "allocate_import_media",
             Self::FinalizeImportMedia(_) => "finalize_import_media",
             Self::MarkImportMediaFailed { .. } => "mark_import_media_failed",
+            Self::UpdateImportRecovery { .. } => "update_import_recovery",
             Self::AbsorbExistingMedia(_) => "absorb_existing_media",
             Self::InspectImportCleanup(_) => "inspect_import_cleanup",
             Self::RecoverInterruptedImportPage { .. } => "recover_interrupted_import_page",
@@ -986,6 +991,7 @@ impl SqliteOperation {
             | Self::AllocateImportMedia(_)
             | Self::FinalizeImportMedia(_)
             | Self::MarkImportMediaFailed { .. }
+            | Self::UpdateImportRecovery { .. }
             | Self::AbsorbExistingMedia(_)
             | Self::RecoverInterruptedImportPage { .. }
             | Self::UpdateWebdavReadyPaths(_)
@@ -1142,6 +1148,7 @@ pub(crate) enum SqliteOutput {
     ImportMediaAllocated(ImportTarget),
     ImportMediaFinalized(bool),
     ImportMediaFailed(bool),
+    ImportRecoveryUpdated(crate::processor::import::ImportRecoveryDisposition),
     ExistingMediaAbsorbed(bool),
     ImportCleanupStatus(crate::processor::import::ImportCleanupStatus),
     InterruptedImportPage(Vec<InterruptedImport>),
@@ -1306,6 +1313,7 @@ impl SqliteOutput {
             Self::ImportMediaAllocated(_) => "import_media_allocated",
             Self::ImportMediaFinalized(_) => "import_media_finalized",
             Self::ImportMediaFailed(_) => "import_media_failed",
+            Self::ImportRecoveryUpdated(_) => "import_recovery_updated",
             Self::ExistingMediaAbsorbed(_) => "existing_media_absorbed",
             Self::ImportCleanupStatus(_) => "import_cleanup_status",
             Self::InterruptedImportPage(_) => "interrupted_import_page",
@@ -3395,6 +3403,25 @@ impl SqliteExecutorHandle {
         }
     }
 
+    pub(crate) async fn update_import_recovery(
+        &self,
+        media_id: i64,
+        completed_media_id: Option<i64>,
+    ) -> Result<crate::processor::import::ImportRecoveryDisposition, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::UpdateImportRecovery {
+                    media_id,
+                    completed_media_id,
+                },
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::ImportRecoveryUpdated(updated) => Ok(updated),
+            output => Err(output.mismatch("update_import_recovery")),
+        }
+    }
     pub(crate) async fn mark_import_media_failed_durable(
         &self,
         media_id: i64,
@@ -6329,6 +6356,46 @@ fn execute_with_connection(
             crate::processor::import::finalize_import_media_on_connection(connection, request)
                 .map(SqliteOutput::ImportMediaFinalized)
                 .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::UpdateImportRecovery {
+            media_id,
+            completed_media_id,
+        } => {
+            use crate::processor::import::ImportRecoveryDisposition;
+            if let Some(completed) = completed_media_id {
+                connection
+                    .execute(
+                        crate::database::queries::import::RETIRE_RECOVERED_DUPLICATE,
+                        rusqlite::params![media_id, completed],
+                    )
+                    .map_err(|error| map_sqlite_error(operation_name, error))?;
+                return Ok(SqliteOutput::ImportRecoveryUpdated(
+                    ImportRecoveryDisposition::Completed,
+                ));
+            }
+            let changed = connection
+                .execute(
+                    crate::database::queries::import::REQUEUE_INTERRUPTED_MEDIA,
+                    [media_id],
+                )
+                .map_err(|error| map_sqlite_error(operation_name, error))?;
+            let disposition = if changed != 0 {
+                ImportRecoveryDisposition::Ready
+            } else {
+                let state: String = connection
+                    .query_row(
+                        crate::database::queries::import::SELECT_RECOVERY_STATE,
+                        [media_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| map_sqlite_error(operation_name, error))?;
+                match state.as_str() {
+                    "imported" => ImportRecoveryDisposition::Completed,
+                    "failed" => ImportRecoveryDisposition::Failed,
+                    _ => ImportRecoveryDisposition::Waiting,
+                }
+            };
+            Ok(SqliteOutput::ImportRecoveryUpdated(disposition))
         }
         SqliteOperation::MarkImportMediaFailed { media_id, error } => {
             crate::processor::import::mark_import_media_failed_on_connection(
