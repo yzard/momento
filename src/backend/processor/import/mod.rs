@@ -44,13 +44,14 @@ pub(crate) enum ImportContentHashClaimOutcome {
 pub enum ImportStagedFileOutcome {
     Completed(i64),
     Deferred(Box<PreparedStagedImport>),
+    SourceCleanupBusy,
 }
 
 impl ImportStagedFileOutcome {
     pub fn completed_media_id(self) -> Option<i64> {
         match self {
             Self::Completed(media_id) => Some(media_id),
-            Self::Deferred(_) => None,
+            Self::Deferred(_) | Self::SourceCleanupBusy => None,
         }
     }
 }
@@ -170,6 +171,72 @@ pub(crate) struct AbsorbExistingMediaDatabase {
     pub source_modified_seconds: Option<i64>,
     pub request_metadata_rerun: bool,
     pub source_cleanup: Option<FileOperationPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportCleanupStatus {
+    Available,
+    AlreadyCommitted,
+    Blocked,
+}
+
+pub(crate) fn inspect_import_cleanup_on_connection(
+    connection: &rusqlite::Connection,
+    plan: FileOperationPlan,
+) -> rusqlite::Result<ImportCleanupStatus> {
+    let transaction = connection.unchecked_transaction()?;
+    let first = plan.entries.first().ok_or(rusqlite::Error::InvalidQuery)?;
+    let source_path = first
+        .source_path
+        .as_ref()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    let group_id: Option<String> = transaction
+        .query_row(
+            queries::import::FIND_COMMITTED_SOURCE_CLEANUP,
+            rusqlite::params![
+                plan.owner_id,
+                first.storage_root.as_str(),
+                source_path.relative_path(),
+                first.expected_version,
+                first.expected_size
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(group_id) = group_id {
+        let mut matches = true;
+        for entry in &plan.entries {
+            let path = entry
+                .source_path
+                .as_ref()
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            matches &= transaction
+                .query_row(
+                    queries::import::MATCH_COMMITTED_CLEANUP_ENTRY,
+                    rusqlite::params![
+                        group_id,
+                        entry.storage_root.as_str(),
+                        path.relative_path(),
+                        entry.expected_version,
+                        entry.expected_size
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+        }
+        if matches {
+            transaction.commit()?;
+            return Ok(ImportCleanupStatus::AlreadyCommitted);
+        }
+    }
+    let blocked = crate::io::journal::file_operation_paths_conflict(&transaction, &plan.claims)?;
+    transaction.commit()?;
+    Ok(if blocked {
+        ImportCleanupStatus::Blocked
+    } else {
+        ImportCleanupStatus::Available
+    })
 }
 
 #[derive(Debug)]
@@ -335,7 +402,7 @@ pub(crate) fn mark_import_media_failed_on_connection(
 pub(crate) fn absorb_existing_media_on_connection(
     connection: &rusqlite::Connection,
     request: AbsorbExistingMediaDatabase,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let transaction = connection.unchecked_transaction()?;
     if let Some(modified_seconds) = request.source_modified_seconds {
         transaction.execute(
@@ -358,10 +425,12 @@ pub(crate) fn absorb_existing_media_on_connection(
         if crate::io::journal::prepare_committed_cleanup(&transaction, source_cleanup)?
             == PrepareJournalOutcome::PathConflict
         {
-            return Err(rusqlite::Error::StatementChangedRows(0));
+            transaction.rollback()?;
+            return Ok(false);
         }
     }
-    transaction.commit()
+    transaction.commit()?;
+    Ok(true)
 }
 
 pub(crate) fn recover_interrupted_import_page_on_connection(
@@ -709,10 +778,17 @@ pub async fn import_staged_file_to_completion(
                     .map_err(AppError::Unavailable)?;
                 attempt = resume_staged_file_import(*prepared, executors, &admission).await;
             }
-            Err(AppError::DatabaseBusy) => {
+            retry @ (Ok(ImportStagedFileOutcome::SourceCleanupBusy)
+            | Err(AppError::DatabaseBusy)) => {
+                let reason = if matches!(retry, Ok(ImportStagedFileOutcome::SourceCleanupBusy)) {
+                    "source cleanup paths are owned by another journal operation"
+                } else {
+                    "database is busy"
+                };
                 warn!(
                     path = %source_label,
-                    "import database operation was busy and will retry at the durable tail"
+                    reason,
+                    "Import temporarily blocked; releasing admission and retrying at the durable tail"
                 );
                 drop(admission);
                 tokio::time::sleep(IMPORT_DATABASE_RETRY_DELAY).await;
@@ -1786,7 +1862,7 @@ async fn attempt_prepared_staged_import(
             )
             .await;
             claim_guard.release().await?;
-            return result.map(ImportStagedFileOutcome::Completed);
+            return result;
         }
         ImportContentHashClaimOutcome::Busy => unreachable!(),
     };
@@ -1841,8 +1917,7 @@ async fn attempt_prepared_staged_import(
                 },
                 executors,
             )
-            .await
-            .map(ImportStagedFileOutcome::Completed);
+            .await;
             claim_guard.release().await?;
             return result;
         }
@@ -2095,7 +2170,7 @@ struct ExistingStagedImport<'a> {
 async fn absorb_existing_media(
     import: ExistingStagedImport<'_>,
     executors: &crate::runtime::ExecutorHandles,
-) -> AppResult<i64> {
+) -> AppResult<ImportStagedFileOutcome> {
     let ExistingStagedImport {
         source,
         source_snapshot,
@@ -2135,24 +2210,9 @@ async fn absorb_existing_media(
         .await?;
 
     let sqlite = &executors.sqlite;
-    if let Some(supplemental_metadata) = supplemental_metadata {
-        publish_supplemental_metadata(
-            executors,
-            canonical_supplemental_metadata_relative_path(&existing_original_path)?,
-            supplemental_metadata,
-        )
-        .await?;
-    }
-
-    retry_import_sqlite_operation("absorb_existing_media", || {
-        sqlite.absorb_existing_media_durable(AbsorbExistingMediaDatabase {
-            media_id: existing_media.id,
-            user_id,
-            source_modified_seconds,
-            request_metadata_rerun: supplemental_metadata.is_some(),
-            source_cleanup: (cleanup.source
-                || (cleanup.supplemental_metadata && supplemental_metadata.is_some()))
-            .then(|| {
+    let source_cleanup = || {
+        (cleanup.source || (cleanup.supplemental_metadata && supplemental_metadata.is_some())).then(
+            || {
                 staged_source_cleanup_plan(
                     source,
                     source_snapshot,
@@ -2163,10 +2223,47 @@ async fn absorb_existing_media(
                     cleanup.source,
                     existing_media.id.to_string(),
                 )
-            }),
+            },
+        )
+    };
+    let cleanup_status = match source_cleanup() {
+        Some(plan) => sqlite.inspect_import_cleanup_durable(plan).await?,
+        None => ImportCleanupStatus::Available,
+    };
+    if cleanup_status == ImportCleanupStatus::Blocked {
+        executors.scheduler.wake_journal_recovery();
+        return Ok(ImportStagedFileOutcome::SourceCleanupBusy);
+    }
+    if cleanup_status != ImportCleanupStatus::AlreadyCommitted {
+        if let Some(supplemental_metadata) = supplemental_metadata {
+            publish_supplemental_metadata(
+                executors,
+                canonical_supplemental_metadata_relative_path(&existing_original_path)?,
+                supplemental_metadata,
+            )
+            .await?;
+        }
+    }
+
+    let absorbed = retry_import_sqlite_operation("absorb_existing_media", || {
+        sqlite.absorb_existing_media_durable(AbsorbExistingMediaDatabase {
+            media_id: existing_media.id,
+            user_id,
+            source_modified_seconds,
+            request_metadata_rerun: cleanup_status != ImportCleanupStatus::AlreadyCommitted
+                && supplemental_metadata.is_some(),
+            source_cleanup: if cleanup_status == ImportCleanupStatus::AlreadyCommitted {
+                None
+            } else {
+                source_cleanup()
+            },
         })
     })
     .await?;
+    if !absorbed {
+        executors.scheduler.wake_journal_recovery();
+        return Ok(ImportStagedFileOutcome::SourceCleanupBusy);
+    }
     if cleanup.source || (cleanup.supplemental_metadata && supplemental_metadata.is_some()) {
         executors.scheduler.wake_journal_recovery();
     }
@@ -2175,7 +2272,7 @@ async fn absorb_existing_media(
         content_path = %source.path.relative_path(),
         "absorbed duplicate import into existing media"
     );
-    Ok(existing_media.id)
+    Ok(ImportStagedFileOutcome::Completed(existing_media.id))
 }
 
 pub async fn recover_interrupted_imports(

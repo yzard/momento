@@ -86,27 +86,15 @@ pub mod file_operations {
     pub const SELECT_DERIVED_PRODUCT_DISCARD_ENTRIES: &str = r#"
         SELECT e.sequence, 'cleanup', e.storage_root, e.temporary_path, NULL,
                CASE WHEN EXISTS (
-                   SELECT 1 FROM media_metadata AS m
-                    WHERE m.media_id = CAST(g.owner_id AS INTEGER)
-                      AND g.owner_kind = 'metadata_generation'
-                      AND ((e.storage_root IN ('thumbnails', 'tiny_thumbnails') AND m.thumbnail_path = e.destination_path)
-                           OR (e.storage_root = 'previews' AND m.preview_path = e.destination_path))
-               ) OR EXISTS (
-                   SELECT 1 FROM media_faces AS f
-                    WHERE f.media_id = (SELECT media_id FROM llm_jobs WHERE id = g.owner_id)
-                      AND g.kind = 'llm_result_artifacts' AND f.crop_path = e.destination_path
-               ) OR EXISTS (
-                   SELECT 1 FROM media_ai_inputs AS i
-                    WHERE i.storage_root = e.storage_root AND i.file_path = e.destination_path
-               ) OR EXISTS (
-                   SELECT 1 FROM llm_job_inputs AS i
-                    WHERE i.storage_root = e.storage_root AND i.file_path = e.destination_path
+                   SELECT 1 FROM file_product_references AS reference
+                    WHERE reference.storage_root = e.storage_root
+                      AND reference.file_path = e.destination_path
                ) THEN NULL ELSE e.destination_path END,
                NULL, NULL, NULL, NULL
           FROM file_operation_entries AS e
           JOIN file_operation_groups AS g ON g.id = e.group_id
          WHERE e.group_id = ? AND e.cleanup_state = 'pending'
-         ORDER BY e.sequence
+         ORDER BY e.sequence LIMIT ?
     "#;
     pub const INSERT_GROUP: &str = "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count, recovery_order) VALUES (?, ?, ?, ?, ?, 'prepared', ?, ?, ?, (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups))";
     pub const INSERT_COMMITTED_CLEANUP_GROUP: &str = "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count, completion_outcome, recovery_order) VALUES (?, ?, ?, ?, ?, 'cleanup_pending', ?, ?, ?, 'published', (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups))";
@@ -131,17 +119,17 @@ pub mod file_operations {
     pub const BEGIN_PUBLICATION: &str = "UPDATE file_operation_groups SET state = 'publishing', version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'prepared' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
     pub const VERIFY_PUBLICATION: &str =
         "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'publishing' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
-    pub const SELECT_PENDING_PUBLICATION_ENTRIES: &str = "SELECT sequence, action, storage_root, source_path, temporary_path, destination_path, tombstone_path, expected_size, expected_sha256, expected_version FROM file_operation_entries WHERE group_id = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared' ORDER BY sequence";
+    pub const SELECT_PENDING_PUBLICATION_ENTRIES: &str = "SELECT sequence, action, storage_root, source_path, temporary_path, destination_path, tombstone_path, expected_size, expected_sha256, expected_version FROM file_operation_entries WHERE group_id = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared' ORDER BY sequence LIMIT ?";
     pub const COMMIT_ENTRY: &str = "UPDATE file_operation_entries SET state = 'committed', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared'";
     pub const COUNT_UNCOMMITTED_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND action IN ('publish', 'move', 'tombstone') AND state != 'committed'";
-    pub const CHECKPOINT_PUBLICATION: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'publishing' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
-    pub const COMPLETE_PUBLICATION: &str = "UPDATE file_operation_groups SET state = CASE WHEN EXISTS (SELECT 1 FROM file_operation_entries WHERE group_id = file_operation_groups.id AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))) THEN 'cleanup_pending' ELSE 'completed' END, completion_outcome = CASE WHEN cancel_requested = 1 THEN 'discarded' ELSE 'published' END, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN EXISTS (SELECT 1 FROM file_operation_entries WHERE group_id = file_operation_groups.id AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))) THEN NULL ELSE datetime('now') END WHERE id = ? AND version = ? AND state = 'files_committed' AND product_target IS NULL AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing'))";
+    pub const CHECKPOINT_PUBLICATION: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'publishing' AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = file_operation_groups.claim_token))";
+    pub const COMPLETE_PUBLICATION: &str = "UPDATE file_operation_groups SET state = CASE WHEN EXISTS (SELECT 1 FROM file_operation_entries WHERE group_id = file_operation_groups.id AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))) THEN 'cleanup_pending' ELSE 'completed' END, completion_outcome = CASE WHEN cancel_requested = 1 THEN 'discarded' ELSE 'published' END, version = version + 1, updated_at = datetime('now'), terminal_at = CASE WHEN EXISTS (SELECT 1 FROM file_operation_entries WHERE group_id = file_operation_groups.id AND cleanup_state = 'pending' AND (action = 'cleanup' OR (action = 'publish' AND state = 'committed'))) THEN NULL ELSE datetime('now') END WHERE id = ? AND version = ? AND state = 'files_committed' AND product_target IS NULL AND (claim_token IS NULL OR EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = file_operation_groups.claim_token AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = file_operation_groups.claim_token AND state = 'processing'))";
     pub const VERIFY_OPERATION_CLAIM_OWNER: &str = "SELECT 1 WHERE EXISTS (SELECT 1 FROM media_metadata_jobs WHERE claim_token = ?1 AND status = 'processing') OR EXISTS (SELECT 1 FROM llm_result_receipts WHERE claim_token = ?1 AND state = 'processing') OR EXISTS (SELECT 1 FROM import_content_hash_claims WHERE claim_token = ?1)";
     pub const VERIFY_CLEANUP: &str = "SELECT 1 FROM file_operation_groups WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
-    pub const SELECT_PENDING_CLEANUP_ENTRIES: &str = "SELECT e.sequence, 'cleanup', e.storage_root, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.destination_path WHEN e.action = 'publish' THEN e.temporary_path ELSE e.source_path END, NULL, NULL, NULL, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_size WHEN e.action = 'cleanup' THEN e.expected_size ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_sha256 WHEN e.action = 'cleanup' THEN e.expected_sha256 ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_version WHEN e.action = 'cleanup' THEN e.expected_version ELSE NULL END FROM file_operation_entries AS e JOIN file_operation_groups AS g ON g.id = e.group_id WHERE e.group_id = ? AND e.cleanup_state = 'pending' AND (e.action = 'cleanup' OR (e.action = 'publish' AND e.state = 'committed')) ORDER BY e.sequence";
+    pub const SELECT_PENDING_CLEANUP_ENTRIES: &str = "SELECT e.sequence, 'cleanup', e.storage_root, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.destination_path WHEN e.action = 'publish' THEN e.temporary_path ELSE e.source_path END, NULL, NULL, NULL, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_size WHEN e.action = 'cleanup' THEN e.expected_size ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_sha256 WHEN e.action = 'cleanup' THEN e.expected_sha256 ELSE NULL END, CASE WHEN e.action = 'publish' AND g.completion_outcome = 'discarded' THEN e.expected_version WHEN e.action = 'cleanup' THEN e.expected_version ELSE NULL END FROM file_operation_entries AS e JOIN file_operation_groups AS g ON g.id = e.group_id WHERE e.group_id = ? AND e.cleanup_state = 'pending' AND (e.action = 'cleanup' OR (e.action = 'publish' AND e.state = 'committed')) ORDER BY e.sequence LIMIT ?";
     pub const CLEAN_ENTRY: &str = "UPDATE file_operation_entries SET cleanup_state = 'cleaned', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND cleanup_state = 'pending' AND action IN ('cleanup', 'publish')";
     pub const COUNT_UNCLEANED_ENTRIES: &str = "SELECT COUNT(*) FROM file_operation_entries WHERE group_id = ? AND cleanup_state != 'cleaned' AND action IN ('cleanup', 'publish')";
-    pub const CHECKPOINT_CLEANUP: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'cleaned' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
+    pub const CHECKPOINT_CLEANUP: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'cleaned' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
     pub const RECORD_PUBLICATION_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET state = 'publication_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'publishing'";
     pub const RECORD_PUBLICATION_FAILURE_ENTRY: &str = "UPDATE file_operation_entries SET last_error_kind = ?, last_error = ? WHERE group_id = ? AND sequence = ? AND action IN ('publish', 'move', 'tombstone') AND state = 'prepared'";
     pub const RECORD_CLEANUP_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET state = 'cleanup_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'cleanup_pending'";
@@ -272,9 +260,12 @@ pub mod file_operations {
     pub const CONSUME_SQLITE_RESULT_RESERVATION: &str = "UPDATE data_dir_space_reservations SET newly_allocated_blocks = newly_allocated_blocks + ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND newly_allocated_blocks + ? <= reserved_peak_additional_bytes";
     pub const SHRINK_SQLITE_RESULT_RESERVATION_TO_CLEANUP: &str = "UPDATE data_dir_space_reservations SET owner_kind = 'llm_result_cleanup', newly_allocated_blocks = reserved_peak_additional_bytes - ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND reserved_peak_additional_bytes - newly_allocated_blocks >= ?";
     pub const SELECT_GROUP_VERSION: &str = "SELECT version FROM file_operation_groups WHERE id = ?";
-    pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') ORDER BY recovery_order, id LIMIT 1";
+    // The ready-only ordered index is the durable FIFO; never sort the backlog per dequeue.
+    pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND retry_at <= unixepoch() ORDER BY recovery_order, id LIMIT 1";
     pub const SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND (state IN ('publishing', 'files_committed', 'rollback_pending') OR (state = 'cleanup_pending' AND completion_outcome = 'discarded' AND cancel_requested = 1)) ORDER BY recovery_order, id LIMIT 1";
     pub const YIELD_RECOVERY_PROGRESS: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state IN ('cleanup_pending', 'rollback_pending')";
+    pub const DEFER_RECOVERY: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), retry_at = unixepoch() + 1, finalization_error_kind = ?1, finalization_error = ?2, rollback_error_kind = CASE WHEN state = 'rollback_pending' THEN ?1 ELSE rollback_error_kind END, rollback_error = CASE WHEN state = 'rollback_pending' THEN ?2 ELSE rollback_error END, updated_at = datetime('now') WHERE id = ?3 AND version = ?4 AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending')";
+    pub const NEXT_RECOVERY_DELAY: &str = "SELECT MAX(0, MIN(retry_at) - unixepoch()) FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending')";
     pub const SELECT_RETRY_RECEIPT: &str = "SELECT group_id, expected_version, request_hash, response_state, response_version, expires_at > datetime('now') FROM file_operation_retry_requests WHERE retry_request_id = ?";
     pub const COUNT_LIVE_RETRY_RECEIPTS: &str = "SELECT COUNT(*) FROM file_operation_retry_requests WHERE group_id = ? AND expires_at > datetime('now')";
     pub const SELECT_FAILED_GROUP_FOR_RETRY: &str =
@@ -291,7 +282,7 @@ pub mod file_operations {
     pub const DELETE_RETRY_RECEIPT: &str = "DELETE FROM file_operation_retry_requests WHERE retry_request_id = ? AND expires_at <= datetime('now')";
     pub const SELECT_EXPIRED_LLM_RESULT_RECEIPTS: &str = "SELECT r.job_id FROM llm_result_receipts AS r JOIN file_operation_groups AS g ON g.id = r.journal_group_id WHERE r.state IN ('cleaned', 'discarded', 'failed') AND r.updated_at <= datetime('now', '-604800 seconds') AND g.state IN ('cleaned', 'rolled_back') ORDER BY r.updated_at, r.job_id LIMIT 64";
     pub const DELETE_EXPIRED_LLM_RESULT_RECEIPT: &str = "DELETE FROM llm_result_receipts WHERE job_id = ? AND state IN ('cleaned', 'discarded', 'failed') AND updated_at <= datetime('now', '-604800 seconds') AND journal_group_id IN (SELECT id FROM file_operation_groups WHERE state IN ('cleaned', 'rolled_back'))";
-    pub const SELECT_COMPACTION_CANDIDATE: &str = "SELECT id, state, version FROM file_operation_groups WHERE detail_level = 'full' AND state IN ('cleaned', 'rolled_back') AND terminal_at IS NOT NULL ORDER BY terminal_at, id LIMIT 1";
+    pub const SELECT_COMPACTION_PAGE: &str = "SELECT id, state, version FROM file_operation_groups WHERE detail_level = 'full' AND state IN ('cleaned', 'rolled_back') AND terminal_at IS NOT NULL ORDER BY terminal_at, id LIMIT 32";
     pub const COUNT_ENTRY_ACTIONS: &str = "SELECT action, COUNT(*) FROM file_operation_entries WHERE group_id = ? GROUP BY action ORDER BY action";
     pub const COUNT_ENTRY_STATES: &str = "SELECT state, COUNT(*) FROM file_operation_entries WHERE group_id = ? GROUP BY state ORDER BY state";
     pub const COUNT_CLEANUP_STATES: &str = "SELECT cleanup_state, COUNT(*) FROM file_operation_entries WHERE group_id = ? GROUP BY cleanup_state ORDER BY cleanup_state";
@@ -301,7 +292,7 @@ pub mod file_operations {
     pub const DELETE_GROUP_CLAIMS: &str =
         "DELETE FROM file_operation_path_claims WHERE group_id = ?";
     pub const COMPACT_GROUP: &str = "UPDATE file_operation_groups SET detail_level = 'compacted', entry_action_summary = ?, entry_state_summary = ?, cleanup_summary = ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND state = ? AND version = ? AND detail_level = 'full'";
-    pub const SELECT_PRUNE_CANDIDATE: &str = "SELECT id FROM file_operation_groups WHERE detail_level = 'compacted' AND state IN ('cleaned', 'rolled_back') AND terminal_at <= datetime('now', '-604800 seconds') ORDER BY terminal_at, id LIMIT 1";
+    pub const SELECT_PRUNE_PAGE: &str = "SELECT id FROM file_operation_groups WHERE detail_level = 'compacted' AND state IN ('cleaned', 'rolled_back') AND terminal_at <= datetime('now', '-604800 seconds') ORDER BY terminal_at, id LIMIT 32";
     pub const PRUNE_GROUP: &str = "DELETE FROM file_operation_groups WHERE id = ? AND detail_level = 'compacted' AND state IN ('cleaned', 'rolled_back') AND terminal_at <= datetime('now', '-604800 seconds')";
     pub const SELECT_GROUP_FOR_CANCELLATION: &str =
         "SELECT state, version, cancel_requested FROM file_operation_groups WHERE id = ?";
@@ -343,10 +334,10 @@ pub mod file_operations {
           FROM file_operation_entries AS e
           JOIN file_operation_groups AS g ON g.id = e.group_id
          WHERE e.group_id = ? AND e.action = 'publish' AND e.state = 'prepared'
-      ORDER BY e.sequence DESC
+      ORDER BY e.sequence DESC LIMIT ?
     "#;
     pub const ROLLBACK_ENTRY: &str = "UPDATE file_operation_entries SET state = 'rolled_back', last_error_kind = NULL, last_error = NULL WHERE group_id = ? AND sequence = ? AND action = 'publish' AND state = 'prepared'";
-    pub const CHECKPOINT_ROLLBACK: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'rolled_back' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'rollback_pending'";
+    pub const CHECKPOINT_ROLLBACK: &str = "UPDATE file_operation_groups SET state = ?, version = version + 1, updated_at = datetime('now'), terminal_at = CASE WHEN ? = 'rolled_back' THEN datetime('now') ELSE NULL END WHERE id = ? AND version = ? AND state = 'rollback_pending'";
     pub const RECORD_FINALIZE_FAILURE: &str = "UPDATE file_operation_groups SET state = 'finalize_failed', version = version + 1, finalization_error_kind = ?, finalization_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'files_committed'";
     pub const RECORD_ROLLBACK_FAILURE_ENTRY: &str = "UPDATE file_operation_entries SET last_error_kind = ?, last_error = ? WHERE group_id = ? AND sequence = ? AND action = 'publish' AND state = 'prepared'";
     pub const RECORD_ROLLBACK_FAILURE_GROUP: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), rollback_error_kind = ?, rollback_error = ?, updated_at = datetime('now') WHERE id = ? AND version = ? AND state = 'rollback_pending'";
@@ -399,6 +390,22 @@ macro_rules! timeline_window_prefix {
 }
 
 pub mod import {
+    pub const FIND_COMMITTED_SOURCE_CLEANUP: &str = r#"
+        SELECT g.id FROM file_operation_groups AS g
+        JOIN file_operation_entries AS e ON e.group_id = g.id
+        WHERE g.kind = 'import_source_cleanup' AND g.owner_kind = 'import'
+          AND g.owner_id = ?1 AND g.completion_outcome = 'published'
+          AND g.state IN ('cleanup_pending', 'cleanup_failed', 'cleaned')
+          AND e.action = 'cleanup' AND e.storage_root = ?2 AND e.source_path = ?3
+          AND e.expected_version = ?4 AND e.expected_size = ?5
+        LIMIT 1
+    "#;
+    pub const MATCH_COMMITTED_CLEANUP_ENTRY: &str = r#"
+        SELECT 1 FROM file_operation_entries
+        WHERE group_id = ?1 AND action = 'cleanup' AND storage_root = ?2
+          AND source_path = ?3 AND expected_version = ?4 AND expected_size = ?5
+        LIMIT 1
+    "#;
     pub const INSERT_CONTENT_HASH_CLAIM: &str = r#"
     INSERT INTO import_content_hash_claims (content_hash, claim_token, import_source)
     VALUES (?, ?, ?)

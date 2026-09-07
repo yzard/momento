@@ -49,39 +49,100 @@ async fn assert_tiny_is_derived_from_thumbnail(
 
 #[tokio::test]
 async fn tiny_thumbnail_reuses_the_normal_thumbnail_pixels() {
-    let pool = create_test_db();
-    let media_id = create_test_media(&pool, "pattern.png");
-    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
-    image::RgbImage::from_fn(800, 600, |x, y| {
-        image::Rgb([
-            ((x * 17 + y * 31) % 256) as u8,
-            ((x * 47 + y * 13) % 256) as u8,
-            ((x * 7 + y * 53) % 256) as u8,
-        ])
-    })
-    .save(data_directory.join("originals/pattern.png"))
-    .expect("pattern");
-    pool.get().expect("database").execute(
-        "UPDATE media SET file_path = 'pattern.png', mime_type = 'image/png', import_state = 'imported' WHERE id = ?",
-        [media_id]).expect("media");
-    let claim = claim_metadata_job(&pool, &executors, media_id).await;
-    let config = Config::default();
-    momento_api::processor::metadata::generate_media_metadata(
-        &executors, media_id, &claim, &config,
-    )
-    .await
-    .expect("metadata");
-    let thumbnail_path: String = pool
-        .get()
-        .expect("database")
-        .query_row(
-            "SELECT thumbnail_path FROM media_metadata WHERE media_id = ?",
-            [media_id],
-            |row| row.get(0),
+    for extension in ["png", "qoi"] {
+        let filename = format!("pattern.{extension}");
+        let pool = create_test_db();
+        let media_id = create_test_media(&pool, &filename);
+        let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
+        image::RgbImage::from_fn(2400, 800, |x, y| {
+            image::Rgb([
+                ((x * 17 + y * 31) % 256) as u8,
+                ((x * 47 + y * 13) % 256) as u8,
+                ((x * 7 + y * 53) % 256) as u8,
+            ])
+        })
+        .save(data_directory.join("originals/pattern.png"))
+        .expect("pattern");
+        if extension == "qoi" {
+            let conversion = std::process::Command::new("magick")
+                .arg(data_directory.join("originals/pattern.png"))
+                .arg(data_directory.join("originals").join(&filename))
+                .output()
+                .expect("QOI fixture conversion");
+            assert!(
+                conversion.status.success(),
+                "{}",
+                String::from_utf8_lossy(&conversion.stderr)
+            );
+        }
+        pool.get().expect("database").execute(
+        "UPDATE media SET file_path = ?, mime_type = ?, import_state = 'imported' WHERE id = ?",
+        rusqlite::params![filename, format!("image/{extension}"), media_id]).expect("media");
+        let claim = claim_metadata_job(&pool, &executors, media_id).await;
+        let config = Config::default();
+        momento_api::processor::metadata::generate_media_metadata(
+            &executors, media_id, &claim, &config,
         )
-        .expect("thumbnail");
-    assert_tiny_is_derived_from_thumbnail(&executors, &data_directory, &thumbnail_path, &config)
+        .await
+        .expect("metadata");
+        let thumbnail_path: String = pool
+            .get()
+            .expect("database")
+            .query_row(
+                "SELECT thumbnail_path FROM media_metadata WHERE media_id = ?",
+                [media_id],
+                |row| row.get(0),
+            )
+            .expect("thumbnail");
+        assert_tiny_is_derived_from_thumbnail(
+            &executors,
+            &data_directory,
+            &thumbnail_path,
+            &config,
+        )
         .await;
+        let preview_path: Option<String> = pool
+            .get()
+            .expect("database")
+            .query_row(
+                "SELECT preview_path FROM media_metadata WHERE media_id = ?",
+                [media_id],
+                |row| row.get(0),
+            )
+            .expect("preview path");
+        if extension == "png" {
+            assert!(preview_path.is_none());
+        } else {
+            use momento_api::processor::thumbnails::{
+                generate_image_thumbnail, ArtifactPublicationOwner, StorageMediaFile,
+            };
+            let preview_path = preview_path.expect("QOI preview");
+            let preview = image::open(data_directory.join("previews").join(&preview_path))
+                .expect("JPEG preview");
+            assert_eq!((preview.width(), preview.height()), (2400, 800));
+            generate_image_thumbnail(
+                &executors,
+                &StorageMediaFile {
+                    storage_root: StorageRootId::Previews,
+                    path: NormalizedStoragePath::parse(&preview_path).unwrap(),
+                },
+                &StorageMediaFile {
+                    storage_root: StorageRootId::Previews,
+                    path: NormalizedStoragePath::parse("expected-thumbnail.jpg").unwrap(),
+                },
+                config.metadata.thumbnails_max_size,
+                config.metadata.thumbnails_quality,
+                &config.media_process,
+                ArtifactPublicationOwner::JournalGroup,
+            )
+            .await
+            .expect("reference thumbnail");
+            assert_eq!(
+                fs::read(data_directory.join("thumbnails").join(&thumbnail_path)).unwrap(),
+                fs::read(data_directory.join("previews/expected-thumbnail.jpg")).unwrap()
+            );
+        }
+    }
 }
 
 async fn claim_metadata_job(
@@ -162,10 +223,18 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
         .expect("metadata artifact generation");
     assert_eq!(artifact_version, 1);
     assert!(thumbnail_path.contains(&format!("v1-{claim_token}")));
-    assert!(preview_path.is_none());
+    let preview_path = preview_path.expect("QOI requires a JPEG preview");
+    let preview =
+        image::open(data_directory.join("previews").join(&preview_path)).expect("preview");
+    let original_dimensions = (
+        u32::from_be_bytes(QOI_FIXTURE[4..8].try_into().unwrap()),
+        u32::from_be_bytes(QOI_FIXTURE[8..12].try_into().unwrap()),
+    );
+    assert_eq!((preview.width(), preview.height()), original_dimensions);
     for (root, path) in [
         ("thumbnails", thumbnail_path.as_str()),
         ("thumbnails_tiny", thumbnail_path.as_str()),
+        ("previews", preview_path.as_str()),
     ] {
         assert!(
             data_directory.join(root).join(path).is_file(),
@@ -179,7 +248,7 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("metadata product group");
-    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 2));
+    assert_eq!(product_group, ("cleanup_pending".to_string(), None, 3));
     let reserved_artifact_bytes: i64 = connection
         .query_row(
             "SELECT r.reserved_peak_additional_bytes FROM data_dir_space_reservations AS r JOIN file_operation_groups AS g ON g.id = r.journal_group_id WHERE g.kind = 'metadata_artifacts'",
@@ -193,7 +262,10 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
     let tiny_thumbnail_bound = tiny_thumbnail_size * tiny_thumbnail_size * 8 + 1_048_576;
     assert_eq!(
         reserved_artifact_bytes,
-        thumbnail_bound + tiny_thumbnail_bound
+        thumbnail_bound
+            + tiny_thumbnail_bound
+            + i64::from(original_dimensions.0) * i64::from(original_dimensions.1) * 16
+            + 1_048_576
     );
     assert!(reserved_artifact_bytes < 512 * 1024 * 1024);
     drop(connection);

@@ -463,3 +463,57 @@ async fn restart_recovery_detaches_an_unfinalized_import_product() {
         .expect("recovered import product");
     assert_eq!(recovered, ("files_committed".to_string(), 1, None));
 }
+#[tokio::test]
+async fn terminal_journal_compaction_is_bounded_and_batched() {
+    let pool = crate::test_utils::create_test_db();
+    for number in 0..40 {
+        pool.get().unwrap().execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count, terminal_at) VALUES (?, 'test', 'test', '1', 'cleaned', 1, datetime('now'))", [format!("compact-{number}")]).unwrap();
+    }
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    assert_eq!(
+        executors
+            .sqlite
+            .maintain_file_operation_journal_durable()
+            .await
+            .unwrap()
+            .compacted_groups,
+        32
+    );
+    assert_eq!(
+        executors
+            .sqlite
+            .maintain_file_operation_journal_durable()
+            .await
+            .unwrap()
+            .compacted_groups,
+        8
+    );
+    assert_eq!(
+        executors
+            .sqlite
+            .maintain_file_operation_journal_durable()
+            .await
+            .unwrap()
+            .compacted_groups,
+        0
+    );
+    pool.get().unwrap().execute("UPDATE file_operation_groups SET terminal_at = datetime('now', '-8 days') WHERE kind = 'test'", []).unwrap();
+    assert_eq!(
+        executors
+            .sqlite
+            .maintain_file_operation_journal_durable()
+            .await
+            .unwrap()
+            .pruned_groups,
+        32
+    );
+    assert_eq!(
+        executors
+            .sqlite
+            .maintain_file_operation_journal_durable()
+            .await
+            .unwrap()
+            .pruned_groups,
+        8
+    );
+}

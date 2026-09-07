@@ -301,10 +301,6 @@ impl JournalMutationGrant {
         self.entries.first().map(|entry| entry.sequence)
     }
 
-    pub(crate) fn retain_first_entry(&mut self) {
-        self.entries.truncate(1);
-    }
-
     pub(crate) fn publication(
         group_id: String,
         group_version: i64,
@@ -752,6 +748,56 @@ pub(crate) fn prepare_committed_cleanup(
     insert_file_operation(transaction, &plan, None, true)
 }
 
+pub(crate) fn file_operation_paths_conflict(
+    connection: &Connection,
+    claims: &[FilePathClaimPlan],
+) -> rusqlite::Result<bool> {
+    for claim in claims {
+        let mode = claim.mode.as_str();
+        let root = claim.storage_root.as_str();
+        let equal = connection
+            .query_row(
+                queries::file_operations::FIND_EQUAL_CLAIM_CONFLICT,
+                params![root, claim.path.path_key(), mode],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let mut ancestor = false;
+        for ancestor_key in claim.path.ancestor_keys() {
+            ancestor = connection
+                .query_row(
+                    queries::file_operations::FIND_SUBTREE_ANCESTOR_CONFLICT,
+                    params![root, ancestor_key, mode],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if ancestor {
+                break;
+            }
+        }
+        if equal || ancestor {
+            return Ok(true);
+        }
+        if claim.scope == PathClaimScope::Subtree {
+            let upper_bound = claim.path.subtree_upper_bound();
+            let descendant = connection
+                .query_row(
+                    queries::file_operations::FIND_SUBTREE_DESCENDANT_CONFLICT,
+                    params![root, claim.path.path_key(), upper_bound, mode],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if descendant {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn insert_file_operation(
     transaction: &rusqlite::Transaction<'_>,
     plan: &FileOperationPlan,
@@ -765,48 +811,8 @@ fn insert_file_operation(
             |_| Ok(()),
         )?;
     }
-    for claim in &plan.claims {
-        let mode = claim.mode.as_str();
-        let root = claim.storage_root.as_str();
-        let equal = transaction
-            .query_row(
-                queries::file_operations::FIND_EQUAL_CLAIM_CONFLICT,
-                params![root, claim.path.path_key(), mode],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        let mut ancestor = false;
-        for ancestor_key in claim.path.ancestor_keys() {
-            ancestor = transaction
-                .query_row(
-                    queries::file_operations::FIND_SUBTREE_ANCESTOR_CONFLICT,
-                    params![root, ancestor_key, mode],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if ancestor {
-                break;
-            }
-        }
-        if equal || ancestor {
-            return Ok(PrepareJournalOutcome::PathConflict);
-        }
-        if claim.scope == PathClaimScope::Subtree {
-            let upper_bound = claim.path.subtree_upper_bound();
-            let descendant = transaction
-                .query_row(
-                    queries::file_operations::FIND_SUBTREE_DESCENDANT_CONFLICT,
-                    params![root, claim.path.path_key(), upper_bound, mode],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if descendant {
-                return Ok(PrepareJournalOutcome::PathConflict);
-            }
-        }
+    if file_operation_paths_conflict(transaction, &plan.claims)? {
+        return Ok(PrepareJournalOutcome::PathConflict);
     }
     transaction.execute(
         if committed_cleanup {
@@ -910,6 +916,7 @@ pub(crate) fn begin_file_operation_publication(
         &transaction,
         queries::file_operations::SELECT_PENDING_PUBLICATION_ENTRIES,
         group_id,
+        MAX_FILE_OPERATION_ENTRIES_PER_GROUP as u16,
     )?;
     transaction.commit()?;
     Ok(Some(JournalMutationGrant::publication(
@@ -923,6 +930,7 @@ pub(crate) fn verify_file_operation_publication(
     connection: &mut Connection,
     group_id: &str,
     expected_version: i64,
+    entry_limit: u16,
 ) -> rusqlite::Result<Option<JournalMutationGrant>> {
     validate_id(group_id).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if expected_version < 1 {
@@ -945,6 +953,7 @@ pub(crate) fn verify_file_operation_publication(
         &transaction,
         queries::file_operations::SELECT_PENDING_PUBLICATION_ENTRIES,
         group_id,
+        entry_limit,
     )?;
     transaction.commit()?;
     Ok(Some(JournalMutationGrant::publication(
@@ -1035,6 +1044,7 @@ pub(crate) fn verify_file_operation_cleanup(
     connection: &mut Connection,
     group_id: &str,
     expected_version: i64,
+    entry_limit: u16,
 ) -> rusqlite::Result<Option<JournalMutationGrant>> {
     validate_id(group_id).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if expected_version < 1 {
@@ -1066,7 +1076,7 @@ pub(crate) fn verify_file_operation_cleanup(
     } else {
         queries::file_operations::SELECT_PENDING_CLEANUP_ENTRIES
     };
-    let entries = load_authorized_entries(&transaction, query, group_id)?;
+    let entries = load_authorized_entries(&transaction, query, group_id, entry_limit)?;
     transaction.commit()?;
     Ok(Some(JournalMutationGrant::cleanup(
         group_id.to_string(),
@@ -1268,6 +1278,7 @@ pub(crate) fn verify_file_operation_rollback(
     connection: &mut Connection,
     group_id: &str,
     expected_version: i64,
+    entry_limit: u16,
 ) -> rusqlite::Result<Option<JournalMutationGrant>> {
     validate_id(group_id).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if expected_version < 1 {
@@ -1290,6 +1301,7 @@ pub(crate) fn verify_file_operation_rollback(
         &transaction,
         queries::file_operations::SELECT_PENDING_ROLLBACK_ENTRIES,
         group_id,
+        entry_limit,
     )?;
     transaction.commit()?;
     Ok(Some(JournalMutationGrant::rollback(
@@ -1761,20 +1773,20 @@ pub(crate) fn maintain_file_operation_journal(
             .ok_or(rusqlite::Error::InvalidQuery)?;
     }
 
-    let compaction_candidate = transaction
-        .query_row(
-            queries::file_operations::SELECT_COMPACTION_CANDIDATE,
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    let compacted_groups = if let Some((group_id, state, version)) = compaction_candidate {
+    let candidates = {
+        let mut statement =
+            transaction.prepare(queries::file_operations::SELECT_COMPACTION_PAGE)?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let compacted_groups = candidates.len();
+    for (group_id, state, version) in candidates {
         let action_summary = count_entry_values(
             &transaction,
             queries::file_operations::COUNT_ENTRY_ACTIONS,
@@ -1813,23 +1825,17 @@ pub(crate) fn maintain_file_operation_journal(
         if updated != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        1
-    } else {
-        0
-    };
+    }
 
-    let prune_candidate = transaction
-        .query_row(
-            queries::file_operations::SELECT_PRUNE_CANDIDATE,
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let pruned_groups = if let Some(group_id) = prune_candidate {
-        transaction.execute(queries::file_operations::PRUNE_GROUP, [group_id])?
-    } else {
-        0
+    let expired_groups = {
+        let mut statement = transaction.prepare(queries::file_operations::SELECT_PRUNE_PAGE)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let mut pruned_groups = 0;
+    for group_id in expired_groups {
+        pruned_groups += transaction.execute(queries::file_operations::PRUNE_GROUP, [group_id])?;
+    }
     transaction.commit()?;
     Ok(JournalMaintenanceOutcome {
         expired_retry_receipts,
@@ -1990,12 +1996,16 @@ fn load_authorized_entries(
     connection: &Connection,
     query: &str,
     group_id: &str,
+    entry_limit: u16,
 ) -> rusqlite::Result<Vec<AuthorizedJournalEntry>> {
+    if entry_limit == 0 || usize::from(entry_limit) > MAX_FILE_OPERATION_ENTRIES_PER_GROUP {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let mut statement = connection.prepare(query)?;
-    let mut rows = statement.query([group_id])?;
+    let mut rows = statement.query(params![group_id, entry_limit])?;
     let mut entries = Vec::new();
     entries
-        .try_reserve_exact(MAX_FILE_OPERATION_ENTRIES_PER_GROUP)
+        .try_reserve_exact(usize::from(entry_limit))
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     while let Some(row) = rows.next()? {
         if entries.len() >= MAX_FILE_OPERATION_ENTRIES_PER_GROUP {

@@ -25,6 +25,24 @@ fn camera_raw_preview_selection_excludes_regular_images() {
 }
 
 #[test]
+fn jpeg_preview_is_required_only_for_browser_unsupported_formats() {
+    use momento_api::constants::requires_jpeg_preview;
+    use std::path::Path;
+    for extension in ["NEF", "CR3", "DNG", "HEIC", "heif", "tif", "qoi", "raf"] {
+        let filename = format!("image.{extension}");
+        assert!(requires_jpeg_preview(
+            Path::new(&filename),
+            image_mime_type(Path::new(&filename))
+        ));
+    }
+    for extension in ["jpg", "png", "gif", "webp", "avif", "bmp"] {
+        let filename = format!("image.{extension}");
+        assert!(!requires_jpeg_preview(Path::new(&filename), None));
+    }
+    assert!(requires_jpeg_preview(Path::new("unknown"), None));
+}
+
+#[test]
 fn release_version_matches_the_backend_package() {
     let release_version = include_str!("../../src/backend/version.txt").trim();
 

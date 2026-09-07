@@ -330,6 +330,7 @@ pub(crate) enum SqliteOperation {
         error: String,
     },
     AbsorbExistingMedia(AbsorbExistingMediaDatabase),
+    InspectImportCleanup(FileOperationPlan),
     RecoverInterruptedImportPage {
         after_media_id: i64,
         limit: u16,
@@ -368,6 +369,7 @@ pub(crate) enum SqliteOperation {
     VerifyFileOperationPublication {
         group_id: String,
         expected_version: i64,
+        entry_limit: u16,
     },
     RecordFileEntryPublished {
         group_id: String,
@@ -381,6 +383,7 @@ pub(crate) enum SqliteOperation {
     VerifyFileOperationCleanup {
         group_id: String,
         expected_version: i64,
+        entry_limit: u16,
     },
     RecordFileEntryCleaned {
         group_id: String,
@@ -389,6 +392,13 @@ pub(crate) enum SqliteOperation {
     },
     LoadNextGenericFileOperationRecovery {
         scope: JournalRecoveryScope,
+    },
+    LoadJournalRetryDelay,
+    DeferJournalRecovery {
+        group_id: String,
+        expected_version: i64,
+        error_kind: String,
+        error: String,
     },
     YieldFileOperationProgress {
         group_id: String,
@@ -433,6 +443,7 @@ pub(crate) enum SqliteOperation {
     VerifyFileOperationRollback {
         group_id: String,
         expected_version: i64,
+        entry_limit: u16,
     },
     RecordFileEntryRolledBack {
         group_id: String,
@@ -588,6 +599,7 @@ impl SqliteOperation {
             Self::FinalizeImportMedia(_) => "finalize_import_media",
             Self::MarkImportMediaFailed { .. } => "mark_import_media_failed",
             Self::AbsorbExistingMedia(_) => "absorb_existing_media",
+            Self::InspectImportCleanup(_) => "inspect_import_cleanup",
             Self::RecoverInterruptedImportPage { .. } => "recover_interrupted_import_page",
             Self::LoadWebdavReadyPage { .. } => "load_webdav_ready_page",
             Self::CheckWebdavReady { .. } => "check_webdav_ready",
@@ -609,6 +621,8 @@ impl SqliteOperation {
             Self::LoadNextGenericFileOperationRecovery { .. } => {
                 "load_next_generic_file_operation_recovery"
             }
+            Self::LoadJournalRetryDelay => "load_journal_retry_delay",
+            Self::DeferJournalRecovery { .. } => "defer_journal_recovery",
             Self::YieldFileOperationProgress { .. } => "yield_file_operation_progress",
             Self::RecordFileOperationFailure { .. } => "record_file_operation_failure",
             Self::RecordFileOperationFinalizationFailure { .. } => {
@@ -676,6 +690,7 @@ impl SqliteOperation {
             Self::VerifyFileOperationPublication { .. }
             | Self::VerifyFileOperationCleanup { .. }
             | Self::LoadNextGenericFileOperationRecovery { .. }
+            | Self::LoadJournalRetryDelay
             | Self::ListFileOperations { .. }
             | Self::LoadFileOperationDetail { .. }
             | Self::VerifyFileOperationRollback { .. } => bounded_api_read_spec(),
@@ -688,7 +703,8 @@ impl SqliteOperation {
             | Self::LoadFaceRepresentativeGroupPage(_)
             | Self::LoadFaceRepresentativeCandidatePage(_) => bounded_api_read_spec(),
             Self::LoadDeduplicateScheduleState => bounded_api_read_spec(),
-            Self::LoadImportStatus { .. }
+            Self::InspectImportCleanup(_)
+            | Self::LoadImportStatus { .. }
             | Self::LoadWebdavReadyPage { .. }
             | Self::CheckWebdavReady { .. } => bounded_api_read_spec(),
             Self::LoadNextMetadataJobDelay | Self::LoadNextLlmSubmissionDelay => {
@@ -744,6 +760,7 @@ impl SqliteOperation {
             | Self::VerifyFileOperationPublication { .. }
             | Self::VerifyFileOperationCleanup { .. }
             | Self::LoadNextGenericFileOperationRecovery { .. }
+            | Self::LoadJournalRetryDelay
             | Self::ListFileOperations { .. }
             | Self::LoadFileOperationDetail { .. }
             | Self::VerifyFileOperationRollback { .. }
@@ -756,6 +773,7 @@ impl SqliteOperation {
             | Self::LoadFaceRepresentativeGroupPage(_)
             | Self::LoadFaceRepresentativeCandidatePage(_)
             | Self::LoadDeduplicateScheduleState
+            | Self::InspectImportCleanup(_)
             | Self::LoadImportStatus { .. }
             | Self::LoadWebdavReadyPage { .. }
             | Self::CheckWebdavReady { .. }
@@ -984,7 +1002,9 @@ impl SqliteOperation {
             | Self::RecordFileEntryCleaned { .. }
             | Self::RecordFileOperationFailure { .. }
             | Self::RecordFileOperationFinalizationFailure { .. } => bounded_api_write_spec(),
-            Self::YieldFileOperationProgress { .. } => bounded_api_write_spec(),
+            Self::YieldFileOperationProgress { .. } | Self::DeferJournalRecovery { .. } => {
+                bounded_api_write_spec()
+            }
             Self::RetryFileOperation { .. } => bounded_api_write_spec(),
             Self::MaintainFileOperationJournal
             | Self::RequestFileOperationCancellation { .. }
@@ -1043,6 +1063,7 @@ pub(crate) enum SqliteOutput {
     MetadataJobStatus(MetadataJobStatus),
     MetadataJobClaimed(Option<MetadataJobClaim>),
     NextMetadataJobDelay(Option<u64>),
+    JournalRetryDelay(Option<u64>),
     MetadataJobFinished,
     MetadataClaimsRecovered(usize),
     MetadataGenerationMedia(MetadataGenerationMedia),
@@ -1121,7 +1142,8 @@ pub(crate) enum SqliteOutput {
     ImportMediaAllocated(ImportTarget),
     ImportMediaFinalized(bool),
     ImportMediaFailed(bool),
-    ExistingMediaAbsorbed,
+    ExistingMediaAbsorbed(bool),
+    ImportCleanupStatus(crate::processor::import::ImportCleanupStatus),
     InterruptedImportPage(Vec<InterruptedImport>),
     WebdavReadyPage(Vec<WebdavReadyFile>),
     WebdavReadyChecked(bool),
@@ -1205,6 +1227,7 @@ impl SqliteOutput {
             Self::MetadataJobStatus(_) => "metadata_job_status",
             Self::MetadataJobClaimed(_) => "metadata_job_claimed",
             Self::NextMetadataJobDelay(_) => "next_metadata_job_delay",
+            Self::JournalRetryDelay(_) => "journal_retry_delay",
             Self::MetadataJobFinished => "metadata_job_finished",
             Self::MetadataClaimsRecovered(_) => "metadata_claims_recovered",
             Self::MetadataGenerationMedia(_) => "metadata_generation_media",
@@ -1283,7 +1306,8 @@ impl SqliteOutput {
             Self::ImportMediaAllocated(_) => "import_media_allocated",
             Self::ImportMediaFinalized(_) => "import_media_finalized",
             Self::ImportMediaFailed(_) => "import_media_failed",
-            Self::ExistingMediaAbsorbed => "existing_media_absorbed",
+            Self::ExistingMediaAbsorbed(_) => "existing_media_absorbed",
+            Self::ImportCleanupStatus(_) => "import_cleanup_status",
             Self::InterruptedImportPage(_) => "interrupted_import_page",
             Self::WebdavReadyPage(_) => "webdav_ready_page",
             Self::WebdavReadyChecked(_) => "webdav_ready_checked",
@@ -3398,7 +3422,7 @@ impl SqliteExecutorHandle {
     pub(crate) async fn absorb_existing_media_durable(
         &self,
         request: AbsorbExistingMediaDatabase,
-    ) -> Result<(), ExecutorError> {
+    ) -> Result<bool, ExecutorError> {
         match self
             .submit(
                 SqliteOperation::AbsorbExistingMedia(request),
@@ -3406,8 +3430,24 @@ impl SqliteExecutorHandle {
             )
             .await?
         {
-            SqliteOutput::ExistingMediaAbsorbed => Ok(()),
+            SqliteOutput::ExistingMediaAbsorbed(absorbed) => Ok(absorbed),
             output => Err(output.mismatch("absorb_existing_media")),
+        }
+    }
+
+    pub(crate) async fn inspect_import_cleanup_durable(
+        &self,
+        plan: FileOperationPlan,
+    ) -> Result<crate::processor::import::ImportCleanupStatus, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::InspectImportCleanup(plan),
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::ImportCleanupStatus(status) => Ok(status),
+            output => Err(output.mismatch("inspect_import_cleanup")),
         }
     }
 
@@ -3763,12 +3803,14 @@ impl SqliteExecutorHandle {
     pub async fn verify_file_operation_publication_durable(
         &self,
         ticket: &JournalMutationTicket,
+        entry_limit: u16,
     ) -> Result<Option<JournalMutationGrant>, ExecutorError> {
         match self
             .submit(
                 SqliteOperation::VerifyFileOperationPublication {
                     group_id: ticket.group_id().to_string(),
                     expected_version: ticket.group_version(),
+                    entry_limit,
                 },
                 SubmissionMode::Durable,
             )
@@ -3802,12 +3844,14 @@ impl SqliteExecutorHandle {
     pub async fn verify_file_operation_cleanup_durable(
         &self,
         ticket: &JournalMutationTicket,
+        entry_limit: u16,
     ) -> Result<Option<JournalMutationGrant>, ExecutorError> {
         match self
             .submit(
                 SqliteOperation::VerifyFileOperationCleanup {
                     group_id: ticket.group_id().to_string(),
                     expected_version: ticket.group_version(),
+                    entry_limit,
                 },
                 SubmissionMode::Durable,
             )
@@ -3853,6 +3897,44 @@ impl SqliteExecutorHandle {
         {
             SqliteOutput::GenericFileOperationRecovery(group) => Ok(group),
             output => Err(output.mismatch("load_next_generic_file_operation_recovery")),
+        }
+    }
+
+    pub async fn journal_retry_delay(&self) -> Result<Option<std::time::Duration>, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::LoadJournalRetryDelay,
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::JournalRetryDelay(seconds) => {
+                Ok(seconds.map(std::time::Duration::from_secs))
+            }
+            output => Err(output.mismatch("load_journal_retry_delay")),
+        }
+    }
+
+    pub(crate) async fn defer_journal_recovery(
+        &self,
+        group_id: String,
+        expected_version: i64,
+        error: &ExecutorError,
+    ) -> Result<JournalCheckpointOutcome, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::DeferJournalRecovery {
+                    group_id,
+                    expected_version,
+                    error_kind: format!("{:?}", error.kind),
+                    error: error.to_string().chars().take(2048).collect(),
+                },
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::FileOperationProgressYielded(outcome) => Ok(outcome),
+            output => Err(output.mismatch("defer_journal_recovery")),
         }
     }
 
@@ -4065,12 +4147,14 @@ impl SqliteExecutorHandle {
     pub async fn verify_file_operation_rollback_durable(
         &self,
         ticket: &JournalMutationTicket,
+        entry_limit: u16,
     ) -> Result<Option<JournalMutationGrant>, ExecutorError> {
         match self
             .submit(
                 SqliteOperation::VerifyFileOperationRollback {
                     group_id: ticket.group_id().to_string(),
                     expected_version: ticket.group_version(),
+                    entry_limit,
                 },
                 SubmissionMode::Durable,
             )
@@ -6255,7 +6339,12 @@ fn execute_with_connection(
         }
         SqliteOperation::AbsorbExistingMedia(request) => {
             crate::processor::import::absorb_existing_media_on_connection(connection, request)
-                .map(|()| SqliteOutput::ExistingMediaAbsorbed)
+                .map(SqliteOutput::ExistingMediaAbsorbed)
+                .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::InspectImportCleanup(plan) => {
+            crate::processor::import::inspect_import_cleanup_on_connection(connection, plan)
+                .map(SqliteOutput::ImportCleanupStatus)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::RecoverInterruptedImportPage {
@@ -6358,10 +6447,12 @@ fn execute_with_connection(
         SqliteOperation::VerifyFileOperationPublication {
             group_id,
             expected_version,
+            entry_limit,
         } => crate::io::journal::verify_file_operation_publication(
             connection,
             &group_id,
             expected_version,
+            entry_limit,
         )
         .map(SqliteOutput::FileOperationPublicationVerified)
         .map_err(|error| map_sqlite_error(operation_name, error)),
@@ -6395,10 +6486,12 @@ fn execute_with_connection(
         SqliteOperation::VerifyFileOperationCleanup {
             group_id,
             expected_version,
+            entry_limit,
         } => crate::io::journal::verify_file_operation_cleanup(
             connection,
             &group_id,
             expected_version,
+            entry_limit,
         )
         .map(SqliteOutput::FileOperationCleanupVerified)
         .map_err(|error| map_sqlite_error(operation_name, error)),
@@ -6423,6 +6516,36 @@ fn execute_with_connection(
             crate::io::journal::load_next_generic_recovery_group(connection, scope)
                 .map(SqliteOutput::GenericFileOperationRecovery)
                 .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::LoadJournalRetryDelay => connection
+            .query_row(
+                crate::database::queries::file_operations::NEXT_RECOVERY_DELAY,
+                [],
+                |row| row.get(0),
+            )
+            .map(SqliteOutput::JournalRetryDelay)
+            .map_err(|error| map_sqlite_error(operation_name, error)),
+        SqliteOperation::DeferJournalRecovery {
+            group_id,
+            expected_version,
+            error_kind,
+            error,
+        } => {
+            let changed = connection
+                .execute(
+                    crate::database::queries::file_operations::DEFER_RECOVERY,
+                    rusqlite::params![error_kind, error, group_id, expected_version],
+                )
+                .map_err(|error| map_sqlite_error(operation_name, error))?;
+            Ok(SqliteOutput::FileOperationProgressYielded(
+                if changed == 1 {
+                    JournalCheckpointOutcome::Advanced {
+                        version: expected_version + 1,
+                    }
+                } else {
+                    JournalCheckpointOutcome::VersionConflict
+                },
+            ))
         }
         SqliteOperation::YieldFileOperationProgress {
             group_id,
@@ -6531,10 +6654,12 @@ fn execute_with_connection(
         SqliteOperation::VerifyFileOperationRollback {
             group_id,
             expected_version,
+            entry_limit,
         } => crate::io::journal::verify_file_operation_rollback(
             connection,
             &group_id,
             expected_version,
+            entry_limit,
         )
         .map(SqliteOutput::FileOperationRollbackVerified)
         .map_err(|error| map_sqlite_error(operation_name, error)),

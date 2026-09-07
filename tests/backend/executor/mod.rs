@@ -820,7 +820,7 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
         .expect("reserve recovery lease");
     let recovery_grant = handles
         .sqlite
-        .verify_file_operation_publication_durable(&recovery_ticket)
+        .verify_file_operation_publication_durable(&recovery_ticket, 256)
         .await
         .expect("verify recovery publication")
         .expect("still-publishing version");
@@ -867,7 +867,7 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
         .expect("reserve cleanup lease");
     let cleanup_grant = handles
         .sqlite
-        .verify_file_operation_cleanup_durable(&cleanup_ticket)
+        .verify_file_operation_cleanup_durable(&cleanup_ticket, 256)
         .await
         .expect("verify cleanup")
         .expect("cleanup-pending version");
@@ -890,7 +890,7 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
         .expect("reserve second cleanup lease");
     let cleanup_grant = handles
         .sqlite
-        .verify_file_operation_cleanup_durable(&cleanup_ticket)
+        .verify_file_operation_cleanup_durable(&cleanup_ticket, 256)
         .await
         .expect("verify second cleanup")
         .expect("second cleanup-pending version");
@@ -920,7 +920,7 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
         .expect("reserve publish cleanup lease");
     let publish_cleanup_grant = handles
         .sqlite
-        .verify_file_operation_cleanup_durable(&publish_cleanup_ticket)
+        .verify_file_operation_cleanup_durable(&publish_cleanup_ticket, 256)
         .await
         .expect("verify publish temporary cleanup")
         .expect("remaining cleanup version");
@@ -1916,6 +1916,7 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
         std::fs::Permissions::from_mode(0o755),
     )
     .expect("repair rollback directory");
+    tokio::time::sleep(handles.sqlite.journal_retry_delay().await.unwrap().unwrap()).await;
     assert_eq!(
         momento_api::io::recovery::recover_generic_file_operations(&handles)
             .await
@@ -2128,7 +2129,7 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
         .expect("reserve delayed pre-cancellation ticket");
     let delayed_grant = handles
         .sqlite
-        .verify_file_operation_publication_durable(&delayed_ticket)
+        .verify_file_operation_publication_durable(&delayed_ticket, 256)
         .await
         .expect("verify delayed pre-cancellation grant")
         .expect("delayed grant");

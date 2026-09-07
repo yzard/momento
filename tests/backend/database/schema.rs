@@ -497,3 +497,70 @@ fn face_schema_stores_independent_bounded_quality_scores() {
             .is_err());
     }
 }
+#[test]
+fn journal_queue_and_sequence_use_ordered_indexes() {
+    let pool = crate::test_utils::create_test_db();
+    let connection = pool.get().unwrap();
+    for (query, index) in [
+        (
+            momento_api::database::queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
+            "idx_file_operation_groups_recovery_queue",
+        ),
+        (
+            "SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups",
+            "idx_file_operation_groups_order",
+        ),
+    ] {
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .unwrap();
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("; ");
+        assert!(details.contains(index), "{details}");
+        assert!(!details.contains("TEMP B-TREE"), "{details}");
+    }
+}
+
+#[test]
+fn journal_fifo_keeps_progress_at_head_and_explicit_retry_moves_to_tail() {
+    let pool = create_test_db();
+    let connection = pool.get().unwrap();
+    for (id, position) in [("first", 1), ("second", 2)] {
+        connection.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count, recovery_order) VALUES (?, 'test', 'test', 'test', 'cleanup_pending', 2, ?)", rusqlite::params![id, position]).unwrap();
+    }
+    let head = || {
+        connection
+            .query_row(
+                queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(head(), "first");
+    connection
+        .execute(
+            queries::file_operations::CHECKPOINT_CLEANUP,
+            rusqlite::params!["cleanup_pending", "cleanup_pending", "first", 1],
+        )
+        .unwrap();
+    assert_eq!(head(), "first", "normal progress must not rotate the FIFO");
+    connection
+        .execute(
+            queries::file_operations::YIELD_RECOVERY_PROGRESS,
+            rusqlite::params!["first", 2],
+        )
+        .unwrap();
+    assert_eq!(head(), "second", "explicit deferral appends to the tail");
+    connection
+        .execute(
+            queries::file_operations::CHECKPOINT_CLEANUP,
+            rusqlite::params!["cleaned", "cleaned", "second", 1],
+        )
+        .unwrap();
+    assert_eq!(head(), "first", "completed work leaves the ready FIFO");
+}

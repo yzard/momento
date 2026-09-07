@@ -978,6 +978,24 @@ CREATE INDEX IF NOT EXISTS idx_face_group_finalization_manual_page
 CREATE INDEX IF NOT EXISTS idx_face_group_finalization_group_page
     ON face_group_finalization_groups (generation_id, complete, face_group_id);
 
+-- One live-reference contract for generated files. References follow business
+-- transactions automatically; Journal does not maintain a second ownership registry.
+CREATE VIEW IF NOT EXISTS file_product_references AS
+    SELECT 'thumbnails' AS storage_root, thumbnail_path AS file_path
+      FROM media_metadata WHERE thumbnail_path IS NOT NULL
+    UNION ALL
+    SELECT 'tiny_thumbnails', thumbnail_path
+      FROM media_metadata WHERE thumbnail_path IS NOT NULL
+    UNION ALL
+    SELECT 'previews', preview_path
+      FROM media_metadata WHERE preview_path IS NOT NULL
+    UNION ALL
+    SELECT 'previews', crop_path FROM media_faces
+    UNION ALL
+    SELECT storage_root, file_path FROM media_ai_inputs
+    UNION ALL
+    SELECT storage_root, file_path FROM llm_job_inputs;
+
 CREATE TABLE IF NOT EXISTS file_operation_groups (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -1004,6 +1022,7 @@ CREATE TABLE IF NOT EXISTS file_operation_groups (
     entry_count INTEGER NOT NULL CHECK(entry_count BETWEEN 1 AND 256),
     version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
     recovery_order INTEGER NOT NULL DEFAULT 1 CHECK(recovery_order > 0),
+    retry_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     terminal_at TEXT
@@ -1196,6 +1215,14 @@ END;
 
 CREATE INDEX IF NOT EXISTS idx_file_operation_groups_state
     ON file_operation_groups (state, recovery_order, id);
+
+CREATE INDEX IF NOT EXISTS idx_file_operation_groups_order
+    ON file_operation_groups (recovery_order);
+
+CREATE INDEX IF NOT EXISTS idx_file_operation_groups_recovery_queue
+    ON file_operation_groups (recovery_order, id)
+    WHERE product_target IS NULL
+      AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending');
 
 CREATE INDEX IF NOT EXISTS idx_file_operation_groups_owner
     ON file_operation_groups (owner_kind, owner_id, state);

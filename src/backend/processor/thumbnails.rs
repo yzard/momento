@@ -172,17 +172,26 @@ pub(crate) async fn generate_image_preview_prepared(
     executors: &ExecutorHandles,
     source: &StorageMediaFile,
     output: &StorageMediaFile,
-    max_size: u32,
     quality: u8,
     maximum_output_bytes: u64,
     process_config: &MediaProcessConfig,
 ) -> Result<(), String> {
-    generate_image_variant_with_fallback(
+    let dimensions = crate::executor::process::inspect_storage_image_dimensions(
+        &executors.cpu,
+        &executors.file_io,
+        source.storage_root,
+        source.path.clone(),
+        process_config,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    // A full-resolution preview must never fall back to a reduced embedded image.
+    generate_image_variant(
         executors,
         source,
         output,
         ImageVariantSpec {
-            maximum_size: max_size,
+            maximum_size: dimensions.0.max(dimensions.1),
             maximum_output_bytes,
             quality,
             variant: ImageVariant::AspectRatioPreview,
@@ -190,7 +199,22 @@ pub(crate) async fn generate_image_preview_prepared(
         process_config,
         OutputMode::Prepared,
     )
+    .await?;
+    let output_dimensions = crate::executor::process::inspect_storage_image_dimensions(
+        &executors.cpu,
+        &executors.file_io,
+        output.storage_root,
+        output.path.clone(),
+        process_config,
+    )
     .await
+    .map_err(|error| error.to_string())?;
+    if output_dimensions != dimensions && output_dimensions != (dimensions.1, dimensions.0) {
+        return Err(format!(
+            "JPEG preview dimensions changed: {dimensions:?} -> {output_dimensions:?}"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn maximum_jpeg_output_bytes(

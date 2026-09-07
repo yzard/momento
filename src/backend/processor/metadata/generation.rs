@@ -10,7 +10,7 @@ use crate::database::operations::{
     MetadataAiInputWrite, MetadataSourceWrite, MetadataValuesWrite, PersistMetadataGeneration,
 };
 use crate::executor::process::{
-    bounded_error_detail, ffmpeg_single_thread_arguments, validate_storage_image_dimensions,
+    bounded_error_detail, ffmpeg_single_thread_arguments, inspect_storage_image_dimensions,
 };
 use crate::processor::ai::input::AiInputStorage;
 use crate::processor::artifact::ArtifactPublicationOwner;
@@ -45,18 +45,22 @@ pub async fn generate_media_metadata(
         path: crate::io::file::NormalizedStoragePath::parse(&file_path)
             .map_err(|error| error.to_string())?,
     };
-    if media_type == "image" {
-        validate_storage_image_dimensions(
-            &executors.cpu,
-            &executors.file_io,
-            crate::io::file::StorageRootId::Originals,
-            crate::io::file::NormalizedStoragePath::parse(&file_path)
-                .map_err(|error| error.to_string())?,
-            &config.media_process,
+    let original_dimensions = if media_type == "image" {
+        Some(
+            inspect_storage_image_dimensions(
+                &executors.cpu,
+                &executors.file_io,
+                crate::io::file::StorageRootId::Originals,
+                crate::io::file::NormalizedStoragePath::parse(&file_path)
+                    .map_err(|error| error.to_string())?,
+                &config.media_process,
+            )
+            .await
+            .map_err(|error| format!("canonical image validation failed: {error}"))?,
         )
-        .await
-        .map_err(|error| format!("canonical image validation failed: {error}"))?;
-    }
+    } else {
+        None
+    };
     let content_hash = match media
         .content_hash
         .filter(|content_hash| is_sha256(content_hash))
@@ -131,7 +135,7 @@ pub async fn generate_media_metadata(
         .join(format!("v{artifact_version}-{claim_token}"))
         .join("thumbnail.jpg");
     let preview_relative = if media_type == "image"
-        && crate::constants::is_camera_raw_image(
+        && crate::constants::requires_jpeg_preview(
             std::path::Path::new(&file_path),
             media.mime_type.as_deref(),
         ) {
@@ -167,6 +171,9 @@ pub async fn generate_media_metadata(
         config.metadata.thumbnails_max_size,
         config.metadata.thumbnails_tiny_size,
         preview_relative.is_some(),
+        original_dimensions
+            .map(|(width, height)| (i32::try_from(width).ok(), i32::try_from(height).ok()))
+            .unwrap_or((None, None)),
         config.media_process.maximum_normalized_image_output_bytes as u64,
     )?;
     let maximum_artifact_batch_bytes = artifact_output_limits
@@ -336,10 +343,26 @@ async fn generate_metadata_artifact_batch(
     };
     let thumbnail = target(0, "thumbnail")?;
     let tiny_thumbnail = target(1, "tiny thumbnail")?;
+    let preview = if include_web_preview {
+        let preview = target(2, "web preview")?;
+        generate_image_preview_prepared(
+            executors,
+            original,
+            &preview,
+            90,
+            output_limits[2],
+            &config.media_process,
+        )
+        .await
+        .map_err(|error| format!("web preview generation failed: {error}"))?;
+        Some(preview)
+    } else {
+        None
+    };
     generate_prepared_thumbnail(
         executors,
         media_type,
-        original,
+        preview.as_ref().unwrap_or(original),
         &thumbnail,
         config.metadata.thumbnails_max_size,
         output_limits[0],
@@ -358,20 +381,6 @@ async fn generate_metadata_artifact_batch(
     )
     .await
     .map_err(|error| format!("tiny thumbnail generation failed: {error}"))?;
-    if include_web_preview {
-        let preview = target(2, "web preview")?;
-        generate_image_preview_prepared(
-            executors,
-            original,
-            &preview,
-            2048,
-            90,
-            output_limits[2],
-            &config.media_process,
-        )
-        .await
-        .map_err(|error| format!("web preview generation failed: {error}"))?;
-    }
     Ok(())
 }
 
@@ -413,6 +422,7 @@ fn metadata_artifact_output_limits(
     thumbnail_size: u32,
     tiny_thumbnail_size: u32,
     include_web_preview: bool,
+    preview_dimensions: (Option<i32>, Option<i32>),
     configured_maximum_bytes: u64,
 ) -> Result<Vec<u64>, String> {
     let thumbnail_limit = maximum_jpeg_output_bytes(thumbnail_size, configured_maximum_bytes)?;
@@ -421,7 +431,10 @@ fn metadata_artifact_output_limits(
         maximum_jpeg_output_bytes(tiny_thumbnail_size, configured_maximum_bytes)?,
     ];
     if include_web_preview {
-        limits.push(maximum_jpeg_output_bytes(2048, configured_maximum_bytes)?);
+        limits.push(maximum_png_output_bytes(
+            preview_dimensions,
+            configured_maximum_bytes,
+        )?);
     }
     Ok(limits)
 }

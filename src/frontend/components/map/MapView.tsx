@@ -229,6 +229,7 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
           attribution={OPENSTREETMAP_ATTRIBUTION}
           detectRetina
           maxZoom={19}
+          referrerPolicy="origin"
           url={OPENSTREETMAP_TILE_URL}
         />
         <MapClusterMarkers clusters={clusters} onClusterClick={handleClusterClick} />

@@ -368,10 +368,23 @@ async fn converted_preview_uses_the_atomically_persisted_generation_path() {
         .await;
     response.assert_status_ok();
     assert_eq!(response.as_bytes(), generation_path.as_bytes());
+    pool.get()
+        .expect("database")
+        .execute(
+            "UPDATE media SET file_path = 'photo.heic', mime_type = 'image/heic' WHERE id = ?",
+            [media_id],
+        )
+        .expect("HEIC media");
+    let response = server
+        .get(&format!("/api/v1/media/{media_id}/preview"))
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user_id)))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.as_bytes(), generation_path.as_bytes());
 }
 
 #[tokio::test]
-async fn non_raw_preview_serves_original_even_when_a_converted_preview_exists() {
+async fn browser_supported_preview_serves_original_even_when_a_converted_preview_exists() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "original-preview", "original-preview@example.com");
     let media_id = create_test_media_with_gps_and_date(
@@ -385,9 +398,9 @@ async fn non_raw_preview_serves_original_even_when_a_converted_preview_exists() 
     let data_directory = test_data_directory(&pool);
     let server = TestServer::new(app).expect("server");
     for (filename, mime_type) in [
-        ("photo.heic", "image/heic"),
-        ("photo.qoi", "image/qoi"),
-        ("photo.tiff", "image/tiff"),
+        ("photo.png", "image/png"),
+        ("photo.webp", "image/webp"),
+        ("photo.avif", "image/avif"),
     ] {
         std::fs::write(
             data_directory.join("originals").join(filename),

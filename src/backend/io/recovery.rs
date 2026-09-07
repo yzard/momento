@@ -273,337 +273,297 @@ async fn recover_file_operations(
             last_progress_log = std::time::Instant::now();
         }
         previous = Some(position);
-        match group.state {
-            JournalRecoveryState::Publishing => {
-                let ticket = executors
-                    .file_io
-                    .reserve_journal_mutation(&group.group_id, group.version)
-                    .map_err(mutation_registry_error)?;
-                let Some(mut grant) = executors
+        match recover_file_operation_step(executors, &group).await {
+            Ok(count) => recovered_entries += count,
+            Err(error) if scope == JournalRecoveryScope::All => {
+                // The step has returned, so its filesystem lease and executor resources are gone.
+                let disposition = executors
                     .sqlite
-                    .verify_file_operation_publication_durable(&ticket)
-                    .await?
-                else {
-                    continue;
-                };
-                grant.retain_first_entry();
-                let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
-                let mut lease =
-                    match acquire_verified_journal_mutation(executors, ticket, grant).await {
-                        Ok(lease) => lease,
-                        Err(error) if is_permanent_file_failure(error.kind) => {
-                            record_permanent_failure(
-                                executors,
-                                group.group_id,
-                                group.version,
-                                sequence,
-                                JournalFailureStage::Publication,
-                                error,
-                            )
-                            .await?;
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                let sequence = lease.next_sequence().map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        "recover_generic_file_operations",
-                        error.to_string(),
-                    )
-                })?;
-                let applied = match executors
-                    .file_io
-                    .apply_next_journal_entry_durable(&mut lease)
-                    .await
-                {
-                    Ok(applied) => applied,
-                    Err(error) if is_permanent_file_failure(error.kind) => {
-                        drop(lease);
-                        record_permanent_failure(
-                            executors,
-                            group.group_id,
-                            group.version,
-                            sequence,
-                            JournalFailureStage::Publication,
-                            error,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                let checkpoint = executors
-                    .sqlite
-                    .record_file_entry_published_durable(
-                        group.group_id,
-                        group.version,
-                        applied.sequence,
-                    )
+                    .defer_journal_recovery(group.group_id.clone(), group.version, &error)
                     .await?;
-                drop(lease);
-                if checkpoint.is_none() {
-                    return Err(recovery_conflict());
-                }
-                recovered_entries = recovered_entries
-                    .checked_add(1)
-                    .ok_or_else(recovery_conflict)?;
+                tracing::warn!(group_id = %group.group_id, error = %error, ?disposition, "Journal operation deferred to FIFO tail");
             }
-            JournalRecoveryState::FilesCommitted => {
-                let outcome = match executors
-                    .sqlite
-                    .complete_no_product_file_operation_durable(
-                        group.group_id.clone(),
-                        group.version,
-                    )
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(error) if error.kind == ExecutorErrorKind::DatabasePermanent => {
-                        let detail = bounded_diagnostic(&error)?;
-                        let outcome = executors
-                            .sqlite
-                            .record_file_operation_finalization_failure_durable(
-                                group.group_id,
-                                group.version,
-                                format!("{:?}", error.kind),
-                                detail,
-                            )
-                            .await?;
-                        if outcome == JournalCheckpointOutcome::VersionConflict {
-                            return Err(recovery_conflict());
-                        }
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if outcome == JournalCheckpointOutcome::VersionConflict {
-                    return Err(recovery_conflict());
-                }
-                let JournalCheckpointOutcome::Advanced { version } = outcome else {
-                    unreachable!();
-                };
-                executors
-                    .file_io
-                    .release_journal_mutation_fence(&group.group_id, version)
-                    .map_err(mutation_registry_error)?;
-            }
-            JournalRecoveryState::CleanupPending => {
-                let ticket = executors
-                    .file_io
-                    .reserve_journal_mutation(&group.group_id, group.version)
-                    .map_err(mutation_registry_error)?;
-                let Some(mut grant) = executors
-                    .sqlite
-                    .verify_file_operation_cleanup_durable(&ticket)
-                    .await?
-                else {
-                    continue;
-                };
-                grant.retain_first_entry();
-                let discarding_product = grant.discarding_product();
-                let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
-                let diagnostic_entry = grant.entries_mut()[0].clone();
-                let mut lease = match acquire_verified_journal_mutation(executors, ticket, grant)
-                    .await
-                    .inspect_err(|error| {
-                        log_cleanup_failure(&group.group_id, &diagnostic_entry, error)
-                    }) {
-                    Ok(lease) => lease,
-                    Err(error) if discarding_product => {
-                        yield_progress_to_tail(executors, group.group_id, group.version).await?;
-                        return Err(error);
-                    }
-                    Err(error) if is_permanent_file_failure(error.kind) => {
-                        record_permanent_failure(
-                            executors,
-                            group.group_id,
-                            group.version,
-                            sequence,
-                            JournalFailureStage::Cleanup,
-                            error,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                let sequence = lease.next_sequence().map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        "recover_generic_file_operations",
-                        error.to_string(),
-                    )
-                })?;
-                let applied = match executors
-                    .file_io
-                    .apply_next_journal_entry_durable(&mut lease)
-                    .await
-                    .inspect_err(|error| {
-                        log_cleanup_failure(&group.group_id, &diagnostic_entry, error)
-                    }) {
-                    Ok(applied) => applied,
-                    Err(error) if discarding_product => {
-                        drop(lease);
-                        yield_progress_to_tail(executors, group.group_id, group.version).await?;
-                        return Err(error);
-                    }
-                    Err(error) if is_permanent_file_failure(error.kind) => {
-                        drop(lease);
-                        record_permanent_failure(
-                            executors,
-                            group.group_id,
-                            group.version,
-                            sequence,
-                            JournalFailureStage::Cleanup,
-                            error,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                if applied.outcome
-                    == crate::executor::JournalFileMutationOutcome::Cleaned(
-                        crate::executor::CleanupJournalOutcome::ProgressPending,
-                    )
-                {
-                    drop(lease);
-                    yield_progress_to_tail(executors, group.group_id, group.version).await?;
-                    if scope == JournalRecoveryScope::StartupCritical {
-                        continue;
-                    }
-                    return Ok(recovered_entries);
-                }
-                let checkpoint = executors
-                    .sqlite
-                    .record_file_entry_cleaned_durable(
-                        group.group_id.clone(),
-                        group.version,
-                        applied.sequence,
-                    )
-                    .await?;
-                drop(lease);
-                let Some(checkpoint) = checkpoint else {
-                    return Err(recovery_conflict());
-                };
-                if checkpoint.phase_complete {
-                    executors
-                        .file_io
-                        .release_journal_mutation_fence(&group.group_id, checkpoint.version)
-                        .map_err(mutation_registry_error)?;
-                    executors.scheduler.wake_llm_results();
-                    executors.scheduler.wake_metadata();
-                }
-                recovered_entries = recovered_entries
-                    .checked_add(1)
-                    .ok_or_else(recovery_conflict)?;
-            }
-            JournalRecoveryState::RollbackPending => {
-                let ticket = executors
-                    .file_io
-                    .reserve_journal_mutation(&group.group_id, group.version)
-                    .map_err(mutation_registry_error)?;
-                let Some(mut grant) = executors
-                    .sqlite
-                    .verify_file_operation_rollback_durable(&ticket)
-                    .await?
-                else {
-                    continue;
-                };
-                grant.retain_first_entry();
-                let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
-                let mut lease =
-                    match acquire_verified_journal_mutation(executors, ticket, grant).await {
-                        Ok(lease) => lease,
-                        Err(error) => {
-                            let error_message = error.to_string();
-                            record_permanent_failure(
-                                executors,
-                                group.group_id,
-                                group.version,
-                                sequence,
-                                JournalFailureStage::Rollback,
-                                error,
-                            )
-                            .await?;
-                            tracing::warn!(
-                            error = error_message,
-                            "Journal rollback evidence failed and was returned to the recovery tail"
-                        );
-                            return Ok(recovered_entries);
-                        }
-                    };
-                let sequence = lease.next_sequence().map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        "recover_generic_file_operations",
-                        error.to_string(),
-                    )
-                })?;
-                let applied = match executors
-                    .file_io
-                    .apply_next_journal_entry_durable(&mut lease)
-                    .await
-                {
-                    Ok(applied) => applied,
-                    Err(error) => {
-                        let error_message = error.to_string();
-                        drop(lease);
-                        record_permanent_failure(
-                            executors,
-                            group.group_id,
-                            group.version,
-                            sequence,
-                            JournalFailureStage::Rollback,
-                            error,
-                        )
-                        .await?;
-                        tracing::warn!(
-                            error = error_message,
-                            "Journal rollback failed and was returned to the recovery tail"
-                        );
-                        return Ok(recovered_entries);
-                    }
-                };
-                if applied.outcome
-                    == crate::executor::JournalFileMutationOutcome::Cleaned(
-                        crate::executor::CleanupJournalOutcome::ProgressPending,
-                    )
-                {
-                    drop(lease);
-                    yield_progress_to_tail(executors, group.group_id, group.version).await?;
-                    if scope == JournalRecoveryScope::StartupCritical {
-                        continue;
-                    }
-                    return Ok(recovered_entries);
-                }
-                let checkpoint = executors
-                    .sqlite
-                    .record_file_entry_rolled_back_durable(
-                        group.group_id.clone(),
-                        group.version,
-                        applied.sequence,
-                    )
-                    .await?;
-                drop(lease);
-                let Some(checkpoint) = checkpoint else {
-                    return Err(recovery_conflict());
-                };
-                if checkpoint.phase_complete {
-                    executors
-                        .file_io
-                        .release_journal_mutation_fence(&group.group_id, checkpoint.version)
-                        .map_err(mutation_registry_error)?;
-                    executors.scheduler.wake_llm_results();
-                    executors.scheduler.wake_metadata();
-                }
-                recovered_entries = recovered_entries
-                    .checked_add(1)
-                    .ok_or_else(recovery_conflict)?;
-            }
+            Err(error) => return Err(error),
         }
     }
+}
+
+async fn recover_file_operation_step(
+    executors: &ExecutorHandles,
+    group: &super::journal::JournalRecoveryGroup,
+) -> Result<usize, ExecutorError> {
+    match group.state {
+        JournalRecoveryState::Publishing => {
+            let ticket = executors
+                .file_io
+                .reserve_journal_mutation(&group.group_id, group.version)
+                .map_err(mutation_registry_error)?;
+            let Some(grant) = executors
+                .sqlite
+                .verify_file_operation_publication_durable(&ticket, 1)
+                .await?
+            else {
+                return Ok(0);
+            };
+            let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
+            let mut lease = match acquire_verified_journal_mutation(executors, ticket, grant).await
+            {
+                Ok(lease) => lease,
+                Err(error) if is_permanent_file_failure(error.kind) => {
+                    record_permanent_failure(
+                        executors,
+                        group.group_id.clone(),
+                        group.version,
+                        sequence,
+                        JournalFailureStage::Publication,
+                        error,
+                    )
+                    .await?;
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
+            let sequence = lease.next_sequence().map_err(|error| {
+                ExecutorError::new(
+                    ExecutorErrorKind::Internal,
+                    "recover_generic_file_operations",
+                    error.to_string(),
+                )
+            })?;
+            let applied = match executors
+                .file_io
+                .apply_next_journal_entry_durable(&mut lease)
+                .await
+            {
+                Ok(applied) => applied,
+                Err(error) if is_permanent_file_failure(error.kind) => {
+                    drop(lease);
+                    record_permanent_failure(
+                        executors,
+                        group.group_id.clone(),
+                        group.version,
+                        sequence,
+                        JournalFailureStage::Publication,
+                        error,
+                    )
+                    .await?;
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
+            let checkpoint = executors
+                .sqlite
+                .record_file_entry_published_durable(
+                    group.group_id.clone(),
+                    group.version,
+                    applied.sequence,
+                )
+                .await?;
+            drop(lease);
+            if checkpoint.is_none() {
+                return Err(recovery_conflict());
+            }
+            return Ok(1);
+        }
+        JournalRecoveryState::FilesCommitted => {
+            let outcome = match executors
+                .sqlite
+                .complete_no_product_file_operation_durable(group.group_id.clone(), group.version)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) if error.kind == ExecutorErrorKind::DatabasePermanent => {
+                    let detail = bounded_diagnostic(&error)?;
+                    let outcome = executors
+                        .sqlite
+                        .record_file_operation_finalization_failure_durable(
+                            group.group_id.clone(),
+                            group.version,
+                            format!("{:?}", error.kind),
+                            detail,
+                        )
+                        .await?;
+                    if outcome == JournalCheckpointOutcome::VersionConflict {
+                        return Err(recovery_conflict());
+                    }
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
+            if outcome == JournalCheckpointOutcome::VersionConflict {
+                return Err(recovery_conflict());
+            }
+            let JournalCheckpointOutcome::Advanced { version } = outcome else {
+                unreachable!();
+            };
+            executors
+                .file_io
+                .release_journal_mutation_fence(&group.group_id, version)
+                .map_err(mutation_registry_error)?;
+        }
+        JournalRecoveryState::CleanupPending => {
+            let ticket = executors
+                .file_io
+                .reserve_journal_mutation(&group.group_id, group.version)
+                .map_err(mutation_registry_error)?;
+            let Some(mut grant) = executors
+                .sqlite
+                .verify_file_operation_cleanup_durable(&ticket, 1)
+                .await?
+            else {
+                return Ok(0);
+            };
+            let discarding_product = grant.discarding_product();
+            let sequence = grant.first_sequence().ok_or_else(recovery_conflict)?;
+            let diagnostic_entry = grant.entries_mut()[0].clone();
+            let mut lease = match acquire_verified_journal_mutation(executors, ticket, grant)
+                .await
+                .inspect_err(|error| log_cleanup_failure(&group.group_id, &diagnostic_entry, error))
+            {
+                Ok(lease) => lease,
+                Err(error) if discarding_product => {
+                    return Err(error);
+                }
+                Err(error) if is_permanent_file_failure(error.kind) => {
+                    record_permanent_failure(
+                        executors,
+                        group.group_id.clone(),
+                        group.version,
+                        sequence,
+                        JournalFailureStage::Cleanup,
+                        error,
+                    )
+                    .await?;
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
+            let sequence = lease.next_sequence().map_err(|error| {
+                ExecutorError::new(
+                    ExecutorErrorKind::Internal,
+                    "recover_generic_file_operations",
+                    error.to_string(),
+                )
+            })?;
+            let applied = match executors
+                .file_io
+                .apply_next_journal_entry_durable(&mut lease)
+                .await
+                .inspect_err(|error| log_cleanup_failure(&group.group_id, &diagnostic_entry, error))
+            {
+                Ok(applied) => applied,
+                Err(error) if discarding_product => {
+                    drop(lease);
+                    return Err(error);
+                }
+                Err(error) if is_permanent_file_failure(error.kind) => {
+                    drop(lease);
+                    record_permanent_failure(
+                        executors,
+                        group.group_id.clone(),
+                        group.version,
+                        sequence,
+                        JournalFailureStage::Cleanup,
+                        error,
+                    )
+                    .await?;
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
+            if applied.outcome
+                == crate::executor::JournalFileMutationOutcome::Cleaned(
+                    crate::executor::CleanupJournalOutcome::ProgressPending,
+                )
+            {
+                drop(lease);
+                yield_progress_to_tail(executors, group.group_id.clone(), group.version).await?;
+                return Ok(0);
+            }
+            let checkpoint = executors
+                .sqlite
+                .record_file_entry_cleaned_durable(
+                    group.group_id.clone(),
+                    group.version,
+                    applied.sequence,
+                )
+                .await?;
+            drop(lease);
+            let Some(checkpoint) = checkpoint else {
+                return Err(recovery_conflict());
+            };
+            if checkpoint.phase_complete {
+                executors
+                    .file_io
+                    .release_journal_mutation_fence(&group.group_id, checkpoint.version)
+                    .map_err(mutation_registry_error)?;
+                executors.scheduler.wake_llm_results();
+                executors.scheduler.wake_metadata();
+            }
+            return Ok(1);
+        }
+        JournalRecoveryState::RollbackPending => {
+            let ticket = executors
+                .file_io
+                .reserve_journal_mutation(&group.group_id, group.version)
+                .map_err(mutation_registry_error)?;
+            let Some(grant) = executors
+                .sqlite
+                .verify_file_operation_rollback_durable(&ticket, 1)
+                .await?
+            else {
+                return Ok(0);
+            };
+            let mut lease = match acquire_verified_journal_mutation(executors, ticket, grant).await
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    return Err(error);
+                }
+            };
+            let applied = match executors
+                .file_io
+                .apply_next_journal_entry_durable(&mut lease)
+                .await
+            {
+                Ok(applied) => applied,
+                Err(error) => {
+                    return Err(error);
+                }
+            };
+            if applied.outcome
+                == crate::executor::JournalFileMutationOutcome::Cleaned(
+                    crate::executor::CleanupJournalOutcome::ProgressPending,
+                )
+            {
+                drop(lease);
+                yield_progress_to_tail(executors, group.group_id.clone(), group.version).await?;
+                return Ok(0);
+            }
+            let checkpoint = executors
+                .sqlite
+                .record_file_entry_rolled_back_durable(
+                    group.group_id.clone(),
+                    group.version,
+                    applied.sequence,
+                )
+                .await?;
+            drop(lease);
+            let Some(checkpoint) = checkpoint else {
+                return Err(recovery_conflict());
+            };
+            if checkpoint.phase_complete {
+                executors
+                    .file_io
+                    .release_journal_mutation_fence(&group.group_id, checkpoint.version)
+                    .map_err(mutation_registry_error)?;
+                executors.scheduler.wake_llm_results();
+                executors.scheduler.wake_metadata();
+            }
+            return Ok(1);
+        }
+    }
+    Ok(0)
 }
 
 pub async fn rollback_prepared_file_operations_after_restart(

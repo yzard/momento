@@ -40,6 +40,94 @@ fn mark_webdav_file_ready(pool: &momento_api::database::DbPool, user_id: i64, fi
         .expect("ready WebDAV file");
 }
 
+#[tokio::test]
+async fn committed_import_reuses_pending_cleanup_without_republishing_sidecar() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "cleanup-replay", "cleanup-replay@example.com");
+    let (executors, directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let (source, path) = staged_file(&directory, StorageRootId::Imports, "replay/photo.jpg");
+    std::fs::write(&path, b"immutable original").unwrap();
+    let sidecar = path.with_file_name("photo.jpg.supplemental-metadata.json");
+    std::fs::write(&sidecar, br#"{"description":"same sidecar"}"#).unwrap();
+    let admission = executors
+        .scheduler
+        .acquire_durable(
+            momento_api::runtime::DurableSourceId::LocalImport,
+            momento_api::runtime::SchedulerAdmissionKind::NewClaim,
+        )
+        .await
+        .unwrap();
+    let cleanup = StagedImportCleanup {
+        source: true,
+        supplemental_metadata: true,
+    };
+    let media_id = import_staged_file(
+        source.clone(),
+        ImportSource::Local,
+        user_id,
+        &executors,
+        cleanup,
+        &admission,
+    )
+    .await
+    .unwrap()
+    .completed_media_id()
+    .unwrap();
+    let journal_count = || {
+        pool.get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM file_operation_groups", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let initial_count = journal_count();
+    for _ in 0..40 {
+        assert_eq!(
+            import_staged_file(
+                source.clone(),
+                ImportSource::Local,
+                user_id,
+                &executors,
+                cleanup,
+                &admission
+            )
+            .await
+            .unwrap()
+            .completed_media_id(),
+            Some(media_id)
+        );
+    }
+    assert_eq!(
+        journal_count(),
+        initial_count,
+        "replays must not publish or queue cleanup again"
+    );
+    assert!(path.exists());
+    assert!(sidecar.exists());
+    // A changed sidecar at the same path is not the previous committed operation.
+    std::fs::write(&sidecar, br#"{"description":"changed sidecar bytes"}"#).unwrap();
+    assert!(matches!(
+        import_staged_file(
+            source,
+            ImportSource::Local,
+            user_id,
+            &executors,
+            cleanup,
+            &admission
+        )
+        .await
+        .unwrap(),
+        momento_api::processor::import::ImportStagedFileOutcome::SourceCleanupBusy
+    ));
+    assert_eq!(
+        journal_count(),
+        initial_count,
+        "blocked sources must not publish a sidecar"
+    );
+}
+
 async fn finish_deferred_import(
     mut outcome: momento_api::processor::import::ImportStagedFileOutcome,
     executors: &momento_api::runtime::ExecutorHandles,
@@ -49,6 +137,9 @@ async fn finish_deferred_import(
         match outcome {
             momento_api::processor::import::ImportStagedFileOutcome::Completed(media_id) => {
                 return media_id;
+            }
+            momento_api::processor::import::ImportStagedFileOutcome::SourceCleanupBusy => {
+                panic!("unexpected source cleanup conflict in fixture")
             }
             momento_api::processor::import::ImportStagedFileOutcome::Deferred(prepared) => {
                 tokio::task::yield_now().await;
@@ -257,6 +348,151 @@ async fn test_local_import_uses_canonical_staged_file_import() {
     std::fs::remove_file(data_directory.join("originals").join(media_path))
         .expect("remove imported original");
     std::fs::remove_dir_all(source_directory).expect("remove local import directory");
+}
+
+#[tokio::test]
+async fn duplicate_import_retries_cleanup_path_conflicts_without_failing_or_committing_access() {
+    use momento_api::processor::import::ImportStagedFileOutcome;
+    use momento_api::runtime::{DurableSourceId, SchedulerAdmissionKind};
+    for (root, import_source, durable_source) in [
+        (
+            StorageRootId::Imports,
+            ImportSource::Local,
+            DurableSourceId::LocalImport,
+        ),
+        (
+            StorageRootId::WebDav,
+            ImportSource::Webdav,
+            DurableSourceId::WebDavImport,
+        ),
+    ] {
+        let pool = create_test_db();
+        let owner = create_test_user(&pool, "owner", "owner@example.com");
+        let importing_user = create_test_user(&pool, "importer", "importer@example.com");
+        let (executors, directory) =
+            crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+        let (first, first_path) = staged_file(&directory, root, "first.jpg");
+        std::fs::write(&first_path, b"duplicate content").unwrap();
+        let admission = executors
+            .scheduler
+            .acquire_durable(durable_source, SchedulerAdmissionKind::NewClaim)
+            .await
+            .unwrap();
+        let media_id = import_staged_file(
+            first,
+            import_source,
+            owner,
+            &executors,
+            StagedImportCleanup {
+                source: false,
+                supplemental_metadata: false,
+            },
+            &admission,
+        )
+        .await
+        .unwrap()
+        .completed_media_id()
+        .unwrap();
+        drop(admission);
+        let (duplicate, duplicate_path) = staged_file(&directory, root, "duplicate.jpg");
+        std::fs::write(&duplicate_path, b"duplicate content").unwrap();
+        {
+            let connection = pool.get().unwrap();
+            connection.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, entry_count) VALUES ('held-path', 'test', 'test', 'test', 'prepared', 1)", []).unwrap();
+            connection.execute("INSERT INTO file_operation_path_claims (group_id, sequence, storage_root, relative_path, path_key, mode, scope, role) VALUES ('held-path', 0, ?, ?, ?, 'read', 'exact', 'source')",
+                rusqlite::params![root.as_str(), duplicate.path.relative_path(), duplicate.path.path_key()]).unwrap();
+        }
+        let admission = executors
+            .scheduler
+            .acquire_durable(durable_source, SchedulerAdmissionKind::NewClaim)
+            .await
+            .unwrap();
+        let outcome = import_staged_file(
+            duplicate.clone(),
+            import_source,
+            importing_user,
+            &executors,
+            StagedImportCleanup {
+                source: true,
+                supplemental_metadata: false,
+            },
+            &admission,
+        )
+        .await
+        .expect("conflict is not a database error");
+        assert!(matches!(
+            outcome,
+            ImportStagedFileOutcome::SourceCleanupBusy
+        ));
+        assert!(duplicate_path.exists());
+        {
+            let connection = pool.get().unwrap();
+            let access: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ?",
+                    rusqlite::params![media_id, importing_user],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(access, 0, "conflicting transaction must roll back");
+            let claims: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM import_content_hash_claims",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                claims, 0,
+                "content-hash owner must be released before retry"
+            );
+        }
+        let retry = import_staged_file_to_completion(
+            StagedImportRequest {
+                source: duplicate,
+                import_source,
+                user_id: importing_user,
+                cleanup: StagedImportCleanup {
+                    source: true,
+                    supplemental_metadata: false,
+                },
+                durable_source,
+            },
+            &executors,
+            &executors.scheduler,
+            admission,
+        );
+        tokio::pin!(retry);
+        tokio::select! {
+            result = &mut retry => panic!("path conflict should wait: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        pool.get()
+            .unwrap()
+            .execute(
+                "DELETE FROM file_operation_groups WHERE id = 'held-path'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), retry)
+                .await
+                .unwrap()
+                .unwrap(),
+            media_id
+        );
+        momento_api::io::recovery::recover_generic_file_operations(&executors)
+            .await
+            .unwrap();
+        assert!(!duplicate_path.exists());
+        let connection = pool.get().unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM media", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let access: i64 = connection.query_row("SELECT COUNT(*) FROM media_access WHERE media_id = ? AND user_id = ? AND deleted_at IS NULL", rusqlite::params![media_id, importing_user], |row| row.get(0)).unwrap();
+        assert_eq!(access, 1);
+    }
 }
 
 #[tokio::test]

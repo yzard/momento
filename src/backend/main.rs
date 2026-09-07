@@ -52,9 +52,19 @@ fn start_background_tasks(
             let recovery =
                 momento_api::io::recovery::recover_generic_file_operations(&journal_executors)
                     .await;
+            let retry_delay = match recovery {
+                Ok(_) => journal_executors.sqlite.journal_retry_delay().await,
+                Err(error) => Err(error),
+            };
             drop(admission);
-            match recovery {
-                Ok(_) => notified.await,
+            match retry_delay {
+                Ok(Some(delay)) => {
+                    tokio::select! {
+                        _ = notified => {},
+                        _ = tokio::time::sleep(delay) => {},
+                    }
+                }
+                Ok(None) => notified.await,
                 Err(error) => {
                     tracing::warn!(error = %error, "Journal recovery deferred after a transient failure");
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;

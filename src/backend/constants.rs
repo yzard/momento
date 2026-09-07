@@ -87,6 +87,25 @@ pub fn is_camera_raw_image(file_path: &Path, mime_type: Option<&str>) -> bool {
         })
 }
 
+pub fn requires_jpeg_preview(file_path: &Path, mime_type: Option<&str>) -> bool {
+    if is_camera_raw_image(file_path, mime_type) {
+        return true;
+    }
+    let mime_type = mime_type.or_else(|| image_mime_type(file_path));
+    !mime_type.is_some_and(|mime| {
+        [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/bmp",
+        ]
+        .iter()
+        .any(|supported| supported.eq_ignore_ascii_case(mime))
+    })
+}
+
 pub fn video_mime_type(file_path: &Path) -> Option<&'static str> {
     mime_type_for_path(file_path, VIDEO_FORMATS)
 }

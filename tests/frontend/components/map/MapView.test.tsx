@@ -40,4 +40,16 @@ describe('MapView', () => {
     )
     expect(container.textContent).toContain('OpenStreetMap')
   })
+
+  it('sets an origin-only referrer policy on every OSM tile', async () => {
+    const { container } = render(<MapView />)
+
+    await waitFor(() => {
+      const tiles = container.querySelectorAll<HTMLImageElement>('img.leaflet-tile')
+      expect(tiles.length).toBeGreaterThan(0)
+      for (const tile of tiles) {
+        expect(tile.referrerPolicy).toBe('origin')
+      }
+    })
+  })
 })

@@ -5,6 +5,65 @@ use momento_api::io::recovery::{
 use sha2::Digest;
 
 #[tokio::test]
+async fn busy_journal_head_is_deferred_without_blocking_following_cleanup() {
+    let pool = crate::test_utils::create_test_db();
+    let (executors, directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    for (id, position) in [("busy", 1), ("ready", 2)] {
+        std::fs::write(directory.join("journal").join(id), b"cleanup").unwrap();
+        let connection = pool.get().unwrap();
+        connection.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, completion_outcome, entry_count, recovery_order) VALUES (?, 'test', 'test', '1', 'cleanup_pending', 'published', 1, ?)", rusqlite::params![id, position]).unwrap();
+        connection.execute("INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, source_path) VALUES (?, 0, 'cleanup', 'journal', ?)", rusqlite::params![id, id]).unwrap();
+    }
+    let held = executors
+        .file_io
+        .reserve_journal_mutation("busy", 1)
+        .unwrap();
+    let grant = executors
+        .sqlite
+        .verify_file_operation_cleanup_durable(&held, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let held = held.acquire(grant).unwrap();
+    assert_eq!(
+        recover_generic_file_operations(&executors).await.unwrap(),
+        1
+    );
+    assert!(directory.join("journal/busy").exists());
+    assert!(!directory.join("journal/ready").exists());
+    let version: i64 = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT version FROM file_operation_groups WHERE id='busy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 2);
+    let delay = executors
+        .sqlite
+        .journal_retry_delay()
+        .await
+        .unwrap()
+        .unwrap();
+    drop(held);
+    tokio::time::sleep(delay).await;
+    assert_eq!(
+        recover_generic_file_operations(&executors).await.unwrap(),
+        1
+    );
+    assert!(!directory.join("journal/busy").exists());
+    assert!(executors
+        .sqlite
+        .journal_retry_delay()
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn source_cleanup_permission_failure_is_logged_without_losing_the_source() {
     use std::os::unix::fs::PermissionsExt;
     use tracing::instrument::WithSubscriber;
@@ -113,7 +172,10 @@ async fn failed_discard_keeps_metadata_queued_until_cleanup_can_retry() {
     discard_incomplete_file_products_after_restart(&executors)
         .await
         .unwrap();
-    assert!(recover_generic_file_operations(&executors).await.is_err());
+    assert_eq!(
+        recover_generic_file_operations(&executors).await.unwrap(),
+        0
+    );
     assert!(executors
         .sqlite
         .claim_next_metadata_job_durable()
@@ -134,6 +196,15 @@ async fn failed_discard_keeps_metadata_queued_until_cleanup_can_retry() {
     std::fs::remove_file(directory.join("thumbnails/parent")).unwrap();
     std::fs::create_dir(directory.join("thumbnails/parent")).unwrap();
     std::fs::write(directory.join("thumbnails/parent/derived"), b"broken").unwrap();
+    tokio::time::sleep(
+        executors
+            .sqlite
+            .journal_retry_delay()
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .await;
     assert_eq!(
         recover_generic_file_operations(&executors).await.unwrap(),
         1

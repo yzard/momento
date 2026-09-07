@@ -586,7 +586,7 @@ fn resolve_preview_path(
         return Err(AppError::NotFound("Preview not found".to_string()));
     }
 
-    if !crate::constants::is_camera_raw_image(
+    if !crate::constants::requires_jpeg_preview(
         std::path::Path::new(&media.file_path),
         media.mime_type.as_deref(),
     ) {
