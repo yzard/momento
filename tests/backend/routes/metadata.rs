@@ -107,6 +107,7 @@ async fn metadata_cancel_stops_queued_and_processing_jobs_without_allowing_a_lat
     crate::test_utils::test_executor_handles(pool.clone())
         .sqlite
         .finish_metadata_job_durable(FinishMetadataJob {
+            retryable: true,
             media_id: processing_media_id,
             claim_token: claim_token.to_string(),
             error: None,

@@ -68,6 +68,7 @@ fn start_background_tasks(
         std::time::Duration::from_secs(config.security.refresh_token_cleanup_interval_seconds);
     let refresh_token_scheduler = scheduler.clone();
     let refresh_token_sqlite = sqlite.clone();
+    let maintenance_executors = executors.clone();
     scheduler.spawn_control(async move {
         loop {
             match refresh_token_scheduler
@@ -92,6 +93,9 @@ fn start_background_tasks(
                     tracing::warn!(error, "Refresh-token cleanup stopped");
                     return;
                 }
+            }
+            if let Err(error) = momento_api::io::recovery::reconcile_unreferenced_thumbnails(&maintenance_executors).await {
+                tracing::warn!(error = %error, "Old thumbnail reconciliation deferred; will retry on the next maintenance pass");
             }
             tokio::time::sleep(refresh_token_cleanup_interval).await;
         }
@@ -267,6 +271,7 @@ fn main() {
     };
     let runtime_sizing = momento_api::runtime::RuntimeSizing::validate_worker_counts(
         &loaded_config.config.thread_pool,
+        loaded_config.config.media_process.magick_memory_quota_bytes,
     )
     .expect("Failed to size Momento runtime");
     let database_path = loaded_config.config.server.data_dir.join("database.sqlite");

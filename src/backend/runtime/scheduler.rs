@@ -516,7 +516,11 @@ impl ExecutorRuntime {
         };
 
         let handles = ExecutorHandles {
-            cpu: CpuExecutorHandle::new(ingress.clone(), sizing.cpu_workers),
+            cpu: CpuExecutorHandle::new(
+                ingress.clone(),
+                sizing.cpu_workers,
+                sizing.magick_memory_quota_bytes,
+            ),
             file_io: FileIoExecutorHandle::new(
                 ingress.clone(),
                 mutation_gates,

@@ -6,7 +6,7 @@ use tracing::error;
 use crate::config::MediaProcessConfig;
 use crate::executor::process::{
     bounded_error_detail, ffmpeg_single_thread_arguments, image_magick_resource_arguments,
-    run_storage_media_tool, run_storage_media_tool_with_stdout, validate_storage_image_dimensions,
+    inspect_storage_image_dimensions, run_storage_media_tool, run_storage_media_tool_with_stdout,
     MediaTool, StorageChildDescriptor,
 };
 use crate::io::file::{NormalizedStoragePath, StorageRootId};
@@ -282,7 +282,7 @@ async fn generate_image_variant(
     process_config: &MediaProcessConfig,
     mode: OutputMode<'_>,
 ) -> Result<(), String> {
-    validate_storage_image_dimensions(
+    let (width, height) = inspect_storage_image_dimensions(
         &executors.cpu,
         &executors.file_io,
         source.storage_root,
@@ -302,7 +302,11 @@ async fn generate_image_variant(
         )
     })?;
     let size = format!("{}x{}", spec.maximum_size, spec.maximum_size);
-    let mut arguments = image_magick_resource_arguments(process_config);
+    let mut arguments =
+        image_magick_resource_arguments(process_config, u64::from(width) * u64::from(height));
+    if matches!(spec.variant, ImageVariant::CroppedThumbnail) {
+        arguments.extend(jpeg_thumbnail_decode_arguments(spec.maximum_size));
+    }
     arguments.extend([
         OsString::from("/proc/self/fd/10[0]"),
         OsString::from("-auto-orient"),
@@ -333,13 +337,25 @@ async fn generate_image_variant(
         output,
         mode,
         GeneratedMediaTool {
-            tool: MediaTool::ImageMagick,
+            tool: MediaTool::ImageMagick {
+                pixels: u64::from(width) * u64::from(height),
+            },
             arguments,
             maximum_output_bytes: spec.maximum_output_bytes,
         },
         process_config,
     )
     .await
+}
+
+/// JPEG's decoder consumes this hint before reading the input; other coders ignore it.
+/// Retain twice the target size for the final resize/crop, including panoramic inputs.
+pub fn jpeg_thumbnail_decode_arguments(maximum_size: u32) -> [OsString; 2] {
+    let decode_size = u64::from(maximum_size) * 2;
+    [
+        OsString::from("-define"),
+        OsString::from(format!("jpeg:size={decode_size}x{decode_size}")),
+    ]
 }
 
 async fn generate_video_variant(

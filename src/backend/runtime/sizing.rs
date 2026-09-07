@@ -97,6 +97,7 @@ impl RuntimeSizingBreakdown {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSizing {
+    pub magick_memory_quota_bytes: u64,
     pub cpu_workers: usize,
     pub storage_io_workers: usize,
     pub network_io_workers: usize,
@@ -127,18 +128,26 @@ pub struct RuntimeSizing {
 impl RuntimeSizing {
     pub fn validate_worker_counts(
         configuration: &ThreadPoolConfig,
+        magick_memory_quota_bytes: u64,
     ) -> Result<Self, RuntimeSizingError> {
-        Self::new(configuration)
+        Self::new(configuration, magick_memory_quota_bytes)
     }
 
-    pub fn new(configuration: &ThreadPoolConfig) -> Result<Self, RuntimeSizingError> {
-        Self::calculate(configuration, true)
+    pub fn new(
+        configuration: &ThreadPoolConfig,
+        magick_memory_quota_bytes: u64,
+    ) -> Result<Self, RuntimeSizingError> {
+        Self::calculate(configuration, magick_memory_quota_bytes, true)
     }
 
     fn calculate(
         configuration: &ThreadPoolConfig,
+        magick_memory_quota_bytes: u64,
         enforce_runtime_budget: bool,
     ) -> Result<Self, RuntimeSizingError> {
+        if magick_memory_quota_bytes < 512 * MEBIBYTE {
+            return Err(RuntimeSizingError::MagickMemoryQuotaTooSmall);
+        }
         validate_range("cpu_workers", configuration.cpu_workers, 1, MAX_CPU_WORKERS)?;
         validate_range(
             "storage_io_workers",
@@ -400,6 +409,7 @@ impl RuntimeSizing {
         let required_open_files = runtime_required_open_files.max(BOOTSTRAP_PEAK_FDS);
 
         Ok(Self {
+            magick_memory_quota_bytes,
             cpu_workers: narrow(cpu_workers)?,
             storage_io_workers: narrow(storage_io_workers)?,
             network_io_workers: narrow(network_io_workers)?,
@@ -436,6 +446,7 @@ impl RuntimeSizing {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSizingError {
+    MagickMemoryQuotaTooSmall,
     WorkerCount {
         field: &'static str,
         actual: usize,
@@ -458,6 +469,7 @@ pub enum RuntimeSizingError {
 impl fmt::Display for RuntimeSizingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MagickMemoryQuotaTooSmall => write!(formatter, "magick_memory_quota_bytes must be at least 536870912 bytes"),
             Self::WorkerCount {
                 field,
                 actual,
@@ -553,7 +565,7 @@ fn maximum_feasible_workers(
             WorkerField::NetworkIo => adjusted.network_io_workers = candidate,
             WorkerField::Sqlite => adjusted.sqlite_workers = candidate,
         }
-        let sizing = RuntimeSizing::calculate(&adjusted, false)?;
+        let sizing = RuntimeSizing::calculate(&adjusted, 512 * MEBIBYTE, false)?;
         if sizing.derived_runtime_bytes > MAX_DERIVED_RUNTIME_BYTES {
             break;
         }

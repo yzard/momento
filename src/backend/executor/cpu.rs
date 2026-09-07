@@ -470,14 +470,20 @@ impl CpuCommand {
 
 #[derive(Clone)]
 pub struct CpuExecutorHandle {
+    magick_memory: Arc<crate::runtime::memory::MemoryBudget>,
     ingress: SchedulerIngress,
     reverse_geocoder: Arc<OnceLock<ReverseGeocoderSnapshot>>,
     child_process_admission: Arc<ChildProcessAdmission>,
 }
 
 impl CpuExecutorHandle {
-    pub(crate) fn new(ingress: SchedulerIngress, worker_count: usize) -> Self {
+    pub(crate) fn new(
+        ingress: SchedulerIngress,
+        worker_count: usize,
+        magick_memory_quota_bytes: u64,
+    ) -> Self {
         Self {
+            magick_memory: crate::runtime::memory::MemoryBudget::new(magick_memory_quota_bytes),
             ingress,
             reverse_geocoder: Arc::new(OnceLock::new()),
             child_process_admission: Arc::new(ChildProcessAdmission::new(worker_count)),
@@ -1120,11 +1126,20 @@ impl CpuExecutorHandle {
         }
     }
 
+    pub fn magick_memory_quota_bytes(&self) -> u64 {
+        self.magick_memory.maximum()
+    }
+
     pub(crate) async fn supervise_child_process_durable(
         &self,
-        spec: ChildProcessSpec,
+        mut spec: ChildProcessSpec,
     ) -> Result<ChildProcessCompletion, ExecutorError> {
         const OPERATION: &str = "supervise_child_process";
+        spec.reserve_magick_memory(&self.magick_memory)
+            .await
+            .map_err(|error| {
+                ExecutorError::new(ExecutorErrorKind::InvalidInput, OPERATION, error)
+            })?;
         let admission = self.child_process_admission.acquire().await;
         let (reply, response) = oneshot::channel();
         self.ingress

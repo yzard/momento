@@ -13,6 +13,133 @@ use std::fs;
 mod clean;
 mod reverse_geocoding;
 
+#[tokio::test]
+async fn metadata_quota_failure_uses_runtime_limit_and_stops_automatic_retry() {
+    use momento_api::database::operations::FinishMetadataJob;
+    use momento_api::processor::metadata::MetadataGenerationError;
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "quota.qoi");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
+    fs::write(data_directory.join("originals/quota.qoi"), QOI_FIXTURE).unwrap();
+    pool.get().unwrap().execute(
+        "UPDATE media SET file_path = 'quota.qoi', mime_type = 'image/qoi', import_state = 'imported' WHERE id = ?",
+        [media_id],
+    ).unwrap();
+    let token = claim_metadata_job(&pool, &executors, media_id).await;
+    let mut config = Config::default();
+    config.server.data_dir = data_directory.clone();
+    config.media_process.magick_memory_quota_bytes = 8 * 1024 * 1024 * 1024;
+    config.metadata.thumbnails_max_size = 16000;
+    let error = momento_api::processor::metadata::generate_media_metadata(
+        &executors, media_id, &token, &config,
+    )
+    .await
+    .unwrap_err();
+    assert!(!error.retryable());
+    match &error {
+        MetadataGenerationError::MagickMemoryQuotaExceeded {
+            source_path,
+            requested_bytes,
+            quota_bytes,
+        } => {
+            assert_eq!(
+                source_path,
+                &data_directory
+                    .join("originals/quota.qoi")
+                    .display()
+                    .to_string()
+            );
+            assert_eq!(*quota_bytes, 4 * 1024 * 1024 * 1024);
+            assert!(*requested_bytes > *quota_bytes);
+        }
+        _ => panic!("unexpected error: {error}"),
+    }
+    executors
+        .sqlite
+        .finish_metadata_job_durable(FinishMetadataJob {
+            media_id,
+            claim_token: token,
+            error: Some(error.to_string()),
+            retryable: error.retryable(),
+        })
+        .await
+        .unwrap();
+    let connection = pool.get().unwrap();
+    let (status, completed, detail): (String, bool, String) = connection.query_row(
+        "SELECT status, completed_at IS NOT NULL, last_error FROM media_metadata_jobs WHERE media_id = ?",
+        [media_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(status, "failed");
+    assert!(completed);
+    assert!(detail.contains("magick_memory_quota_exceeded"));
+    drop(connection);
+    assert!(executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .unwrap()
+        .is_none());
+    assert!(executors
+        .sqlite
+        .load_next_metadata_job_delay_durable()
+        .await
+        .unwrap()
+        .is_none());
+    pool.get()
+        .unwrap()
+        .execute(
+            momento_api::database::queries::metadata_jobs::QUEUE_INCOMPLETE,
+            [],
+        )
+        .unwrap();
+    let retry = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.media_id, media_id);
+}
+
+#[tokio::test]
+async fn permanent_metadata_failure_preserves_cancellation_and_rerun() {
+    use momento_api::database::operations::FinishMetadataJob;
+    for (initial, rerun, expected) in [
+        ("processing", false, "failed"),
+        ("cancelling", false, "cancelled"),
+        ("processing", true, "queued"),
+        ("cancelling", true, "queued"),
+    ] {
+        let pool = create_test_db();
+        let media_id = create_test_media(&pool, "quota.jpg");
+        pool.get().unwrap().execute(
+            "INSERT INTO media_metadata_jobs (media_id, status, claim_token, rerun_requested) VALUES (?, ?, '00000000-0000-0000-0000-000000000042', ?)",
+            rusqlite::params![media_id, initial, rerun],
+        ).unwrap();
+        let executors = crate::test_utils::test_executor_handles(pool.clone());
+        executors
+            .sqlite
+            .finish_metadata_job_durable(FinishMetadataJob {
+                media_id,
+                claim_token: "00000000-0000-0000-0000-000000000042".into(),
+                error: Some("quota exceeded".into()),
+                retryable: false,
+            })
+            .await
+            .unwrap();
+        let status: String = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id = ?",
+                [media_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, expected);
+    }
+}
+
 async fn assert_tiny_is_derived_from_thumbnail(
     executors: &momento_api::runtime::ExecutorHandles,
     data_directory: &std::path::Path,
@@ -538,7 +665,10 @@ async fn metadata_rejects_an_original_without_an_image_mime_type() {
     .await
     .expect_err("unsupported original should fail");
 
-    assert!(error.contains("supported image MIME type"), "{error}");
+    assert!(
+        error.to_string().contains("supported image MIME type"),
+        "{error}"
+    );
     let input_count: i64 = pool
         .get()
         .expect("database connection")
@@ -869,6 +999,7 @@ async fn stale_metadata_claim_cannot_finish_a_new_owner() {
     let stale = executors
         .sqlite
         .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            retryable: true,
             media_id,
             claim_token: first_claim.claim_token,
             error: None,
@@ -1005,6 +1136,7 @@ async fn a_new_rerun_request_after_cancellation_is_not_lost() {
     executors
         .sqlite
         .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            retryable: true,
             media_id,
             claim_token: claim_token.to_string(),
             error: Some("cancelled work stopped".to_string()),
@@ -1063,6 +1195,7 @@ async fn metadata_rerun_requested_during_processing_runs_after_current_attempt()
     executors
         .sqlite
         .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            retryable: true,
             media_id,
             claim_token: claim.claim_token,
             error: None,
@@ -1134,6 +1267,7 @@ async fn transient_metadata_failures_retry_without_attempt_limit() {
     executors
         .sqlite
         .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            retryable: true,
             media_id,
             claim_token: first_claim.claim_token,
             error: Some("temporary failure".to_string()),
@@ -1173,6 +1307,7 @@ async fn transient_metadata_failures_retry_without_attempt_limit() {
     executors
         .sqlite
         .finish_metadata_job_durable(momento_api::database::operations::FinishMetadataJob {
+            retryable: true,
             media_id,
             claim_token: second_claim.claim_token,
             error: Some("another temporary failure".to_string()),

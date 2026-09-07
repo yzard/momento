@@ -9,6 +9,34 @@ use momento_api::config::{
 };
 use tempfile::TempDir;
 
+#[test]
+fn magick_memory_quota_belongs_only_to_media_process() {
+    let config: Config =
+        toml::from_str("[media_process]\nmagick_memory_quota_bytes = 2147483648\n").unwrap();
+    assert_eq!(
+        config.media_process.magick_memory_quota_bytes,
+        2 * 1024 * 1024 * 1024
+    );
+    let sizing = momento_api::runtime::RuntimeSizing::new(
+        &config.thread_pool,
+        config.media_process.magick_memory_quota_bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        sizing.magick_memory_quota_bytes,
+        config.media_process.magick_memory_quota_bytes
+    );
+    let defaults: Config = toml::from_str("").unwrap();
+    assert_eq!(
+        defaults.media_process.magick_memory_quota_bytes,
+        4 * 1024 * 1024 * 1024
+    );
+    assert!(
+        toml::from_str::<Config>("[thread_pool]\nmagick_memory_quota_bytes = 2147483648\n")
+            .is_err()
+    );
+}
+
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
     std::fs::write(&path, contents).expect("Failed to write test config");

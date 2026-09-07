@@ -10,6 +10,17 @@ use momento_api::{
 
 use crate::test_utils::QOI_FIXTURE;
 
+#[test]
+fn magick_workspace_scales_for_panorama_and_hundred_megapixel_sources() {
+    use momento_api::executor::process::magick_memory_requirement;
+    assert_eq!(
+        magick_memory_requirement(33_000_000),
+        512 * 1024 * 1024 + 33_000_000 * 48
+    );
+    assert!(magick_memory_requirement(100_000_000) < 4 * 1024 * 1024 * 1024);
+    assert_eq!(magick_memory_requirement(u64::MAX), u64::MAX);
+}
+
 #[tokio::test]
 async fn image_dimension_validation_enforces_the_total_pixel_limit() {
     let pool = create_test_db();
@@ -73,7 +84,7 @@ async fn storage_image_validation_hands_a_pinned_descriptor_to_the_cpu_child() {
 #[test]
 fn image_magick_arguments_omit_the_time_limit() {
     let config = MediaProcessConfig::default();
-    let arguments = image_magick_resource_arguments(&config);
+    let arguments = image_magick_resource_arguments(&config, 100_000_000);
     let arguments = arguments
         .iter()
         .map(|argument| argument.to_string_lossy())
@@ -83,9 +94,100 @@ fn image_magick_arguments_omit_the_time_limit() {
     assert!(arguments.iter().any(|argument| argument == "memory"));
     assert!(arguments.iter().any(|argument| argument == "disk"));
     assert_eq!(argument_value(&arguments, "memory"), "256MiB");
-    assert_eq!(argument_value(&arguments, "map"), "1024MiB");
-    assert_eq!(argument_value(&arguments, "disk"), "4096MiB");
+    assert_eq!(
+        argument_value(&arguments, "area"),
+        config.maximum_decoded_image_pixels.to_string()
+    );
+    assert_eq!(argument_value(&arguments, "map"), "1073741824");
+    assert_eq!(argument_value(&arguments, "disk"), "32768MiB");
     assert_eq!(argument_value(&arguments, "thread"), "1");
+}
+
+#[test]
+fn image_magick_parses_the_area_as_pixels_instead_of_zero() {
+    let config = MediaProcessConfig {
+        maximum_decoded_image_pixels: 200_000_000,
+        ..MediaProcessConfig::default()
+    };
+    let output = std::process::Command::new("magick")
+        .args(image_magick_resource_arguments(&config, 100_000_000))
+        .args(["-list", "resource", "null:"])
+        .output()
+        .expect("ImageMagick resource inspection");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let limits = String::from_utf8(output.stdout).unwrap();
+    assert!(limits.contains("Area: 200MP"), "{limits}");
+    assert!(limits.contains("Memory: 256MiB"), "{limits}");
+    assert!(limits.contains("Map: 1GiB"), "{limits}");
+}
+
+#[test]
+fn magick_mapping_is_bounded_and_included_in_the_shared_address_space_budget() {
+    use momento_api::executor::process::{magick_map_limit_bytes, magick_memory_requirement};
+    assert_eq!(magick_map_limit_bytes(0), 0);
+    assert_eq!(magick_map_limit_bytes(1_000_000), 24_000_000);
+    assert_eq!(magick_map_limit_bytes(u64::MAX), 1024 * 1024 * 1024);
+    assert_eq!(magick_memory_requirement(0), 512 * 1024 * 1024);
+    assert_eq!(
+        magick_memory_requirement(1_000_000),
+        512 * 1024 * 1024 + 48_000_000
+    );
+    let args = image_magick_resource_arguments(&MediaProcessConfig::default(), 0);
+    let args = args
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+    assert_eq!(argument_value(&args, "map"), "0");
+    assert!(include_str!("../../../docker/imagemagick-policy.xml")
+        .contains("name=\"map\" value=\"1GiB\""));
+}
+
+#[test]
+fn magick_uses_file_backed_mapping_under_the_child_address_space_limit() {
+    use momento_api::executor::process::magick_memory_requirement;
+    use std::os::unix::process::CommandExt;
+    let temporary = tempfile::tempdir().expect("mapped cache directory");
+    let mut command = std::process::Command::new("magick");
+    command
+        .args(image_magick_resource_arguments(
+            &MediaProcessConfig::default(),
+            1_000_000,
+        ))
+        .args([
+            "-debug",
+            "cache",
+            "-limit",
+            "memory",
+            "1MiB",
+            "-size",
+            "1000x1000",
+            "gradient:",
+            "-resize",
+            "200x200",
+            "null:",
+        ])
+        .env("MAGICK_TEMPORARY_PATH", temporary.path());
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: magick_memory_requirement(1_000_000),
+                rlim_max: magick_memory_requirement(1_000_000),
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().expect("mapped ImageMagick conversion");
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{diagnostics}");
+    assert!(diagnostics.contains(", Map,"), "{diagnostics}");
+    assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
 }
 
 #[test]

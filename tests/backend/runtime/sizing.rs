@@ -1,4 +1,19 @@
 use momento_api::config::ThreadPoolConfig;
+
+#[test]
+fn magick_quota_is_validated_and_carried_to_runtime() {
+    let config = ThreadPoolConfig::default();
+    assert!(RuntimeSizing::new(&config, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("magick_memory_quota_bytes"));
+    assert_eq!(
+        RuntimeSizing::new(&config, 2 * 1024 * 1024 * 1024)
+            .unwrap()
+            .magick_memory_quota_bytes,
+        2 * 1024 * 1024 * 1024
+    );
+}
 use momento_api::runtime::{
     RuntimeSizing, MAX_CPU_WORKERS, MAX_DERIVED_RUNTIME_BYTES, MAX_SQLITE_WORKERS,
     MAX_STORAGE_IO_WORKERS,
@@ -6,8 +21,9 @@ use momento_api::runtime::{
 
 #[test]
 fn documented_default_configuration_fits_runtime_budget() {
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig::default())
-        .expect("documented runtime defaults must fit");
+    let sizing =
+        RuntimeSizing::validate_worker_counts(&ThreadPoolConfig::default(), 4 * 1024 * 1024 * 1024)
+            .expect("documented runtime defaults must fit");
 
     assert_eq!(sizing.cpu_workers, 8);
     assert_eq!(sizing.storage_io_workers, 6);
@@ -38,10 +54,12 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
             network_io_workers: count,
             ..ThreadPoolConfig::default()
         };
-        assert!(RuntimeSizing::validate_worker_counts(&configuration)
-            .unwrap_err()
-            .to_string()
-            .contains("network_io_workers"));
+        assert!(
+            RuntimeSizing::validate_worker_counts(&configuration, 4 * 1024 * 1024 * 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("network_io_workers")
+        );
     }
     for (configuration, field) in [
         (
@@ -108,7 +126,7 @@ fn worker_count_boundaries_are_enforced_before_derivation() {
             "sqlite_workers",
         ),
     ] {
-        let error = RuntimeSizing::validate_worker_counts(&configuration)
+        let error = RuntimeSizing::validate_worker_counts(&configuration, 4 * 1024 * 1024 * 1024)
             .expect_err("out-of-range worker count must fail");
         assert!(error.to_string().contains(field), "{error}");
     }
@@ -122,16 +140,22 @@ fn network_and_storage_counts_are_independent_and_budget_all_thread_stacks() {
         storage_io_workers: 2,
         sqlite_workers: 2,
     };
-    let sizing = RuntimeSizing::validate_worker_counts(&base).unwrap();
-    let network = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        network_io_workers: 3,
-        ..base.clone()
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(&base, 4 * 1024 * 1024 * 1024).unwrap();
+    let network = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            network_io_workers: 3,
+            ..base.clone()
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .unwrap();
-    let storage = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        storage_io_workers: 4,
-        ..base
-    })
+    let storage = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            storage_io_workers: 4,
+            ..base
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .unwrap();
     assert_eq!(network.storage_io_workers, 2);
     assert_eq!(network.file_queue_capacity, sizing.file_queue_capacity);
@@ -149,12 +173,15 @@ fn network_and_storage_counts_are_independent_and_budget_all_thread_stacks() {
 
 #[test]
 fn executor_queue_and_registry_capacities_are_derived() {
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 2,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 2,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("minimum runtime");
 
     assert_eq!(sizing.cpu_queue_capacity, 8);
@@ -181,8 +208,9 @@ fn executor_queue_and_registry_capacities_are_derived() {
 
 #[test]
 fn default_runtime_passes_pre_spawn_allocation_and_descriptor_checks() {
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig::default())
-        .expect("default runtime sizing");
+    let sizing =
+        RuntimeSizing::validate_worker_counts(&ThreadPoolConfig::default(), 4 * 1024 * 1024 * 1024)
+            .expect("default runtime sizing");
 
     sizing
         .validate_pre_spawn_environment()
@@ -191,12 +219,15 @@ fn default_runtime_passes_pre_spawn_allocation_and_descriptor_checks() {
 
 #[test]
 fn over_budget_error_reports_one_field_at_a_time_feasible_worker_counts() {
-    let error = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: MAX_CPU_WORKERS,
-        network_io_workers: 2,
-        storage_io_workers: MAX_STORAGE_IO_WORKERS,
-        sqlite_workers: MAX_SQLITE_WORKERS,
-    })
+    let error = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: MAX_CPU_WORKERS,
+            network_io_workers: 2,
+            storage_io_workers: MAX_STORAGE_IO_WORKERS,
+            sqlite_workers: MAX_SQLITE_WORKERS,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect_err("maximum parser values exceed the combined runtime budget");
     let message = error.to_string();
 

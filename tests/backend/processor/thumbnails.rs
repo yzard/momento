@@ -2,8 +2,8 @@ use crate::test_utils::{create_test_db, test_executor_handles_with_data_director
 use momento_api::config::MediaProcessConfig;
 use momento_api::io::file::{NormalizedStoragePath, StorageRootId};
 use momento_api::processor::thumbnails::{
-    generate_image_preview, generate_video_thumbnail_prepared, ArtifactPublicationOwner,
-    StorageMediaFile,
+    generate_image_preview, generate_image_thumbnail, generate_video_thumbnail_prepared,
+    jpeg_thumbnail_decode_arguments, ArtifactPublicationOwner, StorageMediaFile,
 };
 
 fn test_media_runtime() -> (momento_api::runtime::ExecutorHandles, std::path::PathBuf) {
@@ -16,6 +16,122 @@ fn storage_file(storage_root: StorageRootId, path: &str) -> StorageMediaFile {
     StorageMediaFile {
         storage_root,
         path: NormalizedStoragePath::parse(path).expect("normalized storage path"),
+    }
+}
+
+#[test]
+fn jpeg_decode_hint_keeps_twice_the_thumbnail_resolution_without_overflow() {
+    for (size, expected) in [
+        (400, "jpeg:size=800x800"),
+        (48, "jpeg:size=96x96"),
+        (u32::MAX, "jpeg:size=8589934590x8589934590"),
+    ] {
+        let args = jpeg_thumbnail_decode_arguments(size);
+        assert_eq!(args[0], "-define");
+        assert_eq!(args[1], expected);
+    }
+}
+
+#[tokio::test]
+async fn thumbnail_decode_hint_preserves_crop_chain_and_full_resolution_preview() {
+    let (executors, data_directory) = test_media_runtime();
+    let config = MediaProcessConfig::default();
+    for (name, width, height) in [
+        ("panorama.jpg", 2400, 600),
+        ("portrait.jpg", 600, 2400),
+        ("non-jpeg.png", 2400, 600),
+    ] {
+        let original = data_directory.join("originals").join(name);
+        image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 251) as u8, 90])
+        })
+        .save(&original)
+        .expect("source fixture");
+        let original_bytes = std::fs::read(&original).unwrap();
+        let source = storage_file(StorageRootId::Originals, name);
+        let thumbnail = storage_file(StorageRootId::Thumbnails, &format!("{name}.jpg"));
+        let tiny = storage_file(StorageRootId::TinyThumbnails, &format!("{name}.jpg"));
+        generate_image_thumbnail(
+            &executors,
+            &source,
+            &thumbnail,
+            400,
+            85,
+            &config,
+            ArtifactPublicationOwner::JournalGroup,
+        )
+        .await
+        .expect("thumbnail");
+        if name.ends_with(".jpg") {
+            let expected = std::process::Command::new("magick")
+                .args(["-define", "jpeg:size=800x800"])
+                .arg(&original)
+                .args([
+                    "-auto-orient",
+                    "-thumbnail",
+                    "400x400^",
+                    "-gravity",
+                    "center",
+                    "-extent",
+                    "400x400",
+                    "-strip",
+                    "-quality",
+                    "85",
+                    "jpg:-",
+                ])
+                .env("MAGICK_TEMPORARY_PATH", data_directory.join("tmp"))
+                .output()
+                .expect("reference JPEG downsample");
+            assert!(
+                expected.status.success(),
+                "{}",
+                String::from_utf8_lossy(&expected.stderr)
+            );
+            let expected_pixels = image::load_from_memory(&expected.stdout).unwrap().to_rgb8();
+            let actual_pixels = image::open(
+                data_directory
+                    .join("thumbnails")
+                    .join(format!("{name}.jpg")),
+            )
+            .unwrap()
+            .to_rgb8();
+            assert_eq!(
+                actual_pixels, expected_pixels,
+                "thumbnail must use decoder hint before input"
+            );
+        }
+        generate_image_thumbnail(
+            &executors,
+            &thumbnail,
+            &tiny,
+            48,
+            85,
+            &config,
+            ArtifactPublicationOwner::JournalGroup,
+        )
+        .await
+        .expect("tiny from thumbnail");
+        for (directory, size) in [("thumbnails", 400), ("thumbnails_tiny", 48)] {
+            let image =
+                image::open(data_directory.join(directory).join(format!("{name}.jpg"))).unwrap();
+            assert_eq!((image.width(), image.height()), (size, size));
+        }
+        let preview = storage_file(StorageRootId::Previews, &format!("{name}.jpg"));
+        generate_image_preview(
+            &executors,
+            &source,
+            &preview,
+            width.max(height),
+            85,
+            &config,
+            ArtifactPublicationOwner::JournalGroup,
+        )
+        .await
+        .expect("full-resolution preview");
+        let image =
+            image::open(data_directory.join("previews").join(format!("{name}.jpg"))).unwrap();
+        assert_eq!((image.width(), image.height()), (width, height));
+        assert_eq!(std::fs::read(original).unwrap(), original_bytes);
     }
 }
 

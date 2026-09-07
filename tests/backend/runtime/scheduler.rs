@@ -99,7 +99,7 @@ async fn closing_ingress_wakes_capacity_waiters() {
 #[tokio::test]
 async fn full_cpu_fifo_keeps_request_pending_until_capacity_returns() {
     let (ingress, mut receiver) = ingress(2);
-    let cpu = CpuExecutorHandle::new(ingress, 2);
+    let cpu = CpuExecutorHandle::new(ingress, 2, 4 * 1024 * 1024 * 1024);
     let occupying = cpu.probe_durable(1);
     tokio::pin!(occupying);
     assert!(

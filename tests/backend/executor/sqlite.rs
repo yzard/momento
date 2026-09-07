@@ -12,12 +12,15 @@ async fn one_writer_drains_its_queue_while_readers_remain_available() {
     use std::sync::{Arc, Mutex};
 
     let directory = tempfile::tempdir().unwrap();
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 4,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 4,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .unwrap();
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),

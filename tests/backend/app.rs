@@ -100,7 +100,8 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
     std::fs::write(&config_path, toml::to_string(&config).expect("config text"))
         .expect("config file");
     let loaded = load_config_with_identity(&config_path).expect("loaded config");
-    let sizing = RuntimeSizing::new(&loaded.config.thread_pool).expect("runtime sizing");
+    let sizing = RuntimeSizing::new(&loaded.config.thread_pool, 4 * 1024 * 1024 * 1024)
+        .expect("runtime sizing");
     let (runtime, executors) = ExecutorRuntime::start(
         &sizing,
         pool.clone(),

@@ -24,6 +24,10 @@ pub(crate) const THREAD_POOL_CPU_WORKERS: usize = 8;
 pub(crate) const THREAD_POOL_NETWORK_IO_WORKERS: usize = 2;
 pub(crate) const THREAD_POOL_STORAGE_IO_WORKERS: usize = 6;
 pub(crate) const THREAD_POOL_SQLITE_WORKERS: usize = 4;
+
+pub(crate) fn magick_memory_quota_bytes() -> u64 {
+    4 * 1024 * 1024 * 1024
+}
 pub(crate) const REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS: u64 = 3600;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_STDERR_BYTES: usize = 1024 * 1024;
 pub(crate) const MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES: usize = 4 * 1024 * 1024;

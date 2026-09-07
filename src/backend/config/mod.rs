@@ -261,6 +261,9 @@ impl Default for MetadataConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaProcessConfig {
+    /// Shared ImageMagick process admission quota (restart required).
+    #[serde(default = "defaults::magick_memory_quota_bytes")]
+    pub magick_memory_quota_bytes: u64,
     #[serde(default = "defaults::media_process_maximum_stderr_bytes")]
     pub maximum_stderr_bytes: usize,
     #[serde(default = "defaults::media_process_maximum_metadata_output_bytes")]
@@ -274,6 +277,7 @@ pub struct MediaProcessConfig {
 impl Default for MediaProcessConfig {
     fn default() -> Self {
         Self {
+            magick_memory_quota_bytes: defaults::magick_memory_quota_bytes(),
             maximum_stderr_bytes: defaults::MEDIA_PROCESS_MAXIMUM_STDERR_BYTES,
             maximum_metadata_output_bytes: defaults::MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES,
             maximum_normalized_image_output_bytes:
@@ -370,8 +374,8 @@ impl Default for ThreadPoolConfig {
 }
 
 impl ThreadPoolConfig {
-    fn validate(&self) -> std::io::Result<()> {
-        crate::runtime::RuntimeSizing::validate_worker_counts(self)
+    fn validate(&self, magick_memory_quota_bytes: u64) -> std::io::Result<()> {
+        crate::runtime::RuntimeSizing::validate_worker_counts(self, magick_memory_quota_bytes)
             .map(|_| ())
             .map_err(std::io::Error::other)
     }
@@ -668,7 +672,9 @@ fn parse_config_contents(config_path: &Path, content: &str) -> std::io::Result<C
     config.webdav.validate()?;
     config.backup.validate()?;
     config.media_process.validate()?;
-    config.thread_pool.validate()?;
+    config
+        .thread_pool
+        .validate(config.media_process.magick_memory_quota_bytes)?;
     config.llm.validate()?;
     config.face_group.validate()?;
     Ok(config)

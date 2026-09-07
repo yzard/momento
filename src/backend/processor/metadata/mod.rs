@@ -67,12 +67,37 @@ pub struct ExtractedMediaMetadata {
     pub sources: Vec<MetadataSource>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum MetadataGenerationError {
+    #[error("{0}")]
+    Retryable(String),
+    #[error("magick_memory_quota_exceeded: source={source_path}, requested_bytes={requested_bytes}, quota_bytes={quota_bytes}; increase media_process.magick_memory_quota_bytes, restart, then generate metadata again")]
+    MagickMemoryQuotaExceeded {
+        source_path: String,
+        requested_bytes: u64,
+        quota_bytes: u64,
+    },
+}
+
+impl MetadataGenerationError {
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Retryable(_))
+    }
+}
+
+impl From<String> for MetadataGenerationError {
+    fn from(error: String) -> Self {
+        Self::Retryable(error)
+    }
+}
+
+#[tracing::instrument(skip_all, fields(media_id))]
 pub async fn generate_media_metadata(
     executors: &ExecutorHandles,
     media_id: i64,
     claim_token: &str,
     config: &Config,
-) -> Result<(), String> {
+) -> Result<(), MetadataGenerationError> {
     generation::generate_media_metadata(executors, media_id, claim_token, config).await
 }
 

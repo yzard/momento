@@ -28,12 +28,15 @@ fn journal_reservation(
 #[tokio::test]
 async fn operations_run_on_their_named_execution_domains() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 2,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 2,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -476,12 +479,15 @@ async fn metadata_json_parsers_return_typed_bounded_values_and_exclude_unrequest
 #[tokio::test]
 async fn cpu_hashing_is_bounded_and_returns_the_expected_digest() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -554,12 +560,15 @@ async fn cpu_hashing_is_bounded_and_returns_the_expected_digest() {
 #[tokio::test]
 async fn sqlite_executor_atomically_prepares_journal_and_rejects_path_conflicts() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -677,12 +686,15 @@ async fn sqlite_executor_atomically_prepares_journal_and_rejects_path_conflicts(
 #[tokio::test]
 async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -1101,12 +1113,15 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
 #[tokio::test]
 async fn file_executor_streams_storage_chunks_through_root_relative_operations() {
     let directory = tempfile::tempdir().expect("temporary storage directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -1279,12 +1294,15 @@ async fn file_executor_streams_storage_chunks_through_root_relative_operations()
 #[tokio::test]
 async fn file_executor_enumerates_large_directories_with_resumable_sessions() {
     let directory = tempfile::tempdir().expect("temporary storage directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -1354,12 +1372,15 @@ async fn file_executor_enumerates_large_directories_with_resumable_sessions() {
 #[tokio::test]
 async fn journal_move_rejects_a_replaced_source_generation() {
     let directory = tempfile::tempdir().expect("temporary storage directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -1489,12 +1510,15 @@ async fn journal_move_rejects_a_replaced_source_generation() {
 #[tokio::test]
 async fn generic_journal_recovery_finishes_a_rename_not_checkpointed_before_restart() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -1773,12 +1797,15 @@ async fn generic_journal_recovery_finishes_a_rename_not_checkpointed_before_rest
 #[tokio::test]
 async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original_sources() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -2180,12 +2207,15 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
 #[tokio::test]
 async fn durable_cancellations_release_mutation_fences_before_rollback_finishes() {
     let directory = tempfile::tempdir().expect("temporary database directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),
@@ -2280,12 +2310,15 @@ async fn durable_cancellations_release_mutation_fences_before_rollback_finishes(
 #[tokio::test]
 async fn backup_cancellation_commits_product_state_and_journal_cleanup_atomically() {
     let directory = tempfile::tempdir().expect("temporary executor directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let pool = create_pool_at(
         &directory.path().join("database.sqlite"),

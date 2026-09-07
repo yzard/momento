@@ -9,6 +9,101 @@ use super::journal::{
     JournalMutationGrant, JournalMutationStage, JournalRecoveryScope, JournalRecoveryState,
 };
 
+/// Reconcile files even after their old publication journal has been compacted.
+/// Only thumbnail roots are eligible; SQLite rechecks live references and claims
+/// atomically before handing an exact path to the normal durable cleanup worker.
+pub async fn reconcile_unreferenced_thumbnails(
+    executors: &ExecutorHandles,
+) -> Result<usize, ExecutorError> {
+    use super::file::{NormalizedStoragePath, StorageRootId};
+    use crate::executor::StorageDirectoryEntryKind;
+    use crate::runtime::{DurableSourceId, SchedulerAdmissionKind};
+    let mut total = 0;
+    for root in [StorageRootId::Thumbnails, StorageRootId::TinyThumbnails] {
+        let mut directories = std::collections::VecDeque::from([None]);
+        while let Some(directory) = directories.pop_front() {
+            let mut session = None;
+            loop {
+                let _admission = executors
+                    .scheduler
+                    .acquire_durable(
+                        DurableSourceId::Maintenance,
+                        SchedulerAdmissionKind::NewClaim,
+                    )
+                    .await
+                    .map_err(|error| {
+                        ExecutorError::new(
+                            ExecutorErrorKind::Overloaded,
+                            "reconcile_unreferenced_thumbnails",
+                            error,
+                        )
+                    })?;
+                let (returned, entries, finished) = executors
+                    .file_io
+                    .read_storage_directory_session_durable(match session.take() {
+                        Some(session) => session,
+                        None => {
+                            executors
+                                .file_io
+                                .open_storage_directory_session_durable(root, directory.clone())
+                                .await?
+                        }
+                    })
+                    .await?;
+                let mut paths = Vec::new();
+                for entry in entries {
+                    if entry.name.starts_with('.') {
+                        continue;
+                    }
+                    let relative = directory.as_ref().map_or_else(
+                        || entry.name.clone(),
+                        |parent| format!("{}/{}", parent.relative_path(), entry.name),
+                    );
+                    let path = NormalizedStoragePath::parse(&relative).map_err(|error| {
+                        ExecutorError::new(
+                            ExecutorErrorKind::FileInvalidData,
+                            "reconcile_unreferenced_thumbnails",
+                            format!("{relative}: {error}"),
+                        )
+                    })?;
+                    match entry.kind {
+                        StorageDirectoryEntryKind::Directory => directories.push_back(Some(path)),
+                        StorageDirectoryEntryKind::File => paths.push(path),
+                    }
+                }
+                for page in paths.chunks(64) {
+                    let queued = executors
+                        .sqlite
+                        .queue_unreferenced_thumbnails_durable(root, page.to_vec())
+                        .await?;
+                    total += queued;
+                    if queued > 0 {
+                        executors.scheduler.wake_journal_recovery();
+                        tracing::info!(
+                            storage_root = root.as_str(),
+                            queued,
+                            "Unreferenced old thumbnails queued for durable Journal cleanup"
+                        );
+                    }
+                }
+                if finished {
+                    executors
+                        .file_io
+                        .close_storage_session_durable(returned)
+                        .await?;
+                    break;
+                }
+                session = Some(returned);
+            }
+        }
+    }
+    tracing::info!(
+        queued = total,
+        "Old thumbnail reconciliation completed; referenced and actively owned files preserved"
+    );
+    Ok(total)
+}
+
 pub(crate) async fn acquire_verified_journal_mutation(
     executors: &ExecutorHandles,
     ticket: JournalMutationTicket,

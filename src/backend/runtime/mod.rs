@@ -3,6 +3,7 @@ pub(crate) mod config_bootstrap;
 mod control;
 mod http_server;
 mod job;
+pub(crate) mod memory;
 pub(crate) mod scheduler;
 mod sizing;
 mod timezone;

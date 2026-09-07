@@ -43,6 +43,9 @@ trusted_proxy_ip_addresses = {{TRUSTED_PROXY_IP_ADDRESSES}}
 refresh_token_cleanup_interval_seconds = {{REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS}}
 
 [media_process]
+# Shared quota for ImageMagick processes only. Restart required.
+# Tasks wait for quota; disk-backed pixel caches remain allowed.
+magick_memory_quota_bytes = 4294967296
 # Media commands may run as long as required and use one internal thread; worker concurrency controls parallelism.
 maximum_stderr_bytes = {{MEDIA_PROCESS_MAXIMUM_STDERR_BYTES}}
 maximum_metadata_output_bytes = {{MEDIA_PROCESS_MAXIMUM_METADATA_OUTPUT_BYTES}}

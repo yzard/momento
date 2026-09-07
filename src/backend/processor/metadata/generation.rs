@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use super::MetadataGenerationError;
 use crate::config::Config;
 use crate::constants::{
     DOCUMENT_DETECTION_MODEL_TYPE, FACE_DETECTION_MODEL_TYPE, IMAGE_AESTHETICS_MODEL_TYPE,
@@ -26,7 +27,7 @@ pub async fn generate_media_metadata(
     media_id: i64,
     claim_token: &str,
     config: &Config,
-) -> Result<(), String> {
+) -> Result<(), MetadataGenerationError> {
     let media = executors
         .sqlite
         .load_metadata_generation_media_durable(media_id)
@@ -36,8 +37,6 @@ pub async fn generate_media_metadata(
         .artifact_version
         .checked_add(1)
         .ok_or_else(|| "metadata artifact version overflowed".to_string())?;
-    let previous_thumbnail_path = media.thumbnail_path.clone();
-    let previous_preview_path = media.preview_path.clone();
     let file_path = media.file_path;
     let media_type = media.media_type;
     let original_file = StorageMediaFile {
@@ -61,6 +60,30 @@ pub async fn generate_media_metadata(
     } else {
         None
     };
+    {
+        // Tiny thumbnails are converted from the square thumbnail, including for videos.
+        let thumbnail_pixels = u64::from(config.metadata.thumbnails_max_size).pow(2);
+        let original_pixels = original_dimensions
+            .map(|(width, height)| u64::from(width) * u64::from(height))
+            .unwrap_or(0);
+        let requested_bytes = crate::executor::process::magick_memory_requirement(
+            original_pixels.max(thumbnail_pixels),
+        );
+        let quota_bytes = executors.cpu.magick_memory_quota_bytes();
+        if requested_bytes > quota_bytes {
+            return Err(MetadataGenerationError::MagickMemoryQuotaExceeded {
+                source_path: config
+                    .server
+                    .data_dir
+                    .join("originals")
+                    .join(&file_path)
+                    .display()
+                    .to_string(),
+                requested_bytes,
+                quota_bytes,
+            });
+        }
+    }
     let content_hash = match media
         .content_hash
         .filter(|content_hash| is_sha256(content_hash))
@@ -201,13 +224,13 @@ pub async fn generate_media_metadata(
     .await
     {
         artifact_batch.cancel(executors).await;
-        return Err(error);
+        return Err(error.into());
     }
     let committed_artifacts = match artifact_batch.publish(executors, artifact_version).await {
         Ok(group) => group,
         Err(error) => {
             artifact_batch.cancel(executors).await;
-            return Err(error);
+            return Err(error.into());
         }
     };
     let persistence = executors
@@ -252,67 +275,10 @@ pub async fn generate_media_metadata(
         .map_err(|error| error.to_string());
     if let Err(error) = persistence {
         artifact_batch.cancel(executors).await;
-        return Err(error);
+        return Err(error.into());
     }
     executors.scheduler.wake_journal_recovery();
-    retire_previous_metadata_artifacts(
-        executors,
-        previous_thumbnail_path.as_deref(),
-        previous_preview_path.as_deref(),
-    )
-    .await;
     Ok(())
-}
-
-async fn retire_previous_metadata_artifacts(
-    executors: &ExecutorHandles,
-    thumbnail_path: Option<&str>,
-    preview_path: Option<&str>,
-) {
-    if let Some(path) = thumbnail_path {
-        match crate::io::file::NormalizedStoragePath::parse(path) {
-            Ok(path) => {
-                for storage_root in [
-                    crate::io::file::StorageRootId::Thumbnails,
-                    crate::io::file::StorageRootId::TinyThumbnails,
-                ] {
-                    if let Err(error) = crate::processor::artifact::retire_artifact(
-                        executors,
-                        storage_root,
-                        path.clone(),
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            path = path.relative_path(),
-                            error,
-                            "Could not journal cleanup for a replaced metadata thumbnail"
-                        );
-                    }
-                }
-            }
-            Err(_) => tracing::error!(path, "Previous metadata thumbnail path is invalid"),
-        }
-    }
-    if let Some(path) = preview_path {
-        let Ok(path) = crate::io::file::NormalizedStoragePath::parse(path) else {
-            tracing::error!(path, "Previous metadata preview path is invalid");
-            return;
-        };
-        if let Err(error) = crate::processor::artifact::retire_artifact(
-            executors,
-            crate::io::file::StorageRootId::Previews,
-            path.clone(),
-        )
-        .await
-        {
-            tracing::error!(
-                path = path.relative_path(),
-                error,
-                "Could not journal cleanup for a replaced metadata preview"
-            );
-        }
-    }
 }
 
 fn is_sha256(value: &str) -> bool {

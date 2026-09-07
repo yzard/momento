@@ -984,12 +984,13 @@ pub mod metadata_jobs {
        AND claim_token = ?
        AND status IN ('processing', 'cancelling')
     "#;
-    pub const MARK_RETRY: &str = r#"
+    pub const MARK_FAILURE: &str = r#"
     UPDATE media_metadata_jobs
        SET status = CASE
                WHEN rerun_requested = 1 THEN 'queued'
                WHEN status = 'cancelling' THEN 'cancelled'
-               ELSE 'queued'
+               WHEN ?4 THEN 'queued'
+               ELSE 'failed'
            END
          , claim_token = NULL
          , attempts = CASE WHEN rerun_requested = 1 THEN 0 ELSE attempts END
@@ -1000,13 +1001,13 @@ pub mod metadata_jobs {
            END
          , claimed_at = NULL
          , completed_at = CASE
-               WHEN status = 'cancelling' AND rerun_requested = 0 THEN datetime('now')
+               WHEN (status = 'cancelling' OR NOT ?4) AND rerun_requested = 0 THEN datetime('now')
                ELSE NULL
            END
-         , last_error = CASE WHEN status = 'cancelling' OR rerun_requested = 1 THEN NULL ELSE ? END
+         , last_error = CASE WHEN status = 'cancelling' OR rerun_requested = 1 THEN NULL ELSE ?1 END
          , updated_at = datetime('now')
-     WHERE media_id = ?
-       AND claim_token = ?
+     WHERE media_id = ?2
+       AND claim_token = ?3
        AND status IN ('processing', 'cancelling')
     "#;
     pub const RECOVER_ORPHANED_CLAIMS: &str = r#"
@@ -2548,6 +2549,28 @@ pub mod media_text {
 }
 
 pub mod metadata {
+    pub const SELECT_REFERENCED_ARTIFACT_PATHS: &str =
+        "SELECT file_path FROM file_product_references WHERE storage_root = ?1 AND file_path IN (SELECT value FROM json_each(?2))";
+    pub const SELECT_ARTIFACT_PATHS: &str =
+        "SELECT thumbnail_path, preview_path FROM media_metadata WHERE media_id = ?";
+    // Published destinations are immutable products. Normal cleanup of these
+    // groups touches only their temporary paths, so retirement can take ownership.
+    pub const RELEASE_RETIRED_DESTINATION_CLAIM: &str = r#"
+    DELETE FROM file_operation_path_claims
+     WHERE storage_root = ?1 AND path_key = ?2
+       AND role = 'metadata_artifact_destination'
+       AND group_id IN (
+           SELECT g.id FROM file_operation_groups g
+           JOIN file_operation_entries e ON e.group_id = g.id
+            WHERE g.owner_kind = 'metadata_generation' AND (?3 IS NULL OR g.owner_id = ?3)
+              AND g.id = file_operation_path_claims.group_id
+              AND g.product_target IS NULL AND g.completion_outcome = 'published'
+              AND g.cancel_requested = 0
+              AND g.state IN ('cleanup_pending', 'cleaned', 'completed')
+              AND e.action = 'publish' AND e.state = 'committed'
+              AND e.storage_root = ?1 AND e.destination_path = ?4
+       )
+    "#;
     pub const SELECT_IMPORTED_MEDIA: &str = r#"
     SELECT media.file_path
          , media.media_type

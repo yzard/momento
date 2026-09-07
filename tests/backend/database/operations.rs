@@ -6,6 +6,129 @@ use momento_api::database::operations::{
 use momento_api::processor::face_detection;
 use momento_api::runtime::{ExecutorHandles, ExecutorRuntime, RuntimeSizing};
 
+#[tokio::test]
+async fn thumbnail_reconciliation_rejects_other_roots_and_unbounded_batches() {
+    use momento_api::io::file::{NormalizedStoragePath, StorageRootId};
+    let handles = crate::test_utils::test_executor_handles(create_test_db());
+    let path = NormalizedStoragePath::parse("file.jpg").unwrap();
+    for root in [StorageRootId::Originals, StorageRootId::Previews] {
+        assert!(handles
+            .sqlite
+            .queue_unreferenced_thumbnails_durable(root, vec![path.clone()])
+            .await
+            .is_err());
+    }
+    assert!(handles
+        .sqlite
+        .queue_unreferenced_thumbnails_durable(StorageRootId::Thumbnails, vec![path; 65])
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn metadata_replacement_atomically_transfers_old_publication_claims_to_cleanup() {
+    use momento_api::database::operations::{MetadataValuesWrite, PersistMetadataGeneration};
+    use momento_api::io::file::NormalizedStoragePath;
+    for (valid_version, published) in [(false, true), (true, true), (true, false)] {
+        let should_commit = valid_version && published;
+        let pool = create_test_db();
+        let media_id = create_test_media(&pool, "retirement.jpg");
+        let token = uuid::Uuid::new_v4().to_string();
+        let old_path = "media/1/old/thumbnail.jpg";
+        let conn = pool.get().unwrap();
+        conn.execute("INSERT INTO media_metadata(media_id, thumbnail_path, preview_path) VALUES (?, ?, 'media/1/old/preview.jpg') ON CONFLICT(media_id) DO UPDATE SET thumbnail_path=excluded.thumbnail_path, preview_path=excluded.preview_path", rusqlite::params![media_id, old_path]).unwrap();
+        conn.execute("INSERT INTO media_metadata_jobs(media_id,status,claim_token) VALUES (?,'processing',?) ON CONFLICT(media_id) DO UPDATE SET status='processing',claim_token=excluded.claim_token", rusqlite::params![media_id, token]).unwrap();
+        conn.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,completion_outcome,entry_count) VALUES ('old','metadata_artifacts','metadata_generation',?,'cleanup_pending','published',1)", [media_id.to_string()]).unwrap();
+        if !published {
+            conn.execute("UPDATE file_operation_groups SET cancel_requested=1,completion_outcome='discarded' WHERE id='old'", []).unwrap();
+        }
+        conn.execute("INSERT INTO file_operation_entries(group_id,sequence,action,storage_root,temporary_path,destination_path,state) VALUES ('old',0,'publish','thumbnails','media/1/old/tmp',?,'committed')", [old_path]).unwrap();
+        conn.execute("INSERT INTO file_operation_path_claims(group_id,sequence,storage_root,relative_path,path_key,mode,scope,role) VALUES ('old',0,'thumbnails',?,?,'write','exact','metadata_artifact_destination')", rusqlite::params![old_path, NormalizedStoragePath::parse(old_path).unwrap().path_key()]).unwrap();
+        conn.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,claim_token,state,product_target,product_version,entry_count) VALUES ('new','metadata_artifacts','metadata_generation',?,?,'files_committed','metadata_artifacts',2,1)", rusqlite::params![media_id.to_string(), token]).unwrap();
+        drop(conn);
+        let (_, runtime, handles) = start_runtime(pool.clone());
+        let result = handles
+            .sqlite
+            .persist_metadata_generation_durable(PersistMetadataGeneration {
+                media_id,
+                claim_token: token,
+                artifact_group_id: "new".into(),
+                artifact_group_version: if valid_version { 1 } else { 2 },
+                artifact_version: 2,
+                thumbnail_path: "media/1/new/thumbnail.jpg".into(),
+                preview_path: None,
+                content_hash: "a".repeat(64),
+                geohash: None,
+                sources: vec![],
+                ai_inputs: vec![momento_api::database::operations::MetadataAiInputWrite {
+                    task: "ocr".into(),
+                    sequence: 0,
+                    input_kind: "image".into(),
+                    storage_root: "originals".into(),
+                    file_path: "retirement.jpg".into(),
+                    filename: "retirement.jpg".into(),
+                    mime_type: "image/jpeg".into(),
+                    byte_size: 1,
+                    content_hash: "a".repeat(64),
+                    frame_timestamp_ms: None,
+                }],
+                metadata: MetadataValuesWrite {
+                    width: Some(100),
+                    height: Some(100),
+                    date_taken: None,
+                    gps_latitude: None,
+                    gps_longitude: None,
+                    gps_altitude: None,
+                    camera_make: None,
+                    camera_model: None,
+                    lens_make: None,
+                    lens_model: None,
+                    iso: None,
+                    exposure_time: None,
+                    f_number: None,
+                    focal_length: None,
+                    focal_length_35mm: None,
+                    location_city: None,
+                    location_state: None,
+                    location_country: None,
+                    video_codec: None,
+                    keywords: None,
+                    duration_seconds: None,
+                },
+            })
+            .await;
+        assert_eq!(result.is_ok(), should_commit, "{result:?}");
+        let conn = pool.get().unwrap();
+        let claims: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_operation_path_claims WHERE group_id='old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cleanup: i64 = conn.query_row("SELECT COUNT(*) FROM file_operation_entries WHERE group_id='metadata-retire-new' AND action='cleanup'", [], |row| row.get(0)).unwrap();
+        let path: String = conn
+            .query_row(
+                "SELECT thumbnail_path FROM media_metadata WHERE media_id=?",
+                [media_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claims, if should_commit { 0 } else { 1 });
+        assert_eq!(cleanup, if should_commit { 3 } else { 0 });
+        assert_eq!(
+            path,
+            if should_commit {
+                "media/1/new/thumbnail.jpg"
+            } else {
+                old_path
+            }
+        );
+        drop(conn);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
 fn start_runtime(
     pool: momento_api::database::DbPool,
 ) -> (std::path::PathBuf, ExecutorRuntime, ExecutorHandles) {
@@ -28,12 +151,15 @@ fn start_runtime(
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let (runtime, handles) =
         ExecutorRuntime::start(&sizing, pool, identity, directory.clone(), None)

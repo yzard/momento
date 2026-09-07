@@ -76,6 +76,8 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
     assert!(dockerfile.contains("imagemagick-raw"));
     assert!(dockerfile.contains("AVIF DNG GIF HEIC QOI TIFF WEBP"));
     assert!(!image_magick_policy.contains("name=\"time\""));
+    assert!(image_magick_policy.contains("name=\"map\" value=\"1GiB\""));
+    assert!(image_magick_policy.contains("name=\"disk\" value=\"32GiB\""));
     assert!(entrypoint.contains("/data/tmp"));
 }
 
@@ -87,12 +89,15 @@ fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops(
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let runtime = RuntimeBuilder::new(
         sizing,
@@ -131,12 +136,15 @@ fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops(
 #[test]
 fn runtime_builder_publishes_named_executor_and_network_workers() {
     let directory = tempfile::tempdir().expect("temporary runtime directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 3,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 3,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let config_path = directory.path().join("config.toml");
     std::fs::write(
@@ -191,12 +199,15 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
 #[test]
 fn journal_mutation_registry_covers_every_active_mutation_owner() {
     let directory = tempfile::tempdir().expect("temporary runtime directory");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 8,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 4,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 8,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 4,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     assert!(sizing.durable_orchestrations > sizing.file_queue_capacity);
     let mutation_capacity = sizing.journal_mutation_registry_capacity;
@@ -252,12 +263,15 @@ fn runtime_builder_rejects_a_config_changed_after_initial_read() {
     let loaded_config = momento_api::config::load_config_with_identity(&config_path)
         .expect("initial config identity");
     std::fs::write(&config_path, "# changed config\n").expect("replace config contents");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
 
     let result = RuntimeBuilder::new(
@@ -284,12 +298,15 @@ fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let first = RuntimeBuilder::new(
         sizing.clone(),
@@ -326,12 +343,15 @@ fn runtime_builder_does_not_create_a_missing_data_directory() {
         .expect("config identity")
         .identity;
     let missing = directory.path().join("missing");
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
 
     let result = RuntimeBuilder::new(
@@ -356,12 +376,15 @@ fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
 
     let runtime = RuntimeBuilder::new(
@@ -384,12 +407,15 @@ fn runtime_builder_creates_every_writable_storage_root_before_publication() {
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
 
     let runtime = RuntimeBuilder::new(
@@ -450,12 +476,15 @@ fn runtime_builder_rejects_static_storage_that_overlaps_private_data() {
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
 
     let result = RuntimeBuilder::new(
@@ -489,12 +518,15 @@ fn runtime_builder_rejects_orphan_and_truncated_sqlite_bootstrap_files() {
         let identity = momento_api::config::load_config_with_identity(&config_path)
             .expect("config identity")
             .identity;
-        let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-            cpu_workers: 1,
-            network_io_workers: 2,
-            storage_io_workers: 2,
-            sqlite_workers: 2,
-        })
+        let sizing = RuntimeSizing::validate_worker_counts(
+            &ThreadPoolConfig {
+                cpu_workers: 1,
+                network_io_workers: 2,
+                storage_io_workers: 2,
+                sqlite_workers: 2,
+            },
+            4 * 1024 * 1024 * 1024,
+        )
         .expect("runtime sizing");
         let result = RuntimeBuilder::new(
             sizing,
@@ -526,12 +558,15 @@ fn runtime_builder_rejects_an_existing_schema_that_needs_migration() {
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
-    let sizing = RuntimeSizing::validate_worker_counts(&ThreadPoolConfig {
-        cpu_workers: 1,
-        network_io_workers: 2,
-        storage_io_workers: 2,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &ThreadPoolConfig {
+            cpu_workers: 1,
+            network_io_workers: 2,
+            storage_io_workers: 2,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .expect("runtime sizing");
     let result = RuntimeBuilder::new(
         sizing,

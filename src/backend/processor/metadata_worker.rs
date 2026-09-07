@@ -21,6 +21,7 @@ struct MetadataClaimGuard {
     registration: Option<crate::runtime::ActiveDurableClaim>,
     claim: Option<crate::database::operations::MetadataJobClaim>,
     intended_error: Option<Option<String>>,
+    intended_retryable: bool,
     retry_handoff: bool,
 }
 
@@ -39,6 +40,7 @@ impl MetadataClaimGuard {
             registration: Some(registration),
             claim: Some(claim),
             intended_error: None,
+            intended_retryable: true,
             retry_handoff: true,
         }
     }
@@ -55,8 +57,9 @@ impl MetadataClaimGuard {
             .claim_token
     }
 
-    async fn resolve(mut self, error: Option<String>) -> Result<(), String> {
+    async fn resolve(mut self, error: Option<String>, retryable: bool) -> Result<(), String> {
         self.intended_error = Some(error.clone());
+        self.intended_retryable = retryable;
         let claim = self.claim.as_ref().expect("active metadata claim");
         match self
             .sqlite
@@ -64,6 +67,7 @@ impl MetadataClaimGuard {
                 media_id: claim.media_id,
                 claim_token: claim.claim_token.clone(),
                 error,
+                retryable,
             })
             .await
         {
@@ -90,15 +94,20 @@ impl Drop for MetadataClaimGuard {
         let sqlite = self.sqlite.clone();
         let scheduler = self.scheduler.clone();
         let retry_handoff = self.retry_handoff;
-        let error = self.intended_error.take().flatten().or_else(|| {
+        let error = self.intended_error.take().unwrap_or_else(|| {
             Some("metadata orchestration exited before resolving its claim".to_string())
         });
+        let request = FinishMetadataJob {
+            media_id: claim.media_id,
+            claim_token: claim.claim_token,
+            error,
+            retryable: self.intended_retryable,
+        };
         scheduler.clone().spawn_control(async move {
             retry_metadata_claim_handoff(
                 sqlite,
                 scheduler,
-                claim,
-                error,
+                request,
                 admission,
                 registration,
                 retry_handoff,
@@ -111,8 +120,7 @@ impl Drop for MetadataClaimGuard {
 async fn retry_metadata_claim_handoff(
     sqlite: crate::executor::SqliteExecutorHandle,
     scheduler: SchedulerHandle,
-    claim: crate::database::operations::MetadataJobClaim,
-    error: Option<String>,
+    request: FinishMetadataJob,
     admission: Option<crate::runtime::DurableAdmission>,
     registration: Option<crate::runtime::ActiveDurableClaim>,
     mut retry_handoff: bool,
@@ -120,7 +128,7 @@ async fn retry_metadata_claim_handoff(
     drop(admission);
     if !retry_handoff {
         warn!(
-            media_id = claim.media_id,
+            media_id = request.media_id,
             "metadata claim handoff failed permanently; startup recovery will requeue it"
         );
         drop(registration);
@@ -138,7 +146,7 @@ async fn retry_metadata_claim_handoff(
             Ok(admission) => admission,
             Err(acquire_error) => {
                 warn!(
-                    media_id = claim.media_id,
+                    media_id = request.media_id,
                     error = %acquire_error,
                     "metadata claim handoff stopped; startup recovery will requeue it"
                 );
@@ -146,13 +154,7 @@ async fn retry_metadata_claim_handoff(
                 return;
             }
         };
-        let outcome = sqlite
-            .finish_metadata_job_durable(FinishMetadataJob {
-                media_id: claim.media_id,
-                claim_token: claim.claim_token.clone(),
-                error: error.clone(),
-            })
-            .await;
+        let outcome = sqlite.finish_metadata_job_durable(request.clone()).await;
         drop(admission);
         match outcome {
             Ok(()) => {
@@ -162,7 +164,7 @@ async fn retry_metadata_claim_handoff(
             Err(finish_error) => {
                 retry_handoff = metadata_finish_error_is_retryable(finish_error.kind);
                 warn!(
-                    media_id = claim.media_id,
+                    media_id = request.media_id,
                     error = %finish_error,
                     retrying = retry_handoff,
                     "metadata claim handoff failed after releasing its worker"
@@ -323,6 +325,7 @@ async fn process_metadata_job(
                     media_id: claim.media_id,
                     claim_token: claim.claim_token,
                     error: Some(format!("metadata claim registration failed: {error}")),
+                    retryable: true,
                 })
                 .await
                 .map_err(|finish_error| {
@@ -347,13 +350,36 @@ async fn process_metadata_job(
     )
     .await
     {
-        Ok(()) => verify_ai_inputs(executors, media_id, config).await,
+        Ok(()) => verify_ai_inputs(executors, media_id, config)
+            .await
+            .map_err(Into::into),
         Err(error) => Err(error),
     };
+    let retryable = outcome
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.retryable());
     if let Err(error) = &outcome {
-        warn!(media_id, error, "metadata processing failed");
+        match error {
+            crate::processor::metadata::MetadataGenerationError::MagickMemoryQuotaExceeded {
+                source_path,
+                requested_bytes,
+                quota_bytes,
+            } => tracing::error!(
+                media_id, source_path, requested_bytes, quota_bytes,
+                error_code = "magick_memory_quota_exceeded", retryable = false,
+                error = %error,
+                "Metadata request exceeds total ImageMagick quota; marking failed without automatic retry"
+            ),
+            _ => {
+                warn!(media_id, error = %error, retryable, "metadata processing failed; queued for retry")
+            }
+        }
     }
-    if let Err(error) = claim_guard.resolve(outcome.err()).await {
+    if let Err(error) = claim_guard
+        .resolve(outcome.err().map(|error| error.to_string()), retryable)
+        .await
+    {
         warn!("failed to persist metadata job {media_id} outcome: {error}");
     }
     Ok(true)

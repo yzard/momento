@@ -940,11 +940,12 @@ pub struct MetadataJobClaim {
     pub claim_token: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FinishMetadataJob {
     pub media_id: i64,
     pub claim_token: String,
     pub error: Option<String>,
+    pub retryable: bool,
 }
 
 #[derive(Debug)]
@@ -2767,6 +2768,22 @@ fn media_cleanup_plan(
             ));
         }
     }
+    Ok(cleanup_plan(
+        format!("media-delete-{media_id}"),
+        "media_delete_cleanup",
+        "media",
+        media_id,
+        targets,
+    ))
+}
+
+fn cleanup_plan(
+    group_id: String,
+    kind: &str,
+    owner_kind: &str,
+    owner_id: String,
+    targets: Vec<(StorageRootId, NormalizedStoragePath, PathClaimScope, &str)>,
+) -> FileOperationPlan {
     let entries = targets
         .iter()
         .map(|(storage_root, path, _, _)| FileEntryPlan {
@@ -2792,18 +2809,18 @@ fn media_cleanup_plan(
             expected_version: None,
         })
         .collect();
-    Ok(FileOperationPlan {
-        group_id: format!("media-delete-{media_id}"),
-        kind: "media_delete_cleanup".to_string(),
-        owner_kind: "media".to_string(),
-        owner_id: media_id,
+    FileOperationPlan {
+        group_id,
+        kind: kind.to_string(),
+        owner_kind: owner_kind.to_string(),
+        owner_id,
         claim_token: None,
         product_target: None,
         product_version: None,
         entries,
         claims,
         space_reservation: None,
-    })
+    }
 }
 
 fn parse_storage_path(path: &str) -> rusqlite::Result<NormalizedStoragePath> {
@@ -3886,8 +3903,13 @@ pub(crate) fn finish_metadata_job(
             params![request.media_id, request.claim_token],
         )?,
         Some(error) => connection.execute(
-            queries::metadata_jobs::MARK_RETRY,
-            params![error, request.media_id, request.claim_token],
+            queries::metadata_jobs::MARK_FAILURE,
+            params![
+                error,
+                request.media_id,
+                request.claim_token,
+                request.retryable
+            ],
         )?,
     };
     if changed != 1 {
@@ -3922,6 +3944,139 @@ pub(crate) fn load_metadata_generation_media(
     )
 }
 
+pub(crate) fn queue_unreferenced_thumbnails(
+    connection: &mut Connection,
+    storage_root: StorageRootId,
+    paths: Vec<NormalizedStoragePath>,
+) -> rusqlite::Result<usize> {
+    if !matches!(
+        storage_root,
+        StorageRootId::Thumbnails | StorageRootId::TinyThumbnails
+    ) || paths.len() > 64
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let candidates = serde_json::to_string(
+        &paths
+            .iter()
+            .map(|path| path.relative_path())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let referenced = transaction
+        .prepare(queries::metadata::SELECT_REFERENCED_ARTIFACT_PATHS)?
+        .query_map(params![storage_root.as_str(), candidates], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    let mut queued = 0;
+    for path in paths {
+        if referenced.contains(path.relative_path()) {
+            continue;
+        }
+        transaction.execute(
+            queries::metadata::RELEASE_RETIRED_DESTINATION_CLAIM,
+            params![
+                storage_root.as_str(),
+                path.path_key(),
+                Option::<String>::None,
+                path.relative_path()
+            ],
+        )?;
+        let plan = cleanup_plan(
+            format!("orphan-thumbnail-{}", uuid::Uuid::new_v4()),
+            "metadata_artifact_retirement",
+            "thumbnail_reconciliation",
+            storage_root.as_str().to_string(),
+            vec![(
+                storage_root,
+                path,
+                PathClaimScope::Exact,
+                "retired_thumbnail",
+            )],
+        );
+        if crate::io::journal::prepare_committed_cleanup(&transaction, plan)?
+            != PrepareJournalOutcome::PathConflict
+        {
+            queued += 1;
+        }
+    }
+    transaction.commit()?;
+    Ok(queued)
+}
+
+fn retire_metadata_artifacts(
+    transaction: &Transaction<'_>,
+    request: &PersistMetadataGeneration,
+) -> rusqlite::Result<()> {
+    let Some((thumbnail, preview)) = transaction
+        .query_row(
+            queries::metadata::SELECT_ARTIFACT_PATHS,
+            [request.media_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let mut targets = Vec::new();
+    if let Some(path) = thumbnail.filter(|path| path != &request.thumbnail_path) {
+        for root in [StorageRootId::Thumbnails, StorageRootId::TinyThumbnails] {
+            targets.push((
+                root,
+                parse_storage_path(&path)?,
+                PathClaimScope::Exact,
+                "retired_thumbnail",
+            ));
+        }
+    }
+    if let Some(path) = preview.filter(|path| Some(path) != request.preview_path.as_ref()) {
+        targets.push((
+            StorageRootId::Previews,
+            parse_storage_path(&path)?,
+            PathClaimScope::Exact,
+            "retired_preview",
+        ));
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+    for (root, path, _, _) in &targets {
+        transaction.execute(
+            queries::metadata::RELEASE_RETIRED_DESTINATION_CLAIM,
+            params![
+                root.as_str(),
+                path.path_key(),
+                request.media_id.to_string(),
+                path.relative_path()
+            ],
+        )?;
+    }
+    let plan = cleanup_plan(
+        format!("metadata-retire-{}", request.artifact_group_id),
+        "metadata_artifact_retirement",
+        "media",
+        request.media_id.to_string(),
+        targets,
+    );
+    if crate::io::journal::prepare_committed_cleanup(transaction, plan)?
+        == PrepareJournalOutcome::PathConflict
+    {
+        // Roll back the replacement as well: never lose the durable old paths.
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("metadata retirement is waiting for another path owner".to_string()),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn persist_metadata_generation(
     connection: &mut Connection,
     request: PersistMetadataGeneration,
@@ -3932,6 +4087,7 @@ pub(crate) fn persist_metadata_generation(
         params![request.media_id, request.claim_token],
         |_| Ok(()),
     )?;
+    retire_metadata_artifacts(&transaction, &request)?;
     if transaction.execute(
         queries::metadata::FINALIZE_ARTIFACT_GROUP,
         params![

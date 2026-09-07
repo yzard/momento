@@ -5,15 +5,85 @@ use momento_api::io::recovery::{
 use sha2::Digest;
 
 #[tokio::test]
+async fn thumbnail_reconciliation_cleans_history_without_touching_live_or_active_files() {
+    use momento_api::io::file::NormalizedStoragePath;
+    use momento_api::io::recovery::reconcile_unreferenced_thumbnails;
+    let pool = crate::test_utils::create_test_db();
+    let media_id = crate::test_utils::create_test_media(&pool, "original.jpg");
+    let (executors, directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    for root in ["thumbnails", "thumbnails_tiny"] {
+        std::fs::create_dir_all(directory.join(root).join("nested")).unwrap();
+        for name in ["current.jpg", "active.jpg", "published-old.jpg"] {
+            std::fs::write(directory.join(root).join(name), b"preserve or retire").unwrap();
+        }
+        // More than one SQLite batch; no historical Journal evidence is needed.
+        for index in 0..70 {
+            std::fs::write(
+                directory.join(root).join(format!("nested/old-{index}.jpg")),
+                b"old",
+            )
+            .unwrap();
+        }
+    }
+    std::fs::write(directory.join("originals/untouched.jpg"), b"original").unwrap();
+    std::fs::write(directory.join("previews/untouched.jpg"), b"preview").unwrap();
+    let connection = pool.get().unwrap();
+    connection.execute("INSERT INTO media_metadata(media_id,thumbnail_path) VALUES (?,'current.jpg') ON CONFLICT(media_id) DO UPDATE SET thumbnail_path='current.jpg'", [media_id]).unwrap();
+    for root in ["thumbnails", "tiny_thumbnails"] {
+        for (name, published) in [("active.jpg", false), ("published-old.jpg", true)] {
+            let group = format!("{root}-{name}");
+            connection.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,completion_outcome,entry_count) VALUES (?,'metadata_artifacts','metadata_generation',?,?,?,1)",
+                rusqlite::params![group, media_id.to_string(), if published {"cleanup_pending"} else {"prepared"}, if published {Some("published")} else {None}]).unwrap();
+            connection.execute("INSERT INTO file_operation_entries(group_id,sequence,action,storage_root,temporary_path,destination_path,state) VALUES (?,0,'publish',?,'temporary.jpg',?,?)",
+                rusqlite::params![group, root, name, if published {"committed"} else {"prepared"}]).unwrap();
+            connection.execute("INSERT INTO file_operation_path_claims(group_id,sequence,storage_root,relative_path,path_key,mode,scope,role) VALUES (?,0,?,?,?,'write','exact','metadata_artifact_destination')",
+                rusqlite::params![group, root, name, NormalizedStoragePath::parse(name).unwrap().path_key()]).unwrap();
+        }
+    }
+    drop(connection);
+    assert_eq!(
+        reconcile_unreferenced_thumbnails(&executors).await.unwrap(),
+        142
+    );
+    // Active cleanup claims prevent duplicate work before deletion has completed.
+    assert_eq!(
+        reconcile_unreferenced_thumbnails(&executors).await.unwrap(),
+        0
+    );
+    recover_generic_file_operations(&executors).await.unwrap();
+    for root in ["thumbnails", "thumbnails_tiny"] {
+        assert!(directory.join(root).join("current.jpg").is_file());
+        assert!(directory.join(root).join("active.jpg").is_file());
+        assert!(!directory.join(root).join("published-old.jpg").exists());
+        for index in 0..70 {
+            assert!(!directory
+                .join(root)
+                .join(format!("nested/old-{index}.jpg"))
+                .exists());
+        }
+    }
+    assert!(directory.join("originals/untouched.jpg").is_file());
+    assert!(directory.join("previews/untouched.jpg").is_file());
+    assert_eq!(
+        reconcile_unreferenced_thumbnails(&executors).await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn independent_cleanup_uses_a_bounded_rolling_window() {
     use momento_api::runtime::{DurableSourceId, ExecutorRuntime, RuntimeSizing};
     let directory = tempfile::tempdir().unwrap();
-    let sizing = RuntimeSizing::validate_worker_counts(&momento_api::config::ThreadPoolConfig {
-        cpu_workers: 2,
-        network_io_workers: 2,
-        storage_io_workers: 4,
-        sqlite_workers: 2,
-    })
+    let sizing = RuntimeSizing::validate_worker_counts(
+        &momento_api::config::ThreadPoolConfig {
+            cpu_workers: 2,
+            network_io_workers: 2,
+            storage_io_workers: 4,
+            sqlite_workers: 2,
+        },
+        4 * 1024 * 1024 * 1024,
+    )
     .unwrap();
     let pool = momento_api::database::create_pool_at(
         &directory.path().join("database.sqlite"),

@@ -29,7 +29,9 @@ const MAXIMUM_CHILD_FILE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaTool {
-    ImageMagick,
+    ImageMagick {
+        pixels: u64,
+    },
     Identify,
     ExifTool,
     Ffmpeg {
@@ -41,7 +43,7 @@ pub(crate) enum MediaTool {
 impl MediaTool {
     pub(crate) fn executable(self) -> &'static OsStr {
         match self {
-            Self::ImageMagick | Self::Identify => OsStr::new("magick"),
+            Self::ImageMagick { .. } | Self::Identify => OsStr::new("magick"),
             Self::ExifTool => OsStr::new("exiftool"),
             Self::Ffmpeg { .. } => OsStr::new("ffmpeg"),
             Self::Ffprobe => OsStr::new("ffprobe"),
@@ -50,7 +52,8 @@ impl MediaTool {
 
     fn address_space_limit_bytes(self) -> u64 {
         match self {
-            Self::ImageMagick | Self::Identify => 512 * 1024 * 1024,
+            Self::ImageMagick { pixels } => magick_memory_requirement(pixels),
+            Self::Identify => 512 * 1024 * 1024,
             Self::ExifTool => 256 * 1024 * 1024,
             Self::Ffmpeg { .. } | Self::Ffprobe => 1024 * 1024 * 1024,
         }
@@ -58,7 +61,7 @@ impl MediaTool {
 
     fn total_runtime(self) -> Duration {
         match self {
-            Self::ImageMagick | Self::Identify => Duration::from_secs(30 * 60),
+            Self::ImageMagick { .. } | Self::Identify => Duration::from_secs(30 * 60),
             Self::ExifTool | Self::Ffprobe => Duration::from_secs(10 * 60),
             Self::Ffmpeg {
                 validated_media_duration,
@@ -68,6 +71,7 @@ impl MediaTool {
 }
 
 pub(crate) struct ChildProcessSpec {
+    memory_reservation: Option<crate::runtime::memory::MemoryReservation>,
     tool: MediaTool,
     arguments: Vec<OsString>,
     maximum_stdout_bytes: usize,
@@ -339,6 +343,7 @@ impl ChildProcessSpec {
         }
         validate_child_descriptor_leases(&leases)?;
         Ok(Self {
+            memory_reservation: None,
             tool,
             arguments,
             maximum_stdout_bytes,
@@ -366,6 +371,23 @@ impl ChildProcessSpec {
             + self.leases.len() * size_of::<ChildDescriptorLease>()
     }
 
+    pub(crate) async fn reserve_magick_memory(
+        &mut self,
+        budget: &std::sync::Arc<crate::runtime::memory::MemoryBudget>,
+    ) -> Result<(), String> {
+        if matches!(
+            self.tool,
+            MediaTool::ImageMagick { .. } | MediaTool::Identify
+        ) {
+            self.memory_reservation = Some(
+                budget
+                    .acquire(self.tool.address_space_limit_bytes())
+                    .await?,
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn maximum_output_bytes(&self) -> usize {
         self.maximum_stdout_bytes
             .saturating_add(self.maximum_stderr_bytes)
@@ -374,6 +396,7 @@ impl ChildProcessSpec {
 
     pub(crate) fn run(self) -> ChildProcessCompletion {
         let Self {
+            memory_reservation,
             tool,
             arguments,
             maximum_stdout_bytes,
@@ -389,6 +412,7 @@ impl ChildProcessSpec {
             &leases,
             stdout_child_fd,
         );
+        drop(memory_reservation);
         ChildProcessCompletion { result, leases }
     }
 }
@@ -511,7 +535,7 @@ fn tool_arguments(tool: MediaTool) -> Vec<OsString> {
         MediaTool::Ffmpeg { .. } => ffmpeg_single_thread_arguments(),
         MediaTool::Ffprobe => ffprobe_single_thread_arguments(),
         MediaTool::Identify => vec![OsString::from("identify")],
-        MediaTool::ImageMagick | MediaTool::ExifTool => Vec::new(),
+        MediaTool::ImageMagick { .. } | MediaTool::ExifTool => Vec::new(),
     }
 }
 
@@ -1260,7 +1284,21 @@ pub enum ImageDimensionError {
     },
 }
 
-pub fn image_magick_resource_arguments(config: &MediaProcessConfig) -> Vec<OsString> {
+/// Conservative decoder/encoder workspace, heap cache and file-backed mappings.
+/// Both the shared reservation and RLIMIT_AS include the complete mapping allowance.
+pub fn magick_memory_requirement(pixels: u64) -> u64 {
+    (512_u64 * 1024 * 1024)
+        .saturating_add(pixels.saturating_mul(24))
+        .saturating_add(magick_map_limit_bytes(pixels))
+}
+
+pub fn magick_map_limit_bytes(pixels: u64) -> u64 {
+    // Bounded room for pixel caches/intermediate images, including HDRI channels.
+    // Header-only inspection passes zero because it has no validated pixel count yet.
+    pixels.saturating_mul(24).min(1024 * 1024 * 1024)
+}
+
+pub fn image_magick_resource_arguments(config: &MediaProcessConfig, pixels: u64) -> Vec<OsString> {
     const IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES: u64 = 256;
     vec![
         "-limit".into(),
@@ -1268,13 +1306,15 @@ pub fn image_magick_resource_arguments(config: &MediaProcessConfig) -> Vec<OsStr
         format!("{IMAGEMAGICK_MEMORY_LIMIT_MEBIBYTES}MiB").into(),
         "-limit".into(),
         "map".into(),
-        "1024MiB".into(),
+        magick_map_limit_bytes(pixels).to_string().into(),
         "-limit".into(),
         "disk".into(),
-        "4096MiB".into(),
+        "32768MiB".into(),
         "-limit".into(),
         "area".into(),
-        format!("{}P", config.maximum_decoded_image_pixels).into(),
+        // A bare integer is a pixel count. A trailing P is parsed as a scale
+        // suffix and can turn a large count into an effective zero-area limit.
+        config.maximum_decoded_image_pixels.to_string().into(),
         "-limit".into(),
         "thread".into(),
         "1".into(),
@@ -1318,7 +1358,7 @@ pub async fn inspect_storage_image_dimensions(
     const INPUT_DESCRIPTOR: i32 = 10;
     let mut descriptor_path = OsString::from(format!("/proc/self/fd/{INPUT_DESCRIPTOR}"));
     descriptor_path.push("[0]");
-    let mut arguments = image_magick_resource_arguments(config);
+    let mut arguments = image_magick_resource_arguments(config, 0);
     arguments.extend([
         OsString::from("-ping"),
         OsString::from("-format"),
@@ -1352,9 +1392,13 @@ pub async fn inspect_storage_oriented_image_dimensions(
 ) -> Result<(u32, u32), ImageDimensionError> {
     const INPUT_DESCRIPTOR: i32 = 10;
 
+    let (width, height) =
+        inspect_storage_image_dimensions(cpu, file_io, storage_root, path.clone(), config).await?;
+
     let mut source = OsString::from(format!("/proc/self/fd/{INPUT_DESCRIPTOR}"));
     source.push("[0]");
-    let mut arguments = image_magick_resource_arguments(config);
+    let mut arguments =
+        image_magick_resource_arguments(config, u64::from(width) * u64::from(height));
     arguments.extend([
         source,
         OsString::from("-auto-orient"),
@@ -1365,7 +1409,9 @@ pub async fn inspect_storage_oriented_image_dimensions(
     let output = run_storage_media_tool(
         cpu,
         file_io,
-        MediaTool::ImageMagick,
+        MediaTool::ImageMagick {
+            pixels: u64::from(width) * u64::from(height),
+        },
         arguments,
         128,
         config.maximum_stderr_bytes,

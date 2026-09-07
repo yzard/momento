@@ -68,6 +68,7 @@ pub fn test_executor_handles_with_data_directory(
             storage_io_workers: 2,
             sqlite_workers: 2,
         },
+        4 * 1024 * 1024 * 1024,
     )
     .expect("test runtime sizing");
     let config_path = data_directory_path.join("config.toml");

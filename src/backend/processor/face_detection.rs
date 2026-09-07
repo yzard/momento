@@ -667,7 +667,8 @@ async fn write_crop(
     } = output;
     let mut source = OsString::from("/proc/self/fd/10");
     source.push("[0]");
-    let mut arguments = image_magick_resource_arguments(process_config);
+    let mut arguments =
+        image_magick_resource_arguments(process_config, u64::from(width) * u64::from(height));
     arguments.extend([
         source,
         OsString::from("-auto-orient"),
@@ -686,7 +687,9 @@ async fn write_crop(
     let output = run_storage_media_tool(
         &executors.cpu,
         &executors.file_io,
-        MediaTool::ImageMagick,
+        MediaTool::ImageMagick {
+            pixels: u64::from(width) * u64::from(height),
+        },
         arguments,
         0,
         process_config.maximum_stderr_bytes,

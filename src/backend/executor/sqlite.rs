@@ -1,3 +1,4 @@
+use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -437,6 +438,10 @@ pub(crate) enum SqliteOperation {
     LoadFileOperationDetail {
         group_id: String,
     },
+    QueueUnreferencedThumbnails {
+        storage_root: StorageRootId,
+        paths: Vec<NormalizedStoragePath>,
+    },
     MaintainFileOperationJournal,
     LoadFileOperationCancellationStatus {
         group_id: String,
@@ -637,6 +642,7 @@ impl SqliteOperation {
             Self::RetryFileOperation { .. } => "retry_file_operation",
             Self::ListFileOperations { .. } => "list_file_operations",
             Self::LoadFileOperationDetail { .. } => "load_file_operation_detail",
+            Self::QueueUnreferencedThumbnails { .. } => "queue_unreferenced_thumbnails",
             Self::MaintainFileOperationJournal => "maintain_file_operation_journal",
             Self::LoadFileOperationCancellationStatus { .. } => {
                 "load_file_operation_cancellation_status"
@@ -1013,7 +1019,8 @@ impl SqliteOperation {
                 bounded_api_write_spec()
             }
             Self::RetryFileOperation { .. } => bounded_api_write_spec(),
-            Self::MaintainFileOperationJournal
+            Self::QueueUnreferencedThumbnails { .. }
+            | Self::MaintainFileOperationJournal
             | Self::RequestFileOperationCancellation { .. }
             | Self::RecordFileEntryRolledBack { .. } => bounded_api_write_spec(),
         })
@@ -1176,6 +1183,7 @@ pub(crate) enum SqliteOutput {
     FileOperationRetried(JournalRetryOutcome),
     FileOperationsListed(FileOperationListResponse),
     FileOperationDetail(Box<Option<FileOperationDetailResponse>>),
+    UnreferencedThumbnailsQueued(usize),
     FileOperationJournalMaintained(JournalMaintenanceOutcome),
     FileOperationCancellationStatus(Option<JournalCancellationStatus>),
     FileOperationCancellationRequested(JournalCancellationOutcome),
@@ -1341,6 +1349,7 @@ impl SqliteOutput {
             Self::FileOperationRetried(_) => "file_operation_retried",
             Self::FileOperationsListed(_) => "file_operations_listed",
             Self::FileOperationDetail(_) => "file_operation_detail",
+            Self::UnreferencedThumbnailsQueued(_) => "unreferenced_thumbnails_queued",
             Self::FileOperationJournalMaintained(_) => "file_operation_journal_maintained",
             Self::FileOperationCancellationStatus(_) => "file_operation_cancellation_status",
             Self::FileOperationCancellationRequested(_) => "file_operation_cancellation_requested",
@@ -4125,6 +4134,38 @@ impl SqliteExecutorHandle {
         }
     }
 
+    pub async fn queue_unreferenced_thumbnails_durable(
+        &self,
+        storage_root: StorageRootId,
+        paths: Vec<NormalizedStoragePath>,
+    ) -> Result<usize, ExecutorError> {
+        if paths.len() > 64
+            || !matches!(
+                storage_root,
+                StorageRootId::Thumbnails | StorageRootId::TinyThumbnails
+            )
+        {
+            return Err(ExecutorError::new(
+                ExecutorErrorKind::InvalidInput,
+                "queue_unreferenced_thumbnails",
+                "expected at most 64 thumbnail paths",
+            ));
+        }
+        match self
+            .submit(
+                SqliteOperation::QueueUnreferencedThumbnails {
+                    storage_root,
+                    paths,
+                },
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::UnreferencedThumbnailsQueued(count) => Ok(count),
+            output => Err(output.mismatch("queue_unreferenced_thumbnails")),
+        }
+    }
+
     pub async fn maintain_file_operation_journal_durable(
         &self,
     ) -> Result<JournalMaintenanceOutcome, ExecutorError> {
@@ -6691,6 +6732,12 @@ fn execute_with_connection(
                 .map(SqliteOutput::FileOperationDetail)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
+        SqliteOperation::QueueUnreferencedThumbnails {
+            storage_root,
+            paths,
+        } => operations::queue_unreferenced_thumbnails(connection, storage_root, paths)
+            .map(SqliteOutput::UnreferencedThumbnailsQueued)
+            .map_err(|error| map_sqlite_error(operation_name, error)),
         SqliteOperation::MaintainFileOperationJournal => {
             crate::io::journal::maintain_file_operation_journal(connection)
                 .map(SqliteOutput::FileOperationJournalMaintained)
