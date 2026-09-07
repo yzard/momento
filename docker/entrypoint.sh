@@ -1,20 +1,9 @@
 #!/bin/sh
 set -eu
 
-PUID=${PUID:-1000}
-PGID=${PGID:-1000}
-UMASK=${UMASK:-022}
-
-echo "Starting with PUID=$PUID, PGID=$PGID, UMASK=$UMASK"
-
-if [ -n "${TZ:-}" ]; then
-    echo "Setting timezone to $TZ"
-    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-fi
-
-umask "$UMASK"
-
-mkdir -p \
+. /entrypoint_common.sh
+initialize_identity su-exec
+prepare_data_directories \
     /data/albums \
     /data/imports \
     /data/logs \
@@ -24,12 +13,17 @@ mkdir -p \
     /data/thumbnails \
     /data/thumbnails_tiny \
     /data/trash \
-    /data/webdav
+    /data/webdav \
+    /data/backups \
+    /data/journal
 
-chown -R "$PUID:$PGID" /data
+check_existing_file /data/config.toml readable
+check_existing_file /data/database.sqlite writable
+check_existing_file /data/database.sqlite-wal writable
+check_existing_file /data/database.sqlite-shm writable
 
 if [ ! -f /data/config.toml ]; then
-    su-exec "$PUID:$PGID" env HOME=/data /app/momento-api -c /data/config.toml --init-config
+    run_as_service /app/momento-api -c /data/config.toml --init-config
 fi
 
 echo "Running as user $PUID:$PGID"

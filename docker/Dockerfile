@@ -59,6 +59,7 @@ RUN set -- /app/android/*.apk; \
     rm -rf /app/android
 
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/entrypoint_common.sh /entrypoint_common.sh
 RUN chmod +x /entrypoint.sh
 
 RUN mkdir -p /data

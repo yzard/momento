@@ -389,13 +389,16 @@ WORKDIR /app
 COPY --from=rust-builder /app/build/target/release/llm-service /app/llm-service
 COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
+COPY docker/entrypoint_common.sh /entrypoint_common.sh
 
 RUN set -e; \
     for python in /opt/venvs/ocr/bin/python /opt/venvs/ram/bin/python /opt/venvs/dinov2/bin/python /opt/venvs/insightface/bin/python /opt/venvs/paddleocr/bin/python; do \
         PYTHONPATH=/app/runtimes "$python" -c "import io; from PIL import Image; import pillow_heif; from image_runtime import decode_image, register_image_decoders; register_image_decoders(); sources = {'QOI': io.BytesIO(bytes.fromhex('716f696600000003000000020301fe0a141ec40000000000000001'))}; [(lambda output, image_format: (Image.new('RGB', (3, 2), color=(10, 20, 30)).save(output, format=image_format), output.seek(0), sources.__setitem__(image_format, output)))(io.BytesIO(), image_format) for image_format in ('GIF', 'TIFF', 'WEBP')]; heif = io.BytesIO(); pillow_heif.from_pillow(Image.new('RGB', (3, 2), color=(10, 20, 30))).save(heif); heif.seek(0); sources['HEIF'] = heif; assert all(decode_image(source).size == (3, 2) for source in sources.values())"; \
     done \
     && chmod +x /entrypoint_llm.sh \
-    && mkdir -p /data/llm/cache/triton /data/llm/queue /data/llm/tmp /data/logs
+    # Do not seed a new Docker volume with root-owned build verification caches.
+    && rm -rf /data/llm /data/logs \
+    && mkdir -p /data
 
 EXPOSE 8100
 
