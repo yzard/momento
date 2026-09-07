@@ -3,6 +3,35 @@ use momento_api::io::log::{LogSeverity, MAX_LOG_EVENT_BYTES};
 use momento_api::runtime::{RuntimeBuilder, RuntimeSizing};
 
 #[test]
+fn http_startup_and_journal_coordinator_do_not_wait_for_outer_durable_admission() {
+    let main = include_str!("../../../src/backend/main.rs");
+    let startup = main
+        .split("let app = create_app(")
+        .nth(1)
+        .expect("router startup");
+    let before_serving = startup
+        .split("let server_result = serve_http1(")
+        .next()
+        .unwrap();
+    assert!(
+        !before_serving.contains(".await"),
+        "HTTP startup must not wait behind background jobs"
+    );
+    let journal = main
+        .split("let journal_executors =")
+        .nth(1)
+        .unwrap()
+        .split("let refresh_token_cleanup_interval")
+        .next()
+        .unwrap();
+    assert!(
+        !journal.contains("acquire_durable"),
+        "Journal steps own their admission, not their coordinator"
+    );
+    assert!(journal.contains("SchedulerState::Stopped"));
+}
+
+#[test]
 fn compose_llm_address_resolves_to_a_declared_service() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let compose = std::fs::read_to_string(repository.join("docker-compose.yaml"))

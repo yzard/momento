@@ -36,19 +36,11 @@ fn start_background_tasks(
     scheduler.spawn_control(async move {
         loop {
             let notified = journal_scheduler.journal_recovery_notified();
-            let admission = match journal_scheduler
-                .acquire_durable(
-                    DurableSourceId::JournalRecovery,
-                    SchedulerAdmissionKind::RecoveryHandoff,
-                )
-                .await
-            {
-                Ok(admission) => admission,
-                Err(error) => {
-                    tracing::warn!(error, "Journal recovery stopped");
-                    return;
-                }
-            };
+            if journal_scheduler.state() == momento_api::runtime::SchedulerState::Stopped {
+                return;
+            }
+            // Each recovery step owns admission; the coordinator must not hold
+            // a slot while waiting for those steps to acquire theirs.
             let recovery =
                 momento_api::io::recovery::recover_generic_file_operations(&journal_executors)
                     .await;
@@ -56,7 +48,6 @@ fn start_background_tasks(
                 Ok(_) => journal_executors.sqlite.journal_retry_delay().await,
                 Err(error) => Err(error),
             };
-            drop(admission);
             match retry_delay {
                 Ok(Some(delay)) => {
                     tokio::select! {
@@ -457,17 +448,7 @@ async fn run(
         },
     );
 
-    scheduler
-        .execute_durable(
-            DurableSourceId::Maintenance,
-            SchedulerAdmissionKind::RecoveryHandoff,
-            "startup-log",
-            async move {
-                tracing::info!("Starting Momento API on {}", addr);
-            },
-        )
-        .await
-        .expect("Startup log worker failed");
+    tracing::info!("Starting Momento API on {}", addr);
 
     let server_result = serve_http1(
         listener,

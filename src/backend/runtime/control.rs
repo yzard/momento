@@ -63,6 +63,7 @@ struct SchedulerShared {
     state: AtomicU8,
     connections: AdmissionCounter,
     durable: AdmissionCounter,
+    durable_admission_turn: tokio::sync::Mutex<()>,
     requests: AdmissionCounter,
     streams: AdmissionCounter,
     outbound_streams: AdmissionCounter,
@@ -138,6 +139,7 @@ impl SchedulerHandle {
                 state: AtomicU8::new(SchedulerState::Running as u8),
                 connections: AdmissionCounter::new(sizing.active_connections),
                 durable: AdmissionCounter::new(sizing.durable_orchestrations),
+                durable_admission_turn: tokio::sync::Mutex::new(()),
                 requests: AdmissionCounter::new(sizing.active_requests),
                 streams: AdmissionCounter::new(sizing.active_stream_sessions),
                 outbound_streams: AdmissionCounter::new(sizing.active_outbound_stream_sessions),
@@ -181,7 +183,13 @@ impl SchedulerHandle {
         source: DurableSourceId,
         kind: SchedulerAdmissionKind,
     ) -> Result<DurableAdmission, String> {
+        // Serialize admission, not execution: queued callers cannot be overtaken
+        // by a worker immediately requesting its next job.
+        let _turn = self.shared.durable_admission_turn.lock().await;
         loop {
+            let released = self.shared.durable.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
             let state = self.state();
             if state == SchedulerState::Stopped
                 || (state != SchedulerState::Running && kind == SchedulerAdmissionKind::NewClaim)
@@ -205,7 +213,7 @@ impl SchedulerHandle {
                     kind,
                 });
             }
-            self.shared.durable.released.notified().await;
+            released.await;
         }
     }
 

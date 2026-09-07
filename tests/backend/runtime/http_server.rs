@@ -12,11 +12,28 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn owned_http1_server_enforces_header_count_and_graceful_connection_shutdown() {
     let pool = crate::test_utils::create_test_db();
     let scheduler = crate::test_utils::test_scheduler(pool);
+    let mut background_admissions = Vec::new();
+    for _ in 0..scheduler.durable_capacity() {
+        background_admissions.push(
+            scheduler
+                .acquire_durable(
+                    momento_api::runtime::DurableSourceId::Metadata,
+                    momento_api::runtime::SchedulerAdmissionKind::NewClaim,
+                )
+                .await
+                .expect("background admission"),
+        );
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener");
     let address = listener.local_addr().expect("listener address");
-    let app = Router::new().route("/", get(|| async { "ok" }));
+    let app = Router::new().route("/", get(|| async { "ok" })).layer(
+        axum::middleware::from_fn_with_state(
+            scheduler.clone(),
+            momento_api::runtime::schedule_client_request,
+        ),
+    );
     let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel();
     let server_scheduler = scheduler.clone();
     let server = tokio::spawn(async move {
@@ -34,6 +51,20 @@ async fn owned_http1_server_enforces_header_count_and_graceful_connection_shutdo
         .expect("HTTP/1 server");
     });
 
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("client connection");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("request write under saturated background admission");
+    let mut response = vec![0_u8; 512];
+    let bytes_read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response))
+        .await
+        .expect("HTTP must respond despite full durable capacity")
+        .expect("response read");
+    assert!(String::from_utf8_lossy(&response[..bytes_read]).starts_with("HTTP/1.1 200"));
+    drop(stream);
     let mut stream = tokio::net::TcpStream::connect(address)
         .await
         .expect("client connection");
@@ -55,6 +86,7 @@ async fn owned_http1_server_enforces_header_count_and_graceful_connection_shutdo
     assert!(response.starts_with("HTTP/1.1 431"), "{response}");
 
     drop(stream);
+    drop(background_admissions);
     shutdown_sender.send(()).expect("shutdown signal");
     tokio::time::timeout(Duration::from_secs(2), server)
         .await

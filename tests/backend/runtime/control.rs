@@ -30,6 +30,70 @@ fn scheduler_registries_have_the_exact_source_owned_members() {
 }
 
 #[tokio::test]
+async fn durable_admission_is_fifo_even_when_new_work_polls_before_the_woken_waiter() {
+    let scheduler = crate::test_utils::test_scheduler(crate::test_utils::create_test_db());
+    let mut admissions = Vec::new();
+    for _ in 0..scheduler.durable_capacity() {
+        admissions.push(acquire_new_maintenance(&scheduler).await.unwrap());
+    }
+    let mut first = Box::pin(acquire_new_maintenance(&scheduler));
+    let mut second = Box::pin(acquire_new_maintenance(&scheduler));
+    assert!(futures::poll!(&mut first).is_pending());
+    assert!(futures::poll!(&mut second).is_pending());
+    drop(admissions.pop());
+    let mut newcomer = Box::pin(acquire_new_maintenance(&scheduler));
+    assert!(futures::poll!(&mut newcomer).is_pending());
+    assert!(futures::poll!(&mut second).is_pending());
+    let first = first.await.unwrap();
+    drop(first);
+    assert!(futures::poll!(&mut newcomer).is_pending());
+    let second = second.await.unwrap();
+    drop(second);
+    let newcomer = newcomer.await.unwrap();
+    drop(newcomer);
+    drop(admissions);
+    assert_eq!(scheduler.active_durable_total(), 0);
+}
+
+#[tokio::test]
+async fn cancelled_durable_waiters_release_the_turn_and_shutdown_wakes_the_queue() {
+    let scheduler = crate::test_utils::test_scheduler(crate::test_utils::create_test_db());
+    let mut admissions = Vec::new();
+    for _ in 0..scheduler.durable_capacity() {
+        admissions.push(acquire_new_maintenance(&scheduler).await.unwrap());
+    }
+    let mut head = Box::pin(acquire_new_maintenance(&scheduler));
+    let mut cancelled = Box::pin(acquire_new_maintenance(&scheduler));
+    let mut next = Box::pin(acquire_new_maintenance(&scheduler));
+    assert!(futures::poll!(&mut head).is_pending());
+    assert!(futures::poll!(&mut cancelled).is_pending());
+    assert!(futures::poll!(&mut next).is_pending());
+    drop(cancelled);
+    drop(head);
+    drop(admissions.pop());
+    let admission = tokio::time::timeout(Duration::from_secs(1), next)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut head = Box::pin(acquire_new_maintenance(&scheduler));
+    let mut next = Box::pin(acquire_new_maintenance(&scheduler));
+    assert!(futures::poll!(&mut head).is_pending());
+    assert!(futures::poll!(&mut next).is_pending());
+    scheduler.transition_to(SchedulerState::Quiescing).unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(1), head)
+        .await
+        .unwrap()
+        .is_err());
+    assert!(tokio::time::timeout(Duration::from_secs(1), next)
+        .await
+        .unwrap()
+        .is_err());
+    drop(admission);
+    drop(admissions);
+    assert_eq!(scheduler.active_durable_total(), 0);
+}
+
+#[tokio::test]
 async fn control_wakeups_are_versioned_and_level_triggered() {
     let pool = crate::test_utils::create_test_db();
     let scheduler = crate::test_utils::test_scheduler(pool);
