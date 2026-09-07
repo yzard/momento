@@ -394,6 +394,7 @@ private fun DuplicateMediaCard(
                 media = media,
                 repository = repository,
                 trashed = false,
+                tiny = true,
                 modifier = Modifier.fillMaxWidth().aspectRatio(1f).clickable(onClick = open),
             )
             IconButton(

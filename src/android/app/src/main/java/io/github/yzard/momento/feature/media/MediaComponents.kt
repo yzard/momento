@@ -53,6 +53,7 @@ fun MediaGrid(
             media = mediaItem,
             repository = repository,
             trashed = false,
+            tiny = true,
             selected = selected,
             modifier = Modifier
                 .aspectRatio(1f)
@@ -103,9 +104,9 @@ internal fun <GridEntry> LazyMediaGrid(
 }
 
 @Composable
-fun MediaThumbnail(media: Media, repository: AuthenticatedMediaRepository, trashed: Boolean, modifier: Modifier) {
-    val url by produceState<String?>(null, media.id, trashed) {
-        value = if (trashed) repository.trashThumbnailUrl(media.id) else repository.thumbnailUrl(media.id, true)
+fun MediaThumbnail(media: Media, repository: AuthenticatedMediaRepository, trashed: Boolean, tiny: Boolean, modifier: Modifier) {
+    val url by produceState<String?>(null, media.id, trashed, tiny) {
+        value = if (trashed) repository.trashThumbnailUrl(media.id) else repository.thumbnailUrl(media.id, tiny)
     }
     MomentoAsyncImage(
         model = url,
@@ -121,6 +122,7 @@ fun SelectableMediaThumbnail(
     media: Media,
     repository: AuthenticatedMediaRepository,
     trashed: Boolean,
+    tiny: Boolean,
     selected: Boolean,
     modifier: Modifier,
 ) {
@@ -129,7 +131,7 @@ fun SelectableMediaThumbnail(
             stateDescription = if (selected) "Selected" else "Not selected"
         },
     ) {
-        MediaThumbnail(media, repository, trashed, Modifier.fillMaxSize())
+        MediaThumbnail(media, repository, trashed, tiny, Modifier.fillMaxSize())
         if (selected) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.38f)))
             MomentoSelectionMark(

@@ -441,6 +441,7 @@ private fun ContinuousTimelineGrid(
                     media = timelineItem.media,
                     repository = repository,
                     trashed = false,
+                    tiny = false,
                     selected = timelineItem.media.id in selectedIds,
                     modifier = Modifier
                         .fillMaxWidth()
