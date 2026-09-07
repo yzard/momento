@@ -5,6 +5,99 @@ use momento_api::io::recovery::{
 use sha2::Digest;
 
 #[tokio::test]
+async fn independent_cleanup_uses_a_bounded_rolling_window() {
+    use momento_api::runtime::{DurableSourceId, ExecutorRuntime, RuntimeSizing};
+    let directory = tempfile::tempdir().unwrap();
+    let sizing = RuntimeSizing::validate_worker_counts(&momento_api::config::ThreadPoolConfig {
+        cpu_workers: 2,
+        network_io_workers: 2,
+        storage_io_workers: 4,
+        sqlite_workers: 2,
+    })
+    .unwrap();
+    let pool = momento_api::database::create_pool_at(
+        &directory.path().join("database.sqlite"),
+        sizing.sqlite_workers,
+    )
+    .unwrap();
+    momento_api::database::init_database(&pool.get().unwrap()).unwrap();
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(&config_path, "# test config\n").unwrap();
+    let identity = momento_api::config::load_config_with_identity(&config_path)
+        .unwrap()
+        .identity;
+    let (runtime, executors) = ExecutorRuntime::start(
+        &sizing,
+        pool.clone(),
+        identity,
+        directory.path().to_path_buf(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(executors.scheduler.journal_recovery_capacity(), 3);
+    {
+        let mut connection = pool.get().unwrap();
+        let transaction = connection.transaction().unwrap();
+        for index in 1..=40 {
+            let group = format!("independent-{index}");
+            transaction.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, state, completion_outcome, entry_count, recovery_order) VALUES (?, 'test', 'test', '1', 'cleanup_pending', 'published', 2, ?)", rusqlite::params![group, index]).unwrap();
+            for sequence in 0..2 {
+                let path = format!("{group}-{sequence}");
+                std::fs::write(directory.path().join("journal").join(&path), b"cleanup").unwrap();
+                transaction.execute("INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, source_path) VALUES (?, ?, 'cleanup', 'journal', ?)", rusqlite::params![group, sequence, path]).unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+    }
+    let recovery = recover_generic_file_operations(&executors);
+    tokio::pin!(recovery);
+    let observe_parallel = async {
+        loop {
+            let active = executors
+                .scheduler
+                .active_durable_for(DurableSourceId::JournalRecovery);
+            assert!(active <= 3, "recovery exceeded the storage writer window");
+            if active >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! {
+        result = &mut recovery => panic!("recovery was never parallel: {result:?}"),
+        () = observe_parallel => {},
+    }
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), &mut recovery)
+            .await
+            .unwrap()
+            .unwrap(),
+        80
+    );
+    assert_eq!(
+        executors
+            .scheduler
+            .active_durable_for(DurableSourceId::JournalRecovery),
+        0
+    );
+    let remaining: i64 = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM file_operation_groups WHERE state != 'cleaned'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+    assert_eq!(
+        recover_generic_file_operations(&executors).await.unwrap(),
+        0
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn interrupted_import_rolls_back_only_owned_partial_files() {
     for (owned, temporary, role, can_rollback) in [
         (

@@ -514,7 +514,8 @@ fn durable_workers_claim_and_finish_work_in_rolling_lanes() {
     let result_worker = std::fs::read_to_string(backend_source.join("processor/ai/result.rs"))
         .expect("AI result worker source");
 
-    assert!(metadata_worker.contains("process_metadata_lane"));
+    assert!(metadata_worker.contains("drain_metadata_window"));
+    assert!(metadata_worker.contains("process_metadata_job"));
     assert!(!metadata_worker.contains("let mut claim_guards"));
     assert!(result_worker.contains("process_result_lane"));
     assert!(!result_worker.contains("PreparationOutcome"));

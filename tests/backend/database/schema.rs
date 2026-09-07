@@ -514,8 +514,11 @@ fn journal_queue_and_sequence_use_ordered_indexes() {
         let mut statement = connection
             .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap();
+        let parameters = vec!["[]"; statement.parameter_count()];
         let details = statement
-            .query_map([], |row| row.get::<_, String>(3))
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(3)
+            })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
@@ -536,12 +539,23 @@ fn journal_fifo_keeps_progress_at_head_and_explicit_retry_moves_to_tail() {
         connection
             .query_row(
                 queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
-                [],
+                ["[]"],
                 |row| row.get::<_, String>(0),
             )
             .unwrap()
     };
     assert_eq!(head(), "first");
+    let available: String = connection
+        .query_row(
+            queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
+            ["[\"first\"]"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        available, "second",
+        "active FIFO head must not be dispatched twice"
+    );
     connection
         .execute(
             queries::file_operations::CHECKPOINT_CLEANUP,

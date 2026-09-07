@@ -245,47 +245,131 @@ async fn recover_file_operations(
     executors: &ExecutorHandles,
     scope: JournalRecoveryScope,
 ) -> Result<usize, ExecutorError> {
+    use futures::{stream::FuturesUnordered, StreamExt};
+    let concurrency = match scope {
+        JournalRecoveryScope::All => executors.scheduler.journal_recovery_capacity(),
+        JournalRecoveryScope::StartupCritical => 1,
+    };
+    let mut active = std::collections::HashSet::new();
+    let mut running = FuturesUnordered::new();
     let mut recovered_entries = 0usize;
-    let mut previous = None;
+    let mut failure = None;
+    let mut first = true;
     let mut last_progress_log = std::time::Instant::now();
     loop {
-        let Some(group) = executors
-            .sqlite
-            .load_next_generic_file_operation_recovery_durable(scope)
-            .await?
-        else {
-            return Ok(recovered_entries);
+        while failure.is_none() && running.len() < concurrency {
+            let group = match executors
+                .sqlite
+                .load_next_generic_file_operation_recovery_durable(
+                    scope,
+                    active.iter().cloned().collect(),
+                )
+                .await
+            {
+                Ok(Some(group)) => group,
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            };
+            if first || last_progress_log.elapsed().as_secs() >= 5 {
+                tracing::info!(group_id = %group.group_id, state = ?group.state, recovered_entries,
+                    in_flight = running.len(), concurrency, "Journal recovery progress");
+                first = false;
+                last_progress_log = std::time::Instant::now();
+            }
+            active.insert(group.group_id.clone());
+            running.push(run_recovery_step(executors, scope, group));
+        }
+        let Some((group, outcome)) = running.next().await else {
+            return failure.map_or(Ok(recovered_entries), Err);
         };
-        let position = (group.group_id.clone(), group.version);
-        if previous.as_ref() == Some(&position) {
-            return Err(ExecutorError::new(
-                ExecutorErrorKind::Conflict,
-                "recover_generic_file_operations",
-                format!(
-                    "journal recovery made no progress: {} version {}",
-                    group.group_id, group.version
-                ),
-            ));
-        }
-        if previous.is_none() || last_progress_log.elapsed().as_secs() >= 5 {
-            tracing::info!(group_id = %group.group_id, state = ?group.state, recovered_entries,
-                "Journal recovery progress");
-            last_progress_log = std::time::Instant::now();
-        }
-        previous = Some(position);
-        match recover_file_operation_step(executors, &group).await {
+        active.remove(&group.group_id);
+        match outcome {
             Ok(count) => recovered_entries += count,
             Err(error) if scope == JournalRecoveryScope::All => {
-                // The step has returned, so its filesystem lease and executor resources are gone.
-                let disposition = executors
+                match executors
                     .sqlite
                     .defer_journal_recovery(group.group_id.clone(), group.version, &error)
-                    .await?;
-                tracing::warn!(group_id = %group.group_id, error = %error, ?disposition, "Journal operation deferred to FIFO tail");
+                    .await
+                {
+                    Ok(disposition) => {
+                        tracing::warn!(group_id = %group.group_id, error = %error, ?disposition,
+                        "Journal operation deferred to FIFO tail")
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
+        // On failure, settle every already-admitted operation before returning.
     }
+}
+
+async fn run_recovery_step(
+    executors: &ExecutorHandles,
+    scope: JournalRecoveryScope,
+    group: super::journal::JournalRecoveryGroup,
+) -> (
+    super::journal::JournalRecoveryGroup,
+    Result<usize, ExecutorError>,
+) {
+    let outcome = async {
+        let _admission = if scope == JournalRecoveryScope::All {
+            Some(
+                executors
+                    .scheduler
+                    .acquire_durable(
+                        crate::runtime::DurableSourceId::JournalRecovery,
+                        crate::runtime::SchedulerAdmissionKind::ExistingClaimCompletion,
+                    )
+                    .await
+                    .map_err(|error| {
+                        ExecutorError::new(
+                            ExecutorErrorKind::Overloaded,
+                            "journal_recovery_admission",
+                            error,
+                        )
+                    })?,
+            )
+        } else {
+            None // Startup already owns its consistency-critical admission.
+        };
+        let count = recover_file_operation_step(executors, &group).await?;
+        if count == 0 {
+            let status = executors
+                .sqlite
+                .load_file_operation_cancellation_status_durable(group.group_id.clone())
+                .await?;
+            if status.is_some_and(|status| {
+                status.version == group.version
+                    && status.state
+                        == match group.state {
+                            JournalRecoveryState::Publishing => "publishing",
+                            JournalRecoveryState::FilesCommitted => "files_committed",
+                            JournalRecoveryState::CleanupPending => "cleanup_pending",
+                            JournalRecoveryState::RollbackPending => "rollback_pending",
+                        }
+            }) {
+                return Err(ExecutorError::new(
+                    ExecutorErrorKind::Conflict,
+                    "recover_generic_file_operations",
+                    format!(
+                        "journal recovery made no progress: {} version {}",
+                        group.group_id, group.version
+                    ),
+                ));
+            }
+        }
+        Ok(count)
+    }
+    .await;
+    (group, outcome)
 }
 
 async fn recover_file_operation_step(

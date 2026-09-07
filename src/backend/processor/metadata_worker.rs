@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use futures::{stream::FuturesUnordered, StreamExt};
+
 use tracing::warn;
 
 use crate::config::Config;
@@ -7,6 +9,10 @@ use crate::database::operations::FinishMetadataJob;
 use crate::executor::ExecutorErrorKind;
 use crate::processor::ai::input::AiInputStorage;
 use crate::runtime::{DurableSourceId, ExecutorHandles, SchedulerAdmissionKind, SchedulerHandle};
+
+#[cfg(test)]
+#[path = "../../../tests/backend/processor/metadata_worker.rs"]
+mod tests;
 
 struct MetadataClaimGuard {
     sqlite: crate::executor::SqliteExecutorHandle,
@@ -246,84 +252,111 @@ async fn process_cycle(
             scheduler.wake_journal_recovery();
         }
     }
-    let mut lanes = Vec::with_capacity(concurrency);
-    for _ in 0..concurrency {
-        let lane_config = config.clone();
-        let lane_executors = executors.clone();
-        let lane_scheduler = scheduler.clone();
-        lanes.push(scheduler.spawn_control(async move {
-            process_metadata_lane(&lane_config, &lane_executors, &lane_scheduler).await
-        }));
-    }
-    for lane in lanes {
-        lane.await
-            .map_err(|error| format!("metadata worker lane panicked: {error}"))??;
-    }
-    Ok(())
+    drain_metadata_window(
+        concurrency,
+        scheduler.metadata_work_version(),
+        || process_metadata_job(config, executors, scheduler),
+        |version| scheduler.wait_for_metadata_work(version),
+    )
+    .await
 }
 
-async fn process_metadata_lane(
+async fn drain_metadata_window<Job, Wake>(
+    concurrency: usize,
+    mut observed_version: u64,
+    make_job: impl Fn() -> Job,
+    wait_for_work: impl Fn(u64) -> Wake,
+) -> Result<(), String>
+where
+    Job: std::future::Future<Output = Result<bool, String>>,
+    Wake: std::future::Future<Output = u64>,
+{
+    let mut lanes = FuturesUnordered::new();
+    for _ in 0..concurrency {
+        lanes.push(make_job());
+    }
+    let mut failure = None;
+    while !lanes.is_empty() {
+        tokio::select! {
+            outcome = lanes.next() => {
+                match outcome.expect("nonempty metadata window") {
+                    Ok(true) if failure.is_none() => lanes.push(make_job()),
+                    Err(error) => { failure.get_or_insert(error); },
+                    _ => {},
+                }
+            }
+            version = wait_for_work(observed_version), if failure.is_none() => {
+                observed_version = version;
+                while lanes.len() < concurrency {
+                    lanes.push(make_job());
+                }
+            }
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+async fn process_metadata_job(
     config: &Config,
     executors: &ExecutorHandles,
     scheduler: &SchedulerHandle,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let sqlite = &executors.sqlite;
-    loop {
-        let admission = scheduler
-            .acquire_durable(DurableSourceId::Metadata, SchedulerAdmissionKind::NewClaim)
-            .await
-            .map_err(|error| error.to_string())?;
-        let claim = sqlite
-            .claim_next_metadata_job_durable()
-            .await
-            .map_err(|error| error.to_string())?;
-        let Some(claim) = claim else {
-            drop(admission);
-            return Ok(());
-        };
-        let registration =
-            match scheduler.register_durable_claim(&admission, claim.claim_token.clone()) {
-                Ok(registration) => registration,
-                Err(error) => {
-                    sqlite
-                        .finish_metadata_job_durable(FinishMetadataJob {
-                            media_id: claim.media_id,
-                            claim_token: claim.claim_token,
-                            error: Some(format!("metadata claim registration failed: {error}")),
-                        })
-                        .await
-                        .map_err(|finish_error| {
-                            format!("{error}; metadata claim recovery also failed: {finish_error}")
-                        })?;
-                    return Err(error);
-                }
-            };
-        let claim_guard = MetadataClaimGuard::new(
-            sqlite.clone(),
-            scheduler.clone(),
-            admission,
-            registration,
-            claim,
-        );
-        let media_id = claim_guard.media_id();
-        let outcome = match crate::processor::metadata::generate_media_metadata(
-            executors,
-            media_id,
-            claim_guard.claim_token(),
-            config,
-        )
+    let admission = scheduler
+        .acquire_durable(DurableSourceId::Metadata, SchedulerAdmissionKind::NewClaim)
         .await
-        {
-            Ok(()) => verify_ai_inputs(executors, media_id, config).await,
-            Err(error) => Err(error),
-        };
-        if let Err(error) = &outcome {
-            warn!(media_id, error, "metadata processing failed");
+        .map_err(|error| error.to_string())?;
+    let claim = sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(claim) = claim else {
+        drop(admission);
+        return Ok(false);
+    };
+    let registration = match scheduler.register_durable_claim(&admission, claim.claim_token.clone())
+    {
+        Ok(registration) => registration,
+        Err(error) => {
+            sqlite
+                .finish_metadata_job_durable(FinishMetadataJob {
+                    media_id: claim.media_id,
+                    claim_token: claim.claim_token,
+                    error: Some(format!("metadata claim registration failed: {error}")),
+                })
+                .await
+                .map_err(|finish_error| {
+                    format!("{error}; metadata claim recovery also failed: {finish_error}")
+                })?;
+            return Err(error);
         }
-        if let Err(error) = claim_guard.resolve(outcome.err()).await {
-            warn!("failed to persist metadata job {media_id} outcome: {error}");
-        }
+    };
+    let claim_guard = MetadataClaimGuard::new(
+        sqlite.clone(),
+        scheduler.clone(),
+        admission,
+        registration,
+        claim,
+    );
+    let media_id = claim_guard.media_id();
+    let outcome = match crate::processor::metadata::generate_media_metadata(
+        executors,
+        media_id,
+        claim_guard.claim_token(),
+        config,
+    )
+    .await
+    {
+        Ok(()) => verify_ai_inputs(executors, media_id, config).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = &outcome {
+        warn!(media_id, error, "metadata processing failed");
     }
+    if let Err(error) = claim_guard.resolve(outcome.err()).await {
+        warn!("failed to persist metadata job {media_id} outcome: {error}");
+    }
+    Ok(true)
 }
 
 async fn verify_ai_inputs(

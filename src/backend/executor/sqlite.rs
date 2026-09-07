@@ -396,6 +396,7 @@ pub(crate) enum SqliteOperation {
     },
     LoadNextGenericFileOperationRecovery {
         scope: JournalRecoveryScope,
+        active_groups: Vec<String>,
     },
     LoadJournalRetryDelay,
     DeferJournalRecovery {
@@ -3914,10 +3915,14 @@ impl SqliteExecutorHandle {
     pub(crate) async fn load_next_generic_file_operation_recovery_durable(
         &self,
         scope: JournalRecoveryScope,
+        active_groups: Vec<String>,
     ) -> Result<Option<JournalRecoveryGroup>, ExecutorError> {
         match self
             .submit(
-                SqliteOperation::LoadNextGenericFileOperationRecovery { scope },
+                SqliteOperation::LoadNextGenericFileOperationRecovery {
+                    scope,
+                    active_groups,
+                },
                 SubmissionMode::Durable,
             )
             .await?
@@ -6579,8 +6584,11 @@ fn execute_with_connection(
             }
             Ok(SqliteOutput::FileEntryCleaned(checkpoint))
         }
-        SqliteOperation::LoadNextGenericFileOperationRecovery { scope } => {
-            crate::io::journal::load_next_generic_recovery_group(connection, scope)
+        SqliteOperation::LoadNextGenericFileOperationRecovery {
+            scope,
+            active_groups,
+        } => {
+            crate::io::journal::load_next_generic_recovery_group(connection, scope, &active_groups)
                 .map(SqliteOutput::GenericFileOperationRecovery)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }

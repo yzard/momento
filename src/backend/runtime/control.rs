@@ -71,6 +71,7 @@ struct SchedulerShared {
     durable_by_kind: [AtomicUsize; SchedulerAdmissionKind::COUNT],
     active_claim_tokens: Mutex<HashSet<(DurableSourceId, String)>>,
     durable_claim_registry_capacity: usize,
+    journal_recovery_capacity: usize,
     control_versions: [AtomicU64; SchedulerControlSource::COUNT],
     control_changed: Notify,
     backup_import_wake: Notify,
@@ -145,6 +146,7 @@ impl SchedulerHandle {
                 durable_by_kind: std::array::from_fn(|_| AtomicUsize::new(0)),
                 active_claim_tokens: Mutex::new(HashSet::new()),
                 durable_claim_registry_capacity: sizing.durable_claim_registry_capacity,
+                journal_recovery_capacity: sizing.storage_io_workers - 1,
                 control_versions: std::array::from_fn(|_| AtomicU64::new(0)),
                 control_changed: Notify::new(),
                 backup_import_wake: Notify::new(),
@@ -160,6 +162,10 @@ impl SchedulerHandle {
 
     pub fn durable_capacity(&self) -> usize {
         self.shared.durable.maximum
+    }
+
+    pub fn journal_recovery_capacity(&self) -> usize {
+        self.shared.journal_recovery_capacity
     }
 
     pub fn outbound_stream_capacity(&self) -> usize {

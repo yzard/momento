@@ -1375,6 +1375,7 @@ fn release_group_ownership(connection: &Connection, group_id: &str) -> rusqlite:
 pub(crate) fn load_next_generic_recovery_group(
     connection: &Connection,
     scope: JournalRecoveryScope,
+    active_groups: &[String],
 ) -> rusqlite::Result<Option<JournalRecoveryGroup>> {
     let query = match scope {
         JournalRecoveryScope::All => queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
@@ -1383,20 +1384,24 @@ pub(crate) fn load_next_generic_recovery_group(
         }
     };
     connection
-        .query_row(query, [], |row| {
-            let state = match row.get::<_, String>(1)?.as_str() {
-                "publishing" => JournalRecoveryState::Publishing,
-                "files_committed" => JournalRecoveryState::FilesCommitted,
-                "cleanup_pending" => JournalRecoveryState::CleanupPending,
-                "rollback_pending" => JournalRecoveryState::RollbackPending,
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            };
-            Ok(JournalRecoveryGroup {
-                group_id: row.get(0)?,
-                state,
-                version: row.get(2)?,
-            })
-        })
+        .query_row(
+            query,
+            [serde_json::to_string(active_groups).map_err(|_| rusqlite::Error::InvalidQuery)?],
+            |row| {
+                let state = match row.get::<_, String>(1)?.as_str() {
+                    "publishing" => JournalRecoveryState::Publishing,
+                    "files_committed" => JournalRecoveryState::FilesCommitted,
+                    "cleanup_pending" => JournalRecoveryState::CleanupPending,
+                    "rollback_pending" => JournalRecoveryState::RollbackPending,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok(JournalRecoveryGroup {
+                    group_id: row.get(0)?,
+                    state,
+                    version: row.get(2)?,
+                })
+            },
+        )
         .optional()
 }
 
