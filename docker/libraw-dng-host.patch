@@ -1,0 +1,35 @@
+--- a/src/libraw_c_api.cpp
++++ b/src/libraw_c_api.cpp
+@@ -23,6 +23,23 @@
+ #include "libraw/libraw.h"
+ 
+ #ifdef __cplusplus
++#include "dng_host.h"
++// ImageMagick uses the C API, which otherwise cannot supply a DNG SDK host.
++class MomentoLibRaw final : public LibRaw
++{
++public:
++  explicit MomentoLibRaw(unsigned int flags) : LibRaw(flags)
++  {
++    set_dng_host(&host);
++  }
++  ~MomentoLibRaw() override
++  {
++    recycle();
++    set_dng_host(nullptr);
++  }
++private:
++  dng_host host;
++};
+ #include <new>
+ extern "C"
+ {
+@@ -34,7 +51,7 @@
+     LibRaw *ret;
+     try
+     {
+-      ret = new LibRaw(flags);
++      ret = new MomentoLibRaw(flags);
+     }
+     catch (const std::bad_alloc& )
+     {

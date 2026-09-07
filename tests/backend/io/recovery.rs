@@ -4,6 +4,88 @@ use momento_api::io::recovery::{
 };
 use sha2::Digest;
 
+#[test]
+fn rollback_fifo_is_independent_of_cleanup_backlog_and_respects_retry_time() {
+    use momento_api::database::queries::file_operations;
+    let pool = crate::test_utils::create_test_db();
+    let connection = pool.get().unwrap();
+    for index in 1..1001 {
+        connection.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,entry_count,recovery_order) VALUES (?,'test','test','1','cleanup_pending',1,?)", rusqlite::params![format!("cleanup-{index}"), index]).unwrap();
+    }
+    for (id, order, retry_at) in [
+        ("rollback-later", 1002, 0),
+        ("rollback-first", 1001, 0),
+        ("rollback-delayed", 1000, i64::MAX),
+    ] {
+        connection.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,cancel_requested,entry_count,recovery_order,retry_at) VALUES (?,'test','test','1','rollback_pending',1,1,?,?)", rusqlite::params![id, order, retry_at]).unwrap();
+    }
+    let next = |query, active| {
+        connection
+            .query_row(query, [active], |row| row.get::<_, String>(0))
+            .unwrap()
+    };
+    assert_eq!(
+        next(file_operations::SELECT_NEXT_BLOCKING_RECOVERY_GROUP, "[]"),
+        "rollback-first"
+    );
+    assert_eq!(
+        next(
+            file_operations::SELECT_NEXT_BLOCKING_RECOVERY_GROUP,
+            "[\"rollback-first\"]"
+        ),
+        "rollback-later"
+    );
+    assert_eq!(
+        next(file_operations::SELECT_NEXT_CLEANUP_RECOVERY_GROUP, "[]"),
+        "cleanup-1"
+    );
+    connection
+        .execute(
+            "UPDATE file_operation_groups SET state='cleanup_pending' WHERE id='rollback-first'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        next(file_operations::SELECT_NEXT_BLOCKING_RECOVERY_GROUP, "[]"),
+        "rollback-first"
+    );
+    assert_eq!(
+        next(file_operations::SELECT_NEXT_CLEANUP_RECOVERY_GROUP, "[]"),
+        "cleanup-1"
+    );
+}
+
+#[tokio::test]
+async fn background_recovery_serves_rollback_before_draining_older_cleanup() {
+    let pool = crate::test_utils::create_test_db();
+    let (executors, _) = crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let connection = pool.get().unwrap();
+    connection.execute_batch("CREATE TABLE recovery_observations(sequence INTEGER PRIMARY KEY, group_id TEXT); CREATE TRIGGER observe_recovery AFTER UPDATE OF state ON file_operation_groups WHEN NEW.state IN ('cleaned','rolled_back') AND OLD.state <> NEW.state BEGIN INSERT INTO recovery_observations(group_id) VALUES (NEW.id); END;").unwrap();
+    for index in 1..21 {
+        let group = format!("old-cleanup-{index}");
+        connection.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,entry_count,recovery_order) VALUES (?,'test','test','1','cleanup_pending',1,?)", rusqlite::params![group, index]).unwrap();
+        connection.execute("INSERT INTO file_operation_entries(group_id,sequence,action,storage_root,source_path) VALUES (?,0,'cleanup','journal',?)", rusqlite::params![group, format!("missing-{index}")]).unwrap();
+    }
+    connection.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,cancel_requested,entry_count,recovery_order) VALUES ('new-rollback','test','test','1','rollback_pending',1,1,21)", []).unwrap();
+    connection.execute("INSERT INTO file_operation_entries(group_id,sequence,action,storage_root,temporary_path,destination_path) VALUES ('new-rollback',0,'publish','thumbnails','partial','unused')", []).unwrap();
+    drop(connection);
+    recover_generic_file_operations(&executors).await.unwrap();
+    let connection = pool.get().unwrap();
+    let rollback_order: i64 = connection
+        .query_row(
+            "SELECT MIN(sequence) FROM recovery_observations WHERE group_id='new-rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        rollback_order < 21,
+        "rollback must not wait for all older cleanup: {rollback_order}"
+    );
+    let cleanups: i64 = connection.query_row("SELECT COUNT(*) FROM file_operation_groups WHERE id LIKE 'old-cleanup-%' AND state='cleaned'", [], |row| row.get(0)).unwrap();
+    assert_eq!(cleanups, 20, "ordinary cleanup must also drain");
+}
+
 #[tokio::test]
 async fn thumbnail_reconciliation_cleans_history_without_touching_live_or_active_files() {
     use momento_api::io::file::NormalizedStoragePath;
@@ -414,6 +496,13 @@ async fn failed_discard_keeps_metadata_queued_until_cleanup_can_retry() {
         .await
         .unwrap()
         .is_none());
+    assert!(executors
+        .sqlite
+        .load_metadata_job_status_durable()
+        .await
+        .unwrap()
+        .counts
+        .contains(&("waiting_for_rollback".to_string(), 1)));
     let state: String = pool
         .get()
         .unwrap()

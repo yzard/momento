@@ -48,6 +48,7 @@ export default function MetadataPanel() {
       <AdminStatusMetrics
         metrics={[
           { label: 'Queued', value: status?.queuedJobs ?? null },
+          { label: 'Waiting for Journal rollback (queued)', value: status?.waitingForRollbackJobs ?? null },
           { label: 'Processing', value: status?.processingJobs ?? null },
           { label: 'Completed', value: status?.completedJobs ?? null },
           {

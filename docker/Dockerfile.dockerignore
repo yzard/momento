@@ -76,3 +76,10 @@ tests/
 # Environment files
 .env
 .env.*
+
+!tests/
+tests/*
+!tests/docker/
+tests/docker/*
+!tests/docker/build_raw_decoder.sh
+!tests/docker/libraw-dng-host.sh

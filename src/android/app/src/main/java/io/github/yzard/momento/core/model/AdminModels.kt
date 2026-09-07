@@ -13,7 +13,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class AdminUserIdRequest(val userId: Long)
 @Serializable data class MetadataActionResponse(val message: String, val affectedJobs: Long)
 @Serializable class EmptyRequest
-@Serializable data class MetadataStatus(val status: String, val queuedJobs: Long, val processingJobs: Long, val cancellingJobs: Long, val completedJobs: Long, val failedJobs: Long, val errors: List<String>)
+@Serializable data class MetadataStatus(val status: String, val queuedJobs: Long, val processingJobs: Long, val cancellingJobs: Long, val completedJobs: Long, val failedJobs: Long, val errors: List<String>, val waitingForRollbackJobs: Long)
 @Serializable data class AiFeatureActionResult(val feature: String, val outcome: String, val affectedJobs: Long, val error: String?)
 @Serializable data class AiActionResponse(val action: String, val results: List<AiFeatureActionResult>)
 @Serializable data class AiJobCounts(val queued: Long, val submitting: Long, val submitted: Long, val completed: Long, val failed: Long, val cancelled: Long)

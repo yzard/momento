@@ -219,6 +219,7 @@ internal fun MetadataAdministration(
                 AdminStatusMetrics(
                     listOf(
                         AdminMetric("Queued", status?.queuedJobs?.toString() ?: "—", false),
+                        AdminMetric("Waiting for Journal rollback (queued)", status?.waitingForRollbackJobs?.toString() ?: "—", false),
                         AdminMetric("Processing", status?.processingJobs?.toString() ?: "—", false),
                         AdminMetric("Completed", status?.completedJobs?.toString() ?: "—", false),
                         AdminMetric(

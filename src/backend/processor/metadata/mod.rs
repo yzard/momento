@@ -71,6 +71,8 @@ pub struct ExtractedMediaMetadata {
 pub enum MetadataGenerationError {
     #[error("{0}")]
     Retryable(String),
+    #[error("decoder_unsupported: {0}; automatic retry disabled; update the decoder before explicitly generating metadata again")]
+    DecoderUnsupported(String),
     #[error("magick_memory_quota_exceeded: source={source_path}, requested_bytes={requested_bytes}, quota_bytes={quota_bytes}; increase media_process.magick_memory_quota_bytes, restart, then generate metadata again")]
     MagickMemoryQuotaExceeded {
         source_path: String,
@@ -87,6 +89,22 @@ impl MetadataGenerationError {
 
 impl From<String> for MetadataGenerationError {
     fn from(error: String) -> Self {
+        // These are decoder capability diagnostics, not resource/time/IO failures.
+        // Retain the complete diagnostic; never classify all conversion errors as permanent.
+        let diagnostic = error.to_ascii_lowercase();
+        let unsupported_image = diagnostic.contains("@ error/")
+            && (diagnostic.contains("no decode delegate for this image format")
+                || diagnostic.contains("unsupported file format or not raw file")
+                || diagnostic.contains("compression not supported")
+                || diagnostic.contains("unsupported compression"));
+        let unsupported_video = diagnostic.contains("ffmpeg exited with")
+            && (diagnostic.contains("unknown decoder")
+                || diagnostic.contains("decoding requested, but no decoder found")
+                || (diagnostic.contains("decoder (codec")
+                    && diagnostic.contains("not found for input stream")));
+        if unsupported_image || unsupported_video {
+            return Self::DecoderUnsupported(error);
+        }
         Self::Retryable(error)
     }
 }

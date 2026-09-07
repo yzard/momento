@@ -191,8 +191,16 @@ fn metadata_finish_error_is_retryable(kind: ExecutorErrorKind) -> bool {
 
 pub async fn run(config: Arc<Config>, executors: ExecutorHandles, scheduler: SchedulerHandle) {
     let mut observed_version = scheduler.metadata_work_version();
+    let mut previous_waiting_jobs = 0;
     loop {
-        let retry_delay = match process_cycle(&config, &executors, &scheduler).await {
+        let retry_delay = match process_cycle(
+            &config,
+            &executors,
+            &scheduler,
+            &mut previous_waiting_jobs,
+        )
+        .await
+        {
             Ok(()) => match executors
                 .sqlite
                 .load_next_metadata_job_delay_durable()
@@ -234,6 +242,7 @@ async fn process_cycle(
     config: &Config,
     executors: &ExecutorHandles,
     scheduler: &SchedulerHandle,
+    previous_waiting_jobs: &mut i64,
 ) -> Result<(), String> {
     let sqlite = &executors.sqlite;
     let concurrency = scheduler.durable_capacity();
@@ -260,7 +269,31 @@ async fn process_cycle(
         || process_metadata_job(config, executors, scheduler),
         |version| scheduler.wait_for_metadata_work(version),
     )
-    .await
+    .await?;
+    let status = sqlite
+        .load_metadata_job_status_durable()
+        .await
+        .map_err(|error| error.to_string())?;
+    let waiting = status
+        .counts
+        .iter()
+        .find(|(state, _)| state == "waiting_for_rollback")
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+    if rollback_wait_changed(previous_waiting_jobs, waiting) {
+        tracing::info!(
+            waiting_jobs = waiting,
+            reason = "journal_rollback_pending",
+            "Metadata Journal rollback waiting count changed; recovery wakes blocked jobs when ready"
+        );
+    }
+    Ok(())
+}
+
+fn rollback_wait_changed(previous: &mut i64, current: i64) -> bool {
+    let changed = *previous != current;
+    *previous = current;
+    changed
 }
 
 async fn drain_metadata_window<Job, Wake>(
@@ -361,6 +394,10 @@ async fn process_metadata_job(
         .is_some_and(|error| error.retryable());
     if let Err(error) = &outcome {
         match error {
+            crate::processor::metadata::MetadataGenerationError::DecoderUnsupported(_) => {
+                tracing::error!(media_id, error_code = "decoder_unsupported", retryable = false,
+                    error = %error, "Metadata decoder cannot handle this input; marking failed without automatic retry");
+            }
             crate::processor::metadata::MetadataGenerationError::MagickMemoryQuotaExceeded {
                 source_path,
                 requested_bytes,

@@ -210,6 +210,8 @@ pub enum JournalRecoveryState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JournalRecoveryScope {
     All,
+    Blocking,
+    Cleanup,
     StartupCritical,
 }
 
@@ -1379,6 +1381,12 @@ pub(crate) fn load_next_generic_recovery_group(
 ) -> rusqlite::Result<Option<JournalRecoveryGroup>> {
     let query = match scope {
         JournalRecoveryScope::All => queries::file_operations::SELECT_NEXT_GENERIC_RECOVERY_GROUP,
+        JournalRecoveryScope::Blocking => {
+            queries::file_operations::SELECT_NEXT_BLOCKING_RECOVERY_GROUP
+        }
+        JournalRecoveryScope::Cleanup => {
+            queries::file_operations::SELECT_NEXT_CLEANUP_RECOVERY_GROUP
+        }
         JournalRecoveryScope::StartupCritical => {
             queries::file_operations::SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP
         }

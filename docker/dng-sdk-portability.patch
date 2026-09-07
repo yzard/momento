@@ -1,0 +1,10 @@
+--- a/xmp/toolkit/source/XMPStream_IO.cpp
++++ b/xmp/toolkit/source/XMPStream_IO.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "public/include/XMP_Const.h"
+ #include "public/include/XMP_IO.hpp"
++#include <cstring>
+ 
+ #include "source/XMP_LibUtils.hpp"
+ #include "source/XMPStream_IO.hpp"

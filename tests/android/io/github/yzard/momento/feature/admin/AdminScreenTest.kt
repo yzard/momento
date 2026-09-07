@@ -15,7 +15,7 @@ import org.junit.Test
 class AdminScreenTest {
     @Test
     fun metadataGenerateControlSwitchesToCancelOnlyForActiveGeneration() {
-        fun status(state: String) = MetadataStatus(state, 0, 0, 0, 0, 0, emptyList())
+        fun status(state: String) = MetadataStatus(state, 0, 0, 0, 0, 0, emptyList(), 0)
 
         assertTrue(isActiveMetadataGeneration(status("queued")))
         assertTrue(isActiveMetadataGeneration(status("processing")))

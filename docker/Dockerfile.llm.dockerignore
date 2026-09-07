@@ -21,3 +21,9 @@ data/
 docs/
 tests/
 AGENTS.md
+
+!tests/
+tests/*
+!tests/docker/
+tests/docker/*
+!tests/docker/build_raw_decoder.sh

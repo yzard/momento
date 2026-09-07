@@ -96,6 +96,7 @@ async fn status(
         MetadataStatusResponse {
             status: status.to_string(),
             queued_jobs,
+            waiting_for_rollback_jobs: count_for("waiting_for_rollback"),
             processing_jobs,
             cancelling_jobs,
             completed_jobs: count_for("completed"),

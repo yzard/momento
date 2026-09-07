@@ -18,7 +18,14 @@ fn llm_container_places_runtime_temporary_files_on_its_data_volume() {
     assert!(dockerfile.contains("TMPDIR=/data/llm/tmp"));
     assert!(dockerfile.contains("TEMP=/data/llm/tmp"));
     assert!(dockerfile.contains("TMP=/data/llm/tmp"));
-    assert!(dockerfile.contains("libraw-bin"));
+    assert!(
+        dockerfile.contains("COPY --from=raw-decoder-builder /opt/raw-decoder/bin/dcraw_emu /opt/raw-decoder/bin/dcraw_emu")
+    );
+    assert!(dockerfile.contains(
+        "COPY --from=raw-decoder-builder /opt/raw-decoder/lib/*.so* /opt/raw-decoder/lib/"
+    ));
+    assert!(dockerfile.contains("/opt/raw-decoder/bin/dcraw_emu /usr/local/bin/dcraw_emu"));
+    assert!(!dockerfile.contains("libraw-bin"));
     assert!(dockerfile.contains("command -v dcraw_emu"));
     assert!(entrypoint.contains("/data/llm/tmp"));
 }

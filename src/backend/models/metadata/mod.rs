@@ -15,6 +15,7 @@ pub struct MetadataActionResponse {
 pub struct MetadataStatusResponse {
     pub status: String,
     pub queued_jobs: i64,
+    pub waiting_for_rollback_jobs: i64,
     pub processing_jobs: i64,
     pub cancelling_jobs: i64,
     pub completed_jobs: i64,

@@ -46,7 +46,8 @@ class DtoMappingTest {
     @Test fun encodesAlbumUpdateAndDecodesMetadataStatusContracts() {
         val request = AlbumUpdateRequest(3, "Summer", "Trip", 9)
         assertEquals("{\"albumId\":3,\"name\":\"Summer\",\"description\":\"Trip\",\"coverMediaId\":9}", Json.encodeToString(AlbumUpdateRequest.serializer(), request))
-        val status = Json.decodeFromString<MetadataStatus>("{\"status\":\"queued\",\"queuedJobs\":2,\"processingJobs\":1,\"cancellingJobs\":0,\"completedJobs\":3,\"failedJobs\":0,\"errors\":[]}")
+        val status = Json.decodeFromString<MetadataStatus>("{\"status\":\"queued\",\"queuedJobs\":2,\"processingJobs\":1,\"cancellingJobs\":0,\"completedJobs\":3,\"failedJobs\":0,\"errors\":[],\"waitingForRollbackJobs\":1}")
+        assertEquals(1, status.waitingForRollbackJobs)
         assertEquals(2, status.queuedJobs)
     }
 

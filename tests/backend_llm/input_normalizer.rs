@@ -3,6 +3,16 @@ use std::path::Path;
 use llm_service::input_normalizer::{requires_raw_normalization, runtime_input_path};
 
 #[test]
+fn raw_normalization_enables_dng_sdk_without_downsampling() {
+    let arguments = llm_service::input_normalizer::RAW_NORMALIZATION_ARGUMENTS;
+    assert_eq!(
+        arguments,
+        ["-dngsdk", "-w", "+M", "-o", "1", "-q", "3", "-T", "-Z"]
+    );
+    assert!(!arguments.contains(&"-h"));
+}
+
+#[test]
 fn raw_mime_types_require_full_resolution_normalization() {
     for mime_type in [
         "image/x-adobe-dng",

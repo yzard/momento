@@ -260,6 +260,26 @@ async fn metadata_status_returns_complete_failure_diagnostics() {
     response.assert_status_ok();
     let status = response.json::<serde_json::Value>();
     assert_eq!(status["errors"], serde_json::json!([diagnostic]));
+    assert_eq!(status["waitingForRollbackJobs"], 0);
+    let connection = pool.get().unwrap();
+    connection
+        .execute(
+            "UPDATE media_metadata_jobs SET status='queued' WHERE media_id=?",
+            [media_id],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO file_operation_groups(id,kind,owner_kind,owner_id,state,cancel_requested,entry_count) VALUES ('waiting','metadata_artifacts','metadata_generation',?,'rollback_pending',1,1)", [media_id.to_string()]).unwrap();
+    drop(connection);
+    let response = server
+        .post("/api/v1/metadata/status")
+        .add_header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .await;
+    response.assert_status_ok();
+    let status = response.json::<serde_json::Value>();
+    assert_eq!(status["waitingForRollbackJobs"], 1);
+    assert_eq!(status["queuedJobs"], 1);
+    assert_eq!(status["processingJobs"], 0);
 }
 
 #[tokio::test]

@@ -52,6 +52,15 @@ RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --locked --manifest
 
 FROM ${UV_IMAGE} AS uv
 
+FROM ubuntu:22.04 AS raw-decoder-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git curl ca-certificates unzip autoconf automake libtool pkg-config \
+    libjpeg-dev zlib1g-dev liblcms2-dev libexpat1-dev libbrotli-dev && rm -rf /var/lib/apt/lists/*
+COPY docker/build_raw_decoder.sh docker/libraw-dng-host.patch docker/dng-sdk-portability.patch /decoder/
+RUN sh /decoder/build_raw_decoder.sh /build/raw-decoder /opt/raw-decoder bundled
+RUN --mount=type=bind,source=tests/docker/build_raw_decoder.sh,target=/decoder-test.sh \
+    sh /decoder-test.sh /opt/raw-decoder/bin/dcraw_emu /build/raw-decoder/dng_sdk_1_7_1/sample_files /build/decoder-check
+
 FROM ${CUDA_IMAGE} AS runtime-base
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -70,7 +79,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gosu \
-    libraw-bin \
+    libjpeg-turbo8 \
+    liblcms2-2 \
+    libexpat1 \
+    libbrotli1 \
+    zlib1g \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
@@ -79,6 +92,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=raw-decoder-builder /opt/raw-decoder/bin/dcraw_emu /opt/raw-decoder/bin/dcraw_emu
+COPY --from=raw-decoder-builder /opt/raw-decoder/lib/*.so* /opt/raw-decoder/lib/
+COPY --from=raw-decoder-builder /opt/raw-decoder/share/licenses/ /opt/raw-decoder/share/licenses/
+COPY --from=raw-decoder-builder /build/raw-decoder/dng_sdk_1_7_1/libjxl/libjxl/LICENSE /opt/raw-decoder/share/licenses/JPEG-XL.txt
+COPY --from=raw-decoder-builder /build/raw-decoder/dng_sdk_1_7_1/libjxl/libjxl/third_party/highway/LICENSE /opt/raw-decoder/share/licenses/Highway.txt
+RUN ln -s /opt/raw-decoder/bin/dcraw_emu /usr/local/bin/dcraw_emu
 
 FROM runtime-base AS build-tools
 

@@ -14,6 +14,96 @@ mod clean;
 mod reverse_geocoding;
 
 #[tokio::test]
+async fn unsupported_decoder_fails_without_retry_but_explicit_generate_can_retry() {
+    use momento_api::database::operations::FinishMetadataJob;
+    use momento_api::processor::metadata::MetadataGenerationError;
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "unsupported.dng");
+    let (executors, _) = test_executor_handles_with_data_directory(pool.clone());
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE media SET import_state = 'imported' WHERE id = ?",
+            [media_id],
+        )
+        .unwrap();
+    let token = claim_metadata_job(&pool, &executors, media_id).await;
+    let error = MetadataGenerationError::from("source=/data/originals/unsupported.dng: magick: Unsupported file format or not RAW file @ error/dng.c/ReadDNGImage/555".to_string());
+    assert!(!error.retryable());
+    assert!(error.to_string().contains("decoder_unsupported"));
+    executors
+        .sqlite
+        .finish_metadata_job_durable(FinishMetadataJob {
+            media_id,
+            claim_token: token,
+            error: Some(error.to_string()),
+            retryable: error.retryable(),
+        })
+        .await
+        .unwrap();
+    let status = executors
+        .sqlite
+        .load_metadata_job_status_durable()
+        .await
+        .unwrap();
+    assert!(status.counts.contains(&("failed".to_string(), 1)));
+    assert!(executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .unwrap()
+        .is_none());
+    assert!(executors
+        .sqlite
+        .load_next_metadata_job_delay_durable()
+        .await
+        .unwrap()
+        .is_none());
+    pool.get()
+        .unwrap()
+        .execute(
+            momento_api::database::queries::metadata_jobs::QUEUE_INCOMPLETE,
+            [],
+        )
+        .unwrap();
+    assert!(executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn transient_conversion_failures_remain_retryable() {
+    use momento_api::processor::metadata::MetadataGenerationError;
+    for detail in [
+        "magick: time limit exceeded @ error/cache.c/GetImagePixelCache/1785",
+        "magick: cache resources exhausted @ error/cache.c/1",
+        "Database is busy",
+        "Permission denied",
+        "external process executor failed",
+    ] {
+        assert!(
+            MetadataGenerationError::from(detail.to_string()).retryable(),
+            "{detail}"
+        );
+    }
+    for detail in [
+        "magick: no decode delegate for this image format @ error/constitute.c/1",
+        "magick: compression not supported @ error/tiff.c/1",
+        "magick: Unsupported compression @ error/tiff.c/1",
+        "ffmpeg exited with exit status: 1; stderr: Decoding requested, but no decoder found for: av1",
+        "ffmpeg exited with exit status: 1; stderr: Decoder (codec av1) not found for input stream #0:0",
+    ] {
+        assert!(
+            !MetadataGenerationError::from(detail.to_string()).retryable(),
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn metadata_quota_failure_uses_runtime_limit_and_stops_automatic_retry() {
     use momento_api::database::operations::FinishMetadataJob;
     use momento_api::processor::metadata::MetadataGenerationError;

@@ -33,6 +33,9 @@ pub fn requires_raw_normalization(mime_type: &str) -> bool {
     )
 }
 
+pub const RAW_NORMALIZATION_ARGUMENTS: [&str; 9] =
+    ["-dngsdk", "-w", "+M", "-o", "1", "-q", "3", "-T", "-Z"];
+
 pub async fn ensure_raw_normalized(
     source_path: &Path,
     normalized_path: &Path,
@@ -51,14 +54,7 @@ pub async fn ensure_raw_normalized(
     remove_if_present(&temporary_path).await?;
 
     let mut child = tokio::process::Command::new("dcraw_emu")
-        .arg("-w")
-        .arg("+M")
-        .arg("-o")
-        .arg("1")
-        .arg("-q")
-        .arg("3")
-        .arg("-T")
-        .arg("-Z")
+        .args(RAW_NORMALIZATION_ARGUMENTS)
         .arg(&temporary_path)
         .arg(source_path)
         .stdin(Stdio::null())

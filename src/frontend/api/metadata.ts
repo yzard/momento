@@ -3,6 +3,7 @@ import { apiClient } from './client'
 export interface MetadataStatus {
   status: string
   queuedJobs: number
+  waitingForRollbackJobs: number
   processingJobs: number
   cancellingJobs: number
   completedJobs: number

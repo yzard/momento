@@ -2,6 +2,17 @@ use super::drain_metadata_window;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
+#[test]
+fn rollback_wait_logs_transitions_not_every_recovery_wakeup() {
+    let mut previous = 0;
+    assert!(!super::rollback_wait_changed(&mut previous, 0));
+    assert!(super::rollback_wait_changed(&mut previous, 2));
+    assert!(!super::rollback_wait_changed(&mut previous, 2));
+    assert!(super::rollback_wait_changed(&mut previous, 1));
+    assert!(super::rollback_wait_changed(&mut previous, 0));
+    assert!(!super::rollback_wait_changed(&mut previous, 0));
+}
+
 #[tokio::test]
 async fn work_notification_refills_idle_lanes_before_slow_job_finishes() {
     let available = AtomicUsize::new(1);

@@ -342,7 +342,9 @@ async fn recover_file_operations(
 ) -> Result<usize, ExecutorError> {
     use futures::{stream::FuturesUnordered, StreamExt};
     let concurrency = match scope {
-        JournalRecoveryScope::All => executors.scheduler.journal_recovery_capacity(),
+        JournalRecoveryScope::All
+        | JournalRecoveryScope::Blocking
+        | JournalRecoveryScope::Cleanup => executors.scheduler.journal_recovery_capacity(),
         JournalRecoveryScope::StartupCritical => 1,
     };
     let mut active = std::collections::HashSet::new();
@@ -350,17 +352,46 @@ async fn recover_file_operations(
     let mut recovered_entries = 0usize;
     let mut failure = None;
     let mut first = true;
+    let mut blocking_turn = true;
     let mut last_progress_log = std::time::Instant::now();
     loop {
         while failure.is_none() && running.len() < concurrency {
-            let group = match executors
+            // Separate ready FIFOs: alternate lanes at every free slot, borrowing
+            // the other lane when empty. Even a one-slot runtime visits the blocking
+            // FIFO within two completions, independently of the cleanup backlog size.
+            let mut lane = if scope == JournalRecoveryScope::All {
+                if blocking_turn {
+                    JournalRecoveryScope::Blocking
+                } else {
+                    JournalRecoveryScope::Cleanup
+                }
+            } else {
+                scope
+            };
+            let selected = executors
                 .sqlite
                 .load_next_generic_file_operation_recovery_durable(
-                    scope,
+                    lane,
                     active.iter().cloned().collect(),
                 )
-                .await
-            {
+                .await;
+            let selected = if matches!(selected, Ok(None)) && scope == JournalRecoveryScope::All {
+                lane = if blocking_turn {
+                    JournalRecoveryScope::Cleanup
+                } else {
+                    JournalRecoveryScope::Blocking
+                };
+                executors
+                    .sqlite
+                    .load_next_generic_file_operation_recovery_durable(
+                        lane,
+                        active.iter().cloned().collect(),
+                    )
+                    .await
+            } else {
+                selected
+            };
+            let group = match selected {
                 Ok(Some(group)) => group,
                 Ok(None) => break,
                 Err(error) => {
@@ -368,9 +399,10 @@ async fn recover_file_operations(
                     break;
                 }
             };
+            blocking_turn = !blocking_turn;
             if first || last_progress_log.elapsed().as_secs() >= 5 {
                 tracing::info!(group_id = %group.group_id, state = ?group.state, recovered_entries,
-                    in_flight = running.len(), concurrency, "Journal recovery progress");
+                    queue = ?lane, in_flight = running.len(), concurrency, "Journal recovery progress");
                 first = false;
                 last_progress_log = std::time::Instant::now();
             }

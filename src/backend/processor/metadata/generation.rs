@@ -224,7 +224,16 @@ pub async fn generate_media_metadata(
     .await
     {
         artifact_batch.cancel(executors).await;
-        return Err(error.into());
+        return Err(format!(
+            "source={}: {error}",
+            config
+                .server
+                .data_dir
+                .join("originals")
+                .join(&file_path)
+                .display()
+        )
+        .into());
     }
     let committed_artifacts = match artifact_batch.publish(executors, artifact_version).await {
         Ok(group) => group,

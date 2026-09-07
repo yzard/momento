@@ -21,6 +21,7 @@ describe('MetadataPanel', () => {
     mocks.getStatus.mockResolvedValue({
       status: 'idle',
       queuedJobs: 2,
+      waitingForRollbackJobs: 1,
       processingJobs: 1,
       cancellingJobs: 0,
       completedJobs: 8,
@@ -33,6 +34,13 @@ describe('MetadataPanel', () => {
   })
 
   afterEach(cleanup)
+
+  it('shows rollback waiting separately without subtracting it from queued work', async () => {
+    render(<MetadataPanel />)
+    const label = await screen.findByText('Waiting for Journal rollback (queued)')
+    expect(await within(label.parentElement!).findByText('1')).toBeTruthy()
+    expect(within(screen.getByText('Queued').parentElement!).getByText('2')).toBeTruthy()
+  })
 
   it('generates metadata and shows status metrics', async () => {
     render(<MetadataPanel />)
