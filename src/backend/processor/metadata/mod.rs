@@ -121,6 +121,7 @@ pub async fn generate_media_metadata(
 
 mod generation;
 pub mod reverse_geocoding;
+mod video_preview;
 
 pub(crate) fn supplemental_metadata_candidates(file_path: &Path) -> Vec<std::path::PathBuf> {
     const SUPPLEMENTAL_METADATA_SUFFIX: &str = ".supplemental-metadata.json";

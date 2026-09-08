@@ -114,7 +114,7 @@ describe('Lightbox', () => {
       </MemoryRouter>
     )
 
-    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(7))
+    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(7, 'preview'))
     await waitFor(() =>
       expect(view.container.querySelector('video')?.getAttribute('src')).toBe('/stream/7')
     )

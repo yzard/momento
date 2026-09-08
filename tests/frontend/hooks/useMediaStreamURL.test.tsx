@@ -30,9 +30,9 @@ describe('useMediaStreamURL', () => {
 
     expect(mocks.getFileStreamURL).not.toHaveBeenCalled()
     view.rerender({ mediaId: 1, enabled: true })
-    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(1, 'preview'))
     view.rerender({ mediaId: 2, enabled: true })
-    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(2))
+    await waitFor(() => expect(mocks.getFileStreamURL).toHaveBeenCalledWith(2, 'preview'))
     await waitFor(() => expect(view.result.current.streamURL).toBe('/stream/2'))
 
     await act(async () => resolveFirst('/stream/1'))

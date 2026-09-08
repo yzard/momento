@@ -5960,7 +5960,7 @@ fn execute_with_connection(
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::QueueIncompleteMetadata => {
-            operations::queue_incomplete_metadata(connection)
+            crate::database::metadata::queue_with_temporary_mov_preview_backfill(connection)
                 .map(SqliteOutput::IncompleteMetadataQueued)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }

@@ -1,4 +1,5 @@
 pub mod operations;
+pub(crate) mod metadata;
 mod pool;
 pub mod queries;
 pub mod result_footprint;

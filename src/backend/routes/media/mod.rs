@@ -465,7 +465,7 @@ async fn get_media_preview(
             content_type: &content_type,
             headers: &headers,
             filename: None,
-            allow_ranges: false,
+            allow_ranges: media.media_type == "video",
             content_disposition: ContentDisposition::Inline,
             cache_control: "private",
             head_only: false,
@@ -582,14 +582,18 @@ fn resolve_preview_path(
     media: &BinaryMediaRecord,
     _media_id: i64,
 ) -> AppResult<(StorageRootId, NormalizedStoragePath, String)> {
-    if media.media_type == "video" {
-        return Err(AppError::NotFound("Preview not found".to_string()));
-    }
-
-    if !crate::constants::requires_jpeg_preview(
-        std::path::Path::new(&media.file_path),
-        media.mime_type.as_deref(),
-    ) {
+    let video_preview = media.media_type == "video"
+        && crate::constants::requires_mp4_preview(
+            std::path::Path::new(&media.file_path),
+            media.mime_type.as_deref(),
+        );
+    if !video_preview
+        && (media.media_type == "video"
+            || !crate::constants::requires_jpeg_preview(
+                std::path::Path::new(&media.file_path),
+                media.mime_type.as_deref(),
+            ))
+    {
         let relative_path = NormalizedStoragePath::parse(&media.file_path)
             .map_err(|_| AppError::NotFound("Media file path is invalid".to_string()))?;
         return Ok((
@@ -613,7 +617,12 @@ fn resolve_preview_path(
     Ok((
         StorageRootId::Previews,
         relative_path,
-        "image/jpeg".to_string(),
+        if video_preview {
+            "video/mp4"
+        } else {
+            "image/jpeg"
+        }
+        .to_string(),
     ))
 }
 

@@ -2,11 +2,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { post } = vi.hoisted(() => ({ post: vi.fn() }))
 
-vi.mock('../../../src/frontend/api/client', () => ({ apiClient: { post } }))
+vi.mock('../../../../src/frontend/api/client', () => ({ apiClient: { post } }))
 
-import { mediaApi } from '../../../src/frontend/api/media'
+import { mediaApi } from '../../../../src/frontend/api/media'
 
 describe('mediaApi timeline classification', () => {
+  it('requests the playback preview rather than the original download', async () => {
+    post.mockResolvedValue({ data: { url: '/api/v1/media/7/preview' } })
+    expect(await mediaApi.getFileStreamURL(7, 'preview')).toBe('/api/v1/media/7/preview')
+    expect(post).toHaveBeenCalledWith('/media/access-ticket', {
+      mediaId: 7,
+      resource: 'preview',
+    })
+    await mediaApi.getFileStreamURL(7, 'original')
+    expect(post).toHaveBeenLastCalledWith('/media/access-ticket', {
+      mediaId: 7,
+      resource: 'original',
+    })
+  })
   beforeEach(() => {
     post.mockReset()
     post.mockResolvedValue({ data: { groups: [], markers: [] } })
@@ -51,7 +64,7 @@ describe('mediaApi timeline classification', () => {
       },
     })
 
-    await expect(mediaApi.getFileStreamURL(42)).resolves.toBe(
+    await expect(mediaApi.getFileStreamURL(42, 'original')).resolves.toBe(
       '/api/v1/media/42/original?ticket=signed'
     )
     expect(post).toHaveBeenCalledWith('/media/access-ticket', {

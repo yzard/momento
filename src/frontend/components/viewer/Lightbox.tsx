@@ -32,7 +32,7 @@ function DownloadOriginal({ media }: { media: Media }) {
     setIsDownloading(true)
     setError(false)
     try {
-      const url = await mediaApi.getFileStreamURL(media.id)
+      const url = await mediaApi.getFileStreamURL(media.id, 'original')
       const link = document.createElement('a')
       link.href = url
       link.download = media.originalFilename

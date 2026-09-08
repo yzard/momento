@@ -74,7 +74,7 @@ describe('PhotoGrid', () => {
       await Promise.resolve()
     })
 
-    expect(mocks.getFileStreamURL).toHaveBeenCalledWith(5)
+    expect(mocks.getFileStreamURL).toHaveBeenCalledWith(5, 'preview')
     expect(view.container.querySelector('video')?.getAttribute('src')).toBe(
       '/stream/5?ticket=signed'
     )

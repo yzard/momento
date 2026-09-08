@@ -157,15 +157,25 @@ pub async fn generate_media_metadata(
         .join(media_id.to_string())
         .join(format!("v{artifact_version}-{claim_token}"))
         .join("thumbnail.jpg");
-    let preview_relative = if media_type == "image"
-        && crate::constants::requires_jpeg_preview(
+    let video_preview = media_type == "video"
+        && crate::constants::requires_mp4_preview(
             std::path::Path::new(&file_path),
             media.mime_type.as_deref(),
-        ) {
+        );
+    let preview_relative = if video_preview
+        || (media_type == "image"
+            && crate::constants::requires_jpeg_preview(
+                std::path::Path::new(&file_path),
+                media.mime_type.as_deref(),
+            )) {
         let preview_path = PathBuf::from("media")
             .join(media_id.to_string())
             .join(format!("v{artifact_version}-{claim_token}"))
-            .join("preview.jpg");
+            .join(if video_preview {
+                "preview.mp4"
+            } else {
+                "preview.jpg"
+            });
         Some(preview_path.to_string_lossy().into_owned())
     } else {
         None
@@ -190,15 +200,20 @@ pub async fn generate_media_metadata(
                 .map_err(|error| error.to_string())?,
         ));
     }
-    let artifact_output_limits = metadata_artifact_output_limits(
+    let mut artifact_output_limits = metadata_artifact_output_limits(
         config.metadata.thumbnails_max_size,
         config.metadata.thumbnails_tiny_size,
-        preview_relative.is_some(),
+        preview_relative.is_some() && !video_preview,
         original_dimensions
             .map(|(width, height)| (i32::try_from(width).ok(), i32::try_from(height).ok()))
             .unwrap_or((None, None)),
         config.media_process.maximum_normalized_image_output_bytes as u64,
     )?;
+    if video_preview {
+        artifact_output_limits.push(super::video_preview::output_limit(
+            metadata.duration_seconds,
+        )?);
+    }
     let maximum_artifact_batch_bytes = artifact_output_limits
         .iter()
         .try_fold(0_u64, |total, limit| total.checked_add(*limit))
@@ -217,7 +232,7 @@ pub async fn generate_media_metadata(
         &artifact_batch,
         &original_file,
         &media_type,
-        preview_relative.is_some(),
+        metadata.duration_seconds,
         &artifact_output_limits,
         config,
     )
@@ -302,12 +317,11 @@ async fn generate_metadata_artifact_batch(
     batch: &crate::processor::artifact::PreparedMetadataArtifactBatch,
     original: &StorageMediaFile,
     media_type: &str,
-    include_web_preview: bool,
+    duration_seconds: Option<f64>,
     output_limits: &[u64],
     config: &Config,
 ) -> Result<(), String> {
-    let expected_outputs = if include_web_preview { 3 } else { 2 };
-    if output_limits.len() != expected_outputs {
+    if !matches!(output_limits.len(), 2 | 3) {
         return Err("metadata artifact output limits do not match the batch".to_string());
     }
     let target = |index: usize, name: &str| {
@@ -318,18 +332,30 @@ async fn generate_metadata_artifact_batch(
     };
     let thumbnail = target(0, "thumbnail")?;
     let tiny_thumbnail = target(1, "tiny thumbnail")?;
-    let preview = if include_web_preview {
+    let preview = if output_limits.len() == 3 {
         let preview = target(2, "web preview")?;
-        generate_image_preview_prepared(
-            executors,
-            original,
-            &preview,
-            90,
-            output_limits[2],
-            &config.media_process,
-        )
-        .await
-        .map_err(|error| format!("web preview generation failed: {error}"))?;
+        if media_type == "video" {
+            super::video_preview::generate(
+                executors,
+                original,
+                &preview,
+                output_limits[2],
+                duration_seconds,
+                config.media_process.maximum_stderr_bytes,
+            )
+            .await?;
+        } else {
+            generate_image_preview_prepared(
+                executors,
+                original,
+                &preview,
+                90,
+                output_limits[2],
+                &config.media_process,
+            )
+            .await
+            .map_err(|error| format!("web preview generation failed: {error}"))?;
+        }
         Some(preview)
     } else {
         None

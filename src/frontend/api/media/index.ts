@@ -1,5 +1,5 @@
-import { apiClient } from './client'
-import type { Media, TimelineGroup } from './types'
+import { apiClient } from '../client'
+import type { Media, TimelineGroup } from '../types'
 
 interface TimelineListRequest {
   cursor?: string
@@ -104,10 +104,10 @@ export const mediaApi = {
     await apiClient.post('/media/delete', { mediaIds })
   },
 
-  getFileStreamURL: async (mediaId: number): Promise<string> => {
+  getFileStreamURL: async (mediaId: number, resource: 'original' | 'preview'): Promise<string> => {
     const response = await apiClient.post<MediaAccessTicketResponse>('/media/access-ticket', {
       mediaId,
-      resource: 'original',
+      resource,
     })
     return response.data.url
   },

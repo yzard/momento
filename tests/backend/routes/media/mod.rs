@@ -384,6 +384,76 @@ async fn converted_preview_uses_the_atomically_persisted_generation_path() {
 }
 
 #[tokio::test]
+async fn mov_preview_supports_ranges_and_preserves_original_access() {
+    let (app, pool) = create_test_app();
+    let user = create_test_user(&pool, "mov-owner", "mov-owner@example.com");
+    let other = create_test_user(&pool, "mov-other", "mov-other@example.com");
+    let media =
+        create_test_media_with_gps_and_date(&pool, "video.MOV", 40.0, -74.0, "2024-01-15T10:30:00");
+    grant_media_access(&pool, media, user);
+    let data = test_data_directory(&pool);
+    std::fs::write(data.join("originals/video.MOV"), b"original MOV").unwrap();
+    std::fs::write(data.join("previews/video.mp4"), b"0123456789").unwrap();
+    let connection = pool.get().unwrap();
+    connection.execute("UPDATE media SET media_type='video', file_path='video.MOV', mime_type='video/quicktime' WHERE id=?", [media]).unwrap();
+    connection
+        .execute(
+            "UPDATE media_metadata SET preview_path='video.mp4' WHERE media_id=?",
+            [media],
+        )
+        .unwrap();
+    drop(connection);
+    let server = TestServer::new(app).unwrap();
+    let preview_url = format!("/api/v1/media/{media}/preview");
+    let response = server
+        .get(&preview_url)
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
+        .add_header(RANGE, "bytes=2-5")
+        .await;
+    response.assert_status(StatusCode::PARTIAL_CONTENT);
+    response.assert_header("content-type", "video/mp4");
+    response.assert_header(CONTENT_RANGE, "bytes 2-5/10");
+    assert_eq!(response.as_bytes().as_ref(), b"2345");
+    server
+        .get(&preview_url)
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(other)))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let original = server
+        .get(&format!("/api/v1/media/{media}/original"))
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
+        .await;
+    original.assert_status_ok();
+    assert_eq!(original.as_bytes().as_ref(), b"original MOV");
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE media_metadata SET preview_path=NULL WHERE media_id=?",
+            [media],
+        )
+        .unwrap();
+    server
+        .get(&preview_url)
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE media SET mime_type='video/mp4',file_path='video.mp4' WHERE id=?",
+            [media],
+        )
+        .unwrap();
+    std::fs::write(data.join("originals/video.mp4"), b"native MP4").unwrap();
+    let native = server
+        .get(&preview_url)
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
+        .await;
+    native.assert_status_ok();
+    assert_eq!(native.as_bytes().as_ref(), b"native MP4");
+}
+
+#[tokio::test]
 async fn browser_supported_preview_serves_original_even_when_a_converted_preview_exists() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "original-preview", "original-preview@example.com");

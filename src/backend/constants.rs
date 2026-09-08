@@ -87,6 +87,14 @@ pub fn is_camera_raw_image(file_path: &Path, mime_type: Option<&str>) -> bool {
         })
 }
 
+pub fn requires_mp4_preview(file_path: &Path, mime_type: Option<&str>) -> bool {
+    mime_type.is_some_and(|mime| mime.eq_ignore_ascii_case("video/quicktime"))
+        || file_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mov"))
+}
+
 pub fn requires_jpeg_preview(file_path: &Path, mime_type: Option<&str>) -> bool {
     if is_camera_raw_image(file_path, mime_type) {
         return true;

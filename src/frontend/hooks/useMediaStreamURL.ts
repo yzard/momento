@@ -24,7 +24,7 @@ export function useMediaStreamURL(
     const requestGeneration = ++requestGenerationRef.current
     setIsStreamLoading(true)
     try {
-      const url = await mediaApi.getFileStreamURL(mediaId)
+      const url = await mediaApi.getFileStreamURL(mediaId, 'preview')
       if (requestGeneration !== requestGenerationRef.current) return
       streamURLRef.current = url
       setStreamURL(url)

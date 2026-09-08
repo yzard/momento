@@ -584,6 +584,11 @@ async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
 
 #[tokio::test]
 async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
+    assert_video_metadata("mp4", "video/mp4").await;
+    assert_video_metadata("MOV", "video/quicktime").await;
+}
+
+async fn assert_video_metadata(extension: &str, mime: &str) {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "full-resolution-frame.mp4");
     let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
@@ -594,7 +599,7 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
     if ai_directory.exists() {
         fs::remove_dir_all(&ai_directory).expect("remove stale AI fixture directory");
     }
-    let relative_path = format!("full-resolution-frame-{media_id}.mp4");
+    let relative_path = format!("full-resolution-frame-{media_id}.{extension}");
     let original_path = data_directory.join("originals").join(&relative_path);
     fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
     let ffmpeg = std::process::Command::new("ffmpeg")
@@ -604,6 +609,10 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
             "lavfi",
             "-i",
             "color=c=blue:s=64x32:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
             "-pix_fmt",
             "yuv420p",
         ])
@@ -618,8 +627,8 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
     pool.get()
         .expect("database connection")
         .execute(
-            "UPDATE media SET file_path = ?, media_type = 'video', mime_type = 'video/mp4', import_state = 'imported' WHERE id = ?",
-            rusqlite::params![relative_path, media_id],
+            "UPDATE media SET file_path = ?, media_type = 'video', mime_type = ?, import_state = 'imported' WHERE id = ?",
+            rusqlite::params![relative_path, mime, media_id],
         )
         .expect("video media");
     let claim_token = claim_metadata_job(&pool, &executors, media_id).await;
@@ -631,6 +640,39 @@ async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
     )
     .await
     .expect("video metadata generation");
+    let preview: Option<String> = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT preview_path FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if extension == "MOV" {
+        let preview = preview.expect("MOV requires MP4 playback preview");
+        assert!(preview.ends_with("preview.mp4"));
+        let probe = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name,width,height",
+                "-of",
+                "json",
+            ])
+            .arg(data_directory.join("previews").join(preview))
+            .output()
+            .unwrap();
+        assert!(probe.status.success());
+        let info: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+        assert_eq!(info["streams"][0]["codec_name"], "h264");
+        assert_eq!(info["streams"][0]["width"], 64);
+        assert_eq!(info["streams"][0]["height"], 32);
+        assert_eq!(info["streams"][1]["codec_name"], "aac");
+    } else {
+        assert!(preview.is_none(), "MP4 must not be transcoded");
+    }
     let canonical_original_hash: String = pool
         .get()
         .expect("database connection")

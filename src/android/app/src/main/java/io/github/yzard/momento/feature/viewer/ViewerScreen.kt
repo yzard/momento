@@ -698,7 +698,7 @@ private fun VideoViewer(
         )
         return
     }
-    val url by produceState<String?>(null, media.id) { value = repository.originalUrl(media.id) }
+    val url by produceState<String?>(null, media.id) { value = repository.previewUrl(media.id) }
     val currentUrl = url
     if (currentUrl == null) {
         Box(modifier, contentAlignment = Alignment.Center) {
