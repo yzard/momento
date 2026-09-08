@@ -3,7 +3,8 @@ set -euo pipefail
 
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly script_source="$repository_root/build_android_client.sh"
-readonly test_root="$(mktemp -d)"
+mkdir -p "$repository_root/build/tmp"
+readonly test_root="$(mktemp -d "$repository_root/build/tmp/android-build.XXXXXX")"
 trap 'rm -rf "$test_root"' EXIT
 
 fail() {

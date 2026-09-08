@@ -291,7 +291,7 @@ fn recovery_log_cleanup_only_decreases_allocation_and_restores_health() {
 
 #[test]
 fn sqlite_recovery_footprint_is_derived_from_real_wal_frames() {
-    let directory = tempfile::tempdir().expect("SQLite recovery directory");
+    let directory = crate::temporary::tempdir().expect("SQLite recovery directory");
     let database_path = directory.path().join("database.sqlite");
     let connection = rusqlite::Connection::open(&database_path).expect("SQLite database");
     connection
@@ -327,7 +327,7 @@ fn sqlite_recovery_footprint_is_derived_from_real_wal_frames() {
 
 #[test]
 fn sqlite_recovery_footprint_rejects_a_truncated_wal_header() {
-    let directory = tempfile::tempdir().expect("SQLite recovery directory");
+    let directory = crate::temporary::tempdir().expect("SQLite recovery directory");
     let database_path = directory.path().join("database.sqlite");
     let connection = rusqlite::Connection::open(&database_path).expect("SQLite database");
     connection

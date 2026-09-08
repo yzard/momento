@@ -1,9 +1,8 @@
 use momento_api::database::{create_pool_at, init_database, SqliteBootstrapFootprintSpec};
-use tempfile::TempDir;
 
 #[test]
 fn file_pool_enables_wal_and_busy_timeout() {
-    let directory = TempDir::new().expect("Failed to create temporary directory");
+    let directory = crate::temporary::tempdir().expect("Failed to create temporary directory");
     let database_path = directory.path().join("database.sqlite");
     let pool = create_pool_at(&database_path, 2).expect("Failed to create database pool");
     let connection = pool.get().expect("Failed to get database connection");
@@ -38,7 +37,7 @@ fn file_pool_enables_wal_and_busy_timeout() {
 
 #[test]
 fn wal_reader_is_not_blocked_by_uncommitted_writer() {
-    let directory = TempDir::new().expect("Failed to create temporary directory");
+    let directory = crate::temporary::tempdir().expect("Failed to create temporary directory");
     let database_path = directory.path().join("database.sqlite");
     let pool = create_pool_at(&database_path, 2).expect("Failed to create database pool");
     let writer = pool.get().expect("Failed to get writer connection");
@@ -72,7 +71,7 @@ fn wal_reader_is_not_blocked_by_uncommitted_writer() {
 fn fresh_schema_bootstrap_footprint_bounds_the_published_database() {
     use std::os::unix::fs::MetadataExt;
 
-    let directory = TempDir::new().expect("bootstrap directory");
+    let directory = crate::temporary::tempdir().expect("bootstrap directory");
     let database_path = directory.path().join("database.sqlite");
     let spec = SqliteBootstrapFootprintSpec::derive(4096).expect("bootstrap footprint");
     let pool = create_pool_at(&database_path, 2).expect("fresh database pool");
@@ -98,7 +97,7 @@ fn fresh_schema_bootstrap_footprint_bounds_the_published_database() {
 
 #[test]
 fn fresh_bootstrap_recovers_only_a_valid_empty_source_owned_temporary() {
-    let directory = TempDir::new().expect("bootstrap directory");
+    let directory = crate::temporary::tempdir().expect("bootstrap directory");
     let database_path = directory.path().join("database.sqlite");
     let temporary_path = directory
         .path()
@@ -116,7 +115,7 @@ fn fresh_bootstrap_recovers_only_a_valid_empty_source_owned_temporary() {
 #[test]
 fn fresh_bootstrap_preserves_untrusted_or_nonempty_temporaries_for_inspection() {
     for fixture in ["invalid", "nonempty"] {
-        let directory = TempDir::new().expect("bootstrap directory");
+        let directory = crate::temporary::tempdir().expect("bootstrap directory");
         let database_path = directory.path().join("database.sqlite");
         let temporary_path = directory
             .path()
@@ -148,7 +147,7 @@ fn fresh_bootstrap_preserves_untrusted_or_nonempty_temporaries_for_inspection() 
 
 #[test]
 fn bootstrap_rejects_a_schema_shaped_file_without_momento_identity() {
-    let directory = TempDir::new().expect("bootstrap directory");
+    let directory = crate::temporary::tempdir().expect("bootstrap directory");
     let database_path = directory.path().join("database.sqlite");
     let temporary_path = directory
         .path()

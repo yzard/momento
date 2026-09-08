@@ -1,3 +1,6 @@
+#[path = "../../src/test_support/temporary.rs"]
+mod temporary;
+
 mod build_version;
 mod config_cli;
 mod config_file;

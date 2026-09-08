@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::temporary::tempdir;
 use axum::extract::ws::Message;
 use llm_service::result_output::encode_failed_result;
 use llm_service::transport::{
@@ -9,7 +10,6 @@ use llm_service::transport::{
 };
 use momento_common::llm::result_stream::ResultManifest;
 use momento_common::llm::{decode_result_chunk, JobInputDescriptor, ServiceControlMessage};
-use tempfile::tempdir;
 
 fn failed_result(job_id: &str) -> (ResultManifest, Vec<u8>) {
     let output = encode_failed_result(

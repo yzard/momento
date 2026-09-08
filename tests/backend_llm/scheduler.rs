@@ -1,4 +1,17 @@
 use async_trait::async_trait;
+
+#[test]
+fn successful_content_mime_correction_is_logged_at_info() {
+    let source = include_str!("../../src/backend_llm/scheduler.rs");
+    let message = source
+        .find("\"AI input MIME differs from verified content; using detected encoding\"")
+        .unwrap();
+    let event = source[..message].rfind("tracing::").unwrap();
+    assert!(source[event..message]
+        .trim_start()
+        .starts_with("tracing::info!("));
+}
+use crate::temporary::tempdir;
 use llm_service::config::{Config, SchedulerConfig};
 use llm_service::provider::{InferenceResponse, InputInferenceResponse, ServiceManager};
 use llm_service::result_output::encode_completed_result;
@@ -15,7 +28,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 struct MockResultDeliveryTransport {
@@ -580,7 +592,10 @@ async fn classifier_job_uses_first_input_as_aggregate_and_preserves_all_input_re
         .expect("scheduler"),
     );
     // A JPEG mislabeled as DNG must reach the runtime unchanged, without LibRaw.
-    let input_bytes = [b"\xff\xd8\xff\xe1first".to_vec(), b"second".to_vec()];
+    let input_bytes = [
+        b"\xff\xd8\xff\xe1first".to_vec(),
+        b"\xff\xd8\xff\xe1second".to_vec(),
+    ];
     let descriptors = input_bytes
         .iter()
         .enumerate()
@@ -1238,7 +1253,7 @@ async fn scheduler_refills_a_completed_slot_before_a_slow_job_finishes() {
         )
         .expect("scheduler"),
     );
-    let bytes = b"image".to_vec();
+    let bytes = b"\xff\xd8\xff\xe1image".to_vec();
     let descriptor = QueueInputDescriptor {
         sequence: 0,
         filename: "input.jpg".to_string(),
@@ -1649,6 +1664,140 @@ async fn deferred_result_delivery_does_not_consume_a_delivery_attempt() {
 }
 
 #[tokio::test]
+async fn transient_delivery_failure_retries_beyond_the_old_limit() {
+    let directory = tempdir().unwrap();
+    let scheduler = Arc::new(
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig::default(),
+            Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+                service: Vec::new(),
+                ..Config::default()
+            })))),
+            MockResultDeliveryTransport::failing("result receipt timed out"),
+        )
+        .unwrap(),
+    );
+    let path = write_callback_result(directory.path(), "aa1234", "client-a");
+    std::fs::write(
+        path.join("callback.json"),
+        r#"{"attempts":100,"next_attempt_at":0,"last_error":null}"#,
+    )
+    .unwrap();
+    let task = tokio::spawn(scheduler.run());
+    for _ in 0..100 {
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path.join("callback.json")).unwrap()).unwrap();
+        if state["attempts"] == 101 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    task.abort();
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.join("callback.json")).unwrap()).unwrap();
+    assert_eq!(state["attempts"], 101);
+    assert!(path.join("result-records.bin").exists());
+    assert!(!directory.path().join("failed/aa1234").exists());
+}
+
+#[test]
+fn recovery_resumes_only_complete_transient_delivery_failures() {
+    let directory = tempdir().unwrap();
+    let make_scheduler = || {
+        Scheduler::new(
+            directory.path().to_path_buf(),
+            SchedulerConfig::default(),
+            Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+                service: Vec::new(),
+                ..Config::default()
+            })))),
+            MockResultDeliveryTransport::acknowledging(),
+        )
+        .unwrap()
+    };
+    drop(make_scheduler());
+    for (id, reason) in [
+        ("aa01", "upstream inference request failed: result delivery retry attempts exhausted after 10 attempts: result receipt timed out"),
+        ("aa02", "Momento rejected inference result: invalid payload"),
+        ("aa03", "upstream inference request failed: result delivery retry attempts exhausted after 10 attempts: timeout"),
+        ("aa04", "upstream inference request failed: result delivery retry attempts exhausted after 10 attempts: timeout"),
+    ] {
+        let path = write_callback_result(directory.path(), id, "client-a");
+        std::fs::write(path.join("failure.json"), reason).unwrap();
+        if id == "aa03" { std::fs::remove_file(path.join("result-records.bin")).unwrap(); }
+        std::fs::rename(path, directory.path().join("failed").join(id)).unwrap();
+    }
+    std::fs::write(directory.path().join("cancelled/client-a-aa04"), "").unwrap();
+    let scheduler = make_scheduler();
+    assert!(directory
+        .path()
+        .join("callback_pending/aa01/result-records.bin")
+        .exists());
+    for id in ["aa02", "aa03", "aa04"] {
+        assert!(directory.path().join("failed").join(id).exists());
+    }
+    assert_eq!(
+        scheduler
+            .missing_jobs(
+                "client-a",
+                &["aa01".into(), "aa02".into(), "aa04".into(), "bb01".into()]
+            )
+            .unwrap(),
+        vec!["bb01"]
+    );
+    assert!(scheduler
+        .missing_jobs("other-client", &["aa01".into()])
+        .is_err());
+    assert!(scheduler
+        .missing_jobs("client-a", &["../bad".into()])
+        .is_err());
+    assert!(scheduler
+        .missing_jobs("client-a", &vec!["aa01".into(); 257])
+        .is_err());
+}
+
+#[tokio::test]
+async fn delivery_retry_metadata_write_failure_does_not_park_the_result() {
+    for deferred in [false, true] {
+        let directory = tempdir().unwrap();
+        let delivery = if deferred {
+            MockResultDeliveryTransport::returning(ResultDeliveryOutcome::Deferred {
+                retry_after_ms: 1000,
+            })
+        } else {
+            MockResultDeliveryTransport::failing("timeout")
+        };
+        let scheduler = Arc::new(
+            Scheduler::new(
+                directory.path().to_path_buf(),
+                SchedulerConfig::default(),
+                Arc::new(Mutex::new(ServiceManager::new(Arc::new(Config {
+                    service: Vec::new(),
+                    ..Config::default()
+                })))),
+                delivery.clone(),
+            )
+            .unwrap(),
+        );
+        let path = write_callback_result(directory.path(), "aa1234", "client-a");
+        std::fs::create_dir(path.join("callback.json")).unwrap();
+        let task = tokio::spawn(scheduler.run());
+        for _ in 0..100 {
+            if !delivery.deliveries.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!delivery.deliveries.lock().await.is_empty());
+        assert!(path.join("result-records.bin").exists());
+        assert!(!directory.path().join("failed/aa1234").exists());
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn disconnected_client_results_resume_when_the_client_reconnects() {
     let directory = tempdir().expect("queue directory");
     let config = Arc::new(Config {
@@ -1660,7 +1809,6 @@ async fn disconnected_client_results_resume_when_the_client_reconnects() {
         Scheduler::new(
             directory.path().to_path_buf(),
             SchedulerConfig {
-                result_delivery_max_attempts: 1,
                 result_delivery_max_concurrent_deliveries: 1,
                 ..SchedulerConfig::default()
             },
@@ -1818,7 +1966,6 @@ async fn cancelled_processing_failure_is_deleted_instead_of_retained_as_failed()
             SchedulerConfig {
                 result_delivery_acknowledgement_timeout_seconds: 1,
                 result_delivery_retry_delay_seconds: 1,
-                result_delivery_max_attempts: 1,
                 result_delivery_max_concurrent_deliveries: 1,
                 ..SchedulerConfig::default()
             },

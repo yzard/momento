@@ -18,7 +18,7 @@ fn descriptor(bytes: &[u8]) -> JobInputDescriptor {
 
 #[test]
 fn content_store_hard_links_identical_inputs_and_removes_the_last_reference() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let queue = directory.path().join("queue");
     fs::create_dir_all(&queue).expect("queue directory");
     let store = ContentStore::new(&queue).expect("content store");
@@ -61,7 +61,7 @@ fn content_store_hard_links_identical_inputs_and_removes_the_last_reference() {
 
 #[test]
 fn content_store_startup_removes_interrupted_raw_normalization_temporaries() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let queue = directory.path().join("queue");
     fs::create_dir_all(&queue).expect("queue directory");
     let bytes = b"durable raw input";

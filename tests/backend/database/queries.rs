@@ -158,3 +158,63 @@ fn visible_cluster_page_canonicalizes_user_specific_media_sets() {
 
     assert_eq!(rows, vec![(Some(cluster_ids[0]), 1, 2)]);
 }
+#[test]
+fn submitted_reconciliation_guards_receipts_terminal_states_and_attempts() {
+    use momento_api::database::queries::ai_jobs;
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch("CREATE TABLE llm_jobs(id TEXT, media_id INTEGER, task TEXT, status TEXT, attempts INTEGER, state_version INTEGER, claimed_at TEXT, available_at TEXT, updated_at TEXT); CREATE TABLE llm_result_receipts(job_id TEXT, state TEXT);").unwrap();
+    for (index, receipt) in [
+        "receiving",
+        "received",
+        "processing",
+        "cleanup_pending",
+        "file_cleanup_pending",
+        "failed",
+        "discarded",
+        "cleaned",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = format!("{index:032x}");
+        connection.execute("INSERT INTO llm_jobs(id,media_id,task,status,attempts,state_version) VALUES (?,1,'ocr','submitted',2,5)", [&id]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO llm_result_receipts VALUES (?,?)",
+                rusqlite::params![id, receipt],
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .execute(ai_jobs::REQUEUE_MISSING_SUBMITTED, rusqlite::params![id, 1])
+                .unwrap(),
+            0
+        );
+        let expected = usize::from(matches!(*receipt, "discarded" | "cleaned"));
+        assert_eq!(
+            connection
+                .execute(ai_jobs::REQUEUE_MISSING_SUBMITTED, rusqlite::params![id, 2])
+                .unwrap(),
+            expected
+        );
+    }
+    for status in ["cancelled", "completed", "failed", "submitting", "queued"] {
+        connection.execute("INSERT INTO llm_jobs(id,media_id,task,status,attempts,state_version) VALUES (?,1,'ocr',?,2,5)", rusqlite::params![status,status]).unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    ai_jobs::REQUEUE_MISSING_SUBMITTED,
+                    rusqlite::params![status, 2]
+                )
+                .unwrap(),
+            0
+        );
+    }
+    let count = connection
+        .prepare(ai_jobs::SELECT_SUBMITTED_PAGE)
+        .unwrap()
+        .query_map([""], |r| r.get::<_, String>(0))
+        .unwrap()
+        .count();
+    assert_eq!(count, 0);
+}

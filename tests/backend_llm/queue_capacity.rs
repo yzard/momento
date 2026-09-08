@@ -12,7 +12,7 @@ fn capacity_input(content_hash: &str, byte_size: u64, is_cached: bool) -> QueueC
 
 #[test]
 fn reservations_are_atomic_and_release_on_drop() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     std::fs::create_dir(&content).expect("content directory");
     let capacity = QueueCapacityManager::new(content, directory.path().to_path_buf(), 100, 1)
@@ -38,7 +38,7 @@ fn reservations_are_atomic_and_release_on_drop() {
 
 #[test]
 fn an_in_progress_content_hash_is_not_uploaded_twice() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     std::fs::create_dir(&content).expect("content directory");
     let capacity = QueueCapacityManager::new(content, directory.path().to_path_buf(), 1_000, 1)
@@ -60,7 +60,7 @@ fn an_in_progress_content_hash_is_not_uploaded_twice() {
 
 #[test]
 fn duplicate_descriptors_in_one_job_reserve_unique_content_once() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     std::fs::create_dir(&content).expect("content directory");
     let capacity = QueueCapacityManager::new(content, directory.path().to_path_buf(), 100, 1)
@@ -83,7 +83,7 @@ fn duplicate_descriptors_in_one_job_reserve_unique_content_once() {
 
 #[test]
 fn committed_content_is_released_explicitly() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     std::fs::create_dir(&content).expect("content directory");
     let capacity = QueueCapacityManager::new(content, directory.path().to_path_buf(), 100, 1)
@@ -109,7 +109,7 @@ fn committed_content_is_released_explicitly() {
 
 #[test]
 fn one_job_larger_than_the_budget_is_permanently_rejected() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     std::fs::create_dir(&content).expect("content directory");
     let capacity = QueueCapacityManager::new(content, directory.path().to_path_buf(), 100, 1)
@@ -125,7 +125,7 @@ fn one_job_larger_than_the_budget_is_permanently_rejected() {
 
 #[test]
 fn startup_reconstructs_unique_content_usage() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     let source_directory = content.join("hash");
     std::fs::create_dir_all(&source_directory).expect("content directory");
@@ -143,7 +143,7 @@ fn startup_reconstructs_unique_content_usage() {
 
 #[test]
 fn unsatisfied_working_reserve_pauses_admission_without_blocking_startup() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let content = directory.path().join("content");
     std::fs::create_dir(&content).expect("content directory");
     let capacity =

@@ -55,8 +55,6 @@ pub struct SchedulerConfig {
     pub result_delivery_acknowledgement_timeout_seconds: u64,
     #[serde(default = "defaults::result_delivery_retry_delay_seconds")]
     pub result_delivery_retry_delay_seconds: u64,
-    #[serde(default = "defaults::result_delivery_max_attempts")]
-    pub result_delivery_max_attempts: usize,
     #[serde(default = "defaults::result_delivery_max_concurrent_deliveries")]
     pub result_delivery_max_concurrent_deliveries: usize,
 }
@@ -72,7 +70,6 @@ impl Default for SchedulerConfig {
             result_delivery_acknowledgement_timeout_seconds:
                 defaults::RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS,
             result_delivery_retry_delay_seconds: defaults::RESULT_DELIVERY_RETRY_DELAY_SECONDS,
-            result_delivery_max_attempts: defaults::RESULT_DELIVERY_MAX_ATTEMPTS,
             result_delivery_max_concurrent_deliveries:
                 defaults::RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES,
         }
@@ -269,7 +266,6 @@ impl Config {
             .result_delivery_acknowledgement_timeout_seconds
             == 0
             || self.scheduler.result_delivery_retry_delay_seconds == 0
-            || self.scheduler.result_delivery_max_attempts == 0
             || self.scheduler.result_delivery_max_concurrent_deliveries == 0
         {
             return Err(ServiceError::Configuration(

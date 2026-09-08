@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+TEMPORARY_ROOT = Path(__file__).resolve().parents[2] / "build" / "tmp"
+TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
+
 SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "runtime_input.py"
 SPECIFICATION = importlib.util.spec_from_file_location("runtime_input_source", SOURCE_PATH)
 RUNTIME_INPUT = importlib.util.module_from_spec(SPECIFICATION)
@@ -29,7 +32,7 @@ def descriptor(job_id, content, mime_type):
 
 class RuntimeInputTests(unittest.TestCase):
     def test_reads_the_derived_queue_input(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             root = Path(directory)
             job_id = "abcdef12"
             content = b"image"
@@ -42,7 +45,7 @@ class RuntimeInputTests(unittest.TestCase):
     def test_rejects_a_symlinked_input(self):
         if not hasattr(os, "O_NOFOLLOW"):
             self.skipTest("O_NOFOLLOW is unavailable")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             root = Path(directory)
             job_id = "abcdef12"
             content = b"image"

@@ -1,11 +1,10 @@
 use std::os::unix::fs::PermissionsExt;
 
 use momento_common::config_file::{replace_config, write_new_config};
-use tempfile::TempDir;
 
 #[test]
 fn writes_private_config_atomically_without_overwriting() {
-    let directory = TempDir::new().expect("Failed to create config fixture");
+    let directory = crate::temporary::tempdir().expect("Failed to create config fixture");
     let path = directory.path().join("nested").join("config.toml");
 
     write_new_config(&path, "first").expect("Config should be written");
@@ -21,7 +20,7 @@ fn writes_private_config_atomically_without_overwriting() {
 
 #[test]
 fn replaces_existing_config_atomically() {
-    let directory = TempDir::new().expect("Failed to create config fixture");
+    let directory = crate::temporary::tempdir().expect("Failed to create config fixture");
     let path = directory.path().join("config.toml");
     write_new_config(&path, "first").expect("Config should be written");
 
@@ -36,7 +35,7 @@ fn replaces_existing_config_atomically() {
 
 #[test]
 fn replacing_missing_config_is_an_error() {
-    let directory = TempDir::new().expect("Failed to create config fixture");
+    let directory = crate::temporary::tempdir().expect("Failed to create config fixture");
     let path = directory.path().join("config.toml");
 
     let error = replace_config(&path, "contents").expect_err("Config must already exist");

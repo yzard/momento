@@ -3,6 +3,20 @@ use std::time::Duration;
 use momento_api::database::operations::BinaryMediaQuery;
 
 #[tokio::test]
+async fn result_cleanup_with_no_remaining_receipt_is_idempotent() {
+    let handles = crate::test_utils::test_executor_handles(crate::test_utils::create_test_db());
+    for _ in 0..2 {
+        let outcome = handles
+            .sqlite
+            .cleanup_llm_result_staging_page_durable("aa1234".into(), 256)
+            .await
+            .unwrap();
+        assert!(outcome.complete);
+        assert_eq!(outcome.deleted, 0);
+    }
+}
+
+#[tokio::test]
 async fn one_writer_drains_its_queue_while_readers_remain_available() {
     use momento_api::config::ThreadPoolConfig;
     use momento_api::database::{create_pool_at, init_database};
@@ -11,7 +25,7 @@ async fn one_writer_drains_its_queue_while_readers_remain_available() {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::temporary::tempdir().unwrap();
     let sizing = RuntimeSizing::validate_worker_counts(
         &ThreadPoolConfig {
             cpu_workers: 1,

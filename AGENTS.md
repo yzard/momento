@@ -36,6 +36,18 @@ The r2d2 connection limit remains `sqlite_workers`, with one additional maintena
 
 ## Conventions
 
+Host test and development temporary files belong under repository `build/tmp/`, never the
+system `/tmp`. Rust tests use `src/test_support/temporary.rs` (including direct test-binary
+execution); Python and shell fixtures pass the repository temporary directory explicitly.
+Temporary fixtures must be deleted after testing. Rust fixtures live in a unique process-owned
+directory with exit cleanup for statically retained fixtures, including failed test runs;
+Python uses context managers and shell tests use exit traps. Never clean another running
+test's directory or the entire shared temporary root. Forced termination (SIGKILL/abort)
+cannot run exit cleanup and may leave that process's directory behind.
+When running compilers or other development tools, create `build/tmp/` first and set
+`TMPDIR`, `TEMP`, and `TMP` to its absolute path. Production service temporary storage stays
+on its mounted data volume (`/data/tmp` or `/data/llm/tmp`), not the container's `/tmp`.
+
 This repo follows the shared agent skills. Read them before changing code — they are the
 source of truth, and this file only records what is specific to Momento.
 
@@ -327,7 +339,7 @@ cannot recreate cancelled work.
 ```text
 .tmp -> queuing -> processing -> deleted after Momento durably receives the result
                             \-> callback_pending -> deleted after a successful retry
-                                                 \-> failed after retry exhaustion
+                                                 \-> failed after permanent receipt rejection
                   processing -> failed for terminal local queue/processing failure
 ```
 
@@ -387,11 +399,14 @@ not survive their parent process.
 One failed job does not prevent other in-flight jobs from finishing. Provider or runtime inference
 errors become durable failed result payloads. Loss of the local runtime transport is retried from
 the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Result
-delivery uses its acknowledgement timeout, fixed retry delay, and maximum-attempt policy. A durable
+delivery uses its acknowledgement timeout and fixed retry delay without an attempt limit. A durable
 receipt acknowledgement deletes the queue directory. A deferred receipt updates its next delivery time
 without consuming an attempt. A permanent receipt rejection writes durable failure evidence and moves
-the job to `failed`; timeout or disconnect keeps it in `callback_pending`, and retry exhaustion moves it
-to `failed`.
+the job to `failed`; timeout or disconnect keeps it in `callback_pending` until receipt or cancellation.
+Startup restores complete results parked by older versions solely due to delivery retry exhaustion.
+Momento reconciles submitted jobs on connection and every 60 seconds in pages of at most 256 IDs.
+Only jobs missing from llm-service and without a usable local result receipt are requeued, preserving
+the original wire attempt. Completed and cancelled jobs are never resurrected.
 
 ### Result contract
 

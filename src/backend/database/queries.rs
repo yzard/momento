@@ -1210,6 +1210,8 @@ pub mod metadata_clean {
 }
 
 pub mod ai_jobs {
+    pub const SELECT_SUBMITTED_PAGE: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'submitted' AND id > ? AND NOT EXISTS (SELECT 1 FROM llm_result_receipts r WHERE r.job_id = llm_jobs.id AND r.state NOT IN ('discarded', 'cleaned')) ORDER BY id LIMIT 256";
+    pub const REQUEUE_MISSING_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, attempts = attempts - 1, claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ? AND attempts > 0 AND NOT EXISTS (SELECT 1 FROM llm_result_receipts r WHERE r.job_id = llm_jobs.id AND r.state NOT IN ('discarded', 'cleaned'))";
     pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
     pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
@@ -2105,6 +2107,21 @@ pub mod llm_callback {
                               SELECT 1 FROM llm_result_staging AS staging
                                WHERE staging.job_id = r.job_id
                           )
+               )
+    "#;
+    pub const RESULT_CLEANUP_ALREADY_FINISHED: &str = r#"
+        SELECT NOT EXISTS (SELECT 1 FROM llm_result_staging WHERE job_id = ?1)
+           AND (
+                   NOT EXISTS (SELECT 1 FROM llm_result_receipts WHERE job_id = ?1)
+                OR EXISTS (
+                       SELECT 1 FROM llm_result_receipts AS r
+                       JOIN file_operation_groups AS g ON g.id = r.journal_group_id
+                       JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id
+                        WHERE r.job_id = ?1
+                          AND r.state IN ('cleaned', 'discarded', 'failed')
+                          AND g.state IN ('cleaned', 'rolled_back')
+                          AND s.state = 'released'
+                   )
                )
     "#;
     pub const SELECT_RESULT_STAGING_PAGE: &str = r#"

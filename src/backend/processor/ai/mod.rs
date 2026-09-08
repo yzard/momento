@@ -179,12 +179,75 @@ pub async fn run(
                 }
             }
         };
-        tokio::join!(submission_loop, cancellation_loop);
+        let reconciliation_loop = async {
+            loop {
+                tokio::select! {
+                    _ = connection.closed() => return,
+                    result = reconcile_submitted_jobs(&sqlite, &connection, &scheduler, &handle) => {
+                        if let Err(error) = result {
+                            tracing::warn!(error, "LLM submitted-job reconciliation deferred");
+                        }
+                    }
+                }
+                tokio::select! {
+                    _ = connection.closed() => return,
+                    () = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                }
+            }
+        };
+        tokio::join!(submission_loop, cancellation_loop, reconciliation_loop);
         tracing::warn!(
             client_id = config.llm.client_id,
             "LLM WebSocket disconnected"
         );
         tokio::time::sleep(TRANSPORT_RECONNECT_DELAY).await;
+    }
+}
+
+pub async fn reconcile_submitted_jobs(
+    sqlite: &SqliteExecutorHandle,
+    connection: &LlmConnection,
+    scheduler: &SchedulerHandle,
+    handle: &TransportHandle,
+) -> Result<(), String> {
+    let mut after_id = String::new();
+    loop {
+        let _permit = scheduler
+            .acquire_durable(
+                DurableSourceId::LlmSubmission,
+                SchedulerAdmissionKind::NewClaim,
+            )
+            .await?;
+        let jobs = sqlite
+            .load_submitted_llm_page_durable(after_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(last) = jobs.last() else {
+            return Ok(());
+        };
+        after_id = last.job_id.clone();
+        let missing = connection
+            .missing_jobs(jobs.iter().map(|job| job.job_id.clone()).collect())
+            .await?;
+        if missing
+            .iter()
+            .any(|id| !jobs.iter().any(|job| &job.job_id == id))
+        {
+            return Err("LLM reconciliation returned an unrequested job".to_string());
+        }
+        for job in jobs {
+            if !missing.contains(&job.job_id) {
+                continue;
+            }
+            sqlite
+                .finish_llm_submission_durable(FinishLlmSubmission::RequeueMissing {
+                    job_id: job.job_id,
+                    attempt: job.attempts,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            handle.wake_submissions();
+        }
     }
 }
 

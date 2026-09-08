@@ -156,7 +156,7 @@ async fn thumbnail_reconciliation_cleans_history_without_touching_live_or_active
 #[tokio::test]
 async fn independent_cleanup_uses_a_bounded_rolling_window() {
     use momento_api::runtime::{DurableSourceId, ExecutorRuntime, RuntimeSizing};
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::temporary::tempdir().unwrap();
     let sizing = RuntimeSizing::validate_worker_counts(
         &momento_api::config::ThreadPoolConfig {
             cpu_workers: 2,

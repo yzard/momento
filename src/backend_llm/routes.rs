@@ -175,6 +175,24 @@ async fn handle_control(
     let message = serde_json::from_str::<ClientControlMessage>(text)
         .map_err(|error| ServiceError::BadRequest(error.to_string()))?;
     match message {
+        ClientControlMessage::CheckJobs {
+            request_id,
+            job_ids,
+        } => {
+            let missing_job_ids = state.scheduler.missing_jobs(client_id, &job_ids)?;
+            state
+                .connections
+                .send(
+                    client_id,
+                    generation,
+                    ServiceControlMessage::JobsChecked {
+                        request_id,
+                        missing_job_ids,
+                    },
+                )
+                .await
+                .map_err(ServiceError::Internal)
+        }
         ClientControlMessage::SubmissionStart { manifest } => {
             start_submission(state, client_id, generation, submissions, manifest).await
         }

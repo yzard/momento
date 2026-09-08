@@ -15,7 +15,7 @@ fn write_allocated_file(path: &std::path::Path, modified_seconds: i64) {
 
 #[test]
 fn log_cleanup_uses_bounded_oldest_batches_and_preserves_unowned_files() {
-    let directory = tempfile::tempdir().expect("log directory");
+    let directory = crate::temporary::tempdir().expect("log directory");
     let first_date = NaiveDate::from_ymd_opt(2020, 1, 1).expect("first date");
     for offset in 0..300_i64 {
         let date = first_date
@@ -66,7 +66,7 @@ fn log_cleanup_uses_bounded_oldest_batches_and_preserves_unowned_files() {
 fn log_inventory_rejects_symlink_entries() {
     use std::os::unix::fs::symlink;
 
-    let directory = tempfile::tempdir().expect("log directory");
+    let directory = crate::temporary::tempdir().expect("log directory");
     let target = directory.path().join("outside.log");
     write_allocated_file(&target, 1);
     symlink(&target, directory.path().join("momento-api.2020-01-01.log")).expect("log symlink");

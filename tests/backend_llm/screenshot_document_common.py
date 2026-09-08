@@ -5,6 +5,9 @@ import threading
 import types
 import unittest
 from pathlib import Path
+
+TEMPORARY_ROOT = Path(__file__).resolve().parents[2] / "build" / "tmp"
+TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
 from unittest import mock
 
 import numpy
@@ -169,7 +172,7 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
                 self.arguments = arguments
 
         modules = self.paddlex_modules(create_predictor, FakeCropByPolys, cuda_device_count=1)
-        with tempfile.TemporaryDirectory() as model_root:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as model_root:
             detection_model_path = Path(model_root) / "detection"
             recognition_model_path = Path(model_root) / "recognition"
             detection_model_path.mkdir()
@@ -191,7 +194,7 @@ class ScreenshotDocumentCommonTests(unittest.TestCase):
             return mock.Mock()
 
         modules = self.paddlex_modules(create_predictor, mock.Mock, cuda_device_count=1)
-        with tempfile.TemporaryDirectory() as model_root:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as model_root:
             detection_model_path = Path(model_root) / "detection"
             detection_model_path.mkdir()
             missing_recognition_model_path = Path(model_root) / "missing-recognition"

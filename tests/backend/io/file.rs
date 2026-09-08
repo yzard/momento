@@ -82,7 +82,7 @@ fn path_claim_conflicts_are_component_scoped_and_read_sharing_is_allowed() {
 
 #[test]
 fn storage_root_registry_opens_fixed_directories_and_rejects_symlinks() {
-    let directory = tempfile::tempdir().expect("data directory");
+    let directory = crate::temporary::tempdir().expect("data directory");
     for root in StorageRootId::ALL {
         if root != StorageRootId::Static {
             std::fs::create_dir(directory.path().join(root.directory_name()))

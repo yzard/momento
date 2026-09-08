@@ -235,6 +235,54 @@ impl Scheduler {
         Ok(QueueAdmission::Staging(Box::new(staging)))
     }
 
+    pub fn missing_jobs(
+        &self,
+        client_id: &str,
+        job_ids: &[String],
+    ) -> Result<Vec<String>, ServiceError> {
+        if job_ids.len() > 256 || job_ids.iter().any(|id| !is_valid_job_id(id)) {
+            return Err(ServiceError::BadRequest(
+                "invalid job reconciliation page".to_string(),
+            ));
+        }
+        let mut missing = Vec::new();
+        for id in job_ids {
+            if self.cancellation_marker(client_id, id).exists() {
+                continue;
+            }
+            let mut found = false;
+            for state in [
+                ".tmp",
+                "queuing",
+                "processing",
+                "callback_pending",
+                "failed",
+                ".deleting",
+            ] {
+                let path = self.queue_dir.join(state).join(id);
+                match std::fs::read(path.join("manifest.json")) {
+                    Ok(bytes) => {
+                        let manifest: QueueManifest = serde_json::from_slice(&bytes)
+                            .map_err(|error| ServiceError::Internal(error.to_string()))?;
+                        if manifest.client_id != client_id {
+                            return Err(ServiceError::Conflict(
+                                "job belongs to another client".to_string(),
+                            ));
+                        }
+                        found = true;
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io_error(error)),
+                }
+            }
+            if !found {
+                missing.push(id.clone());
+            }
+        }
+        Ok(missing)
+    }
+
     pub fn accept(
         &self,
         manifest: QueueManifest,
@@ -985,10 +1033,19 @@ impl Scheduler {
                     "queued input hash does not match manifest".to_string(),
                 ));
             }
-            let detected_mime = crate::input_normalizer::encoded_image_mime_type(&header);
-            let input_mime = detected_mime.unwrap_or(&descriptor.mime_type);
+            let input_mime = crate::input_normalizer::detect_input_mime(&path, &header)
+                .await
+                .map_err(|error| {
+                    LoadInputsError::Inference(ServiceError::Upstream(format!(
+                        "input_sequence={} filename={:?} declared_mime={} content_hash={}: {error}",
+                        descriptor.sequence,
+                        descriptor.filename,
+                        descriptor.mime_type,
+                        descriptor.content_hash
+                    )))
+                })?;
             if input_mime != descriptor.mime_type {
-                warn!(
+                tracing::info!(
                     job_id = manifest.job_id,
                     media_id = manifest.media_id,
                     task = manifest.task,
@@ -996,11 +1053,11 @@ impl Scheduler {
                     filename = descriptor.filename,
                     declared_mime = descriptor.mime_type,
                     detected_mime = input_mime,
-                    "AI input MIME differs from verified file header; using detected encoding"
+                    "AI input MIME differs from verified content; using detected encoding"
                 );
             }
             let (runtime_path, runtime_byte_size, runtime_content_hash, runtime_mime_type) =
-                if requires_raw_normalization(input_mime) {
+                if requires_raw_normalization(&input_mime) {
                     let normalized = self
                         .prepare_normalized_input(job_path, descriptor)
                         .await
@@ -1380,7 +1437,11 @@ impl Scheduler {
             }
             Ok(ResultDeliveryOutcome::Deferred { retry_after_ms }) => {
                 if let Err(error) = self.defer_result_delivery(&path, retry_after_ms) {
-                    self.fail(path, error.to_string());
+                    self.log_result_delivery_failure(
+                        &manifest,
+                        &format!("could not persist delivery deferral; retaining result: {error}"),
+                    );
+                    tokio::time::sleep(WORKER_ERROR_RETRY_DELAY).await;
                 }
             }
             Ok(ResultDeliveryOutcome::Rejected { error }) => {
@@ -1392,7 +1453,11 @@ impl Scheduler {
                 if let Err(error) =
                     self.record_result_delivery_failure(&path, delivery_error.message())
                 {
-                    self.fail(path, error.to_string());
+                    self.log_result_delivery_failure(
+                        &manifest,
+                        &format!("could not persist delivery retry; retaining result: {error}"),
+                    );
+                    tokio::time::sleep(WORKER_ERROR_RETRY_DELAY).await;
                 }
             }
         }
@@ -1446,14 +1511,8 @@ impl Scheduler {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ResultDeliveryState>(&bytes).ok())
             .unwrap_or_default();
-        state.attempts += 1;
+        state.attempts = state.attempts.saturating_add(1);
         state.last_error = Some(error.to_string());
-        if state.attempts >= self.configuration.result_delivery_max_attempts {
-            return Err(ServiceError::Upstream(format!(
-                "result delivery retry attempts exhausted after {} attempts: {error}",
-                state.attempts
-            )));
-        }
         state.next_attempt_at = chrono::Utc::now().timestamp()
             + self.configuration.result_delivery_retry_delay_seconds as i64;
         let bytes = serde_json::to_vec(&state)
@@ -1625,6 +1684,38 @@ fn sync_directory(path: &Path) -> Result<(), ServiceError> {
 }
 
 fn recover_queue(queue_dir: &Path) -> Result<(), ServiceError> {
+    // Older versions parked valid results after transient delivery retry exhaustion.
+    // Only that specific failure is recoverable here; permanent rejection stays terminal.
+    for entry in std::fs::read_dir(queue_dir.join("failed")).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let path = entry.path();
+        let failure = match std::fs::read_to_string(path.join("failure.json")) {
+            Ok(failure) => failure,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(error)),
+        };
+        if !failure.starts_with(
+            "upstream inference request failed: result delivery retry attempts exhausted after ",
+        ) || !durable_result_is_complete(&path)
+        {
+            continue;
+        }
+        let manifest: QueueManifest =
+            serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(io_error)?)
+                .map_err(|error| ServiceError::BadRequest(error.to_string()))?;
+        let marker = queue_dir
+            .join("cancelled")
+            .join(format!("{}-{}", manifest.client_id, manifest.job_id));
+        if marker.exists() {
+            continue;
+        }
+        let destination = queue_dir.join("callback_pending").join(entry.file_name());
+        transition_directory(&path, &destination)?;
+        tracing::info!(
+            job_id = manifest.job_id,
+            "Resumed durable result delivery after legacy retry exhaustion"
+        );
+    }
     let temporary_dir = queue_dir.join(".tmp");
     for entry in std::fs::read_dir(&temporary_dir).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;

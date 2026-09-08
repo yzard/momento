@@ -79,6 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gosu \
+    libimage-exiftool-perl \
     libjpeg-turbo8 \
     liblcms2-2 \
     libexpat1 \

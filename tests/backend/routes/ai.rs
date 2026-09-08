@@ -9,7 +9,6 @@ use momento_api::auth::create_access_token;
 use momento_api::config::{Config, ConfigManager};
 use momento_api::processor::ai::operation::AiFeature;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 
 fn admin_token(user_id: i64) -> String {
     create_access_token(user_id, "admin", "admin", &Config::default(), None)
@@ -68,7 +67,7 @@ async fn aggregate_status_requires_an_administrator() {
 
 #[tokio::test]
 async fn administrator_updates_a_live_ai_schedule_and_persists_config() {
-    let directory = TempDir::new().expect("temporary config directory");
+    let directory = crate::temporary::tempdir().expect("temporary config directory");
     let config_path = directory.path().join("config.toml");
     let config = Config::default();
     std::fs::write(

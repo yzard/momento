@@ -989,7 +989,7 @@ async fn test_webdav_duplicate_reuses_existing_media() {
 #[tokio::test]
 async fn test_concurrent_matching_hash_imports_create_one_media_row() {
     let _filesystem_test_guard = lock_webdav_test().await;
-    let database_directory = tempfile::tempdir().expect("database directory");
+    let database_directory = crate::temporary::tempdir().expect("database directory");
     let pool = create_pool_at(&database_directory.path().join("database.sqlite"), 2)
         .expect("database pool");
     init_database(&pool.get().expect("connection")).expect("database schema");

@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn drain_batch_retains_one_event_at_the_byte_boundary() {
-        let directory = tempfile::tempdir().expect("log directory");
+        let directory = crate::temporary::tempdir().expect("log directory");
         let logs = File::open(directory.path()).expect("logs handle");
         let budget = running_budget();
         let (producer, consumer) = bounded_log_ring(8).expect("log ring");
@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn drain_batch_stops_at_the_event_count_boundary() {
-        let directory = tempfile::tempdir().expect("log directory");
+        let directory = crate::temporary::tempdir().expect("log directory");
         let logs = File::open(directory.path()).expect("logs handle");
         let budget = running_budget();
         let (producer, consumer) = bounded_log_ring(65).expect("log ring");

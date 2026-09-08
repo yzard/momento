@@ -1,3 +1,6 @@
+#[path = "../../src/test_support/temporary.rs"]
+mod temporary;
+
 mod app;
 mod auth;
 mod config;

@@ -346,6 +346,10 @@ pub struct JobInputResult {
     deny_unknown_fields
 )]
 pub enum ClientControlMessage {
+    CheckJobs {
+        request_id: String,
+        job_ids: Vec<String>,
+    },
     SubmissionStart {
         manifest: JobManifest,
     },
@@ -393,6 +397,10 @@ pub enum ClientControlMessage {
     deny_unknown_fields
 )]
 pub enum ServiceControlMessage {
+    JobsChecked {
+        request_id: String,
+        missing_job_ids: Vec<String>,
+    },
     SubmissionReady {
         job_id: String,
         attempt: u32,

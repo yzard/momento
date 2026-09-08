@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::temporary::tempdir;
 use futures::{SinkExt, StreamExt};
 use llm_service::config::{Config, SchedulerConfig};
 use llm_service::provider::ServiceManager;
@@ -13,7 +14,6 @@ use momento_common::llm::{
     WEBSOCKET_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
-use tempfile::tempdir;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -23,6 +23,30 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[tokio::test]
+async fn authenticated_job_reconciliation_reports_missing_ids() {
+    let directory = tempdir().unwrap();
+    let (url, _scheduler, server) =
+        start_server(directory.path(), SchedulerConfig::default()).await;
+    let mut socket = connect(&url, "client-a").await;
+    send_control(
+        &mut socket,
+        ClientControlMessage::CheckJobs {
+            request_id: "check-1".into(),
+            job_ids: vec!["aa01".into()],
+        },
+    )
+    .await;
+    assert_eq!(
+        receive_control(&mut socket).await,
+        ServiceControlMessage::JobsChecked {
+            request_id: "check-1".into(),
+            missing_job_ids: vec!["aa01".into()],
+        }
+    );
+    server.abort();
+}
 
 async fn start_server(
     queue_dir: &Path,

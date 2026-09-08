@@ -2,7 +2,8 @@
 set -euo pipefail
 
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly test_root="$(mktemp -d)"
+mkdir -p "$repository_root/build/tmp"
+readonly test_root="$(mktemp -d "$repository_root/build/tmp/android-entrypoint.XXXXXX")"
 trap 'rm -rf "$test_root"' EXIT
 
 fail() {

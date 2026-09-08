@@ -41,6 +41,106 @@ const CLIENT_ID: &str = "momento-test";
 const API_KEY: &str = "test-key";
 
 #[tokio::test]
+async fn reconciliation_requeues_only_missing_submitted_jobs_with_the_same_attempt() {
+    use momento_api::database::operations::FinishLlmSubmission;
+    let pool = create_test_db();
+    let executors = crate::test_utils::test_executor_handles(pool.clone());
+    for (id, filename) in [
+        ("aa01", "missing.jpg"),
+        ("aa02", "present.jpg"),
+        ("aa03", "completed.jpg"),
+    ] {
+        let media_id = create_test_media(&pool, filename);
+        pool.get().unwrap().execute("INSERT INTO llm_jobs (id,media_id,task,status,attempts) VALUES (?,?,'ocr','submitted',1)", rusqlite::params![id,media_id]).unwrap();
+    }
+    pool.get()
+        .unwrap()
+        .execute("UPDATE llm_jobs SET status='completed' WHERE id='aa03'", [])
+        .unwrap();
+    let (address, server) = start_server(true, |mut socket| async move {
+        let ClientControlMessage::CheckJobs {
+            request_id,
+            job_ids,
+        } = receive_client_control(&mut socket).await
+        else {
+            panic!("expected reconciliation");
+        };
+        assert_eq!(job_ids, vec!["aa01", "aa02"]);
+        send_service_control(
+            &mut socket,
+            ServiceControlMessage::JobsChecked {
+                request_id,
+                missing_job_ids: vec!["aa01".into()],
+            },
+        )
+        .await;
+        // Keep the socket alive until the client has committed its reconciliation.
+        while let Some(Ok(message)) = socket.next().await {
+            if let Message::Ping(bytes) = message {
+                socket.send(Message::Pong(bytes)).await.unwrap();
+            }
+        }
+    })
+    .await;
+    let connection = LlmConnection::connect(
+        &address,
+        CLIENT_ID,
+        API_KEY,
+        executors.sqlite.clone(),
+        executors.file_io.clone(),
+        executors.scheduler.clone(),
+    )
+    .await
+    .unwrap();
+    let handle = TransportHandle::default();
+    momento_api::processor::ai::reconcile_submitted_jobs(
+        &executors.sqlite,
+        &connection,
+        &executors.scheduler,
+        &handle,
+    )
+    .await
+    .unwrap();
+    let statuses: Vec<(String, String, i64)> = pool
+        .get()
+        .unwrap()
+        .prepare("SELECT id,status,attempts FROM llm_jobs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            ("aa01".into(), "queued".into(), 0),
+            ("aa02".into(), "submitted".into(), 1),
+            ("aa03".into(), "completed".into(), 1)
+        ]
+    );
+    assert!(handle.submission_work_version() > 0);
+    // A stale response must not resurrect completed or cancelled work.
+    executors
+        .sqlite
+        .finish_llm_submission_durable(FinishLlmSubmission::RequeueMissing {
+            job_id: "aa03".into(),
+            attempt: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        pool.get()
+            .unwrap()
+            .query_row("SELECT status FROM llm_jobs WHERE id='aa03'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+        "completed"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn saturated_scheduler_defers_receipt_without_freezing_the_socket() {
     use momento_api::runtime::{DurableSourceId, SchedulerAdmissionKind};
     let pool = create_test_db();
@@ -2125,4 +2225,36 @@ async fn journal_cleanup_may_finish_before_result_staging_cleanup() {
         )
         .expect("cleanup-order terminal receipt");
     assert_eq!(terminal, ("cleaned".to_string(), "released".to_string(), 0));
+    for _ in 0..2 {
+        let repeated = executors
+            .sqlite
+            .cleanup_llm_result_staging_page_durable(JOB_ID.to_string(), 256)
+            .await
+            .unwrap();
+        assert!(repeated.complete);
+        assert_eq!(repeated.deleted, 0);
+    }
+    // Released capacity must not hide an unfinished receipt.
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE llm_result_receipts SET state='file_cleanup_pending' WHERE job_id=?",
+            [JOB_ID],
+        )
+        .unwrap();
+    assert!(executors
+        .sqlite
+        .cleanup_llm_result_staging_page_durable(JOB_ID.to_string(), 256)
+        .await
+        .is_err());
+}
+
+#[test]
+fn receipt_admission_deferral_is_logged_at_info() {
+    let source = include_str!("../../../../src/backend/processor/ai/transport.rs");
+    let message = source
+        .find("\"deferring LLM result receipt before publication\"")
+        .unwrap();
+    let event = source[..message].rfind("tracing::").unwrap();
+    assert!(source[event..].starts_with("tracing::info!("));
 }

@@ -1051,6 +1051,10 @@ pub struct LlmCancellationBatch {
 
 #[derive(Debug)]
 pub enum FinishLlmSubmission {
+    RequeueMissing {
+        job_id: String,
+        attempt: i64,
+    },
     Submitted {
         job_id: String,
         attempt: i64,
@@ -4281,11 +4285,41 @@ pub(crate) fn load_llm_prepared_inputs(
     Ok(inputs)
 }
 
+pub(crate) fn load_submitted_llm_page(
+    connection: &Connection,
+    after_id: &str,
+) -> rusqlite::Result<Vec<LlmSubmissionJob>> {
+    connection
+        .prepare(queries::ai_jobs::SELECT_SUBMITTED_PAGE)?
+        .query_map([after_id], |row| {
+            Ok(LlmSubmissionJob {
+                job_id: row.get(0)?,
+                media_id: row.get(1)?,
+                task: row.get(2)?,
+                attempts: row.get(3)?,
+            })
+        })?
+        .collect()
+}
+
 pub(crate) fn finish_llm_submission(
     connection: &Connection,
     request: FinishLlmSubmission,
 ) -> rusqlite::Result<()> {
     match request {
+        FinishLlmSubmission::RequeueMissing { job_id, attempt } => {
+            let changed = connection.execute(
+                queries::ai_jobs::REQUEUE_MISSING_SUBMITTED,
+                params![job_id, attempt],
+            )?;
+            if changed > 0 {
+                tracing::warn!(
+                    job_id,
+                    attempt,
+                    "Requeued submitted AI job missing from llm-service and local result inbox"
+                );
+            }
+        }
         FinishLlmSubmission::Submitted { job_id, attempt } => {
             connection.execute(queries::ai_jobs::MARK_SUBMITTED, params![job_id, attempt])?;
         }

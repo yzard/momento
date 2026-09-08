@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn replacement_connection_creation_checks_out_and_publishes_sqlite_capacity() {
-        let directory = tempfile::tempdir().expect("temporary database directory");
+        let directory = crate::temporary::tempdir().expect("temporary database directory");
         let database_path = directory.path().join("database.sqlite");
         prepare_database_file(&database_path).expect("prepare database");
         initialize_database_file(&database_path).expect("initialize database");
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn existing_database_read_only_probe_does_not_mutate_main_wal_or_shm() {
-        let directory = tempfile::tempdir().expect("database directory");
+        let directory = crate::temporary::tempdir().expect("database directory");
         let database_path = directory.path().join("database.sqlite");
         prepare_database_file(&database_path).expect("fresh database");
         initialize_database_file(&database_path).expect("WAL activation");

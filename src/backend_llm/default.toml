@@ -22,7 +22,6 @@ runtime_max_attempts = {{SCHEDULER_RUNTIME_MAX_ATTEMPTS}}
 # Durable results are retried until Momento acknowledges persistence.
 result_delivery_acknowledgement_timeout_seconds = {{RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS}}
 result_delivery_retry_delay_seconds = {{RESULT_DELIVERY_RETRY_DELAY_SECONDS}}
-result_delivery_max_attempts = {{RESULT_DELIVERY_MAX_ATTEMPTS}}
 result_delivery_max_concurrent_deliveries = {{RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES}}
 
 [[service]]

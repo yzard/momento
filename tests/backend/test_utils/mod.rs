@@ -34,7 +34,7 @@ pub async fn lock_webdav_test() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 pub fn create_test_db() -> DbPool {
-    let directory = tempfile::tempdir().expect("test database directory");
+    let directory = crate::temporary::tempdir().expect("test database directory");
     let pool = create_pool_at(&directory.path().join("database.sqlite"), 5)
         .expect("Failed to create test database pool");
     TEST_DATABASE_DIRECTORIES
@@ -154,7 +154,7 @@ pub fn create_test_config_manager(mut config: Config) -> ConfigManager {
         }
     }
     let config_path =
-        std::env::temp_dir().join(format!("momento-test-config-{}.toml", uuid::Uuid::new_v4()));
+        crate::temporary::root().join(format!("momento-test-config-{}.toml", uuid::Uuid::new_v4()));
     let config_contents = toml::to_string(&config).expect("serialize test config");
     std::fs::write(&config_path, config_contents).expect("write test config");
     let loaded = momento_api::config::load_config_with_identity(&config_path)

@@ -3,6 +3,9 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+
+TEMPORARY_ROOT = Path(__file__).resolve().parents[2] / "build" / "tmp"
+TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
 from unittest.mock import patch
 
 SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "image_aesthetics_server.py"
@@ -110,7 +113,7 @@ class ImageAestheticsServerTests(unittest.TestCase):
             IMAGE_AESTHETICS_SERVER.create_aesthetics_responses([prepared_input], [])
 
     def test_required_models_must_be_local_files(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             model_path = Path(directory) / "model.pt"
             model_path.write_bytes(b"model")
 

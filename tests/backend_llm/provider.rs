@@ -10,7 +10,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 
 const MOCK_RUNTIME: &str = r#"
 import argparse
@@ -474,7 +474,7 @@ pub(super) fn manager(services: Vec<(ServiceConfig, RuntimeSpec)>) -> ServiceMan
 }
 
 pub(super) fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
-    let directory = TempDir::new().expect("Failed to create runtime fixture");
+    let directory = crate::temporary::tempdir().expect("Failed to create runtime fixture");
     let script_path = directory.path().join("mock_runtime.py");
     let start_log = directory.path().join("starts.log");
     fs::write(&script_path, MOCK_RUNTIME).expect("Failed to write mock runtime");
@@ -492,7 +492,7 @@ async fn infer_one(
     bytes: &[u8],
     filename: &str,
 ) -> Result<llm_service::provider::InferenceResponse, llm_service::error::ServiceError> {
-    let input_file = NamedTempFile::new().expect("Failed to create queued input");
+    let input_file = crate::temporary::tempfile().expect("Failed to create queued input");
     fs::write(input_file.path(), bytes).expect("Failed to write queued input");
     let dispatcher = manager.dispatcher(task).await?;
     let inputs = dispatcher

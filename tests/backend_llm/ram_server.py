@@ -5,13 +5,16 @@ import types
 import unittest
 from pathlib import Path
 
+TEMPORARY_ROOT = Path(__file__).resolve().parents[2] / "build" / "tmp"
+TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
+
 SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "ram_server.py"
 
 
 class RamServerTests(unittest.TestCase):
     def test_checkpoint_must_be_baked_into_the_image(self):
         ram_server = self.load_module()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             checkpoint = Path(directory) / "ram.pth"
             with self.assertRaisesRegex(RuntimeError, "checkpoint is missing"):
                 ram_server.require_checkpoint(checkpoint)

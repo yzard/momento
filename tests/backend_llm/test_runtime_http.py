@@ -8,6 +8,9 @@ import threading
 import unittest
 from pathlib import Path
 
+TEMPORARY_ROOT = Path(__file__).resolve().parents[2] / "build" / "tmp"
+TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
+
 from image_runtime import ModelHTTPServer
 
 RUNTIME_HTTP_SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "runtime_http.py"
@@ -55,7 +58,7 @@ class RuntimeHttpTests(unittest.TestCase):
 
     def test_handler_reads_owned_input_and_returns_compact_json(self):
         runtime = RecordingRuntime()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             input_root = Path(directory)
             job_id = "abcdef12"
             image_bytes = b"queued-image"

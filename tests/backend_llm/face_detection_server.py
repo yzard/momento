@@ -9,6 +9,9 @@ import threading
 import unittest
 from pathlib import Path
 
+TEMPORARY_ROOT = Path(__file__).resolve().parents[2] / "build" / "tmp"
+TEMPORARY_ROOT.mkdir(parents=True, exist_ok=True)
+
 import numpy
 
 SOURCE_PATH = Path(__file__).resolve().parents[2] / "src" / "backend_llm" / "face_detection_server.py"
@@ -157,7 +160,7 @@ class FaceDetectionServerTests(unittest.TestCase):
             FACE_DETECTION_SERVER.normalize_embedding([0.0] * 512)
 
     def test_model_directory_must_be_baked_into_the_image(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             with self.assertRaisesRegex(RuntimeError, "model is missing"):
                 FACE_DETECTION_SERVER.require_model_directory(directory, "buffalo_l")
             model_directory = Path(directory) / "models" / "buffalo_l"
@@ -173,7 +176,7 @@ class FaceDetectionServerTests(unittest.TestCase):
                 return {"faces": []}
 
         runtime = RecordingRuntime()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as directory:
             input_root = Path(directory)
             job_id = "abcdef12"
             image_bytes = b"queued-image"

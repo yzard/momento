@@ -190,6 +190,9 @@ pub(crate) enum SqliteOperation {
         limit: u16,
     },
     LoadNextLlmSubmissionDelay,
+    LoadSubmittedLlmPage {
+        after_id: String,
+    },
     LoadLlmPreparedInputs {
         job_id: String,
     },
@@ -533,6 +536,7 @@ impl SqliteOperation {
             Self::PrepareLlmSubmissionCycle => "prepare_llm_submission_cycle",
             Self::ClaimLlmSubmissionJobs { .. } => "claim_llm_submission_jobs",
             Self::LoadNextLlmSubmissionDelay => "load_next_llm_submission_delay",
+            Self::LoadSubmittedLlmPage { .. } => "load_submitted_llm_page",
             Self::LoadLlmPreparedInputs { .. } => "load_llm_prepared_inputs",
             Self::FinishLlmSubmission(_) => "finish_llm_submission",
             Self::LoadLlmCancellationBatch { .. } => "load_llm_cancellation_batch",
@@ -719,9 +723,9 @@ impl SqliteOperation {
             | Self::LoadImportStatus { .. }
             | Self::LoadWebdavReadyPage { .. }
             | Self::CheckWebdavReady { .. } => bounded_api_read_spec(),
-            Self::LoadNextMetadataJobDelay | Self::LoadNextLlmSubmissionDelay => {
-                bounded_api_read_spec()
-            }
+            Self::LoadNextMetadataJobDelay
+            | Self::LoadNextLlmSubmissionDelay
+            | Self::LoadSubmittedLlmPage { .. } => bounded_api_read_spec(),
             Self::SelectLlmResultStagingCleanup { .. } => bounded_api_read_spec(),
             Self::LoadLlmResultStagingPage { .. } => bounded_api_read_spec(),
             Self::LoadFacePreparationContext { .. } => bounded_api_read_spec(),
@@ -791,6 +795,7 @@ impl SqliteOperation {
             | Self::CheckWebdavReady { .. }
             | Self::LoadNextMetadataJobDelay
             | Self::LoadNextLlmSubmissionDelay
+            | Self::LoadSubmittedLlmPage { .. }
             | Self::SelectLlmResultStagingCleanup { .. }
             | Self::LoadLlmResultStagingPage { .. }
             | Self::LoadFacePreparationContext { .. }
@@ -4558,6 +4563,22 @@ impl SqliteExecutorHandle {
         }
     }
 
+    pub async fn load_submitted_llm_page_durable(
+        &self,
+        after_id: String,
+    ) -> Result<Vec<LlmSubmissionJob>, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::LoadSubmittedLlmPage { after_id },
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::LlmSubmissionJobs(jobs) => Ok(jobs),
+            output => Err(output.mismatch("load_submitted_llm_page")),
+        }
+    }
+
     pub async fn load_llm_prepared_inputs_durable(
         &self,
         job_id: String,
@@ -4597,6 +4618,7 @@ impl SqliteExecutorHandle {
             FinishLlmSubmission::Submitted { .. }
             | FinishLlmSubmission::Deferred { .. }
             | FinishLlmSubmission::RequeueAmbiguous { .. } => false,
+            FinishLlmSubmission::RequeueMissing { .. } => false,
         };
         if error_is_oversized {
             return Err(ExecutorError::new(
@@ -5415,6 +5437,25 @@ fn execute(
                 format!("SQLite connection capacity is unavailable: {error}"),
             )
         })?;
+    // Another cleanup owner may have finished after candidate selection. Check on
+    // the SQLite writer lane before requiring the now-released parent reservation.
+    if let SqliteOperation::CleanupLlmResultStagingPage { job_id, .. } = &operation {
+        let finished = connection
+            .query_row(
+                crate::database::queries::llm_callback::RESULT_CLEANUP_ALREADY_FINISHED,
+                [job_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| map_sqlite_error(operation_name, error))?;
+        if finished {
+            return Ok(SqliteOutput::LlmResultStagingCleaned(
+                operations::CleanupLlmResultStagingOutcome {
+                    deleted: 0,
+                    complete: true,
+                },
+            ));
+        }
+    }
     let durable_capacity = match operation_spec.capacity {
         SqliteCapacitySource::DurableParent { max_growth_bytes } => {
             let job_id = durable_parent_job_id.as_deref().ok_or_else(|| {
@@ -5946,6 +5987,11 @@ fn execute_with_connection(
         SqliteOperation::LoadNextLlmSubmissionDelay => {
             operations::next_llm_submission_delay_seconds(connection)
                 .map(SqliteOutput::NextLlmSubmissionDelay)
+                .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::LoadSubmittedLlmPage { after_id } => {
+            operations::load_submitted_llm_page(connection, &after_id)
+                .map(SqliteOutput::LlmSubmissionJobs)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::LoadLlmPreparedInputs { job_id } => {

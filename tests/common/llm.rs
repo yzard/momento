@@ -40,6 +40,36 @@ fn cancellation_wire_contract_uses_camel_case() {
 }
 
 #[test]
+fn job_reconciliation_wire_contract_is_bounded_by_the_service_and_uses_camel_case() {
+    let request = ClientControlMessage::CheckJobs {
+        request_id: "request-1".into(),
+        job_ids: vec!["aa01".into()],
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"type":"checkJobs","requestId":"request-1","jobIds":["aa01"]})
+    );
+    assert_eq!(
+        serde_json::from_value::<ClientControlMessage>(value).unwrap(),
+        request
+    );
+    let response = ServiceControlMessage::JobsChecked {
+        request_id: "request-1".into(),
+        missing_job_ids: vec!["aa01".into()],
+    };
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"type":"jobsChecked","requestId":"request-1","missingJobIds":["aa01"]})
+    );
+    assert_eq!(
+        serde_json::from_value::<ServiceControlMessage>(value).unwrap(),
+        response
+    );
+}
+
+#[test]
 fn websocket_control_contract_uses_tagged_camel_case() {
     let message = ClientControlMessage::SubmissionStart {
         manifest: JobManifest {

@@ -150,7 +150,7 @@ fn magick_mapping_is_bounded_and_included_in_the_shared_address_space_budget() {
 fn magick_uses_file_backed_mapping_under_the_child_address_space_limit() {
     use momento_api::executor::process::magick_memory_requirement;
     use std::os::unix::process::CommandExt;
-    let temporary = tempfile::tempdir().expect("mapped cache directory");
+    let temporary = crate::temporary::tempdir().expect("mapped cache directory");
     let mut command = std::process::Command::new("magick");
     command
         .args(image_magick_resource_arguments(

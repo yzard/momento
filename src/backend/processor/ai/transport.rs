@@ -64,6 +64,11 @@ pub enum SubmissionOutcome {
 }
 
 enum TransportCommand {
+    CheckJobs {
+        request_id: String,
+        job_ids: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
     Submit {
         manifest: JobManifest,
         inputs: Vec<PreparedSubmissionInput>,
@@ -111,6 +116,7 @@ struct InboundResultSession {
 }
 
 struct TransportState {
+    checks: HashMap<String, oneshot::Sender<Result<Vec<String>, String>>>,
     submissions: HashMap<String, SubmissionSession>,
     submission_order: VecDeque<String>,
     cancellations: HashMap<String, oneshot::Sender<Result<CancelJobsResponse, String>>>,
@@ -121,6 +127,7 @@ struct TransportState {
 impl TransportState {
     fn new() -> Self {
         Self {
+            checks: HashMap::new(),
             submissions: HashMap::new(),
             submission_order: VecDeque::new(),
             cancellations: HashMap::new(),
@@ -171,6 +178,21 @@ pub struct LlmConnection {
 }
 
 impl LlmConnection {
+    pub async fn missing_jobs(&self, job_ids: Vec<String>) -> Result<Vec<String>, String> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(TransportCommand::CheckJobs {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                job_ids,
+                reply,
+            })
+            .await
+            .map_err(|_| "LLM transport closed".to_string())?;
+        tokio::time::timeout(ADMISSION_TIMEOUT, response)
+            .await
+            .map_err(|_| "LLM reconciliation timed out".to_string())?
+            .map_err(|_| "LLM reconciliation channel closed".to_string())?
+    }
     pub async fn connect(
         server_address: &str,
         client_id: &str,
@@ -311,6 +333,7 @@ async fn run_transport<Stream>(
 
     loop {
         expire_submission_waits(&mut state.submissions, &mut state.submission_order);
+        state.checks.retain(|_, reply| !reply.is_closed());
         expire_result_receipts(&mut state.results, &sqlite, &file_io, &scheduler).await;
         let can_accept_command = state.pending_controls.len() < MAX_PENDING_CONTROLS;
         let has_outbound =
@@ -411,6 +434,24 @@ async fn run_transport<Stream>(
 
 fn accept_transport_command(command: TransportCommand, state: &mut TransportState) {
     match command {
+        TransportCommand::CheckJobs {
+            request_id,
+            job_ids,
+            reply,
+        } => {
+            match control_message(ClientControlMessage::CheckJobs {
+                request_id: request_id.clone(),
+                job_ids,
+            }) {
+                Ok(message) => {
+                    state.checks.insert(request_id, reply);
+                    state.pending_controls.push_back(message);
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            }
+        }
         TransportCommand::Submit {
             manifest,
             inputs,
@@ -613,6 +654,15 @@ async fn handle_service_message(
     scheduler: &SchedulerHandle,
 ) -> Result<(), String> {
     match message {
+        ServiceControlMessage::JobsChecked {
+            request_id,
+            missing_job_ids,
+        } => {
+            let reply = state.checks.remove(&request_id).ok_or_else(|| {
+                "job reconciliation response references an inactive request".to_string()
+            })?;
+            let _ = reply.send(Ok(missing_job_ids));
+        }
         ServiceControlMessage::SubmissionReady {
             job_id,
             attempt,
@@ -1377,7 +1427,7 @@ async fn finish_result_receipt(
                 scheduler,
             )
             .await;
-            tracing::warn!(
+            tracing::info!(
                 job_id,
                 media_id = session.manifest.media_id,
                 error,

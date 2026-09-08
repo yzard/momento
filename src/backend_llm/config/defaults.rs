@@ -10,7 +10,6 @@ pub(crate) const SCHEDULER_MAX_IN_FLIGHT_JOBS: usize = 128;
 pub(crate) const SCHEDULER_RUNTIME_MAX_ATTEMPTS: usize = 3;
 pub(crate) const RESULT_DELIVERY_ACKNOWLEDGEMENT_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const RESULT_DELIVERY_RETRY_DELAY_SECONDS: u64 = 30;
-pub(crate) const RESULT_DELIVERY_MAX_ATTEMPTS: usize = 10;
 pub(crate) const RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES: usize = 16;
 pub(crate) const SERVICE_ENABLED: bool = true;
 pub(crate) const SERVICE_STARTUP_TIMEOUT_SECONDS: u64 = 300;
@@ -86,10 +85,6 @@ pub(crate) fn result_delivery_acknowledgement_timeout_seconds() -> u64 {
 
 pub(crate) fn result_delivery_retry_delay_seconds() -> u64 {
     RESULT_DELIVERY_RETRY_DELAY_SECONDS
-}
-
-pub(crate) fn result_delivery_max_attempts() -> usize {
-    RESULT_DELIVERY_MAX_ATTEMPTS
 }
 
 pub(crate) fn result_delivery_max_concurrent_deliveries() -> usize {
@@ -170,10 +165,6 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{RESULT_DELIVERY_RETRY_DELAY_SECONDS}}",
             RESULT_DELIVERY_RETRY_DELAY_SECONDS.to_string(),
-        ),
-        (
-            "{{RESULT_DELIVERY_MAX_ATTEMPTS}}",
-            RESULT_DELIVERY_MAX_ATTEMPTS.to_string(),
         ),
         (
             "{{RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES}}",

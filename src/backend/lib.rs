@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../test_support/temporary.rs"]
+mod temporary;
+
 pub mod app;
 pub mod auth;
 pub mod config;

@@ -74,7 +74,7 @@ async fn protocol_guard_rejects_encoded_bodies_and_overlong_uris_before_consumpt
 
 #[tokio::test]
 async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
-    let directory = tempfile::tempdir().expect("application directory");
+    let directory = crate::temporary::tempdir().expect("application directory");
     let data_directory = directory.path().join("data");
     let static_directory = directory.path().join("static");
     std::fs::create_dir(&data_directory).expect("data directory");

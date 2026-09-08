@@ -4,7 +4,6 @@ use llm_service::config::{
     apply_config_environment, default_config_template, resolve_config_environment, Config,
 };
 use std::io::Write;
-use tempfile::{NamedTempFile, TempDir};
 
 const LOCAL_SCHEDULER_CONFIGURATION: &str = "[scheduler]\nmax_queue_bytes = 1048576\nworking_space_reserve_bytes = 1048576\nmax_in_flight_jobs = 1\n";
 
@@ -53,7 +52,7 @@ fn local_face_configuration(face_detection_size: u32, extra: &str) -> String {
 
 #[test]
 fn loads_operational_runtime_configuration() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(file, "{}", local_ocr_configuration("")).expect("Failed to write config fixture");
 
     let config = Config::load(file.path()).expect("Config should load");
@@ -103,7 +102,7 @@ fn rejects_removed_runtime_deployment_configuration() {
         "embedding_dimensions = 768",
         "model_version = \"unlimited_ocr\"",
     ] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(file, "{}", local_ocr_configuration(removed_field))
             .expect("Failed to write config fixture");
 
@@ -116,7 +115,7 @@ fn rejects_removed_runtime_deployment_configuration() {
 #[test]
 fn rejects_removed_general_and_storage_sections() {
     for section in ["general", "storage"] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(
             file,
             "{}\n[{section}]\ndata_dir = \"/legacy\"\n",
@@ -142,7 +141,7 @@ fn rejects_removed_callback_and_nested_scheduler_sections() {
             local_ocr_configuration("")
         ),
     ] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(file, "{configuration}").expect("Failed to write config fixture");
 
         let error = Config::load(file.path()).expect_err("removed section must be rejected");
@@ -152,7 +151,7 @@ fn rejects_removed_callback_and_nested_scheduler_sections() {
 
 #[test]
 fn requires_the_shared_websocket_api_key() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "[server]\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
@@ -165,7 +164,7 @@ fn requires_the_shared_websocket_api_key() {
 
 #[test]
 fn server_data_dir_derives_runtime_directories() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "[server]\napi_key = \"test-key\"\ndata_dir = \"/srv/momento\"\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
@@ -195,7 +194,7 @@ fn server_data_dir_derives_runtime_directories() {
 
 #[test]
 fn rejects_configurable_queue_directory() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "[server]\napi_key = \"test-key\"\nqueue_dir = \"/separate/queue\"\n\n{LOCAL_SCHEDULER_CONFIGURATION}\n[[service]]\nenabled = true\nmodel_type = \"ocr\"\nmax_tokens = 1\nmax_concurrent_jobs = 1\n"
@@ -209,7 +208,7 @@ fn rejects_configurable_queue_directory() {
 
 #[test]
 fn rejects_configurable_logging_path() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[logging]\nfile_path = \"/var/log/llm-service.log\"\n",
@@ -229,7 +228,7 @@ fn loads_playground_toml_configuration() {
     let playground = std::fs::read_to_string(&path).expect("Playground config must exist");
     let resolved = resolve_config_environment(&playground, Some("change-me-llm-service-key"))
         .expect("Playground API key should resolve");
-    let mut file = NamedTempFile::new().expect("Resolved playground config fixture");
+    let mut file = crate::temporary::tempfile().expect("Resolved playground config fixture");
     write!(file, "{resolved}").expect("Resolved playground config");
     let config = Config::load(file.path()).expect("Playground TOML configuration should load");
     let clustering = config.service_for("image_clustering").unwrap();
@@ -284,7 +283,7 @@ fn loads_playground_toml_configuration() {
 
 #[test]
 fn saves_commented_operational_default_configuration() {
-    let directory = TempDir::new().expect("Failed to create config fixture");
+    let directory = crate::temporary::tempdir().expect("Failed to create config fixture");
     let path = directory.path().join("config").join("config_llm.toml");
 
     Config::save_default(&path).expect("Default config should be saved");
@@ -302,7 +301,7 @@ fn saves_commented_operational_default_configuration() {
 
 #[test]
 fn default_configuration_does_not_replace_an_existing_file() {
-    let directory = TempDir::new().expect("Failed to create config fixture");
+    let directory = crate::temporary::tempdir().expect("Failed to create config fixture");
     let path = directory.path().join("config_llm.toml");
     std::fs::write(&path, "existing").expect("Failed to write existing config");
 
@@ -314,7 +313,7 @@ fn default_configuration_does_not_replace_an_existing_file() {
 
 #[test]
 fn rejects_non_positive_scheduler_configuration() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}",
@@ -332,7 +331,7 @@ fn requires_explicit_queue_capacity_configuration() {
         "max_queue_bytes = 1048576\n",
         "working_space_reserve_bytes = 1048576\n",
     ] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(
             file,
             "{}",
@@ -352,7 +351,7 @@ fn rejects_invalid_queue_capacity_configuration() {
         ("working_space_reserve_bytes", "0"),
         ("max_queue_bytes", "18446744073709551615"),
     ] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         let configured = local_ocr_configuration("")
             .replace(&format!("{field} = 1048576"), &format!("{field} = {value}"));
         write!(file, "{configured}").expect("Failed to write config fixture");
@@ -367,7 +366,7 @@ fn rejects_invalid_queue_capacity_configuration() {
 
 #[test]
 fn rejects_removed_scheduler_poll_interval() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}",
@@ -387,7 +386,7 @@ fn rejects_removed_scheduler_poll_interval() {
 
 #[test]
 fn rejects_enabled_service_without_concurrency_limit() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     let configuration =
         local_ocr_configuration("").replace("max_concurrent_jobs = 1", "max_concurrent_jobs = 0");
     write!(file, "{configuration}").expect("Failed to write config fixture");
@@ -398,7 +397,7 @@ fn rejects_enabled_service_without_concurrency_limit() {
 
 #[test]
 fn validates_image_aesthetics_staged_concurrency() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 3\nmodel_concurrency = 64\nmodel_batch_wait_milliseconds = 5\n",
@@ -420,7 +419,7 @@ fn validates_image_aesthetics_staged_concurrency() {
 
 #[test]
 fn validates_image_clustering_staged_concurrency() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[[service]]\nenabled = true\nmodel_type = \"image_clustering\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 16\nmodel_concurrency = 16\nmodel_batch_wait_milliseconds = 5\n",
@@ -441,7 +440,7 @@ fn validates_image_clustering_staged_concurrency() {
 #[test]
 fn validates_both_classifier_services_without_model_configuration() {
     for model_type in ["screenshot_detection", "document_detection"] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(
             file,
             "{}\n[[service]]\nenabled = true\nmodel_type = \"{model_type}\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 3\nmodel_concurrency = 2\n",
@@ -464,7 +463,7 @@ fn validates_both_classifier_services_without_model_configuration() {
 #[test]
 fn face_detection_requires_staged_concurrency_and_batch_configuration() {
     let face_configuration = local_face_configuration(960, "");
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(file, "{face_configuration}").expect("Failed to write config fixture");
 
     let config = Config::load(file.path()).expect("face detection config should load");
@@ -480,7 +479,7 @@ fn face_detection_requires_staged_concurrency_and_batch_configuration() {
 #[test]
 fn face_detection_rejects_unsupported_detection_sizes() {
     for unsupported_size in [0, 800, 1024] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(file, "{}", local_face_configuration(unsupported_size, ""))
             .expect("Failed to write config fixture");
 
@@ -493,7 +492,7 @@ fn face_detection_rejects_unsupported_detection_sizes() {
 #[test]
 fn face_detection_accepts_each_supported_detection_size() {
     for supported_size in [640, 960, 1280] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(file, "{}", local_face_configuration(supported_size, ""))
             .expect("Failed to write config fixture");
 
@@ -511,7 +510,7 @@ fn face_detection_accepts_each_supported_detection_size() {
 
 #[test]
 fn face_detection_rejects_removed_max_concurrent_jobs() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}",
@@ -526,7 +525,7 @@ fn face_detection_rejects_removed_max_concurrent_jobs() {
 
 #[test]
 fn classifier_services_reject_the_removed_max_concurrent_jobs_field() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\nprocessing_concurrency = 2\nmodel_concurrency = 2\n",
@@ -547,7 +546,7 @@ fn classifier_services_require_positive_processing_and_model_concurrency() {
             local_ocr_configuration("")
         )
         .replace(&format!("{field} = 2"), &format!("{field} = {value}"));
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(file, "{configuration}").expect("Failed to write config fixture");
 
         let error = Config::load(file.path()).expect_err("zero concurrency must fail");
@@ -564,7 +563,7 @@ fn classifier_services_reject_removed_concurrency_names() {
         "model_screenshot_detection_concurrency = 2",
         "model_document_detection_concurrency = 2",
     ] {
-        let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+        let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
         write!(
             file,
             "{}\n[[service]]\nenabled = true\nmodel_type = \"screenshot_detection\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nprocessing_concurrency = 2\nmodel_concurrency = 2\n{removed_field}\n",
@@ -583,7 +582,7 @@ fn classifier_services_reject_removed_concurrency_names() {
 
 #[test]
 fn standard_services_reject_classifier_concurrency_fields() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[[service]]\nenabled = true\nmodel_type = \"image_tagging\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 2\nprocessing_concurrency = 2\n",
@@ -600,7 +599,7 @@ fn standard_services_reject_classifier_concurrency_fields() {
 
 #[test]
 fn image_aesthetics_rejects_removed_max_concurrent_jobs() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[[service]]\nenabled = true\nmodel_type = \"image_aesthetics\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 16\nprocessing_concurrency = 8\nmodel_concurrency = 64\nmodel_batch_wait_milliseconds = 5\n",
@@ -615,7 +614,7 @@ fn image_aesthetics_rejects_removed_max_concurrent_jobs() {
 
 #[test]
 fn image_clustering_rejects_removed_max_concurrent_jobs() {
-    let mut file = NamedTempFile::new().expect("Failed to create config fixture");
+    let mut file = crate::temporary::tempfile().expect("Failed to create config fixture");
     write!(
         file,
         "{}\n[[service]]\nenabled = true\nmodel_type = \"image_clustering\"\nstartup_timeout_seconds = 1\nrequest_timeout_seconds = 1\nmax_concurrent_jobs = 32\nprocessing_concurrency = 16\nmodel_concurrency = 16\nmodel_batch_wait_milliseconds = 5\n",

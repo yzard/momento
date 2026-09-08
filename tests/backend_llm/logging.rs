@@ -1,6 +1,6 @@
 #[test]
 fn llm_service_owns_its_daily_non_ansi_file_sink() {
-    let directory = tempfile::tempdir().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let guard = llm_service::logging::init_logging(directory.path(), "llm-service")
         .expect("logging initialization");
 

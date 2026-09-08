@@ -45,7 +45,7 @@ fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
 
 #[test]
 fn config_bootstrap_enforces_the_exact_file_size_boundary() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let path = directory.path().join("config.toml");
     let mut exact = String::from("#");
     exact.push_str(&"x".repeat(1024 * 1024 - 2));
@@ -62,7 +62,7 @@ fn config_bootstrap_enforces_the_exact_file_size_boundary() {
 
 #[test]
 fn config_bootstrap_rejects_unsafe_path_components_and_long_filename() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let parent_path = directory.path().join("..").join("config.toml");
     assert!(load_config(&parent_path)
         .expect_err("parent component must fail")
@@ -79,7 +79,7 @@ fn config_bootstrap_rejects_unsafe_path_components_and_long_filename() {
 #[cfg(unix)]
 #[test]
 fn config_bootstrap_rejects_a_symlinked_config_file() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let target = write_config(&directory, "[thread_pool]\n");
     let link = directory.path().join("linked.toml");
     std::os::unix::fs::symlink(target, &link).expect("create config symlink");
@@ -90,7 +90,7 @@ fn config_bootstrap_rejects_a_symlinked_config_file() {
 
 #[test]
 fn test_load_config_reads_server_paths() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[server]\ndata_dir = \"/srv/momento/data\"\nstatic_dir = \"/srv/momento/static\"\n",
@@ -111,7 +111,7 @@ fn security_scoped_credential_expirations_must_be_within_one_week() {
         ("media_access_ticket_expire_hours", 0),
         ("share_session_expire_hours", 169),
     ] {
-        let directory = TempDir::new().expect("temporary directory");
+        let directory = crate::temporary::tempdir().expect("temporary directory");
         let path = write_config(&directory, &format!("[security]\n{field} = {value}\n"));
 
         let error = load_config(&path).expect_err("invalid scoped credential expiration");
@@ -130,7 +130,7 @@ fn security_password_and_cleanup_limits_must_be_positive() {
         "password_lockout_seconds",
         "refresh_token_cleanup_interval_seconds",
     ] {
-        let directory = TempDir::new().expect("temporary directory");
+        let directory = crate::temporary::tempdir().expect("temporary directory");
         let path = write_config(&directory, &format!("[security]\n{field} = 0\n"));
 
         let error = load_config(&path).expect_err("zero security limit must fail");
@@ -142,7 +142,7 @@ fn security_password_and_cleanup_limits_must_be_positive() {
 
 #[test]
 fn media_process_limits_must_be_positive() {
-    let directory = TempDir::new().expect("temporary config directory");
+    let directory = crate::temporary::tempdir().expect("temporary config directory");
     for invalid_config in [
         "maximum_stderr_bytes = 0",
         "maximum_decoded_image_pixels = 0",
@@ -163,7 +163,7 @@ fn removed_media_process_runtime_settings_are_rejected() {
         ("imagemagick_map_limit_mebibytes", "1024"),
         ("imagemagick_disk_limit_mebibytes", "4096"),
     ] {
-        let directory = TempDir::new().expect("temporary config directory");
+        let directory = crate::temporary::tempdir().expect("temporary config directory");
         let path = write_config(
             &directory,
             &format!("[media_process]\n{setting} = {value}\n"),
@@ -300,7 +300,7 @@ fn config_environment_rejects_invalid_recovery_and_empty_secrets() {
 
 #[test]
 fn test_load_config_rejects_configurable_log_file_path() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[logging]\nfile_path = \"/var/log/momento.log\"\n");
 
     let error = load_config(&path).expect_err("Logging path must not be configurable");
@@ -310,7 +310,7 @@ fn test_load_config_rejects_configurable_log_file_path() {
 
 #[test]
 fn test_load_config_reads_thread_pool() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[thread_pool]\ncpu_workers = 7\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 3\n",
@@ -326,7 +326,7 @@ fn test_load_config_reads_thread_pool() {
 
 #[test]
 fn test_load_config_rejects_removed_llm_submission_batch_size() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[llm_submission_worker]\nbatch_size = 64\n");
 
     let error = load_config(&path).expect_err("Submission batch size has been removed");
@@ -336,7 +336,7 @@ fn test_load_config_rejects_removed_llm_submission_batch_size() {
 
 #[test]
 fn test_load_config_rejects_renamed_llm_submission_max_in_flight() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[llm_submission_worker]\nmax_in_flight = 17\n");
 
     let error = load_config(&path).expect_err("Renamed submission setting must fail");
@@ -360,7 +360,7 @@ fn removed_worker_concurrency_settings_are_rejected() {
         ("llm_submission_worker", "max_async_submission_tasks"),
         ("llm_result_worker", "concurrency"),
     ] {
-        let directory = TempDir::new().expect("temporary directory");
+        let directory = crate::temporary::tempdir().expect("temporary directory");
         let path = write_config(&directory, &format!("[{section}]\n{setting} = 7\n"));
 
         let error = load_config(&path).expect_err("removed concurrency setting must fail");
@@ -370,7 +370,7 @@ fn removed_worker_concurrency_settings_are_rejected() {
         );
     }
 
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let path = write_config(&directory, "[regenerate]\nnum_cpus = 7\n");
     let error = load_config(&path).expect_err("removed regenerate section must fail");
     assert!(error.to_string().contains("regenerate"), "{error}");
@@ -383,7 +383,7 @@ fn thread_pool_worker_bounds_are_validated() {
         "cpu_workers = 8\nnetwork_io_workers = 2\nstorage_io_workers = 1\nsqlite_workers = 4",
         "cpu_workers = 8\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 0",
     ] {
-        let directory = TempDir::new().expect("temporary directory");
+        let directory = crate::temporary::tempdir().expect("temporary directory");
         let path = write_config(&directory, &format!("[thread_pool]\n{invalid_section}\n"));
 
         let error = load_config(&path).expect_err("invalid worker count must fail");
@@ -393,7 +393,7 @@ fn thread_pool_worker_bounds_are_validated() {
 
 #[test]
 fn removed_available_workers_key_is_rejected() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let path = write_config(
         &directory,
         "[thread_pool]\navailable_workers = 16\ncpu_workers = 8\nnetwork_io_workers = 2\nstorage_io_workers = 6\nsqlite_workers = 4\n",
@@ -405,7 +405,7 @@ fn removed_available_workers_key_is_rejected() {
 
 #[test]
 fn removed_combined_io_workers_key_is_rejected() {
-    let directory = TempDir::new().unwrap();
+    let directory = crate::temporary::tempdir().unwrap();
     let path = write_config(&directory, "[thread_pool]\ncpu_workers=2\nnetwork_io_workers=2\nstorage_io_workers=2\nsqlite_workers=2\nio_workers=4\n");
     assert!(load_config(&path)
         .unwrap_err()
@@ -415,7 +415,7 @@ fn removed_combined_io_workers_key_is_rejected() {
 
 #[test]
 fn test_load_config_rejects_removed_llm_result_worker_batch_size() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[llm_result_worker]\nbatch_size = 64\n");
 
     let error = load_config(&path).expect_err("Result worker batch size has been removed");
@@ -425,7 +425,7 @@ fn test_load_config_rejects_removed_llm_result_worker_batch_size() {
 
 #[test]
 fn test_load_config_rejects_renamed_llm_result_cpu_processing_concurrency() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[llm_result_worker]\ncpu_processing_concurrency = 7\n",
@@ -438,7 +438,7 @@ fn test_load_config_rejects_renamed_llm_result_cpu_processing_concurrency() {
 
 #[test]
 fn test_load_config_rejects_removed_llm_result_worker_poll_interval() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[llm_result_worker]\npoll_interval_seconds = 0\n");
 
     let error = load_config(&path).expect_err("Removed result worker section must fail");
@@ -448,7 +448,7 @@ fn test_load_config_rejects_removed_llm_result_worker_poll_interval() {
 
 #[test]
 fn test_load_config_missing_file_is_an_error() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let missing = dir.path().join("does-not-exist.toml");
 
     let error = load_config(&missing).expect_err("Missing config must not fall back to defaults");
@@ -458,7 +458,7 @@ fn test_load_config_missing_file_is_an_error() {
 
 #[test]
 fn test_load_config_malformed_toml_is_an_error() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[server]\nport = \"not-a-number\"\n");
 
     let error = load_config(&path).expect_err("Malformed config must not fall back to defaults");
@@ -468,7 +468,7 @@ fn test_load_config_malformed_toml_is_an_error() {
 
 #[test]
 fn test_load_config_omitted_sections_use_defaults() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[server]\nport = 9001\n");
 
     let config = load_config(&path).expect("Failed to load config");
@@ -482,7 +482,7 @@ fn test_load_config_omitted_sections_use_defaults() {
 
 #[tokio::test]
 async fn test_consume_admin_password_reset_persists_false_and_preserves_comments() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(
         &path,
@@ -512,7 +512,7 @@ async fn test_consume_admin_password_reset_persists_false_and_preserves_comments
 
 #[tokio::test]
 async fn test_consume_admin_password_reset_does_not_rewrite_false_config() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "[server]\nreset_admin_password = false\n")
         .expect("Failed to write config");
@@ -533,7 +533,7 @@ async fn test_consume_admin_password_reset_does_not_rewrite_false_config() {
 
 #[test]
 fn test_llm_section_owns_ai_schedules_and_defaults() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "[llm]\ndeduplicate_cron = \"30 3 * * *\"\n")
         .expect("Failed to write existing config");
@@ -551,7 +551,7 @@ fn test_llm_section_owns_ai_schedules_and_defaults() {
 
 #[tokio::test]
 async fn config_manager_updates_ai_cron_and_preserves_config() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let path = write_config(
         &directory,
         "# keep this comment\n[server]\ndata_dir = \"/srv/momento\"\n\n[llm]\nocr_cron = \"0 1 * * *\"\nimage_tagging_cron = \"0 2 * * *\"\n",
@@ -590,7 +590,7 @@ async fn config_manager_updates_ai_cron_and_preserves_config() {
 
 #[tokio::test]
 async fn config_manager_rejects_external_edits_without_changing_live_state() {
-    let directory = TempDir::new().expect("temporary directory");
+    let directory = crate::temporary::tempdir().expect("temporary directory");
     let path = write_config(&directory, "[llm]\nocr_cron = \"0 1 * * *\"\n");
     let loaded = load_config_with_identity(&path).expect("load config");
     let executors = crate::test_utils::test_executor_handles(crate::test_utils::create_test_db());
@@ -620,7 +620,7 @@ fn test_server_path_defaults_match_container_layout() {
 
 #[test]
 fn test_load_config_rejects_removed_storage_section() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[storage]\ndata_dir = \"/data\"\n");
 
     let error = load_config(&path).expect_err("Storage section must be rejected");
@@ -630,7 +630,7 @@ fn test_load_config_rejects_removed_storage_section() {
 
 #[test]
 fn test_load_config_rejects_removed_admin_section() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[admin]\nusername = \"admin\"\npassword = \"admin\"\n",
@@ -643,7 +643,7 @@ fn test_load_config_rejects_removed_admin_section() {
 
 #[test]
 fn test_load_config_reads_flat_webdav_settings() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[webdav]\nmount_path = \"/photos\"\nrealm = \"Photos\"\nmax_upload_bytes = 1234\nstable_file_age_seconds = 11\n",
@@ -659,7 +659,7 @@ fn test_load_config_reads_flat_webdav_settings() {
 
 #[test]
 fn test_load_config_reads_backup_settings_and_rejects_invalid_limits() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[backup]\nmax_upload_bytes = 4096\nmax_chunk_bytes = 1024\nsession_expiry_hours = 12\n",
@@ -680,7 +680,7 @@ fn test_load_config_reads_backup_settings_and_rejects_invalid_limits() {
 
 #[test]
 fn test_load_config_rejects_removed_webdav_enabled_setting() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[webdav]\nenabled = false\n");
 
     let error = load_config(&path).expect_err("WebDAV enablement must not be configurable");
@@ -698,7 +698,7 @@ fn test_load_config_rejects_invalid_webdav_runtime_settings() {
         ("mount_path", "\"/..\""),
         ("mount_path", "\"/photo%73\""),
     ] {
-        let dir = TempDir::new().expect("Failed to create temp dir");
+        let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
         let path = write_config(&dir, &format!("[webdav]\n{setting} = {value}\n"));
         let error = load_config(&path).expect_err("Invalid WebDAV setting must be rejected");
 
@@ -708,7 +708,7 @@ fn test_load_config_rejects_invalid_webdav_runtime_settings() {
 
 #[test]
 fn test_load_config_rejects_nested_webdav_settings() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[webdav.limits]\nmax_upload_bytes = 1234\n");
 
     let error = load_config(&path).expect_err("Nested WebDAV settings must be rejected");
@@ -718,7 +718,7 @@ fn test_load_config_rejects_nested_webdav_settings() {
 
 #[test]
 fn test_load_config_reads_thumbnail_metadata_settings() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[metadata]\nthumbnails_max_size = 1600\nthumbnails_tiny_size = 400\nthumbnails_quality = 90\n",
@@ -733,7 +733,7 @@ fn test_load_config_reads_thumbnail_metadata_settings() {
 
 #[test]
 fn test_load_config_rejects_removed_video_frame_quality() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[metadata]\nthumbnails_video_frame_quality = 80\n");
 
     let error = load_config(&path).expect_err("unused video frame quality must be rejected");
@@ -753,7 +753,7 @@ fn test_load_config_rejects_removed_reverse_geocoding_settings() {
         ("reverse_geocoding_timeout_seconds", "12"),
         ("reverse_geocoding_rate_limit_seconds", "2.5"),
     ] {
-        let dir = TempDir::new().expect("Failed to create temp dir");
+        let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
         let path = write_config(&dir, &format!("[metadata]\n{setting} = {value}\n"));
 
         let error = load_config(&path).expect_err("Removed setting must be rejected");
@@ -764,7 +764,7 @@ fn test_load_config_rejects_removed_reverse_geocoding_settings() {
 
 #[test]
 fn test_load_config_rejects_replaced_metadata_sections() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
 
     for section in ["thumbnails", "reverse_geocoding"] {
         let path = write_config(&dir, &format!("[{section}]\nenabled = true\n"));
@@ -776,7 +776,7 @@ fn test_load_config_rejects_replaced_metadata_sections() {
 
 #[test]
 fn test_load_config_rejects_unprefixed_metadata_settings() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
 
     for (setting, value) in [("max_size", "1600"), ("enabled", "false")] {
         let path = write_config(&dir, &format!("[metadata]\n{setting} = {value}\n"));
@@ -788,7 +788,7 @@ fn test_load_config_rejects_unprefixed_metadata_settings() {
 
 #[test]
 fn test_save_default_config_round_trips() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("generated").join("config.toml");
 
     save_default_config(&path).expect("Failed to save default config");
@@ -841,18 +841,18 @@ fn test_save_default_config_round_trips() {
 
 #[test]
 fn test_load_config_reads_and_validates_server_api_body_limit() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[server]\napi_request_body_max_bytes = 4096\n");
 
     let config = load_config(&path).expect("Failed to load server API body limit");
     assert_eq!(config.server.api_request_body_max_bytes, 4096);
 
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[server]\napi_request_body_max_bytes = 0\n");
     let error = load_config(&path).expect_err("Zero body limit must fail");
     assert!(error.to_string().contains("server"), "{error}");
 
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[server]\nrequest_log_body_max_bytes = 1048576\n");
     let error = load_config(&path).expect_err("Removed request-log limit must be rejected");
     assert!(error.to_string().contains("request_log_body_max_bytes"));
@@ -860,7 +860,7 @@ fn test_load_config_reads_and_validates_server_api_body_limit() {
 
 #[test]
 fn test_save_default_config_does_not_replace_existing_config() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "existing").expect("Failed to write existing config");
 
@@ -872,7 +872,7 @@ fn test_save_default_config_does_not_replace_existing_config() {
 
 #[test]
 fn test_load_config_rejects_removed_metadata_batch_size() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[metadata_worker]\nbatch_size = 64\n");
 
     let error = load_config(&path).expect_err("Metadata batch size has been removed");
@@ -882,7 +882,7 @@ fn test_load_config_rejects_removed_metadata_batch_size() {
 
 #[test]
 fn test_load_config_uses_disabled_global_llm_default_when_section_is_missing() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "[server]\nport = 9001\n").expect("Failed to write test config");
 
@@ -904,7 +904,7 @@ fn test_load_config_rejects_removed_ai_feature_enablement_fields() {
         "screenshot_detection_enabled",
         "document_detection_enabled",
     ] {
-        let dir = TempDir::new().expect("Failed to create temp dir");
+        let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
         let path = write_config(&dir, &format!("[llm]\n{removed_field} = true\n"));
 
         let error = load_config(&path).expect_err("Removed feature switch must fail");
@@ -915,7 +915,7 @@ fn test_load_config_rejects_removed_ai_feature_enablement_fields() {
 
 #[test]
 fn test_load_config_rejects_invalid_face_group_similarity_threshold() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[face_group]\nsimilarity_threshold = 1.1\n");
 
     let error = load_config(&path).expect_err("Invalid face similarity threshold must fail");
@@ -929,7 +929,7 @@ fn test_load_config_rejects_invalid_face_representative_weights() {
         "confidence_weight = -0.1\nface_size_weight = 0.2\ncenter_proximity_weight = 0.1\nfrontality_weight = 0.25\nvisibility_weight = 0.3\nfeature_clarity_weight = 0.25\n",
         "confidence_weight = 0.1\nface_size_weight = 0.1\ncenter_proximity_weight = 0.1\nfrontality_weight = 0.1\nvisibility_weight = 0.1\nfeature_clarity_weight = 0.1\n",
     ] {
-        let dir = TempDir::new().expect("Failed to create temp dir");
+        let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
         let path = write_config(
             &dir,
             &format!("[face_group]\n{invalid_weights}"),
@@ -952,7 +952,7 @@ fn test_load_config_rejects_each_invalid_ai_schedule() {
         "screenshot_detection_cron",
         "document_detection_cron",
     ] {
-        let dir = TempDir::new().expect("Failed to create temp dir");
+        let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
         let path = write_config(&dir, &format!("[llm]\n{field} = \"invalid\"\n"));
 
         let error = load_config(&path).expect_err("Invalid schedule must fail");
@@ -970,7 +970,7 @@ fn playground_config_matches_the_generated_template() {
 
 #[test]
 fn test_load_config_rejects_removed_cronjob_section() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[cronjob]\nocr_cron = \"0 1 * * *\"\n");
 
     let error = load_config(&path).expect_err("Removed cronjob section must fail");
@@ -979,7 +979,7 @@ fn test_load_config_rejects_removed_cronjob_section() {
 
 #[test]
 fn test_load_config_requires_llm_server_address() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[llm]\nenabled = true\nserver_address = \"\"\n");
 
     let error = load_config(&path).expect_err("Enabled LLM must have a server address");
@@ -989,7 +989,7 @@ fn test_load_config_requires_llm_server_address() {
 
 #[test]
 fn test_load_config_requires_host_and_port_only_for_llm_server_address() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     for server_address in [
         "ws://127.0.0.1:8100",
         "127.0.0.1:8100/api/v1/llm/connect",
@@ -1009,7 +1009,7 @@ fn test_load_config_requires_host_and_port_only_for_llm_server_address() {
 
 #[test]
 fn test_load_config_requires_websocket_client_identity_and_key() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
 
     let path = write_config(
         &dir,
@@ -1028,7 +1028,7 @@ fn test_load_config_requires_websocket_client_identity_and_key() {
 
 #[test]
 fn test_load_config_rejects_configurable_security_algorithm() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[security]\nalgorithm = \"HS512\"\n");
 
     let error = load_config(&path).expect_err("JWT algorithm is not configurable");
@@ -1038,7 +1038,7 @@ fn test_load_config_rejects_configurable_security_algorithm() {
 
 #[test]
 fn test_load_config_rejects_configurable_llm_inference_endpoint() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[llm]\nenabled = true\nserver_address = \"127.0.0.1:8100\"\ninference_endpoint = \"/custom\"\n",
@@ -1051,7 +1051,7 @@ fn test_load_config_rejects_configurable_llm_inference_endpoint() {
 
 #[test]
 fn test_load_config_rejects_removed_llm_service_url() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
         "[llm]\nenabled = true\nservice_url = \"ws://127.0.0.1:8100/api/v1/llm/connect\"\n",
@@ -1063,7 +1063,7 @@ fn test_load_config_rejects_removed_llm_service_url() {
 
 #[test]
 fn test_load_config_rejects_removed_deduplicate_section() {
-    let dir = TempDir::new().expect("Failed to create temp dir");
+    let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(&dir, "[deduplicate]\nenabled = true\n");
 
     let error = load_config(&path).expect_err("Deduplicate settings moved to llm");

@@ -83,7 +83,7 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
 
 #[test]
 fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# config\n").expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
@@ -135,7 +135,7 @@ fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops(
 
 #[test]
 fn runtime_builder_publishes_named_executor_and_network_workers() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let sizing = RuntimeSizing::validate_worker_counts(
         &ThreadPoolConfig {
             cpu_workers: 1,
@@ -198,7 +198,7 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
 
 #[test]
 fn journal_mutation_registry_covers_every_active_mutation_owner() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let sizing = RuntimeSizing::validate_worker_counts(
         &ThreadPoolConfig {
             cpu_workers: 8,
@@ -257,7 +257,7 @@ fn journal_mutation_registry_covers_every_active_mutation_owner() {
 
 #[test]
 fn runtime_builder_rejects_a_config_changed_after_initial_read() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# initial config\n").expect("write initial config");
     let loaded_config = momento_api::config::load_config_with_identity(&config_path)
@@ -292,7 +292,7 @@ fn runtime_builder_rejects_a_config_changed_after_initial_read() {
 
 #[test]
 fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# config\n").expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
@@ -336,7 +336,7 @@ fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
 
 #[test]
 fn runtime_builder_does_not_create_a_missing_data_directory() {
-    let directory = tempfile::tempdir().expect("temporary parent directory");
+    let directory = crate::temporary::tempdir().expect("temporary parent directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# config\n").expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
@@ -367,7 +367,7 @@ fn runtime_builder_does_not_create_a_missing_data_directory() {
 
 #[test]
 fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# config\n").expect("write config");
     let reserved_temporary = directory.path().join(".config.toml.momento-update.tmp");
@@ -401,7 +401,7 @@ fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
 
 #[test]
 fn runtime_builder_creates_every_writable_storage_root_before_publication() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# config\n").expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
@@ -470,7 +470,7 @@ fn runtime_builder_creates_every_writable_storage_root_before_publication() {
 
 #[test]
 fn runtime_builder_rejects_static_storage_that_overlaps_private_data() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
     std::fs::write(&config_path, "# config\n").expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
@@ -511,7 +511,7 @@ fn runtime_builder_rejects_orphan_and_truncated_sqlite_bootstrap_files() {
         ),
         ("database.sqlite", b"".as_slice(), "empty or truncated"),
     ] {
-        let directory = tempfile::tempdir().expect("temporary runtime directory");
+        let directory = crate::temporary::tempdir().expect("temporary runtime directory");
         let config_path = directory.path().join("config.toml");
         std::fs::write(&config_path, "# config\n").expect("write config");
         std::fs::write(directory.path().join(filename), contents).expect("write SQLite fixture");
@@ -545,7 +545,7 @@ fn runtime_builder_rejects_orphan_and_truncated_sqlite_bootstrap_files() {
 
 #[test]
 fn runtime_builder_rejects_an_existing_schema_that_needs_migration() {
-    let directory = tempfile::tempdir().expect("temporary runtime directory");
+    let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let database_path = directory.path().join("database.sqlite");
     let pool = momento_api::database::create_pool_at(&database_path, 1).expect("database pool");
     pool.get()

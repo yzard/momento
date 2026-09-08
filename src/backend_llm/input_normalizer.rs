@@ -33,6 +33,68 @@ pub fn requires_raw_normalization(mime_type: &str) -> bool {
     )
 }
 
+/// Probe only the extensionless queue file, never the user-supplied name or MIME.
+/// TIFF-based RAW and ISO-BMFF images require container inspection beyond magic bytes.
+pub async fn detect_input_mime(path: &Path, header: &[u8]) -> Result<String, String> {
+    if let Some(mime) = encoded_image_mime_type(header) {
+        return Ok(mime.to_string());
+    }
+    let mut child = tokio::process::Command::new("exiftool")
+        .args(["-j", "-FileType", "-MIMEType"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("content format probe could not start: {error}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or("format probe stdout unavailable")?
+        .take(65537);
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or("format probe stderr unavailable")?
+        .take(65537);
+    let mut output = Vec::new();
+    let mut diagnostic = Vec::new();
+    let (_, _, status) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::try_join!(
+            stdout.read_to_end(&mut output),
+            stderr.read_to_end(&mut diagnostic),
+            child.wait()
+        )
+    })
+    .await
+    .map_err(|_| "content format probe timed out".to_string())?
+    .map_err(|error| format!("content format probe failed: {error}"))?;
+    if !status.success() || output.len() > 65536 || diagnostic.len() > 65536 {
+        return Err(format!(
+            "content format probe failed ({status}): {}",
+            String::from_utf8_lossy(&diagnostic)
+        ));
+    }
+    let records: Vec<serde_json::Value> = serde_json::from_slice(&output)
+        .map_err(|error| format!("invalid content format probe response: {error}"))?;
+    let record = records
+        .first()
+        .ok_or("content format probe returned no record")?;
+    let file_type = record["FileType"].as_str().unwrap_or("");
+    let mime = match file_type {
+        "DNG" => "image/x-adobe-dng",
+        "CR2" | "CR3" | "CRW" | "NEF" | "NRW" | "ARW" | "SR2" | "SRF" | "RW2" | "RWL" | "ORF"
+        | "RAF" | "PEF" | "SRW" | "RAW" | "ERF" | "MRW" | "MOS" | "KDC" | "DCR" | "3FR" | "FFF"
+        | "IIQ" => "image/x-raw",
+        _ => record["MIMEType"].as_str().unwrap_or(""),
+    };
+    if !mime.starts_with("image/") {
+        return Err(format!("unsupported or unrecognized input content: file_type={file_type:?}, detected_mime={mime:?}"));
+    }
+    Ok(mime.to_string())
+}
+
 /// Recognize non-RAW encodings without trusting a camera filename or MIME label.
 /// TIFF is deliberately absent: many genuine RAW formats use a TIFF container.
 pub fn encoded_image_mime_type(header: &[u8]) -> Option<&'static str> {
