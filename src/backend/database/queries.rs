@@ -1223,11 +1223,49 @@ pub mod metadata_clean {
 pub mod ai_jobs {
     pub const SELECT_SUBMITTED_PAGE: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'submitted' AND id > ? AND NOT EXISTS (SELECT 1 FROM llm_result_receipts r WHERE r.job_id = llm_jobs.id AND r.state NOT IN ('discarded', 'cleaned')) ORDER BY id LIMIT 256";
     pub const REQUEUE_MISSING_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, attempts = attempts - 1, claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitted' AND attempts = ? AND attempts > 0 AND NOT EXISTS (SELECT 1 FROM llm_result_receipts r WHERE r.job_id = llm_jobs.id AND r.state NOT IN ('discarded', 'cleaned'))";
-    pub const INSERT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = ?) AND NOT EXISTS (SELECT 1 FROM media_text WHERE media_text.media_id = media.id AND media_text.model_type = ?) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = ? AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_FACE_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, face_grouping_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'face_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'face_detection') AND NOT EXISTS (SELECT 1 FROM media_face_detection_results WHERE media_face_detection_results.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'face_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_AESTHETICS_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'image_aesthetics', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_aesthetics') AND NOT EXISTS (SELECT 1 FROM media_aesthetics WHERE media_aesthetics.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'image_aesthetics' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_SCREENSHOT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'screenshot_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'screenshot_detection') AND NOT EXISTS (SELECT 1 FROM media_screenshot_classifications WHERE media_screenshot_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'screenshot_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
-    pub const INSERT_DOCUMENT_ELIGIBLE: &str = "INSERT INTO llm_jobs (id, media_id, task, status) SELECT lower(hex(randomblob(16))), media.id, 'document_detection', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media.media_type = 'image' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'document_detection') AND NOT EXISTS (SELECT 1 FROM media_document_classifications WHERE media_document_classifications.media_id = media.id) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.media_id = media.id AND llm_jobs.task = 'document_detection' AND llm_jobs.status IN ('queued','submitting','submitted'))";
+    pub fn insert_eligible(task: &str) -> Option<String> {
+        let completed_media = match task {
+            "ocr" | "image_tagging" => "SELECT media_id FROM media_text WHERE model_type = ?1",
+            "image_aesthetics" => "SELECT media_id FROM media_aesthetics",
+            "screenshot_detection" => "SELECT media_id FROM media_screenshot_classifications",
+            "document_detection" => "SELECT media_id FROM media_document_classifications",
+            "face_detection" => "SELECT media_id FROM media_face_detection_results",
+            "image_clustering" => {
+                "SELECT media_id FROM media_similarity_index WHERE processing_status = 1"
+            }
+            _ => return None,
+        };
+        let existing_jobs = if task == "image_clustering" {
+            "deduplicate_run_id = ?2"
+        } else {
+            "status IN ('queued','submitting','submitted')"
+        };
+        Some(format!(
+            r#"
+INSERT INTO llm_jobs (id, media_id, task, status, face_grouping_run_id, deduplicate_run_id)
+SELECT lower(hex(randomblob(16))), media.id, ?1, 'queued'
+     , CASE WHEN ?1 = 'face_detection' THEN ?2 END
+     , CASE WHEN ?1 = 'image_clustering' THEN ?2 END
+  FROM media
+  JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id
+ WHERE media.import_state = 'imported'
+   AND media_metadata_jobs.status = 'completed'
+   AND (?1 NOT IN ('screenshot_detection', 'document_detection') OR media.media_type = 'image')
+   AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
+   AND EXISTS (
+       SELECT 1 FROM media_ai_inputs
+        WHERE media_ai_inputs.media_id = media.id AND task = ?1
+   )
+   AND media.id NOT IN (
+       SELECT media_id FROM llm_jobs
+        WHERE task = ?1 AND {existing_jobs}
+   )
+   AND media.id NOT IN (
+       {completed_media}
+   )
+"#
+        ))
+    }
     pub const SELECT_QUEUED: &str = "SELECT id, media_id, task, attempts FROM llm_jobs WHERE status = 'queued' AND available_at <= datetime('now') AND NOT EXISTS (SELECT 1 FROM llm_cancellation_scopes WHERE llm_cancellation_scopes.scope = 'all' OR (llm_cancellation_scopes.scope = 'task' AND llm_cancellation_scopes.task = llm_jobs.task)) ORDER BY created_at LIMIT ?";
     pub const NEXT_AVAILABLE_DELAY_SECONDS: &str = r#"
     WITH future_work(ready_at) AS (
@@ -3529,7 +3567,6 @@ pub mod deduplicate {
     pub const RECOVER_SUBMITTING_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitting'";
     pub const CANCEL_SUBMITTED_JOBS: &str = "UPDATE llm_jobs SET status = 'cancelled', state_version = state_version + 1, completed_at = datetime('now'), updated_at = datetime('now') WHERE task = 'image_clustering' AND status = 'submitted'";
     pub const FAIL_INTERRUPTED_RUNS: &str = "UPDATE media_similarity_runs SET status = 'failed', completed_at = datetime('now'), error = 'deduplicate inference was interrupted during restart' WHERE status = 'running' AND EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = media_similarity_runs.id AND llm_jobs.status = 'cancelled')";
-    pub const CREATE_CLUSTERING_JOBS: &str = "INSERT INTO llm_jobs (id, media_id, deduplicate_run_id, task, status) SELECT lower(hex(randomblob(16))), media.id, ?, 'image_clustering', 'queued' FROM media JOIN media_metadata_jobs ON media_metadata_jobs.media_id = media.id WHERE media.import_state = 'imported' AND media_metadata_jobs.status = 'completed' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations) AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = media.id AND media_ai_inputs.task = 'image_clustering') AND NOT EXISTS (SELECT 1 FROM media_similarity_index WHERE media_similarity_index.media_id = media.id AND media_similarity_index.processing_status = 1) AND NOT EXISTS (SELECT 1 FROM llm_jobs WHERE llm_jobs.deduplicate_run_id = ? AND llm_jobs.media_id = media.id AND llm_jobs.task = 'image_clustering')";
     pub const REQUEUE_MISSING_INPUT_JOBS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, last_error = NULL, claimed_at = NULL, completed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE deduplicate_run_id = ? AND task = 'image_clustering' AND status = 'failed' AND last_error = 'missing prepared AI inputs' AND EXISTS (SELECT 1 FROM media_ai_inputs WHERE media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = 'image_clustering')";
     pub const SELECT_ACTIVE_RUNS: &str =
         "SELECT id, status FROM media_similarity_runs WHERE status IN ('running', 'cancelling')";

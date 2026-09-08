@@ -3,6 +3,195 @@ use momento_api::database::queries;
 use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
 
 #[test]
+fn shared_ai_admission_materializes_active_jobs_and_preserves_retry_eligibility() {
+    assert!(queries::ai_jobs::insert_eligible("unknown").is_none());
+    for task in [
+        "ocr",
+        "image_tagging",
+        "image_aesthetics",
+        "screenshot_detection",
+        "document_detection",
+        "face_detection",
+    ] {
+        let pool = create_test_db();
+        let connection = pool.get().unwrap();
+        connection
+            .execute(
+                "INSERT INTO face_grouping_runs(id,status) VALUES (1,'running')",
+                [],
+            )
+            .unwrap();
+        let run_id = (task == "face_detection").then_some(1_i64);
+        let plan = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                queries::ai_jobs::insert_eligible(task).unwrap()
+            ))
+            .unwrap()
+            .query_map(rusqlite::params![task, run_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let (_, parent, _) = plan
+            .iter()
+            .find(|(_, _, detail)| detail.contains("llm_jobs"))
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|(id, _, detail)| id == parent && detail.contains("LIST SUBQUERY")),
+            "{task}: {plan:?}"
+        );
+        for status in [
+            "queued",
+            "submitting",
+            "submitted",
+            "failed",
+            "cancelled",
+            "completed",
+        ] {
+            let media_id = create_test_media(&pool, &format!("{task}-{status}.jpg"));
+            connection
+                .execute(
+                    "INSERT INTO media_metadata_jobs(media_id,status) VALUES (?,'completed')",
+                    [media_id],
+                )
+                .unwrap();
+            connection.execute("INSERT INTO media_ai_inputs(media_id,task,sequence,input_kind,storage_root,file_path,filename,mime_type,byte_size,content_hash) VALUES (?,?,0,'image','originals','test.jpg','test.jpg','image/jpeg',1,'hash')", rusqlite::params![media_id, task]).unwrap();
+            connection.execute("INSERT INTO llm_jobs(id,media_id,task,status,face_grouping_run_id) VALUES (?,?,?,?,?)", rusqlite::params![format!("{media_id:032x}"), media_id, task, status, run_id]).unwrap();
+        }
+        assert_eq!(
+            connection
+                .execute(
+                    &queries::ai_jobs::insert_eligible(task).unwrap(),
+                    rusqlite::params![task, run_id]
+                )
+                .unwrap(),
+            3,
+            "{task}"
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    &queries::ai_jobs::insert_eligible(task).unwrap(),
+                    rusqlite::params![task, run_id]
+                )
+                .unwrap(),
+            0,
+            "{task}"
+        );
+    }
+}
+
+#[test]
+fn clustering_admission_materializes_existing_run_media_once() {
+    let pool = create_test_db();
+    let connection = pool.get().unwrap();
+    let plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            queries::ai_jobs::insert_eligible("image_clustering").unwrap()
+        ))
+        .unwrap()
+        .query_map(rusqlite::params!["image_clustering", 1], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(3)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|(_, detail)| detail.contains("LIST SUBQUERY")),
+        "{plan:?}"
+    );
+    // The llm_jobs scan must be inside the uncorrelated list, not a per-media lookup.
+    let full_plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            queries::ai_jobs::insert_eligible("image_clustering").unwrap()
+        ))
+        .unwrap()
+        .query_map(rusqlite::params!["image_clustering", 1], |row| {
+            Ok((row.get::<_, i64>(1)?, row.get::<_, String>(3)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let (parent, _) = full_plan
+        .iter()
+        .find(|(_, detail)| detail.contains("SCAN llm_jobs"))
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|(id, detail)| id == parent && detail.contains("LIST SUBQUERY")),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn clustering_admission_preserves_all_status_exclusions_and_other_run_eligibility() {
+    let pool = create_test_db();
+    let mut connection = pool.get().unwrap();
+    connection.execute("INSERT INTO media_similarity_runs(id,trigger,status) VALUES (1,'manual','failed'),(2,'manual','running')", []).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for (index, status) in [
+        "queued",
+        "submitting",
+        "submitted",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let media_id = index as i64 + 1;
+        transaction.execute("INSERT INTO media(id,filename,original_filename,file_path,media_type,import_state) VALUES (?,'test.jpg','test.jpg',?,'image','imported')", rusqlite::params![media_id, format!("{media_id}.jpg")]).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO media_metadata_jobs(media_id,status) VALUES (?,'completed')",
+                [media_id],
+            )
+            .unwrap();
+        transaction.execute("INSERT INTO media_ai_inputs(media_id,task,sequence,input_kind,storage_root,file_path,filename,mime_type,byte_size,content_hash) VALUES (?,'image_clustering',0,'image','originals',?,'test.jpg','image/jpeg',1,?)", rusqlite::params![media_id, format!("{media_id}.jpg"), "0".repeat(64)]).unwrap();
+        transaction.execute("INSERT INTO llm_jobs(id,media_id,deduplicate_run_id,task,status) VALUES (?,?,1,'image_clustering',?)", rusqlite::params![format!("{media_id:032x}"),media_id,status]).unwrap();
+    }
+    assert_eq!(
+        transaction
+            .execute(
+                &queries::ai_jobs::insert_eligible("image_clustering").unwrap(),
+                rusqlite::params!["image_clustering", 1]
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                &queries::ai_jobs::insert_eligible("image_clustering").unwrap(),
+                rusqlite::params!["image_clustering", 2]
+            )
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                &queries::ai_jobs::insert_eligible("image_clustering").unwrap(),
+                rusqlite::params!["image_clustering", 2]
+            )
+            .unwrap(),
+        0
+    );
+    transaction.rollback().unwrap();
+}
+
+#[test]
 fn replayable_receipt_retirement_requires_complete_cleanup_and_active_job() {
     for (receipt, journal, outcome, reservation, job, staging, expected) in [
         (

@@ -138,18 +138,10 @@ pub(crate) fn start_feature_on_connection(
         | AiFeature::ScreenshotDetection
         | AiFeature::DocumentDetection => {
             let task = feature.name();
-            let queued = if task == IMAGE_AESTHETICS_MODEL_TYPE {
-                transaction.execute(queries::ai_jobs::INSERT_AESTHETICS_ELIGIBLE, [])?
-            } else if task == SCREENSHOT_DETECTION_MODEL_TYPE {
-                transaction.execute(queries::ai_jobs::INSERT_SCREENSHOT_ELIGIBLE, [])?
-            } else if task == DOCUMENT_DETECTION_MODEL_TYPE {
-                transaction.execute(queries::ai_jobs::INSERT_DOCUMENT_ELIGIBLE, [])?
-            } else {
-                transaction.execute(
-                    queries::ai_jobs::INSERT_ELIGIBLE,
-                    rusqlite::params![task, task, task, task],
-                )?
-            };
+            let queued = transaction.execute(
+                &queries::ai_jobs::insert_eligible(task).ok_or(rusqlite::Error::InvalidQuery)?,
+                rusqlite::params![task, Option::<i64>::None],
+            )?;
             transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
             queued
         }
@@ -166,7 +158,11 @@ pub(crate) fn start_feature_on_connection(
             }
             transaction.execute(queries::faces::INSERT_GROUPING_RUN, [])?;
             let run_id = transaction.last_insert_rowid();
-            let queued = transaction.execute(queries::ai_jobs::INSERT_FACE_ELIGIBLE, [run_id])?;
+            let queued = transaction.execute(
+                &queries::ai_jobs::insert_eligible(FACE_DETECTION_MODEL_TYPE)
+                    .ok_or(rusqlite::Error::InvalidQuery)?,
+                rusqlite::params![FACE_DETECTION_MODEL_TYPE, run_id],
+            )?;
             transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
             queued
         }
@@ -202,8 +198,9 @@ pub(crate) fn start_feature_on_connection(
                 transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
             }
             let queued = transaction.execute(
-                queries::deduplicate::CREATE_CLUSTERING_JOBS,
-                rusqlite::params![run_id, run_id],
+                &queries::ai_jobs::insert_eligible("image_clustering")
+                    .ok_or(rusqlite::Error::InvalidQuery)?,
+                rusqlite::params!["image_clustering", run_id],
             )?;
             transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
             queued

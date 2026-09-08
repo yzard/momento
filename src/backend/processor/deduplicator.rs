@@ -249,8 +249,9 @@ pub fn queue_clustering_jobs(connection: &Connection, run_id: i64) -> AppResult<
         transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
     }
     let queued_jobs = transaction.execute(
-        queries::deduplicate::CREATE_CLUSTERING_JOBS,
-        rusqlite::params![run_id, run_id],
+        &queries::ai_jobs::insert_eligible("image_clustering")
+            .ok_or(rusqlite::Error::InvalidQuery)?,
+        rusqlite::params!["image_clustering", run_id],
     )?;
     transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     transaction.commit()?;
