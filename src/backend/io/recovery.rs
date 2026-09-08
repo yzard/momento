@@ -9,6 +9,14 @@ use super::journal::{
     JournalMutationGrant, JournalMutationStage, JournalRecoveryScope, JournalRecoveryState,
 };
 
+fn wake_recovered_owner(scheduler: &SchedulerHandle, owner_kind: &str) {
+    match owner_kind {
+        "llm_result" => scheduler.wake_llm_results(),
+        "metadata" | "metadata_generation" => scheduler.wake_metadata(),
+        _ => {}
+    }
+}
+
 /// Reconcile files even after their old publication journal has been compacted.
 /// Only thumbnail roots are eligible; SQLite rechecks live references and claims
 /// atomically before handing an exact path to the normal durable cleanup worker.
@@ -708,8 +716,7 @@ async fn recover_file_operation_step(
                     .file_io
                     .release_journal_mutation_fence(&group.group_id, checkpoint.version)
                     .map_err(mutation_registry_error)?;
-                executors.scheduler.wake_llm_results();
-                executors.scheduler.wake_metadata();
+                wake_recovered_owner(&executors.scheduler, &group.owner_kind);
             }
             return Ok(1);
         }
@@ -768,8 +775,7 @@ async fn recover_file_operation_step(
                     .file_io
                     .release_journal_mutation_fence(&group.group_id, checkpoint.version)
                     .map_err(mutation_registry_error)?;
-                executors.scheduler.wake_llm_results();
-                executors.scheduler.wake_metadata();
+                wake_recovered_owner(&executors.scheduler, &group.owner_kind);
             }
             return Ok(1);
         }

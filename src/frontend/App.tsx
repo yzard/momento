@@ -4,6 +4,7 @@ import { AuthProvider } from './context/AuthContext'
 import { ThemeProvider } from './context/ThemeContext'
 import { useAuth } from './hooks/useAuth'
 import Layout from './components/layout/Layout'
+import PageErrorBoundary from './components/common/PageErrorBoundary'
 
 const Login = lazy(() => import('./pages/Login'))
 const Timeline = lazy(() => import('./pages/Timeline'))
@@ -103,9 +104,11 @@ export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <Suspense fallback={<LoadingScreen />}>
-          <AppRoutes />
-        </Suspense>
+        <PageErrorBoundary onReload={() => window.location.reload()}>
+          <Suspense fallback={<LoadingScreen />}>
+            <AppRoutes />
+          </Suspense>
+        </PageErrorBoundary>
       </AuthProvider>
     </ThemeProvider>
   )

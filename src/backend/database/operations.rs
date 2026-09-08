@@ -4494,7 +4494,20 @@ pub(crate) fn create_llm_result_receipt(
     request: CreateLlmResultReceipt,
     sqlite_reservation: crate::io::space_budget::ProvisionalSpaceToken,
 ) -> rusqlite::Result<CreateLlmResultReceiptOutcome> {
-    if let Some((attempt, job_version, state)) = connection
+    // Retirement commits independently: if subsequent admission fails, the service still
+    // owns the unacknowledged result and can safely replay it without the stale blocker.
+    let retirement = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let retired = retire_replayable_result_receipts(&retirement, Some(&request.job_id))?;
+    retirement.commit()?;
+    if retired != 0 {
+        tracing::info!(
+            job_id = request.job_id,
+            attempt = request.attempt,
+            job_version = request.expected_job_version,
+            "Retired fully cleaned discarded LLM receipt before redelivery"
+        );
+    }
+    if let Some((attempt, job_version, state, journal_state)) = connection
         .query_row(
             queries::llm_callback::SELECT_RESULT_RECEIPT_STATE,
             [&request.job_id],
@@ -4503,11 +4516,22 @@ pub(crate) fn create_llm_result_receipt(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()?
     {
+        tracing::info!(
+            job_id = request.job_id,
+            incoming_attempt = request.attempt,
+            incoming_job_version = request.expected_job_version,
+            existing_attempt = attempt,
+            existing_job_version = job_version,
+            receipt_state = state,
+            journal_state = ?journal_state,
+            "LLM receipt admission deferred by existing receipt"
+        );
         return Ok(
             if attempt == i64::from(request.attempt)
                 && job_version == request.expected_job_version
@@ -4694,11 +4718,10 @@ pub(crate) fn commit_llm_result_receipt(
 }
 
 pub(crate) fn stage_llm_result_page(
-    connection: &mut Connection,
+    mut transaction: rusqlite::Savepoint<'_>,
     request: StageLlmResultPage,
     capacity: &SqliteResultCapacityChild,
 ) -> rusqlite::Result<StageLlmResultPageOutcome> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let Some((attempt, state, claim_token, next_record_sequence, next_byte_offset)) = transaction
         .query_row(
             queries::llm_callback::SELECT_RESULT_RECEIPT_PROGRESS,
@@ -4855,29 +4878,7 @@ pub(crate) fn recover_llm_result_state(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let claims_recovered =
         transaction.execute(queries::llm_callback::RECOVER_RESULT_RECEIPT_CLAIMS, [])?;
-    let replayable = {
-        let mut statement = transaction
-            .prepare(queries::file_operations::SELECT_REPLAYABLE_TERMINAL_RESULT_RECEIPTS)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let mut replayable_receipts_retired = 0usize;
-    for (group_id, reservation_id) in replayable {
-        replayable_receipts_retired = replayable_receipts_retired
-            .checked_add(transaction.execute(
-                queries::file_operations::DELETE_REPLAYABLE_RESULT_RECEIPT_AFTER_TERMINATION,
-                [group_id],
-            )?)
-            .ok_or(rusqlite::Error::InvalidQuery)?;
-        transaction.execute(
-            queries::file_operations::DELETE_RELEASED_RESULT_RESERVATION,
-            [reservation_id],
-        )?;
-    }
+    let replayable_receipts_retired = retire_replayable_result_receipts(&transaction, None)?;
     let released_active_reservation_ids = transaction
         .prepare(queries::file_operations::SELECT_ORPHANED_ACTIVE_RESULT_RESERVATIONS_PAGE)?
         .query_map([], |row| row.get::<_, String>(0))?
@@ -4902,6 +4903,36 @@ pub(crate) fn recover_llm_result_state(
             || released_active_reservation_ids.len() == 256,
         released_active_reservation_ids,
     })
+}
+
+fn retire_replayable_result_receipts(
+    transaction: &rusqlite::Transaction<'_>,
+    job_id: Option<&str>,
+) -> rusqlite::Result<usize> {
+    let replayable = {
+        let mut statement = transaction
+            .prepare(queries::file_operations::SELECT_REPLAYABLE_TERMINAL_RESULT_RECEIPTS)?;
+        let rows = statement
+            .query_map([job_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut replayable_receipts_retired = 0usize;
+    for (group_id, reservation_id) in replayable {
+        replayable_receipts_retired = replayable_receipts_retired
+            .checked_add(transaction.execute(
+                queries::file_operations::DELETE_REPLAYABLE_RESULT_RECEIPT_AFTER_TERMINATION,
+                [group_id],
+            )?)
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        transaction.execute(
+            queries::file_operations::DELETE_RELEASED_RESULT_RESERVATION,
+            [reservation_id],
+        )?;
+    }
+    Ok(replayable_receipts_retired)
 }
 
 pub(crate) fn cleanup_llm_result_staging_page(

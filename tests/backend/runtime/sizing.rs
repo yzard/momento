@@ -44,7 +44,7 @@ fn documented_default_configuration_fits_runtime_budget() {
     assert_eq!(sizing.active_inbound_durable_streams, 12);
     assert_eq!(sizing.active_file_chunks, 12);
     assert_eq!(sizing.durable_orchestrations, 18);
-    assert_eq!(sizing.durable_claim_registry_capacity, 30);
+    assert_eq!(sizing.durable_claim_registry_capacity, 48);
 }
 
 #[test]
@@ -188,12 +188,12 @@ fn executor_queue_and_registry_capacities_are_derived() {
     assert_eq!(sizing.file_queue_capacity, 8);
     assert_eq!(sizing.sqlite_queue_capacity, 8);
     assert_eq!(sizing.log_event_capacity, 128);
-    assert_eq!(sizing.file_registry_capacity, 74);
+    assert_eq!(sizing.file_registry_capacity, 78);
     assert_eq!(sizing.journal_mutation_registry_capacity, 42);
-    assert_eq!(sizing.durable_claim_registry_capacity, 10);
+    assert_eq!(sizing.durable_claim_registry_capacity, 16);
     assert_eq!(
         sizing.durable_claim_registry_capacity,
-        sizing.durable_orchestrations + sizing.active_outbound_stream_sessions
+        2 * sizing.durable_orchestrations + sizing.active_outbound_stream_sessions
     );
     assert_eq!(
         sizing.journal_mutation_registry_capacity,

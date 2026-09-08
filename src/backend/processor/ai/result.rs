@@ -7,7 +7,7 @@ use momento_common::llm::{
     ResultRecord, ResultRecordKind, IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS,
     RESULT_RECORD_HEADER_BYTES,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::config::MediaProcessConfig;
 use crate::constants::{DOCUMENT_DETECTION_MODEL_TYPE, SCREENSHOT_DETECTION_MODEL_TYPE};
@@ -19,6 +19,11 @@ use crate::error::{AppError, AppResult};
 use crate::executor::SqliteExecutorHandle;
 use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::runtime::{DurableSourceId, SchedulerAdmissionKind};
+
+// A small non-face DTO can wait outside orchestration admission. The runtime
+// accounts eight times its encoded size for decoded values and containers.
+pub(crate) const DETACHED_RESULT_MEMORY_BYTES: u64 = 64 * 1024;
+const DETACHED_RESULT_ENCODED_BYTES: u64 = 8 * 1024;
 
 pub(crate) enum QueuedResult {
     Journal {
@@ -78,6 +83,31 @@ impl PreparedResultRequest {
 }
 
 impl PreparedQueuedResult {
+    pub(crate) fn can_detach_sqlite_write(&self) -> bool {
+        match self {
+            Self::Result {
+                request: PreparedResultRequest::Streamed(result),
+                face: None,
+                ..
+            } => {
+                result.manifest.byte_size <= DETACHED_RESULT_ENCODED_BYTES
+                    && result.manifest.record_count <= 32
+            }
+            Self::PermanentFailure {
+                job_id,
+                claim_token,
+                error,
+            } => {
+                job_id
+                    .len()
+                    .saturating_add(claim_token.as_ref().map_or(0, String::len))
+                    .saturating_add(error.len())
+                    <= DETACHED_RESULT_ENCODED_BYTES as usize
+            }
+            Self::Result { face: Some(_), .. } => false,
+        }
+    }
+
     fn claim_identity(&self) -> (String, Option<String>) {
         match self {
             Self::Result {
@@ -131,11 +161,44 @@ impl PreparedQueuedResult {
 }
 
 pub async fn run(executors: crate::runtime::ExecutorHandles, process_config: MediaProcessConfig) {
+    tokio::join!(
+        run_persistence(&executors, process_config),
+        run_cleanup(&executors)
+    );
+}
+
+async fn run_cleanup(executors: &crate::runtime::ExecutorHandles) {
+    let scheduler = &executors.scheduler;
+    let mut observed = scheduler.llm_result_work_version();
+    loop {
+        let retry = match process_staging_cleanup_pages(executors, scheduler).await {
+            Ok(count) if count > 0 => continue,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(%error, "LLM result staging cleanup will retry independently of persistence");
+                true
+            }
+        };
+        if retry {
+            tokio::select! {
+                version = scheduler.wait_for_llm_result_work(observed) => observed = version,
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
+        } else {
+            observed = scheduler.wait_for_llm_result_work(observed).await;
+        }
+    }
+}
+
+async fn run_persistence(
+    executors: &crate::runtime::ExecutorHandles,
+    process_config: MediaProcessConfig,
+) {
     let scheduler = executors.scheduler.clone();
     let mut observed_version = scheduler.llm_result_work_version();
     loop {
         let processed =
-            process_available_results_scheduled(&executors, &process_config, &scheduler).await;
+            process_available_results_scheduled(executors, &process_config, &scheduler).await;
         let retry_after_failure = match processed {
             Ok(processed) if processed > 0 => {
                 scheduler.wake_ai_finalization();
@@ -174,13 +237,25 @@ async fn process_available_results_scheduled(
     scheduler: &crate::runtime::SchedulerHandle,
 ) -> AppResult<usize> {
     let concurrency = scheduler.durable_capacity();
-    let mut lanes = Vec::with_capacity(concurrency);
-    for _ in 0..concurrency {
+    let candidates = {
+        let _admission = scheduler
+            .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
+            .await
+            .map_err(AppError::Internal)?;
+        executors
+            .sqlite
+            .select_llm_result_candidates_durable(
+                u16::try_from(concurrency.min(256)).expect("bounded result concurrency"),
+            )
+            .await?
+    };
+    let mut lanes = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
         let lane_executors = executors.clone();
         let lane_config = process_config.clone();
         let lane_scheduler = scheduler.clone();
         lanes.push(scheduler.spawn_control(async move {
-            process_result_lane(&lane_executors, &lane_config, &lane_scheduler).await
+            process_result_lane(&lane_executors, &lane_config, &lane_scheduler, candidate).await
         }));
     }
     let mut processed = 0;
@@ -202,30 +277,35 @@ async fn process_available_results_scheduled(
             }
         }
     }
-    let cleanup_pages = process_staging_cleanup_pages(executors, scheduler).await?;
     if let Some(error) = first_error {
         return Err(error);
     }
-    Ok(processed + cleanup_pages)
+    Ok(processed)
 }
 
 async fn process_result_lane(
     executors: &crate::runtime::ExecutorHandles,
     process_config: &MediaProcessConfig,
     scheduler: &crate::runtime::SchedulerHandle,
+    candidate: QueuedResult,
 ) -> AppResult<usize> {
     let mut processed = 0;
+    let mut initial_candidate = Some(candidate);
     loop {
         let admission = scheduler
             .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
             .await
             .map_err(AppError::Internal)?;
-        let queued_result = executors
-            .sqlite
-            .select_llm_result_candidates_durable(1)
-            .await?
-            .into_iter()
-            .next();
+        let queued_result = if let Some(candidate) = initial_candidate.take() {
+            Some(candidate)
+        } else {
+            executors
+                .sqlite
+                .select_llm_result_candidates_durable(1)
+                .await?
+                .into_iter()
+                .next()
+        };
         let Some(queued_result) = queued_result else {
             drop(admission);
             return Ok(processed);
@@ -248,6 +328,7 @@ async fn process_result_lane(
         } else {
             None
         };
+        let preparation_started = std::time::Instant::now();
         let prepared_result = match prepare_queued_result(executors, queued_result, process_config)
             .await
         {
@@ -268,10 +349,34 @@ async fn process_result_lane(
             },
         };
         let claim_identity = prepared_result.claim_identity();
+        if preparation_started.elapsed() >= std::time::Duration::from_secs(1) {
+            tracing::info!(
+                job_id = claim_identity.0,
+                elapsed_ms = preparation_started.elapsed().as_millis(),
+                "LLM result preparation completed"
+            );
+        }
+        // Small writes have separately budgeted retained payloads. Large/face
+        // writes keep their memory-bearing admission until persistence finishes.
+        let admission = if prepared_result.can_detach_sqlite_write() {
+            drop(admission);
+            None
+        } else {
+            Some(admission)
+        };
+        let persistence_started = std::time::Instant::now();
         let persistence = executors
             .sqlite
             .persist_prepared_llm_result_durable(prepared_result)
             .await;
+        if persistence_started.elapsed() >= std::time::Duration::from_secs(1) {
+            tracing::info!(
+                job_id = claim_identity.0,
+                elapsed_ms = persistence_started.elapsed().as_millis(),
+                succeeded = persistence.is_ok(),
+                "LLM result SQLite queue and commit completed"
+            );
+        }
         let replaced_crops = match persistence {
             Ok(replaced_crops) => replaced_crops,
             Err(error) => {
@@ -290,6 +395,7 @@ async fn process_result_lane(
             }
         };
         scheduler.wake_journal_recovery();
+        scheduler.wake_llm_results();
         crate::processor::face_detection::retire_replaced_crops(executors, replaced_crops).await;
         drop(registration);
         drop(admission);
@@ -386,7 +492,10 @@ async fn process_staging_cleanup_pages(
 ) -> AppResult<usize> {
     let candidates = {
         let _worker_permit = scheduler
-            .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
+            .acquire_durable(
+                DurableSourceId::LlmResultCleanup,
+                SchedulerAdmissionKind::NewClaim,
+            )
             .await
             .map_err(AppError::Internal)?;
         executors
@@ -402,7 +511,7 @@ async fn process_staging_cleanup_pages(
     for job_id in candidates {
         let _worker_permit = scheduler
             .acquire_durable(
-                DurableSourceId::LlmResult,
+                DurableSourceId::LlmResultCleanup,
                 SchedulerAdmissionKind::ExistingClaimCompletion,
             )
             .await
@@ -1005,12 +1114,11 @@ async fn prepare_queued_face_result(
 }
 
 pub(crate) fn persist_prepared_result(
-    connection: &Connection,
+    mut transaction: rusqlite::Savepoint<'_>,
     prepared: PreparedQueuedResult,
     capacity: Option<&crate::database::operations::SqliteResultCapacityChild>,
 ) -> AppResult<Vec<crate::io::file::NormalizedStoragePath>> {
     let capacity_job_id = prepared.durable_parent_job_id().map(str::to_string);
-    let mut transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let mut replaced_crop_paths = None;
     let mut permanent_failure = None;
     match prepared {
@@ -1076,7 +1184,7 @@ pub(crate) fn persist_prepared_result(
         tracing::error!(
             job_id,
             error,
-            "Momento LLM result processing failed permanently"
+            "Momento LLM result classified as permanently invalid; awaiting SQLite commit"
         );
     }
     Ok(replaced_crop_paths.unwrap_or_default())

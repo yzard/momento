@@ -39,7 +39,9 @@ export default function AiPanel() {
   const statusQuery = useQuery({
     queryKey: queryKeys.ai.status,
     queryFn: aiApi.status,
-    refetchInterval: 1000,
+    refetchInterval: 5000,
+    staleTime: 5000,
+    refetchOnWindowFocus: false,
   })
 
   return (

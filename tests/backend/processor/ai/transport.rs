@@ -141,7 +141,7 @@ async fn reconciliation_requeues_only_missing_submitted_jobs_with_the_same_attem
 }
 
 #[tokio::test]
-async fn saturated_scheduler_defers_receipt_without_freezing_the_socket() {
+async fn saturated_scheduler_waits_for_receipt_capacity_without_freezing_the_socket() {
     use momento_api::runtime::{DurableSourceId, SchedulerAdmissionKind};
     let pool = create_test_db();
     let (executors, _directory) =
@@ -163,14 +163,10 @@ async fn saturated_scheduler_defers_receipt_without_freezing_the_socket() {
                 .unwrap(),
         );
     }
-    let recovery_executors = executors.clone();
     let (address, server) = start_server(true, move |mut socket| async move {
         let (manifest, records) = completed_ocr_result(job_id, media_id, "text");
         send_streamed_result(&mut socket, manifest, records).await;
-        assert!(matches!(
-            receive_client_control(&mut socket).await,
-            ClientControlMessage::ResultReceiptDeferred { .. }
-        ));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         socket.send(Message::Ping(vec![1, 2, 3])).await.unwrap();
         loop {
             match socket.next().await.unwrap().unwrap() {
@@ -183,11 +179,6 @@ async fn saturated_scheduler_defers_receipt_without_freezing_the_socket() {
             }
         }
         drop(held);
-        momento_api::io::recovery::recover_generic_file_operations(&recovery_executors)
-            .await
-            .unwrap();
-        let (manifest, records) = completed_ocr_result(job_id, media_id, "text");
-        send_streamed_result(&mut socket, manifest, records).await;
         assert!(matches!(
             receive_client_control(&mut socket).await,
             ClientControlMessage::ResultReceived { .. }
@@ -228,9 +219,90 @@ async fn saturated_scheduler_defers_receipt_without_freezing_the_socket() {
         )
         .unwrap();
     assert_eq!(status, "submitted");
+    assert_eq!(pool.get().unwrap().query_row(
+        "SELECT COUNT(*) FROM file_operation_groups WHERE owner_kind='llm_result' AND owner_id=?",
+        [job_id], |row| row.get::<_, i64>(0)).unwrap(), 1);
 }
 
 type ServerSocket = WebSocketStream<TcpStream>;
+
+#[tokio::test]
+async fn result_start_waiting_for_sqlite_does_not_block_socket_heartbeats() {
+    let pool = create_test_db();
+    let (executors, _directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let media_id = create_test_media(&pool, "start-wait.jpg");
+    let job_id = "abc111111111111111111111111111";
+    pool.get().unwrap().execute("INSERT INTO llm_jobs(id,media_id,task,status,attempts) VALUES(?,?,'ocr','submitted',1)", rusqlite::params![job_id,media_id]).unwrap();
+    pool.get().unwrap().execute("INSERT INTO llm_job_inputs(job_id,sequence,input_kind,storage_root,file_path,filename,mime_type,byte_size,content_hash) VALUES(?,0,'image','originals','test.jpg','test.jpg','image/jpeg',1,?)", rusqlite::params![job_id,"0".repeat(64)]).unwrap();
+    let locked = pool.get().unwrap();
+    locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (responsive, response) = tokio::sync::oneshot::channel();
+    let (address, server) = start_server(true, move |mut socket| async move {
+        let (manifest, _) = completed_ocr_result(job_id, media_id, "text");
+        send_service_control(&mut socket, ServiceControlMessage::ResultStart { manifest }).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        socket.send(Message::Ping(vec![7, 8, 9])).await.unwrap();
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Pong(bytes) if bytes == vec![7, 8, 9] => break,
+                Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.unwrap(),
+                other => panic!("unexpected message while writer locked: {other:?}"),
+            }
+        }
+        responsive.send(()).unwrap();
+        let ClientControlMessage::CheckJobs {
+            request_id,
+            job_ids,
+        } = receive_client_control(&mut socket).await
+        else {
+            panic!("expected outbound command while result waits for SQLite")
+        };
+        send_service_control(
+            &mut socket,
+            ServiceControlMessage::JobsChecked {
+                request_id,
+                missing_job_ids: job_ids,
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive_client_control(&mut socket).await,
+            ClientControlMessage::ResultReady { .. }
+        ));
+    })
+    .await;
+    let _connection = LlmConnection::connect(
+        &address,
+        CLIENT_ID,
+        API_KEY,
+        executors.sqlite.clone(),
+        executors.file_io.clone(),
+        executors.scheduler.clone(),
+    )
+    .await
+    .unwrap();
+    let responsive = tokio::time::timeout(std::time::Duration::from_secs(2), response).await;
+    let outbound = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        _connection.missing_jobs(vec!["aa11".into()]),
+    )
+    .await;
+    locked.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        outbound
+            .expect("outbound command must not wait for result admission")
+            .unwrap(),
+        vec!["aa11"]
+    );
+    responsive
+        .expect("socket must respond before SQLite writer becomes available")
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
 
 struct TestHandshake {
     accept_protocol: bool,
@@ -501,6 +573,22 @@ async fn send_streamed_result(
     manifest: ResultManifest,
     records: Vec<u8>,
 ) {
+    send_streamed_result_body(socket, &manifest, records).await;
+    send_service_control(
+        socket,
+        ServiceControlMessage::ResultFinished {
+            job_id: manifest.job_id,
+            attempt: manifest.attempt,
+        },
+    )
+    .await;
+}
+
+async fn send_streamed_result_body(
+    socket: &mut ServerSocket,
+    manifest: &ResultManifest,
+    records: Vec<u8>,
+) {
     send_service_control(
         socket,
         ServiceControlMessage::ResultStart {
@@ -532,14 +620,6 @@ async fn send_streamed_result(
         }
         other => panic!("expected result chunk credit, received {other:?}"),
     }
-    send_service_control(
-        socket,
-        ServiceControlMessage::ResultFinished {
-            job_id: manifest.job_id,
-            attempt: manifest.attempt,
-        },
-    )
-    .await;
 }
 
 fn pending_count(pool: &momento_api::database::DbPool, table: &str) -> i64 {
@@ -708,9 +788,42 @@ async fn websocket_results_are_acknowledged_after_durable_receipt_before_process
         connection.execute("INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash) VALUES (?, 0, 'image', 'originals', 'test.jpg', 'test.jpg', 'image/jpeg', 1, ?)", rusqlite::params![job_id, "0".repeat(64)]).expect("job input");
     }
     drop(connection);
+    let receipt_scheduler = executors.scheduler.clone();
     let (server_address, server) = start_server(true, move |mut socket| async move {
         let (manifest, records) = completed_ocr_result(VALID_JOB_ID, media_id, "persisted");
-        send_streamed_result(&mut socket, manifest, records).await;
+        send_streamed_result_body(&mut socket, &manifest, records).await;
+        let mut held = Vec::new();
+        for _ in 0..receipt_scheduler.durable_capacity() {
+            held.push(
+                receipt_scheduler
+                    .acquire_durable(
+                        momento_api::runtime::DurableSourceId::Maintenance,
+                        momento_api::runtime::SchedulerAdmissionKind::NewClaim,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        send_service_control(
+            &mut socket,
+            ServiceControlMessage::ResultFinished {
+                job_id: manifest.job_id,
+                attempt: manifest.attempt,
+            },
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        socket
+            .send(Message::Ping(b"capacity-wait".to_vec()))
+            .await
+            .unwrap();
+        let pong = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(pong, Message::Pong(b"capacity-wait".to_vec()));
+        drop(held);
         match receive_client_control(&mut socket).await {
             ClientControlMessage::ResultReceived { job_id, attempt } => {
                 assert_eq!(job_id, VALID_JOB_ID);
@@ -937,6 +1050,15 @@ async fn websocket_results_are_acknowledged_after_durable_receipt_before_process
 
 #[tokio::test]
 async fn interrupted_result_receive_restarts_with_a_new_journal_group() {
+    assert_interrupted_result_redelivery(true).await;
+}
+
+#[tokio::test]
+async fn discarded_result_receipt_is_retired_on_redelivery_without_restart() {
+    assert_interrupted_result_redelivery(false).await;
+}
+
+async fn assert_interrupted_result_redelivery(run_startup_recovery: bool) {
     const JOB_ID: &str = "ab111111111111111111111111111111";
     let pool = create_test_db();
     let executors = crate::test_utils::test_executor_handles(pool.clone());
@@ -1012,30 +1134,32 @@ async fn interrupted_result_receive_restarts_with_a_new_journal_group() {
         )
         .expect("legacy discarded result receipt");
     drop(connection);
-    let startup_recovery = executors
-        .sqlite
-        .recover_llm_result_state_durable()
-        .await
-        .expect("retire legacy discarded result receipt");
-    assert_eq!(startup_recovery.claims_recovered, 0);
-    assert_eq!(startup_recovery.replayable_receipts_retired, 1);
-    assert_eq!(startup_recovery.orphaned_reservations_retired, 0);
-    assert!(!startup_recovery.has_more);
+    if run_startup_recovery {
+        let startup_recovery = executors
+            .sqlite
+            .recover_llm_result_state_durable()
+            .await
+            .expect("retire legacy discarded result receipt");
+        assert_eq!(startup_recovery.claims_recovered, 0);
+        assert_eq!(startup_recovery.replayable_receipts_retired, 1);
+        assert_eq!(startup_recovery.orphaned_reservations_retired, 0);
+        assert!(!startup_recovery.has_more);
 
-    pool.get()
+        pool.get()
         .expect("legacy orphan connection")
         .execute(
             "INSERT INTO data_dir_space_reservations (id, class, owner_kind, owner_id, filesystem_id, reserved_peak_additional_bytes, state) VALUES ('legacy-orphaned-result-sqlite', 'sqlite', 'llm_result', ?, 'test', 4096, 'active')",
             [JOB_ID],
         )
         .expect("orphaned active result reservation");
-    let orphan_recovery = executors
-        .sqlite
-        .recover_llm_result_state_durable()
-        .await
-        .expect("retire legacy orphaned result reservation");
-    assert_eq!(orphan_recovery.replayable_receipts_retired, 0);
-    assert_eq!(orphan_recovery.orphaned_reservations_retired, 1);
+        let orphan_recovery = executors
+            .sqlite
+            .recover_llm_result_state_durable()
+            .await
+            .expect("retire legacy orphaned result reservation");
+        assert_eq!(orphan_recovery.replayable_receipts_retired, 0);
+        assert_eq!(orphan_recovery.orphaned_reservations_retired, 1);
+    }
 
     let (second_address, second_server) = start_server(true, move |mut socket| async move {
         let (manifest, records) = completed_ocr_result(JOB_ID, media_id, "retry");
@@ -1192,12 +1316,33 @@ async fn streamed_typed_results_persist_without_the_legacy_json_inbox() {
     .expect("WebSocket connection");
     server.await.expect("server task");
 
-    assert_eq!(
-        process_available_results(&executors, MediaProcessConfig::default())
-            .await
-            .expect("persist typed streamed results"),
-        3
-    );
+    let worker = executors
+        .scheduler
+        .spawn_control(momento_api::processor::ai::result::run(
+            executors.clone(),
+            MediaProcessConfig::default(),
+        ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let complete: i64 = pool
+                .get()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM llm_jobs WHERE status='completed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if complete == 3 && executors.scheduler.active_durable_total() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("scheduled lanes drain actual results and release admission");
+    worker.abort();
+    let _ = worker.await;
     let connection = pool.get().expect("persistence connection");
     let state: (i64, i64, i64) = connection
         .query_row(

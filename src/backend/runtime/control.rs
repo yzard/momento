@@ -183,6 +183,7 @@ impl SchedulerHandle {
         source: DurableSourceId,
         kind: SchedulerAdmissionKind,
     ) -> Result<DurableAdmission, String> {
+        let admission_started = std::time::Instant::now();
         // Serialize admission, not execution: queued callers cannot be overtaken
         // by a worker immediately requesting its next job.
         let _turn = self.shared.durable_admission_turn.lock().await;
@@ -207,6 +208,16 @@ impl SchedulerHandle {
                 }
                 self.shared.durable_by_source[source.index()].fetch_add(1, Ordering::AcqRel);
                 self.shared.durable_by_kind[kind.index()].fetch_add(1, Ordering::AcqRel);
+                if admission_started.elapsed() >= std::time::Duration::from_millis(250) {
+                    tracing::info!(
+                        ?source,
+                        ?kind,
+                        wait_ms = admission_started.elapsed().as_millis(),
+                        active = self.active_durable_total(),
+                        capacity = self.durable_capacity(),
+                        "Durable work resumed after scheduler admission wait"
+                    );
+                }
                 return Ok(DurableAdmission {
                     counter: Arc::clone(&self.shared),
                     source,

@@ -4,6 +4,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
+mod write_batch;
 use rusqlite::{ErrorCode, OptionalExtension};
 use tokio::sync::{oneshot, Notify};
 
@@ -5351,7 +5352,8 @@ pub(crate) fn spawn_sqlite_workers(
 }
 
 fn run_worker(context: SqliteWorkerContext, receiver: Receiver<SqliteCommand>, read_only: bool) {
-    while let Ok(command) = receiver.recv() {
+    let mut pending = None;
+    while let Some(command) = pending.take().or_else(|| receiver.recv().ok()) {
         context.capacity_wake.notify_one();
         if command.is_read_only() != read_only {
             let operation = command.operation.name();
@@ -5360,6 +5362,17 @@ fn run_worker(context: SqliteWorkerContext, receiver: Receiver<SqliteCommand>, r
                 operation,
                 "SQLite command reached the wrong worker lane",
             ));
+            continue;
+        }
+        if !read_only && write_batch::eligible(&command.operation, &context.footprints) {
+            let (batch, next) = write_batch::collect(
+                command,
+                &receiver,
+                &context.footprints,
+                &context.capacity_wake,
+            );
+            pending = next;
+            write_batch::execute(batch, &context);
             continue;
         }
         let operation_result = execute(
@@ -6036,18 +6049,14 @@ fn execute_with_connection(
                 .map(SqliteOutput::LlmResultReceiptCommitted)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
-        SqliteOperation::StageLlmResultPage(request) => {
-            let capacity = durable_capacity.as_ref().ok_or_else(|| {
-                ExecutorError::new(
-                    ExecutorErrorKind::Internal,
-                    operation_name,
-                    "LLM staging is missing its durable SQLite capacity child",
-                )
-            })?;
-            operations::stage_llm_result_page(connection, *request, capacity)
-                .map(SqliteOutput::LlmResultPageStaged)
-                .map_err(|error| map_sqlite_error(operation_name, error))
-        }
+        operation @ (SqliteOperation::StageLlmResultPage(_)
+        | SqliteOperation::PersistPreparedLlmResult(_)) => write_batch::execute_result_write(
+            connection
+                .savepoint()
+                .map_err(|error| map_sqlite_error(operation_name, error))?,
+            operation,
+            durable_capacity.as_ref(),
+        ),
         SqliteOperation::SelectLlmResultStagingCleanup { limit } => {
             operations::select_llm_result_staging_cleanup(connection, i64::from(limit))
                 .map(SqliteOutput::LlmResultStagingCleanup)
@@ -6147,15 +6156,6 @@ fn execute_with_connection(
             crate::processor::ai::result::select_result_candidates(connection, i64::from(limit))
                 .map(SqliteOutput::LlmResultCandidates)
                 .map_err(|error| map_result_app_error(operation_name, error))
-        }
-        SqliteOperation::PersistPreparedLlmResult(prepared) => {
-            crate::processor::ai::result::persist_prepared_result(
-                connection,
-                prepared,
-                durable_capacity.as_ref(),
-            )
-            .map(SqliteOutput::PreparedLlmResultPersisted)
-            .map_err(|error| map_result_app_error(operation_name, error))
         }
         SqliteOperation::LoadMetadataAiInputVerification { media_id } => {
             operations::load_metadata_ai_input_verification(connection, media_id)

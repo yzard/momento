@@ -182,8 +182,12 @@ impl RuntimeSizing {
         let active_file_chunks = checked_mul(2, file_workers)?;
         let durable_orchestrations =
             checked_add(checked_add(cpu_workers, file_workers)?, sqlite_workers)?;
-        let durable_claim_registry_capacity =
-            checked_add(durable_orchestrations, active_outbound_stream_sessions)?;
+        // Prepared result lanes retain their claim while their bounded SQLite
+        // write waits, but no longer retain application admission.
+        let durable_claim_registry_capacity = checked_add(
+            checked_mul(2, durable_orchestrations)?,
+            active_outbound_stream_sessions,
+        )?;
 
         let scheduler_ingress_capacity = [
             active_requests,
@@ -268,7 +272,15 @@ impl RuntimeSizing {
         ]
         .into_iter()
         .try_fold(0_u64, checked_add)?;
-        let durable_state = checked_mul(durable_orchestrations, result_peak.max(metadata_peak))?;
+        // Prepared results waiting for the writer have released orchestration
+        // admission, but their bounded payloads are still live in result lanes.
+        let durable_state = checked_mul(
+            durable_orchestrations,
+            checked_add(
+                result_peak.max(metadata_peak),
+                crate::processor::ai::result::DETACHED_RESULT_MEMORY_BYTES,
+            )?,
+        )?;
 
         let stream_buffers = checked_mul(
             checked_add(active_stream_sessions, active_outbound_stream_sessions)?,

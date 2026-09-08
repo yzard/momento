@@ -185,6 +185,13 @@ pub mod file_operations {
         DELETE FROM llm_result_receipts
          WHERE journal_group_id = ?
            AND state = 'discarded'
+           AND NOT EXISTS (
+                   SELECT 1 FROM llm_result_staging WHERE job_id = llm_result_receipts.job_id
+               )
+           AND EXISTS (
+                   SELECT 1 FROM data_dir_space_reservations
+                    WHERE id = llm_result_receipts.sqlite_reservation_id AND state = 'released'
+               )
            AND EXISTS (
                    SELECT 1 FROM file_operation_groups
                     WHERE id = llm_result_receipts.journal_group_id
@@ -216,6 +223,10 @@ pub mod file_operations {
           JOIN llm_jobs AS j ON j.id = r.job_id
           JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id
          WHERE r.state = 'discarded'
+           AND (?1 IS NULL OR r.job_id = ?1)
+           AND NOT EXISTS (
+                   SELECT 1 FROM llm_result_staging WHERE job_id = r.job_id
+               )
            AND (
                    g.state = 'rolled_back'
                 OR (g.state = 'cleaned' AND g.completion_outcome = 'discarded')
@@ -261,10 +272,10 @@ pub mod file_operations {
     pub const SHRINK_SQLITE_RESULT_RESERVATION_TO_CLEANUP: &str = "UPDATE data_dir_space_reservations SET owner_kind = 'llm_result_cleanup', newly_allocated_blocks = reserved_peak_additional_bytes - ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND reserved_peak_additional_bytes - newly_allocated_blocks >= ?";
     pub const SELECT_GROUP_VERSION: &str = "SELECT version FROM file_operation_groups WHERE id = ?";
     // The ready-only ordered index is the durable FIFO; never sort the backlog per dequeue.
-    pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
-    pub const SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups WHERE product_target IS NULL AND (state IN ('publishing', 'files_committed', 'rollback_pending') OR (state = 'cleanup_pending' AND completion_outcome = 'discarded' AND cancel_requested = 1)) AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
-    pub const SELECT_NEXT_BLOCKING_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND (state <> 'cleanup_pending' OR cancel_requested = 1) AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
-    pub const SELECT_NEXT_CLEANUP_RECOVERY_GROUP: &str = "SELECT id, state, version FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND state = 'cleanup_pending' AND cancel_requested = 0 AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
+    pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
+    pub const SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind FROM file_operation_groups WHERE product_target IS NULL AND (state IN ('publishing', 'files_committed', 'rollback_pending') OR (state = 'cleanup_pending' AND completion_outcome = 'discarded' AND cancel_requested = 1)) AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
+    pub const SELECT_NEXT_BLOCKING_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND (state <> 'cleanup_pending' OR cancel_requested = 1) AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
+    pub const SELECT_NEXT_CLEANUP_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND state = 'cleanup_pending' AND cancel_requested = 0 AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
     pub const YIELD_RECOVERY_PROGRESS: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state IN ('cleanup_pending', 'rollback_pending')";
     pub const DEFER_RECOVERY: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), retry_at = unixepoch() + 1, finalization_error_kind = ?1, finalization_error = ?2, rollback_error_kind = CASE WHEN state = 'rollback_pending' THEN ?1 ELSE rollback_error_kind END, rollback_error = CASE WHEN state = 'rollback_pending' THEN ?2 ELSE rollback_error END, updated_at = datetime('now') WHERE id = ?3 AND version = ?4 AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending')";
     pub const NEXT_RECOVERY_DELAY: &str = "SELECT MAX(0, MIN(retry_at) - unixepoch()) FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending')";
@@ -1255,40 +1266,17 @@ pub mod ai_jobs {
     pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, state_version = state_version + 1, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', state_version = state_version + 1, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const SELECT_LATEST_STATUS_COUNTS: &str = r#"
-    WITH ranked_jobs AS (
-        SELECT task
-             , status
-             , ROW_NUMBER() OVER (
-                   PARTITION BY media_id, task
-                   ORDER BY rowid DESC
-               ) AS recency
-          FROM llm_jobs
-    )
     SELECT task
          , status
          , COUNT(*)
-      FROM ranked_jobs
-     WHERE recency = 1
+      FROM llm_jobs
+     WHERE rowid IN (SELECT MAX(rowid) FROM llm_jobs GROUP BY media_id, task)
      GROUP BY task
             , status
      ORDER BY task
             , status
     "#;
     pub const SELECT_LATEST_FAILURES: &str = r#"
-    WITH ranked_jobs AS (
-        SELECT id
-             , media_id
-             , attempts
-             , task
-             , status
-             , last_error
-             , updated_at
-             , ROW_NUMBER() OVER (
-                   PARTITION BY media_id, task
-                   ORDER BY rowid DESC
-               ) AS recency
-          FROM llm_jobs
-    )
     SELECT r.task
          , r.last_error
          , r.id
@@ -1296,10 +1284,10 @@ pub mod ai_jobs {
          , r.attempts
          , m.original_filename
          , m.file_path
-      FROM ranked_jobs AS r
+      FROM llm_jobs AS r
       JOIN media AS m ON m.id = r.media_id
-     WHERE recency = 1
-       AND status = 'failed'
+     WHERE r.status = 'failed'
+       AND r.rowid IN (SELECT MAX(rowid) FROM llm_jobs GROUP BY media_id, task)
        AND last_error IS NOT NULL
      ORDER BY r.task
             , r.updated_at DESC
@@ -1965,8 +1953,12 @@ pub mod llm_callback {
         "SELECT media_id, task, attempts, status, state_version FROM llm_jobs WHERE id = ?";
     pub const SELECT_JOB_INPUT_CORRELATION: &str =
         "SELECT sequence, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";
-    pub const SELECT_RESULT_RECEIPT_STATE: &str =
-        "SELECT attempt, job_version, state FROM llm_result_receipts WHERE job_id = ?";
+    pub const SELECT_RESULT_RECEIPT_STATE: &str = r#"
+        SELECT r.attempt, r.job_version, r.state, g.state
+          FROM llm_result_receipts AS r
+          LEFT JOIN file_operation_groups AS g ON g.id = r.journal_group_id
+         WHERE r.job_id = ?
+    "#;
     pub const INSERT_RESULT_RECEIPT: &str = r#"
         INSERT INTO llm_result_receipts (
             job_id, attempt, job_version, media_id, task, result_status,
@@ -2041,17 +2033,15 @@ pub mod llm_callback {
                )
     "#;
     pub const SELECT_RESULT_STAGING_CLEANUP: &str = r#"
-        SELECT r.job_id
-          FROM llm_result_receipts AS r
-         WHERE r.state = 'cleanup_pending'
-            OR (
+        SELECT job_id FROM (
+            SELECT job_id, updated_at FROM llm_result_receipts WHERE state = 'cleanup_pending'
+            UNION ALL
+            SELECT r.job_id, r.updated_at
+              FROM data_dir_space_reservations AS s
+              CROSS JOIN llm_result_receipts AS r ON r.sqlite_reservation_id = s.id
+             WHERE s.class = 'sqlite' AND s.state = 'active'
+               AND (
                    r.state IN ('file_cleanup_pending', 'cleaned', 'discarded', 'failed')
-               AND EXISTS (
-                       SELECT 1
-                         FROM data_dir_space_reservations AS s
-                        WHERE s.id = r.sqlite_reservation_id
-                          AND s.state = 'active'
-                   )
                AND (
                        r.state != 'file_cleanup_pending'
                     OR EXISTS (
@@ -2071,7 +2061,8 @@ pub mod llm_callback {
                        )
                    )
                )
-      ORDER BY r.updated_at, r.job_id
+        )
+      ORDER BY updated_at, job_id
          LIMIT ?
     "#;
     pub const SELECT_RESULT_RECEIPT_STATE_ONLY: &str =

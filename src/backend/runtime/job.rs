@@ -9,6 +9,8 @@ pub enum DurableSourceId {
     LlmSubmission,
     LlmCancellation,
     LlmResult,
+    LlmReceipt,
+    LlmResultCleanup,
     DeduplicateFinalization,
     FaceGroupFinalization,
     JournalRecovery,
@@ -17,7 +19,7 @@ pub enum DurableSourceId {
 }
 
 impl DurableSourceId {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::MediaProcess,
         Self::LocalImport,
         Self::WebDavImport,
@@ -26,6 +28,8 @@ impl DurableSourceId {
         Self::LlmSubmission,
         Self::LlmCancellation,
         Self::LlmResult,
+        Self::LlmReceipt,
+        Self::LlmResultCleanup,
         Self::DeduplicateFinalization,
         Self::FaceGroupFinalization,
         Self::JournalRecovery,

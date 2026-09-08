@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, Outlet } from '../../src/frontend/node_modules/react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -83,6 +83,19 @@ describe('App Places routes', () => {
 })
 
 describe('App timeline routes', () => {
+  it('shows a refresh action when an open Admin tab loses deployed page assets', async () => {
+    authentication.user.role = 'admin'
+    render(
+      <MemoryRouter initialEntries={['/admin/ai']}>
+        <App />
+      </MemoryRouter>
+    )
+    expect(await screen.findByText('AI admin page')).toBeTruthy()
+    fireEvent(window, new Event('vite:preloadError'))
+    expect(screen.getByRole('alert')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Refresh page' })).toBeTruthy()
+  })
+
   it.each([
     ['/timeline/screenshots', 'image', 'screenshot'],
     ['/timeline/documents', 'image', 'document'],

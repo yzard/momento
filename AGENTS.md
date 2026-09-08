@@ -410,6 +410,29 @@ the original wire attempt. Completed and cancelled jobs are never resurrected.
 
 ### Result contract
 
+The SQLite writer coalesces consecutive ready AI staging/persistence commands into one
+bounded transaction (at most 16 commands and 16 MiB of declared input bounds). It never
+waits to fill a batch, skips a FIFO barrier, or combines two operations for the same result.
+Every command owns a savepoint; success is returned only after the outer commit. A failed
+commit leaves durable work retryable. Other writes retain their independent transaction
+semantics. Small non-face results (at most 8 KiB encoded and 32 records) release application
+admission before waiting on the bounded SQLite writer while retaining their durable claim;
+the runtime accounts 64 KiB per detached lane. Larger results and prepared face artifacts keep
+their admission so detached payloads cannot exceed the memory budget. Receipt publication, result processing,
+and result cleanup have separate source counters, not separate OS thread pools.
+
+Result processing claims a bounded batch once and starts lanes only for actual candidates;
+do not start one empty writer transaction per global worker on every wake. Cleanup selection
+starts from active SQLite reservations, not historical terminal receipts. Journal completion
+wakes only its owning metadata/result pipeline. Staging cleanup drains independently of
+result preparation, using the same event signal; it never waits for every result lane to finish.
+Result start, chunk writes, expiry rollback, and final publication run as bounded asynchronous
+operations outside WebSocket framing. Ready controls and submission frames alternate, and
+inbound frames have no strict priority over outbound work. Completed incoming result publication waits
+asynchronously for scheduler admission independently of WebSocket framing and heartbeats;
+disconnect must not cancel an in-flight publication/commit. Bound receiving plus publishing
+sessions, and defer new receipts before accepting bytes when that bound is reached.
+
 llm-service sends a validated manifest first on the active WebSocket matching the manifest's client ID.
 After `resultReady`, it reads its durable record file in at most 64 KiB frames and waits for the exact
 cumulative-offset `resultChunkReady` credit after every frame before sending `resultFinished`.
@@ -428,8 +451,9 @@ failed. A stale or terminal delivery is acknowledged; failure to commit a termin
 `resultReceiptDeferred`. A temporary scheduler, SQLite, I/O, or reservation failure returns
 `resultReceiptDeferred` so llm-service retains the durable result without consuming an attempt.
 Momento uses available workers from its global application pool to prepare durable inbox results,
-including expensive face-image normalization and cropping. One logical writer persists each
-completed preparation immediately in its own short SQLite transaction; there is no dedicated
+including expensive face-image normalization and cropping. Completed preparations enter the
+shared SQLite writer immediately and may share a bounded transaction using isolated savepoints;
+there is no dedicated
 AI-result OS thread or separate CPU pool. A slow image never forms a batch barrier. A permanently
 invalid payload fails only its Momento job. A transient database, pool, I/O, or internal failure
 leaves that inbox row available for unbounded retry; transient failures never exhaust an attempt

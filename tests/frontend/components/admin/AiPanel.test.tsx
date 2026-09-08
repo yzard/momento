@@ -313,6 +313,8 @@ describe('AiPanel', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(mocks.status).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1000)
+    expect(mocks.status).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(4000)
     expect(mocks.status).toHaveBeenCalledTimes(2)
   })
 })

@@ -115,7 +115,26 @@ struct InboundResultSession {
     deadline: Instant,
 }
 
+type ResultPublication = Result<
+    (
+        String,
+        HashMap<String, InboundResultSession>,
+        VecDeque<Message>,
+    ),
+    String,
+>;
+
+enum ResultOperation {
+    Start(ResultManifest),
+    Chunk(Vec<u8>),
+    Finish { job_id: String, attempt: u32 },
+    Expire(String),
+}
+
 struct TransportState {
+    finishing_results:
+        futures::stream::FuturesUnordered<tokio::task::JoinHandle<ResultPublication>>,
+    finishing_job_ids: std::collections::HashSet<String>,
     checks: HashMap<String, oneshot::Sender<Result<Vec<String>, String>>>,
     submissions: HashMap<String, SubmissionSession>,
     submission_order: VecDeque<String>,
@@ -127,6 +146,8 @@ struct TransportState {
 impl TransportState {
     fn new() -> Self {
         Self {
+            finishing_results: futures::stream::FuturesUnordered::new(),
+            finishing_job_ids: std::collections::HashSet::new(),
             checks: HashMap::new(),
             submissions: HashMap::new(),
             submission_order: VecDeque::new(),
@@ -330,16 +351,53 @@ async fn run_transport<Stream>(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_peer_activity = Instant::now();
     let mut failure = None;
+    let mut prefer_submission = false;
 
     loop {
         expire_submission_waits(&mut state.submissions, &mut state.submission_order);
         state.checks.retain(|_, reply| !reply.is_closed());
-        expire_result_receipts(&mut state.results, &sqlite, &file_io, &scheduler).await;
+        let expired = state
+            .results
+            .iter()
+            .filter(|(_, session)| session.deadline <= Instant::now())
+            .map(|(job_id, _)| job_id.clone())
+            .collect::<Vec<_>>();
+        for job_id in expired {
+            if let Err(error) = schedule_result_operation(
+                ResultOperation::Expire(job_id),
+                &mut state,
+                &sqlite,
+                &file_io,
+                &scheduler,
+            ) {
+                failure = Some(error);
+                break;
+            }
+        }
+        if failure.is_some() {
+            break;
+        }
         let can_accept_command = state.pending_controls.len() < MAX_PENDING_CONTROLS;
         let has_outbound =
             !state.pending_controls.is_empty() || has_sendable_submission(&state.submissions);
         tokio::select! {
-            biased;
+            Some(finished) = state.finishing_results.next(), if !state.finishing_results.is_empty() => {
+                match finished {
+                    Ok(Ok((job_id, results, controls))) => {
+                        state.finishing_job_ids.remove(&job_id);
+                        state.results.extend(results);
+                        state.pending_controls.extend(controls);
+                    }
+                    Ok(Err(error)) => {
+                        failure = Some(format!("LLM result operation failed: {error}"));
+                        break;
+                    }
+                    Err(error) => {
+                        failure = Some(format!("LLM result operation panicked: {error}"));
+                        break;
+                    }
+                }
+            }
             inbound = source.next() => {
                 match inbound {
                     Some(Ok(message)) => {
@@ -384,14 +442,19 @@ async fn run_transport<Stream>(
                 }
             }
             () = std::future::ready(()), if has_outbound => {
-                let next = if let Some(control) = state.pending_controls.pop_front() {
-                    Ok(Some(control))
-                } else {
+                // Result credits must not indefinitely displace input frames.
+                // Alternate when both directions have ready protocol work.
+                let send_submission = has_sendable_submission(&state.submissions)
+                    && (prefer_submission || state.pending_controls.is_empty());
+                let next = if send_submission {
                     next_submission_message(
                         &mut state.submissions,
                         &mut state.submission_order,
                     ).await
+                } else {
+                    Ok(state.pending_controls.pop_front())
                 };
+                prefer_submission = !send_submission;
                 match next {
                     Ok(Some(message)) => {
                         if let Err(error) = sink.send(message).await {
@@ -410,6 +473,15 @@ async fn run_transport<Stream>(
     }
 
     let error = failure.unwrap_or_else(|| "LLM WebSocket transport stopped".to_string());
+    // Publication may already be committing. Do not cancel it on disconnect;
+    // the peer retains its result and can replay the durable receipt later.
+    while let Some(finished) = state.finishing_results.next().await {
+        match finished {
+            Ok(Ok((_, results, _))) => state.results.extend(results),
+            Ok(Err(error)) => tracing::warn!(error, "LLM result operation failed after disconnect"),
+            Err(error) => tracing::warn!(%error, "LLM result operation panicked after disconnect"),
+        }
+    }
     for (_, session) in state.submissions {
         let _ = session.reply.send(Err(error.clone()));
     }
@@ -631,17 +703,13 @@ async fn handle_inbound_message(
         }
         Message::Pong(_) => Ok(()),
         Message::Close(_) => Err("LLM WebSocket peer closed the connection".to_string()),
-        Message::Binary(bytes) => {
-            handle_result_chunk(
-                bytes,
-                &mut state.results,
-                &mut state.pending_controls,
-                sqlite,
-                file_io,
-                scheduler,
-            )
-            .await
-        }
+        Message::Binary(bytes) => schedule_result_operation(
+            ResultOperation::Chunk(bytes),
+            state,
+            sqlite,
+            file_io,
+            scheduler,
+        ),
         Message::Frame(_) => Err("unexpected raw LLM WebSocket frame".to_string()),
     }
 }
@@ -809,29 +877,123 @@ async fn handle_service_message(
             let _ = reply.send(Err(error));
         }
         ServiceControlMessage::ResultStart { manifest } => {
-            start_result_receipt(
-                manifest,
-                &mut state.results,
-                &mut state.pending_controls,
+            if state.finishing_job_ids.contains(&manifest.job_id)
+                || state.results.contains_key(&manifest.job_id)
+                || state.results.len() + state.finishing_results.len()
+                    >= scheduler.durable_capacity()
+            {
+                return queue_result_control(
+                    &mut state.pending_controls,
+                    ClientControlMessage::ResultReceiptDeferred {
+                        job_id: manifest.job_id,
+                        attempt: manifest.attempt,
+                        retry_after_ms: 1_000,
+                    },
+                );
+            }
+            schedule_result_operation(
+                ResultOperation::Start(manifest),
+                state,
                 sqlite,
                 file_io,
                 scheduler,
-            )
-            .await?;
+            )?;
         }
         ServiceControlMessage::ResultFinished { job_id, attempt } => {
-            finish_result_receipt(
-                &job_id,
-                attempt,
-                &mut state.results,
-                &mut state.pending_controls,
+            if !state.results.contains_key(&job_id) {
+                return queue_result_control(
+                    &mut state.pending_controls,
+                    ClientControlMessage::ResultReceiptDeferred {
+                        job_id,
+                        attempt,
+                        retry_after_ms: 1_000,
+                    },
+                );
+            }
+            schedule_result_operation(
+                ResultOperation::Finish { job_id, attempt },
+                state,
                 sqlite,
                 file_io,
                 scheduler,
-            )
-            .await?;
+            )?;
         }
     }
+    Ok(())
+}
+
+fn schedule_result_operation(
+    operation: ResultOperation,
+    state: &mut TransportState,
+    sqlite: &SqliteExecutorHandle,
+    file_io: &FileIoExecutorHandle,
+    scheduler: &SchedulerHandle,
+) -> Result<(), String> {
+    let job_id = match &operation {
+        ResultOperation::Start(manifest) => manifest.job_id.clone(),
+        ResultOperation::Chunk(bytes) => decode_result_chunk(bytes)?.job_id.to_string(),
+        ResultOperation::Finish { job_id, .. } => job_id.clone(),
+        ResultOperation::Expire(job_id) => job_id.clone(),
+    };
+    if state.finishing_job_ids.contains(&job_id) {
+        return Err("LLM result arrived before its previous credit was returned".to_string());
+    }
+    let mut results = HashMap::new();
+    if let Some(session) = state.results.remove(&job_id) {
+        results.insert(job_id.clone(), session);
+    } else if !matches!(operation, ResultOperation::Start(_)) {
+        return Err("LLM result has no active receiving session".to_string());
+    }
+    let sqlite = sqlite.clone();
+    let file_io = file_io.clone();
+    let operation_scheduler = scheduler.clone();
+    state.finishing_job_ids.insert(job_id.clone());
+    state
+        .finishing_results
+        .push(scheduler.spawn_control(async move {
+            let mut controls = VecDeque::new();
+            match operation {
+                ResultOperation::Start(manifest) => {
+                    start_result_receipt(
+                        manifest,
+                        &mut results,
+                        &mut controls,
+                        &sqlite,
+                        &file_io,
+                        &operation_scheduler,
+                    )
+                    .await?
+                }
+                ResultOperation::Chunk(bytes) => {
+                    handle_result_chunk(
+                        bytes,
+                        &mut results,
+                        &mut controls,
+                        &sqlite,
+                        &file_io,
+                        &operation_scheduler,
+                    )
+                    .await?
+                }
+                ResultOperation::Finish { job_id, attempt } => {
+                    finish_result_receipt(
+                        &job_id,
+                        attempt,
+                        &mut results,
+                        &mut controls,
+                        &sqlite,
+                        &file_io,
+                        &operation_scheduler,
+                    )
+                    .await?
+                }
+                ResultOperation::Expire(_) => {
+                    expire_result_receipts(&mut results, &sqlite, &file_io, &operation_scheduler)
+                        .await
+                }
+            }
+            Ok((job_id, results, controls))
+        }));
     Ok(())
 }
 
@@ -1398,22 +1560,25 @@ async fn finish_result_receipt(
         .file_session
         .take()
         .ok_or_else(|| "result Journal session is unavailable".to_string())?;
-    // Acquire before publication so deferral only discards an uncommitted temp
-    // file. Bound this wait: the socket also owns credits and heartbeats. Never
-    // cancel the subsequent file publication or SQLite commit on a timer.
-    let admission = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        scheduler.acquire_durable(
-            DurableSourceId::LlmResult,
+    // Runs independently from socket credits/heartbeats. Wait for capacity
+    // without discarding a valid received result or timing out its commit.
+    let admission_started = Instant::now();
+    let admission = scheduler
+        .acquire_durable(
+            DurableSourceId::LlmReceipt,
             SchedulerAdmissionKind::ExistingClaimCompletion,
-        ),
-    )
-    .await
-    .map_err(|_| {
-        "LLM result receipt admission timed out; scheduler capacity unavailable".to_string()
-    })
-    .and_then(|admission| admission);
-    let _admission = match admission {
+        )
+        .await;
+    if admission_started.elapsed() >= Duration::from_millis(100) {
+        tracing::info!(job_id, wait_ms = admission_started.elapsed().as_millis(),
+            capacity = scheduler.durable_capacity(),
+            active_submissions = scheduler.active_durable_for(DurableSourceId::LlmSubmission),
+            active_results = scheduler.active_durable_for(DurableSourceId::LlmResult),
+            active_receipts = scheduler.active_durable_for(DurableSourceId::LlmReceipt),
+            active_cleanup = scheduler.active_durable_for(DurableSourceId::LlmResultCleanup),
+            "LLM result publication waited for scheduler capacity without discarding received bytes");
+    }
+    let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
             if let Err(abort_error) = file_io.abort_storage_session_durable(file_session).await {
@@ -1456,6 +1621,9 @@ async fn finish_result_receipt(
             },
         );
     }
+    // The synced receipt is now owned by the bounded publication window and
+    // executor FIFOs; waiting for SQLite must not occupy application capacity.
+    drop(admission);
     let ticket = file_io
         .reserve_journal_mutation(&session.journal_group_id, 2)
         .map_err(|error| error.to_string())?;

@@ -458,11 +458,18 @@ async fn completed_result_cleanup_does_not_block_startup() {
         0
     );
     assert!(directory.join("journal/finished.records").exists());
+    let metadata_version = executors.scheduler.metadata_work_version();
+    let result_version = executors.scheduler.llm_result_work_version();
     assert_eq!(
         recover_generic_file_operations(&executors).await.unwrap(),
         1
     );
     assert!(!directory.join("journal/finished.records").exists());
+    assert_eq!(
+        executors.scheduler.metadata_work_version(),
+        metadata_version
+    );
+    assert!(executors.scheduler.llm_result_work_version() > result_version);
 }
 
 #[tokio::test]

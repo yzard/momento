@@ -17,7 +17,7 @@ async fn acquire_new_maintenance(
 
 #[test]
 fn scheduler_registries_have_the_exact_source_owned_members() {
-    assert_eq!(DurableSourceId::COUNT, 13);
+    assert_eq!(DurableSourceId::COUNT, 15);
     assert_eq!(CronTaskId::COUNT, 7);
     assert_eq!(SchedulerControlSource::COUNT, 7);
     assert_eq!(SchedulerAdmissionKind::COUNT, 3);
@@ -209,7 +209,7 @@ async fn durable_claim_tokens_are_unique_and_unregister_on_drop() {
 }
 
 #[tokio::test]
-async fn durable_claim_registry_accounts_for_detached_outbound_claims() {
+async fn durable_claim_registry_accounts_for_detached_outbound_and_result_claims() {
     let pool = crate::test_utils::create_test_db();
     let scheduler = crate::test_utils::test_scheduler(pool);
     let mut detached_claims = Vec::new();
@@ -229,6 +229,20 @@ async fn durable_claim_registry_accounts_for_detached_outbound_claims() {
         detached_claims.push(claim);
     }
 
+    for index in 0..scheduler.durable_capacity() {
+        let admission = scheduler
+            .acquire_durable(
+                DurableSourceId::LlmResult,
+                SchedulerAdmissionKind::ExistingClaimCompletion,
+            )
+            .await
+            .unwrap();
+        let claim = scheduler
+            .register_durable_claim(&admission, format!("result-{index}"))
+            .unwrap();
+        drop(admission);
+        detached_claims.push(claim);
+    }
     let mut durable_claims = Vec::new();
     for index in 0..scheduler.durable_capacity() {
         let admission = scheduler

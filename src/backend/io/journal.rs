@@ -195,6 +195,7 @@ pub struct JournalEntryCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalRecoveryGroup {
     pub group_id: String,
+    pub owner_kind: String,
     pub state: JournalRecoveryState,
     pub version: i64,
 }
@@ -1404,6 +1405,7 @@ pub(crate) fn load_next_generic_recovery_group(
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };
                 Ok(JournalRecoveryGroup {
+                    owner_kind: row.get(3)?,
                     group_id: row.get(0)?,
                     state,
                     version: row.get(2)?,

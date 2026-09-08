@@ -3,6 +3,220 @@ use momento_api::database::queries;
 use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
 
 #[test]
+fn replayable_receipt_retirement_requires_complete_cleanup_and_active_job() {
+    for (receipt, journal, outcome, reservation, job, staging, expected) in [
+        (
+            "discarded",
+            "cleaned",
+            "discarded",
+            "released",
+            "submitted",
+            false,
+            1,
+        ),
+        (
+            "discarded",
+            "rolled_back",
+            "",
+            "released",
+            "submitted",
+            false,
+            1,
+        ),
+        (
+            "receiving",
+            "cleaned",
+            "discarded",
+            "released",
+            "submitted",
+            false,
+            0,
+        ),
+        (
+            "processing",
+            "cleaned",
+            "discarded",
+            "released",
+            "submitted",
+            false,
+            0,
+        ),
+        (
+            "discarded",
+            "cleanup_pending",
+            "discarded",
+            "released",
+            "submitted",
+            false,
+            0,
+        ),
+        (
+            "discarded",
+            "cleaned",
+            "completed",
+            "released",
+            "submitted",
+            false,
+            0,
+        ),
+        (
+            "discarded",
+            "cleaned",
+            "discarded",
+            "active",
+            "submitted",
+            false,
+            0,
+        ),
+        (
+            "discarded",
+            "cleaned",
+            "discarded",
+            "released",
+            "cancelled",
+            false,
+            0,
+        ),
+        (
+            "discarded",
+            "cleaned",
+            "discarded",
+            "released",
+            "completed",
+            false,
+            0,
+        ),
+        (
+            "discarded",
+            "cleaned",
+            "discarded",
+            "released",
+            "submitted",
+            true,
+            0,
+        ),
+    ] {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE llm_result_receipts(job_id TEXT, state TEXT, journal_group_id TEXT, sqlite_reservation_id TEXT); CREATE TABLE llm_jobs(id TEXT, status TEXT); CREATE TABLE file_operation_groups(id TEXT, state TEXT, completion_outcome TEXT); CREATE TABLE data_dir_space_reservations(id TEXT, state TEXT); CREATE TABLE llm_result_staging(job_id TEXT);").unwrap();
+        connection
+            .execute(
+                "INSERT INTO llm_result_receipts VALUES ('job', ?, 'group', 'reservation')",
+                [receipt],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO llm_jobs VALUES ('job', ?)", [job])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO file_operation_groups VALUES ('group', ?, ?)",
+                [journal, outcome],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO data_dir_space_reservations VALUES ('reservation', ?)",
+                [reservation],
+            )
+            .unwrap();
+        if staging {
+            connection
+                .execute("INSERT INTO llm_result_staging VALUES ('job')", [])
+                .unwrap();
+        }
+        let count = |job_id: Option<&str>| {
+            connection
+                .prepare(queries::file_operations::SELECT_REPLAYABLE_TERMINAL_RESULT_RECEIPTS)
+                .unwrap()
+                .query_map([job_id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .count()
+        };
+        assert_eq!(count(Some("other")), 0);
+        assert_eq!(count(Some("job")), expected);
+        assert_eq!(count(None), expected);
+        assert_eq!(
+            connection
+                .execute(
+                    queries::file_operations::DELETE_REPLAYABLE_RESULT_RECEIPT_AFTER_TERMINATION,
+                    ["group"]
+                )
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn ai_status_uses_latest_job_and_hides_superseded_failures() {
+    let pool = create_test_db();
+    let media = create_test_media(&pool, "latest.jpg");
+    let connection = pool.get().unwrap();
+    for (id, task, status) in [
+        ("aa", "ocr", "failed"),
+        ("bb", "ocr", "completed"),
+        ("cc", "image_tagging", "failed"),
+    ] {
+        connection.execute("INSERT INTO llm_jobs(id,media_id,task,status,last_error) VALUES(?,?,?,?, 'test failure')",
+            rusqlite::params![id, media, task, status]).unwrap();
+    }
+    let counts = connection
+        .prepare(queries::ai_jobs::SELECT_LATEST_STATUS_COUNTS)
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        counts,
+        vec![
+            ("image_tagging".into(), "failed".into(), 1),
+            ("ocr".into(), "completed".into(), 1)
+        ]
+    );
+    let failures = connection
+        .prepare(queries::ai_jobs::SELECT_LATEST_FAILURES)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(2))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(failures, vec!["cc"]);
+}
+
+#[test]
+fn result_cleanup_plan_starts_from_active_reservations_not_terminal_receipts() {
+    let pool = create_test_db();
+    let connection = pool.get().unwrap();
+    let plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            queries::llm_callback::SELECT_RESULT_STAGING_CLEANUP
+        ))
+        .unwrap()
+        .query_map([18], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert!(
+        plan.contains("SEARCH s USING INDEX idx_data_dir_space_reservations_state"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("SEARCH r USING INDEX sqlite_autoindex_llm_result_receipts_"),
+        "{plan}"
+    );
+    assert!(!plan.contains("MULTI-INDEX OR"), "{plan}");
+}
+
+#[test]
 fn import_recovery_preserves_active_owners_and_terminal_media() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "recover.jpg");
