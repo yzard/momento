@@ -1,1056 +1,129 @@
-# AGENTS.md - Momento Codebase Guide
-
-> Guidelines for AI coding agents working in this repository.
-
-## Project Overview
-
-Momento is a self-hosted photo management application with:
-- **Backend**: Axum + SQLite (Rust) in `src/backend/`
-- **LLM service**: Separate Axum durable-inference queue in `src/backend_llm/`
-- **Common**: Shared Rust infrastructure used by both services in `src/common/`
-- **Frontend**: React + TypeScript + Vite + Tailwind in `src/frontend/`
-
-Monorepo managed with pnpm workspaces and Turborepo.
-
-Momento API has one dedicated scheduler thread, an asynchronous network runtime configured by
-`[thread_pool].network_io_workers` (minimum 2), and three closed executor domains configured by
-`[thread_pool].cpu_workers`, `[thread_pool].storage_io_workers`, and
-`[thread_pool].sqlite_workers`. Client requests and every background business operation acquire
-source-owned capacity from the scheduler, then submit typed bounded operations to the CPU, File I/O,
-or SQLite FIFO; no business operation blocks a network thread with CPU, disk, or SQL work. Business
-modules do not create their own threads, Tokio tasks, blocking pools, Rayon pools, or semaphore-based
-concurrency windows. r2d2 is the deliberate additional connection pool: it owns SQLite connections
-and its connection-maintenance thread, while each SQL operation executes only on the configured SQLite
-executor worker that checks out that connection. File workers exclusively perform filesystem and log
-sink I/O; CPU workers own parsing, encoding, hashing, image work, and supervised child processes.
-`storage_io_workers` excludes network threads (minimum 2): one dedicated reader, one dedicated
-writer, and remaining workers alternate between ready read/write FIFOs. Log writes, cleanup,
-and mixed operations must never execute on the reserved reader. No `io_workers` alias exists.
-`sqlite_workers` counts one dedicated writer plus `sqlite_workers - 1` readers (minimum 2).
-The scheduler routes SQL through separate bounded read/write FIFOs using the operation's read
-specification, never its HTTP method or its name. Reads execute under SQLite `query_only` protection;
-transactions that may mutate data, including claim/cleanup operations, must use the writer lane.
-The r2d2 connection limit remains `sqlite_workers`, with one additional maintenance thread.
-
----
-
-## Conventions
-
-Host test and development temporary files belong under repository `build/tmp/`, never the
-system `/tmp`. Rust tests use `src/test_support/temporary.rs` (including direct test-binary
-execution); Python and shell fixtures pass the repository temporary directory explicitly.
-Temporary fixtures must be deleted after testing. Rust fixtures live in a unique process-owned
-directory with exit cleanup for statically retained fixtures, including failed test runs;
-Python uses context managers and shell tests use exit traps. Never clean another running
-test's directory or the entire shared temporary root. Forced termination (SIGKILL/abort)
-cannot run exit cleanup and may leave that process's directory behind.
-When running compilers or other development tools, create `build/tmp/` first and set
-`TMPDIR`, `TEMP`, and `TMP` to its absolute path. Production service temporary storage stays
-on its mounted data volume (`/data/tmp` or `/data/llm/tmp`), not the container's `/tmp`.
-
-This repo follows the shared agent skills. Read them before changing code — they are the
-source of truth, and this file only records what is specific to Momento.
-
-| Skill | Governs |
-|-------|---------|
-| `project-structure` | Where every file goes: `src/`, tests mirroring new source paths, `playground/`, `build/`, `dist/`, `docker/` |
-| `add-modify-codebase` | How changes land: breaking changes over shims, refactor over copy-paste, unit tests for touched code |
-| `general-coding` | Guard clauses, no broad catch, no default arguments, no backward-compat layers, no environment variables in source |
-| `naming-conventions` | Cross-layer name consistency (database → Rust → TypeScript) |
-| `axum-server` | Backend module layout and Axum patterns |
-| `restful-api-design` | Endpoint paths and HTTP methods |
-| `sql-coding` | Centralized schema and query constants |
-| `docker-build` | Dockerfile, entrypoint, and `build_docker.sh` contents |
-
-Three rules are worth repeating because they are the ones most often violated:
-
-1. **Break the signature, don't add a default.** New argument means every caller is found and updated to pass it explicitly. No default values, no compatibility shims, no deprecated wrappers.
-2. **Extract before you copy.** Implementing something similar to existing code means refactoring the existing code into a shared function first, then calling it from both places.
-3. **Tests ship with the change.** Every added or modified path gets a unit test at its mirrored location under `tests/`, in the same change.
-
-### Mandatory Android build entrypoint
-
-**Every Android build operation must run in Docker through the repository-root
-`./build_android_client.sh` script. This rule is non-negotiable.** It applies to compilation,
-dependency resolution, verification, lint, JVM tests, instrumented tests, debug APKs, and signed
-APK/AAB releases. Use the script command that matches the task:
-
-```bash
-./build_android_client.sh verify
-./build_android_client.sh assemble-debug
-./build_android_client.sh instrumented-test
-./build_android_client.sh shell
-./build_android_client.sh release --keystore-dir /path/to/keystore
-```
-
-Never bypass the script by running host `gradle`, `./gradlew`, Java, Android SDK, emulator, or ADB
-commands. Do not invoke the Android Dockerfiles with ad hoc `docker build` or `docker run` commands,
-and do not copy artifacts directly from Gradle build directories. The script owns the Docker build
-environment and publishes supported outputs under `build/android/` and `dist/android/`. An Android
-APK or AAB is a valid Momento build artifact only when it was produced by
-`./build_android_client.sh`.
-
----
-
-## LLM Task Scheduling
-
-Every AI inference type follows one staged, durable propagation pattern. Current task identifiers
-are `ocr`, `image_tagging`, `image_clustering`, `image_aesthetics`, `face_detection`,
-`screenshot_detection`, and `document_detection`; adding another identifier means extending this
-same pattern end to end, not creating a direct or type-specific transport path.
-
-### End-to-end ownership
-
-```text
-import
-  -> metadata job
-  -> task-ready inputs in Momento previews + media_ai_inputs descriptors
-  -> durable Momento llm_jobs row
-  -> authenticated client-aware WebSocket submission
-  -> durable llm-service disk queue
-  -> one task runtime performs inference
-  -> result returned on the originating client's WebSocket
-  -> durable Momento result inbox receipt
-  -> result receipt acknowledgement + llm-service queue deletion
-  -> independent transactional Momento result persistence + terminal job state
-  -> optional separately scheduled downstream work
-```
-
-No stage runs its downstream stage inline. Import only creates metadata work; metadata prepares
-inputs; an AI trigger creates inference jobs; the Momento submission worker sends them;
-llm-service performs inference; the WebSocket handler durably receives results; the independent
-Momento result worker persists them. Type-specific work after inference,
-such as deduplication cluster generation, is another scheduled stage.
-
-Local and WebDAV imports use the same `finalize_staged_original` implementation. A source is
-claimed before finalization and hashed before a media ID is allocated. A partial unique index on
-the content hash and a matching-hash import lock prevent concurrent imports from creating multiple
-media rows. New content is stored as the canonical original, receives media ownership, is marked
-imported, records the source modification time in `media.created_at`, and queues exactly one
-metadata job. Exact duplicate content reuses the imported media ID, grants or restores access for
-the importing user, keeps the canonical original bytes, and moves an incoming supplemental
-metadata sidecar beside that original. An older duplicate source modification time lowers
-`media.created_at`; a newer time never replaces it. A duplicate sidecar
-requests another metadata run, including when one is already processing. Supplemental values are
-authoritative for fields they contain, and sidecars remain beside originals so later regeneration
-is deterministic. Import does not generate metadata or thumbnails, prepare AI inputs, or create
-LLM jobs. Source cleanup failure after a committed import is logged as a warning rather than
-changing the durable import result.
-
-WebDAV PUT accepts either a valid declared length or an undeclared chunked body. Undeclared PUT
-bodies are bounded incrementally by `webdav.max_upload_bytes`; they are never buffered in full, and
-an oversized partial file is removed before returning 413. PATCH still requires a declared chunk
-size because partial-update range validation depends on it. Every staging mutation invalidates its
-durable `webdav_ready_files` entry before touching bytes. Only a successful complete PUT, a PATCH
-whose `Content-Range` reaches the declared total, or a successful MOVE/COPY records the resulting
-path as ready. The import worker selects only these durable ready paths, acquires the exclusive
-mutation gate, revalidates and claims each file, and calculates its content hash only after the
-transfer has completed and the file has been closed. GET, HEAD, OPTIONS, and PROPFIND do not hold
-the mutation gate. The modification-age check is a secondary settling delay, not the completion
-signal.
-
-Momento owns every AI input reference. Photo tasks reference the immutable canonical original
-without resizing or creating a task-specific copy. Video-capable tasks share one lossless,
-full-resolution representative PNG frame below Momento previews; screenshot and document detection
-remain photo-only. UI thumbnails are presentation assets and are
-never AI inputs. The transport supports multiple ordered inputs even though current metadata
-generation creates one input per task. llm-service may decode the received bytes, apply orientation,
-and perform model-required tensor transforms, but it never reads Momento paths, generates task
-inputs, or assumes a shared filesystem.
-
-The primary implementation points are:
-
-- `src/backend/processor/metadata/generation.rs`: prepare task inputs.
-- `src/backend/processor/metadata_worker.rs`: verify required inputs before metadata completes.
-- `src/backend/processor/ai/mod.rs`: create/claim jobs and verify prepared bytes.
-- `src/backend/processor/ai/transport.rs`: connect, stream jobs, cancel, and receive results.
-- `src/backend/processor/ai/result.rs`: validate and transactionally persist results.
-- `src/backend_llm/routes.rs`: authenticate clients and stream WebSocket admission.
-- `src/backend_llm/transport.rs`: active-client registry and durable-receipt acknowledgements.
-- `src/backend_llm/scheduler.rs`: durable queue, batching, result retries, and recovery.
-- `src/backend_llm/provider.rs`: task registry, local runtime lifecycle, and inference dispatch.
-- `src/backend_llm/screenshot_document_common.py`: shared image analysis and HTTP runtime used by
-  screenshot and document detection.
-- `src/backend_llm/screenshot_detection_server.py`: exact `screenshot_detection` runtime entrypoint.
-- `src/backend_llm/document_detection_server.py`: exact `document_detection` runtime entrypoint.
-
-New source and test paths must follow the repository's resource hierarchy and test-mirroring
-convention; existing flat route, query, and frontend API modules are layout debt, not templates to
-copy. All AI control and status endpoints require an administrator. The administrator work-status
-table counts only the latest job for each media item and inference task, so a successful rerun
-supersedes an older failure without deleting the historical job. A successfully inferred empty
-result, such as no detected faces, is completed work rather than a failure. User-facing
-duplicate-group and face-group browsing uses normal authenticated access and filters through `media_access`.
-The LLM WebSocket uses the configured client ID and shared API key rather than a user JWT.
-
-Metadata jobs use `queued`, `processing`, `cancelling`, `cancelled`, `completed`, and `failed`
-states. Workers atomically claim rows, recover orphaned claims on startup, retry through
-`available_at`, and verify every enabled task's prepared inputs before completion. Cancelling moves
-queued jobs directly to `cancelled` and lets a processing owner settle from `cancelling` to
-`cancelled` without committing metadata. Metadata cleanup removes generated metadata and related AI
-data without scheduling regeneration; a later explicit generate action queues missing, failed, and
-cancelled metadata work. Cleanup currently deletes matching AI job rows directly; do not claim that
-cleanup uses the cancellation outbox unless that implementation is changed.
-The durable cleanup operation is `metadata_clean_operations`, with its SQL grouped under
-`queries::metadata_clean`; generation and cancellation SQL stays under `queries::metadata_jobs`.
-Cleanup phases never enqueue regeneration. A new rerun requested after cancellation survives both
-normal worker settlement and startup recovery; recovery consumes the rerun flag when it queues that
-new attempt.
-
-### Prepared input contract
-
-`media_ai_inputs` records a Momento-owned `storage_root` (`originals` or `previews`) plus the task,
-sequence, input kind, relative file path, filename, MIME type, byte size, SHA-256 content hash, and
-optional frame timestamp. Every photo task points at the same canonical original descriptor.
-Every video-capable task points at one file named by the canonical original hash below
-`previews/ai/<media-id>/frames/`; metadata reruns reuse it, and no task directory or copy is created. Job eligibility requires
-imported media, completed metadata, and at least one
-matching descriptor. Screenshot and document detection are photo-only and receive the canonical
-original. A missing or non-image original MIME type is an explicit metadata failure; Momento never
-falls back to a thumbnail.
-
-`llm_job_inputs` snapshots the storage root and descriptor when the job is queued. Before each
-submission, Momento resolves the path only inside the selected Momento storage root, opens it,
-streams its exact byte size and SHA-256 hash, rewinds that same open handle, and sends from the
-verified handle. Missing or changed bytes fail the Momento job and are never submitted. The wire
-manifest contains no storage root or path: llm-service receives only descriptors and raw bytes,
-persists those bytes below its own data root, and can run on another server with unrelated storage.
-Input and job admission allow up to 32 GiB so large streamed media is not rejected by the previous
-50 MiB cap. llm-service responds to admission with the exact input sequences it does not already
-hold, and Momento streams only those sequences. Received source bytes live in a content-addressed
-store below the llm-service queue and are hard-linked into job directories, so concurrent task types
-share one durable copy without sharing storage with Momento. Supported camera RAW inputs are decoded
-at full resolution by `dcraw_emu`/LibRaw inside llm-service; one TIFF normalization is cached per
-source content hash and hard-linked into each active job. All source, normalized, and temporary RAW
-files remain below the llm-service mounted data root. When Momento durably acknowledges a result,
-llm-service deletes the job and removes content whose final job link is gone. Deployments still must
-monitor durable queue space and configure `[scheduler].max_queue_bytes` plus
-`working_space_reserve_bytes` for the llm-service filesystem.
-
-Multi-input jobs preserve every descriptor's `sequence` and optional `frameTimestampMs` through
-the queue, provider response, result message, and input-level persistence. Concurrency is across jobs;
-inputs within one job are currently inferred sequentially in descriptor order. A new type must
-define explicit aggregation and persistence semantics for all inputs rather than silently using
-only the first result.
-
-### Submission wire contract
-
-Momento opens:
-
-```text
-GET ws[s]://<llm-service>/api/v1/llm/connect
-x-api-key: <configured API key>
-x-momento-client-id: <configured client ID>
-Sec-WebSocket-Protocol: momento-llm-v1
-```
-
-The API key is shared by every allowed Momento client. Client IDs contain only letters, numbers,
-hyphens, and underscores. llm-service keeps active client IDs only in memory: different IDs may be
-connected concurrently, but a second live connection using the same ID is rejected. The ID is
-stored in each durable job manifest so a disconnected client can reconnect and receive its own
-pending results.
-
-Submission control messages are camel-case tagged JSON. Momento sends `submissionStart` with:
-
-```text
-jobId, mediaId, task, attempt, inputs[]
-```
-
-Each input descriptor contains:
-
-```text
-sequence, filename, mimeType, byteSize, contentHash, inputKind, frameTimestampMs
-```
-
-llm-service returns `submissionReady` before bytes are sent. Momento then streams bounded binary
-frames containing the job ID, input sequence, and at most 64 KiB of raw prepared bytes. Each input
-ends with `inputFinished`; the job ends with `submissionFinished`. A non-empty hexadecimal `jobId`,
-a known task, and at least one input are required. Every declared input must be present, non-empty,
-and exactly match its descriptor's byte size and SHA-256 hash. The current admission contract
-accepts image MIME types; supporting another payload requires deliberately extending the shared
-descriptor and admission abstractions.
-
-`submissionAcknowledged` is sent only after llm-service has synced the staged files and atomically
-renamed the directory into `queuing`. Duplicate IDs owned by the same client are acknowledged
-idempotently; an ID already owned by another client is rejected. Rejections explicitly state
-whether they are retryable. A lost connection before an acknowledgement requeues the Momento job
-without changing its correlation attempt, allowing the same durable admission to be replayed.
-
-Momento job states follow:
-
-```text
-queued -> submitting -> submitted -> completed | failed
-                  \-> queued       transient network/5xx retry
-queued | submitting | submitted -> cancelled
-```
-
-Momento retries transport and retryable admission errors but treats permanent rejections as
-submission failures. An acknowledgement means only that llm-service has durably admitted the job,
-not that inference has completed. The result must return the same `jobId`, `mediaId`, `task`, and
-exact submitted `attempt`.
-
-The Momento submission worker uses scheduler durable admission plus the shared typed SQLite, File I/O,
-CPU, and network domains. It claims and streams a replacement job as soon as any submission completes, and sleeps only
-when no eligible queued job remains. There is no submission-specific concurrency setting; this
-application scheduling is independent from every model runtime's inference concurrency.
-
-All AI task types share global `[llm].enabled` gating but retain independent job eligibility and
-trigger/run paths. The submission worker sends existing queued jobs; it does not create task jobs.
-Submission reads the immutable
-`llm_job_inputs` snapshot created with each job rather than re-querying live `media_ai_inputs`.
-
-Cancellation commits the Momento terminal state, an all-task or task-specific
-`llm_cancellation_scopes` outbox row, and matching exact `llm_job_cancellations` rows in one
-transaction. Momento immediately attempts and durably retries authenticated
-`cancelJobs` WebSocket messages containing that scope and the exact job IDs. llm-service scopes
-every cancellation to the authenticated client, scans
-`.tmp`, `queuing`, `processing`, `callback_pending`, and `failed` for every matching task and writes
-job markers before deleting non-running data. A matching job already in `processing` finishes its
-local inference, then llm-service discards its result and queue directory without delivering a
-result. Exact-ID markers prevent an admission that was already in flight from recreating
-cancelled work. Cancellation acknowledgements remove the matching Momento outbox rows; a
-disconnect or rejection leaves them for retry.
-Queued jobs matching a pending task or all-task cancellation scope are not submitted until that
-scope is acknowledged. This keeps reset replacements from racing ahead of their cancellation.
-
-### Durable llm-service queue
-
-Admission links already-cached content and streams only missing files into `.tmp/<job-id>/`, validates
-all descriptors and received bytes, syncs the staged data, publishes missing bytes unchanged into
-`content/<sha256>/source`, and atomically renames the directory into `queuing/<job-id>/`. Job input
-files are hard links to that content store. Each manifest records the authenticated client ID. Duplicate job
-IDs owned by that client are acknowledged idempotently and are not enqueued twice; cross-client
-collisions are rejected.
-
-Admission computes byte counts and SHA-256 incrementally while writing and rejects a field before
-writing beyond its declared size. It never rereads a complete input into memory. Abandoned staging
-directories are removed when admission fails. Admission atomically reserves the uncached unique
-source bytes against `[scheduler].max_queue_bytes` and the filesystem space remaining after
-`working_space_reserve_bytes`. A full queue returns `submissionDeferred` before requesting input
-bytes; Momento requeues the existing job after the returned delay without consuming a submission
-attempt. A single job whose uncached inputs exceed `max_queue_bytes` is rejected permanently.
-Cached content is counted once regardless of how many job directories hard-link it. Active
-reservations prevent concurrent submissions of the same missing content from double-uploading it.
-
-Cancellation markers are stored as client-scoped zero-byte files in `cancelled/`. They contain no
-media or model result data and remain durable so delayed or retried submissions from that client
-cannot recreate cancelled work.
-
-```text
-.tmp -> queuing -> processing -> deleted after Momento durably receives the result
-                            \-> callback_pending -> deleted after a successful retry
-                                                 \-> failed after permanent receipt rejection
-                  processing -> failed for terminal local queue/processing failure
-```
-
-Each job directory contains `manifest.json` and `input-N` files. Inference atomically publishes
-`result-records.bin` and `result-manifest.json` through their synced `.tmp` files; callback retry state
-adds `callback.json`; terminal queue failures add `failure.json`. There is
-no `completed/` directory. A matching WebSocket durable result-receipt acknowledgement permits
-deletion of all llm-service job data and immediately releases any unique source bytes no longer
-referenced by another job. It does not report whether Momento's later result persistence and
-downstream processing succeeded. Startup rebuilds capacity usage from the durable content store;
-temporary admission reservations exist only in memory and incomplete `.tmp` directories are
-discarded during recovery.
-
-Startup recovery removes incomplete `.tmp` admissions, promotes interrupted `processing` jobs that
-have a complete validated result manifest/record pair to `callback_pending`, moves other interrupted
-processing jobs back to `queuing`, keeps callback jobs with a complete pair, and requeues callback jobs
-that do not have a durable result. Therefore interrupted inference may run again, while a
-completed inference awaiting acknowledgement is delivered again without rerunning the model.
-
-### Multiple-request scheduling
-
-Only one model runtime may be active in llm-service. Every model provider is a managed process in
-the llm-service container and listens only on its application-owned loopback address. Packages and
-model weights are installed in the image; activation performs no package installation or model
-download. llm-service itself may run on a different machine from Momento, but it never delegates
-inference to a remote model provider.
-For each scheduler cycle:
-
-1. A separate result-delivery loop sends durable `callback_pending` results through a rolling
-   `result_delivery_max_concurrent_deliveries` window. Never-attempted results take priority over
-   retries, each completed delivery immediately refills its slot, and result delivery never gates
-   model inference or reruns completed inference.
-2. Read valid queued manifests and sort them by job ID.
-3. If the currently active task still has queued work, select that task to keep its runtime warm.
-4. Otherwise select the task belonging to the first sorted queued job.
-5. Keep at most the scheduler's global `max_in_flight_jobs`, moving only same-task jobs from
-   `queuing` to `processing` and replenishing each slot as soon as its job completes.
-6. Keep only lightweight disk descriptors in the active window. Providers send validated job/input
-   descriptors to the active local runtime. The runtime opens the derived file below
-   `queue/processing`; providers never retransmit image payloads to same-container subservices.
-7. Activate or reuse the selected local runtime and dispatch the homogeneous rolling window. The scheduler
-   and provider do not apply a model concurrency limit.
-8. The model subservice alone enforces its configured `max_concurrent_jobs`; vLLM uses
-   `--max-num-seqs`, and Python runtimes use their inference semaphore.
-   Python runtimes acquire that semaphore before opening and reading each queued input, bounding
-   decoded image memory and applying HTTP backpressure.
-9. Finish every claimed job independently and refill its window slot immediately while matching work remains.
-
-This warm-task preference drains one task through a rolling window before switching when that task
-continues to have work. Switching task type shuts down the old runtime before starting and
-readiness-checking the new one. A runtime is also shut down when no inference job is claimed for
-`idle_shutdown_seconds`; result delivery does not require or keep a model runtime active.
-Each runtime is started in its own process group. Switching or idle shutdown sends the whole group
-`SIGTERM`, waits for the bounded shutdown timeout, and escalates to `SIGKILL` so vLLM workers do
-not survive their parent process.
-
-One failed job does not prevent other in-flight jobs from finishing. Provider or runtime inference
-errors become durable failed result payloads. Loss of the local runtime transport is retried from
-the durable queued bytes up to `runtime_max_attempts`; model-result errors are not retried. Result
-delivery uses its acknowledgement timeout and fixed retry delay without an attempt limit. A durable
-receipt acknowledgement deletes the queue directory. A deferred receipt updates its next delivery time
-without consuming an attempt. A permanent receipt rejection writes durable failure evidence and moves
-the job to `failed`; timeout or disconnect keeps it in `callback_pending` until receipt or cancellation.
-Startup restores complete results parked by older versions solely due to delivery retry exhaustion.
-Momento reconciles submitted jobs on connection and every 60 seconds in pages of at most 256 IDs.
-Only jobs missing from llm-service and without a usable local result receipt are requeued, preserving
-the original wire attempt. Completed and cancelled jobs are never resurrected.
-
-### Result contract
-
-The SQLite writer coalesces consecutive ready AI staging/persistence commands into one
-bounded transaction (at most 16 commands and 16 MiB of declared input bounds). It never
-waits to fill a batch, skips a FIFO barrier, or combines two operations for the same result.
-Every command owns a savepoint; success is returned only after the outer commit. A failed
-commit leaves durable work retryable. Other writes retain their independent transaction
-semantics. Small non-face results (at most 8 KiB encoded and 32 records) release application
-admission before waiting on the bounded SQLite writer while retaining their durable claim;
-the runtime accounts 64 KiB per detached lane. Larger results and prepared face artifacts keep
-their admission so detached payloads cannot exceed the memory budget. Receipt publication, result processing,
-and result cleanup have separate source counters, not separate OS thread pools.
-
-Result processing claims a bounded batch once and starts lanes only for actual candidates;
-do not start one empty writer transaction per global worker on every wake. Cleanup selection
-starts from active SQLite reservations, not historical terminal receipts. Journal completion
-wakes only its owning metadata/result pipeline. Staging cleanup drains independently of
-result preparation, using the same event signal; it never waits for every result lane to finish.
-Result start, chunk writes, expiry rollback, and final publication run as bounded asynchronous
-operations outside WebSocket framing. Ready controls and submission frames alternate, and
-inbound frames have no strict priority over outbound work. Completed incoming result publication waits
-asynchronously for scheduler admission independently of WebSocket framing and heartbeats;
-disconnect must not cancel an in-flight publication/commit. Bound receiving plus publishing
-sessions, and defer new receipts before accepting bytes when that bound is reached.
-
-llm-service sends a validated manifest first on the active WebSocket matching the manifest's client ID.
-After `resultReady`, it reads its durable record file in at most 64 KiB frames and waits for the exact
-cumulative-offset `resultChunkReady` credit after every frame before sending `resultFinished`.
-Momento incrementally verifies size, SHA-256, CRC32C, task-specific record order, and input correlation.
-Receipt preparation snapshots the job's monotonic `state_version`; every later permanent disposition
-must compare that version, so cancellation or another terminal transition always wins a result race.
-The current Momento implementation then converts that validated typed stream into its bounded `JobResult`
-DTO for the existing SQLite JSON inbox; the approved `plan.md` still requires replacing that final
-conversion with the Journal-owned record inbox and direct typed persistence.
-
-Momento first stores an incoming result in its durable `llm_job_results` inbox and then sends
-`resultReceived`. That receipt is the llm-service success boundary and permits llm-service to delete
-all local task data. `resultReceiptRejected` is reserved for permanent manifest, framing, hash, or
-record-contract failures and is sent only after Momento atomically marks the matching active job
-failed. A stale or terminal delivery is acknowledged; failure to commit a terminal rejection returns
-`resultReceiptDeferred`. A temporary scheduler, SQLite, I/O, or reservation failure returns
-`resultReceiptDeferred` so llm-service retains the durable result without consuming an attempt.
-Momento uses available workers from its global application pool to prepare durable inbox results,
-including expensive face-image normalization and cropping. Completed preparations enter the
-shared SQLite writer immediately and may share a bounded transaction using isolated savepoints;
-there is no dedicated
-AI-result OS thread or separate CPU pool. A slow image never forms a batch barrier. A permanently
-invalid payload fails only its Momento job. A transient database, pool, I/O, or internal failure
-leaves that inbox row available for unbounded retry; transient failures never exhaust an attempt
-limit, delete the inbox payload, or mark the Momento job failed. Matching duplicate deliveries are
-received idempotently, and late results for terminal or removed jobs are acknowledged without
-recreating work.
-
-Persistence is deliberately type-specific. OCR and tagging store present text results in
-input-level `media_text_inputs` rows and derive ordered media-level text in `media_text`; missing
-text currently becomes an empty string. Aesthetics validates five finite scores in `[0, 1]`, stores
-ordered input-level scores in `media_aesthetic_inputs`, and stores the first-input aggregate in
-`media_aesthetics`. Clustering validates its embedding/hash result and updates
-similarity tables. Face detection
-validates bounding boxes, eye centers, confidence, face size, frontality, BiSeNet visibility,
-facial-feature clarity, and 512-dimensional embeddings before writing crops and face rows. A generic transport response does not remove the
-requirement for explicit validation, storage, clean/reset behavior, and optional downstream
-scheduling for each inference type.
-Screenshot and document results require a boolean `detected` and finite `confidence` in `[0, 1]`.
-Momento stores ordered input-level results plus a first-input aggregate in separate screenshot and
-document tables. The categories are independent, so a photo may be positive for both.
-
-Deduplication start and scheduled execution create a durable run plus image-clustering jobs and
-return without running inference inline. Clustering results only persist similarity data;
-`finalize_ready_runs` separately creates duplicate groups after the run's jobs are terminal.
-Cancellation prevents further creation and finalization. Startup marks interrupted runs failed and
-schedules replacement work rather than resuming the same run record.
-
-Momento has independent five-field cron schedules for OCR, image tagging, deduplication, image
-aesthetics, face detection, screenshot detection, and document detection. Each schedule lives in
-`[llm]`, uses the system timezone, and creates work through the same durable processor operations as
-manual triggers. The field remains `deduplicate_cron`, not
-`image_clustering_cron`, because it starts the complete deduplication pipeline; image clustering is
-only its inference stage. `[llm].enabled` is the only Momento AI enablement switch: when it is true,
-all seven features and their schedules are active; when it is false, all are disabled. Per-feature
-`*_enabled` configuration fields do not exist.
-
-### Adding an inference type
-
-Every new inference type must use one exact snake-case task identifier and propagate through all
-layers below in the same change. Do not add a second submission endpoint, bypass prepared inputs,
-call llm-service inline from metadata/import, let llm-service access Momento storage, or add a
-type-specific queue/scheduler.
-
-1. Add metadata reference/preparation and completion verification for task-ready inputs, including
-   an explicit Momento storage root, stable sequence/timestamp rules, and durable
-   `media_ai_inputs` descriptors. Reuse the canonical original or shared full-resolution video
-   frame; do not create a task-specific media copy.
-2. Extend schema constraints and centralized queries for eligibility, idempotent job creation,
-   active-job uniqueness, status, cancellation, reset, clean, retry, and any run relationship.
-3. Add administrator trigger/status API behavior and matching frontend API/UI behavior where the
-   task is user-controllable.
-4. Reuse the shared Momento `llm_jobs` submission worker and manifest-first WebSocket protocol.
-5. Register the task in llm-service `ServiceType`, configuration validation, `ActiveService`,
-   provider dispatch, and local runtime activation/readiness/liveness/shutdown.
-6. Keep scheduler dispatch batches homogeneous, enforce `max_concurrent_jobs` only inside the
-   local model subservice, and preserve ordered per-input correlation in provider responses.
-7. Extend the result DTO only for required fields, then add strict type-specific result
-   validation and transactional persistence in Momento.
-8. Define failure, cancellation, restart recovery, duplicate result, multi-input aggregation,
-   clean/reset, and optional downstream-stage semantics explicitly.
-9. Add mirrored tests for preparation and eligibility, WebSocket admission and raw-byte
-   preservation, runtime reuse/switching, configured concurrency, result validation, result
-   retries/idempotency, persistence, cancellation, and recovery.
-10. Extend the shared failed-job lifecycle matrix in
-   `tests/backend/routes/ai.rs::failed_jobs_can_be_cleaned_and_restarted_for_every_ai_feature`.
-   The new case must create a terminal `failed` job together with representative persisted result
-   data, call the feature's `clean` endpoint, prove that every task-owned job and result row was
-   removed, call `start`, and prove that a fresh eligible job was queued. A feature that owns runs,
-   generations, finalization state, groups, members, or generated files must include those artifacts
-   in the fixture and prove they are removed in foreign-key-safe order. A new AI feature is not
-   complete if a historical failed job can block clean or prevent the clean-to-start sequence.
-11. Extend both failed-job retry matrices:
-   `tests/backend/routes/ai.rs::manual_start_queues_a_new_attempt_after_failure_for_every_ai_feature`
-   and
-   `tests/backend/cronjob.rs::scheduled_occurrences_queue_a_new_attempt_after_failure_for_every_ai_feature`.
-   With prepared inputs still present and no successfully persisted result, both the administrator
-   `start` endpoint and the scheduled cron entry must preserve the terminal failed job as history
-   and queue a new job without requiring clean first. Run-based features must create a new run and
-   associate the replacement job with it. These matrices must remain exhaustive with `AiFeature::ALL`;
-   adding an AI feature without adding both cases is a test failure and an incomplete implementation.
-
-Metadata generation lives in `processor/metadata/`; `processor/regenerator.rs` does not exist.
-
----
-
-## Configuration
-
-Both binaries (`momento-api`, `llm-service`) require `-c|--config PATH`. A missing or malformed
-config is a hard startup failure — it never falls back to defaults, because that would silently
-start the server against the wrong data directory. Momento resolves the exact
-`${LLM_SERVICE_ADDRESS}` placeholder when it appears in `llm.server_address`; the environment value is
-required and must be non-empty in that case. Momento also accepts exact runtime overrides from
-`RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and `LLM_SERVICE_API_KEY`; llm-service accepts
-`LLM_SERVICE_API_KEY`. No other config
-interpolation or application environment variable is supported.
-
-Both binaries also support `--init-config`, which writes their source-owned commented operational
-template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
-`/data/config.toml` for Momento and `/data/config_llm.toml` for llm-service. Each service owns all
-of its fallback and operational-template values in its `config/defaults.rs`; its commented TOML
-source contains named placeholders rather than duplicated values. The rendered templates exactly
-match `playground/config.toml` and `playground/config_llm.toml`, including their environment
-placeholders. Normal startup never generates or replaces a configuration file except when atomically
-consuming the one-shot administrator password-reset request described below.
-
-Momento constructs one `ConfigManager` from the exact CLI config path and the fully validated
-configuration. Runtime code reads immutable snapshots from that manager instead of retaining its
-own `Config` copy. Administrator configuration endpoints must accept typed fields, validate the
-prospective complete configuration, preserve unrelated TOML values and comments with `toml_edit`,
-atomically replace the same config path, then publish the new snapshot. A failed validation or
-write leaves both the file and live snapshot unchanged. The AI schedule endpoint currently updates
-the seven `[llm].*_cron` fields this way; active cron loops subscribe to the manager and reschedule
-immediately without restarting Momento. Other configuration fields remain startup-only until their
-runtime owners explicitly subscribe to changes.
-
-Momento has no `[admin]` configuration section. An empty database creates `admin` / `admin` with a
-required password change. Setting `[server].reset_admin_password = true` is a one-start recovery
-request: startup atomically writes it back to `false`, keeps the stored password unchanged, and
-accepts temporary `admin` / `admin` API authentication only in that process for the existing
-administrator. A successful forced password change replaces the stored hash; a restart before the
-change removes the temporary override and restores normal authentication with the unchanged stored
-username and password. `RESET_ADMIN_PASSWORD=true` applies the same request from the environment;
-operators must remove that override after startup so it is not requested again on every restart.
-
-Momento filesystem locations derive from `server.data_dir`:
-
-```toml
-[server]
-data_dir = "/data"          # database.sqlite, originals/, thumbnails/, previews/, imports/, webdav/, ...
-static_dir = "/app/static"  # built frontend served as a fallback
-```
-
-`main` calls `constants::init_paths(&config.server.data_dir)` once after parsing the
-config; everything else reads `constants::paths()`. Never hardcode a path under the data
-directory and never add a new `std::env::var` call. The config loaders own all supported environment
-access: `LLM_SERVICE_ADDRESS`, `RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and `LLM_SERVICE_API_KEY` for
-Momento, and `LLM_SERVICE_API_KEY` for llm-service. Add a config field rather than another
-environment setting.
-
-Log paths are not configurable. Each service writes plain daily rotated files below
-`server.data_dir/logs/` (`momento-api.YYYY-MM-DD.log` or `llm-service.YYYY-MM-DD.log`). Log events
-contain the timestamp, level, message, and structured fields; they do not repeat the service name
-or process ID. File logs never contain ANSI escapes. Console logs keep the timestamp dim regardless
-of severity, then color the level, message, and structured fields as one span: DEBUG/INFO white,
-WARN yellow, and ERROR/fatal paths red.
-
-llm-service configures only `server.data_dir`; its durable queue and runtime cache are fixed at
-`server.data_dir/llm/queue/` and `server.data_dir/llm/cache/`, while its logs remain in
-`server.data_dir/logs/`. The `llm/` subtree must be durable. Queue jobs are accepted only with a
-non-empty hexadecimal Momento job ID and a manifest sent before its binary input frames.
-
-Runtime executables, scripts, model paths, model versions, loopback URLs, CUDA device selection,
-and embedding dimensions are owned by `RuntimeCatalog` and the llm-service image, not TOML.
-Service configuration retains only enablement, startup/request timeouts, model concurrency, OCR
-token limits, and task-specific thresholds. Local runtime requests contain job/input descriptors,
-never media bytes or caller-supplied paths.
-
-`llm.server_address` contains only the llm-service host and port. Momento owns the WebSocket scheme
-and `/api/v1/llm/connect` path as implementation details; `0.0.0.0` is only a server bind address
-and is never a client destination. llm-service has no Momento address. Its
-top-level `[scheduler]` section owns inference settings and every result-delivery setting, with
-result-delivery fields prefixed by `result_delivery_`. The Compose deployment mounts one shared
-data root into both containers; llm-service only uses its config, `logs/`, and `llm/` subtree and
-does not read Momento originals, previews, or thumbnails.
-
-Metadata, LLM submission, and LLM result workers are event-driven. Each starts by draining its
-durable queue, then waits on a versioned no-lost-wakeup signal. New work wakes each
-worker immediately. Submission and result preparation both use the global Momento application
-worker pool; neither section has a concurrency field. AI-result persistence remains a single
-logical writer and never creates concurrent database writers.
-
-### Face detection and grouping
-
-The `face_detection` service requires `minimum_face_likelihood` in `(0, 1]` and a positive
-`minimum_face_resolution_pixels`. These values belong to the llm-service face service entry and
-are passed explicitly to the local runtime. A detection is returned only when its confidence
-reaches the likelihood threshold and both detected face-box dimensions reach the configured
-source-pixel resolution. Tests that load playground configuration validate the values and
-required ranges rather than pinning locally tuned thresholds.
-
-Face results include a normalized `eyeCenter` derived from InsightFace's first two landmarks and a
-normalized `frontalityScore` derived from all five landmarks. Frontality accounts for eye-line
-roll plus nose and mouth-center horizontal offsets, is constrained to `[0, 1]`, and is persisted
-with the face row. The runtime keeps one CUDA BiSeNet ResNet18 ONNX session beside Buffalo L,
-parses dynamically batched aligned faces at the model's fixed 512x512 input, and derives
-`visibilityScore` from the expected eye, nose, and mouth regions. It derives
-`featureClarityScore` from local edge strength inside the visible semantic regions. The old
-combined `qualityScore` is replaced by independent `faceSizeScore`, visibility, and feature
-clarity values. Momento keeps the 256x256 portrait output size and the existing crop dimensions;
-only the crop origin changes so the portrait is centered on `eyeCenter`, subject to image-edge
-clamping. Face crops reference the immutable submitted original snapshot. Momento uses ImageMagick
-to select its first frame, apply stored orientation, and normalize it to PNG in memory before Rust
-decodes and crops it; conversion failures are logged and fail only the corresponding Momento job.
-
-Automatic grouping processes faces in face-ID order and compares each embedding against the fixed
-seed embedding that first created each automatic group. A face joins the first automatic seed whose
-cosine similarity reaches `face_group.similarity_threshold`; the default is `0.50`, lower values
-are more tolerant, and higher values are stricter. Grouping is deliberately greedy: it does not use
-the thumbnail representative, compare every automatic member pair, apply transitive closure, or run
-a second group-to-group merge pass. A manual merge makes every face selected by that merge a fixed
-manual anchor. Later detections compare against every anchor and join the best matching manual group
-before automatic grouping. Automatically attached members are reevaluated on each run and never
-become anchors, preventing transitive similarity drift. Manual groups and their anchors are never
-deleted by automatic regrouping. Changing these semantics requires explicit false-merge analysis
-and grouping tests, not just changing the thumbnail representative.
-
-`face_groups.representative_face_id` is a thumbnail choice, not the grouping seed. Select it only
-after automatic membership is complete and select it again after a manual merge. Rank each face by
-the six weights in `[face_group]`: confidence, face size, center proximity,
-frontality, visibility, and feature clarity. The weights must be non-negative and sum to `1`.
-Center proximity normalizes squared face-box-center distance from the media center to `[0, 1]`;
-higher weighted scores win and face ID ascending is the deterministic tie-breaker. Recompute all
-stored representatives at startup so configuration changes apply to existing groups. If the global
-representative is not visible to a requesting user, thumbnail lookup applies the same configured
-score to that user's accessible members.
-
-The face-group list is sorted in the backend before `LIMIT`/`OFFSET`: distinct visible media count
-descending, then face-group ID ascending as the stable tie-breaker. Do not sort paginated face
-groups in the frontend, and do not use raw face count in place of distinct accessible media count.
-
-### Places and aesthetic covers
-
-Places are identified by the exact `location_city`, nullable `location_state`, and
-`location_country` tuple. Lists and galleries filter through active `media_access`; list ordering is
-visible media count descending, then city, state, and country ascending. Place identifiers are
-opaque encodings of the complete tuple. Manual GPS changes immediately recompute or clear the local
-reverse-geocoded fields so grouping cannot retain stale location names.
-
-Place covers reuse normal thumbnails; WebGUI and Android crop them to 3:2 at display time.
-`image_aesthetics` uses the canonical photo original or the shared full-resolution video frame.
-Cover ranking prefers completed
-aesthetic inference and combines aesthetic 40%, scenic 25%, simplicity 20%, landscape 10%, and
-technical quality 5%, then applies OCR-clutter and dominant-face penalties. Media without an
-aesthetic result use a deterministic landscape, capture-date, and media-ID fallback. A user's place
-cover is always selected only from media visible to that user. Place cover selection is never
-stored or cached as a representative media ID. Every place cover request reruns the ranking
-against current metadata, aesthetic results, and active `media_access`, so changed membership is
-visible on the next request.
-
-`schema.sql` and the Android Room database define only their current schemas. Keep only the current
-Room schema export. Do not add schema migration or compatibility code; breaking schema changes
-require a fresh database and data directory.
-
-Reverse geocoding is always local and uses the pinned GeoNames `cities500` asset embedded in the
-Momento API binary. It has no enablement, URL, user-agent, timeout, or rate-limit configuration.
-Normal metadata generation fills missing location fields immediately; each metadata-worker cycle
-does not backfill existing metadata rows. Existing non-empty location fields are preserved.
-Updating the dataset requires recording its snapshot date, source checksums, output checksum, and
-CC BY 4.0 attribution in the source manifest.
-
-The Dockerfiles and entrypoints use `PUID`/`PGID`/`UMASK`/`TZ`; Compose additionally supplies
-`LLM_SERVICE_ADDRESS`, `RESET_ADMIN_PASSWORD`, `SECRET_KEY`, and the shared
-`LLM_SERVICE_API_KEY`. They prepare
-filesystem ownership and invoke each binary with its generated config path. `RUST_LOG` and `RUST_BACKTRACE` are ecosystem-standard runtime knobs read
-by `tracing-subscriber`, not application config.
-
----
-
-## Build, Lint & Test Commands
-
-### Root
-```bash
-pnpm install              # Install all dependencies
-pnpm build                # Build all packages
-pnpm dev                  # Dev servers (backend + frontend)
-pnpm lint                 # Lint all packages
-pnpm test                 # Run all tests
-
-./run_playground.sh /path/to/keystore                         # Build and run the playground stack
-./build_docker.sh /path/to/keystore                           # Build both images locally
-./build_docker.sh publish github yzard /path/to/keystore      # Build and publish both images to GHCR
-./build_android_client.sh verify                              # Android compile, JVM tests, and lint in Docker
-./build_android_client.sh assemble-debug                      # Android debug APK in Docker
-./build_android_client.sh instrumented-test                   # Containerized emulator tests; requires /dev/kvm
-./build_android_client.sh shell                               # Containerized Java/Gradle/SDK/ADB shell
-./build_android_client.sh release --keystore-dir /path/to/keystore
-```
-
-`run_playground.sh`, `build_docker.sh`, and the explicitly separate Android entrypoint
-`build_android_client.sh` are the supported scripts at the git root. They resolve paths from their
-own location, so they work from any working directory. Android compilation, debugging, lint, and
-tests must use `build_android_client.sh`; direct host Gradle, Java, Android SDK, emulator, or ADB
-commands are unsupported.
-
-### Playground containers
-
-`run_playground.sh` uses `build_docker.sh` and the root `docker-compose.yaml` to build and start exactly two containers:
-`momento-api` and `momento-llm-service`. It does not compile or run host binaries. The Momento image embeds
-the built frontend, while the llm-service image embeds four isolated Python environments and all
-model weights. Docker layer caching avoids repeating package/model downloads when their inputs do
-not change.
-
-The script passes the invoking UID/GID and mounts `playground/` as `/data` in both containers. Each
-service therefore has one volume mount. It tears down both containers on exit and never
-mounts the Docker socket. Runtime model processes are spawned inside the llm-service container, so
-inference never creates additional containers.
-
-`playground/logs/` holds both services' logs. llm-service queue and runtime cache remain below
-`playground/llm/`, while its config remains at `playground/config_llm.toml`. Build artifacts do not
-belong in either directory.
-
-### Android client
-
-`build_android_client.sh` is the only Android build, debug, and test entrypoint. Its `verify`,
-`assemble-debug`, `instrumented-test`, `shell`, and `release` commands all run in Docker. Only
-`release` accepts `--keystore-dir`; only `instrumented-test` uses the emulator image and `/dev/kvm`.
-Intermediate state belongs below `build/android/`, debug APKs below
-`dist/android/debug/`, and the single release APK plus AAB directly below
-`dist/android/`. Run `./build_android_client.sh --help` for the complete option contract.
-
-`build_docker.sh` calls only `build_android_client.sh release`, then verifies and embeds the one
-release APK into the momento-api image as `/app/static/momento-android.apk`. It separately builds
-llm-service and never routes Android development or test commands.
-
-### Backend (src/backend)
-```bash
-cd src/backend
-
-# Build (release/no-debug is the default project workflow)
-CARGO_TARGET_DIR=../../build/backend/target cargo build --release
-
-# Run development server
-CARGO_TARGET_DIR=../../build/backend/target cargo run --release -- -c ../../playground/config.toml
-
-# Linting & formatting
-cargo fmt                  # Format code
-CARGO_TARGET_DIR=../../build/backend/target cargo clippy --release --all-targets
-
-# Testing (integration tests live in tests/backend/, not #[cfg(test)] modules)
-CARGO_TARGET_DIR=../../build/backend/target cargo test --release --all-targets
-CARGO_TARGET_DIR=../../build/backend/target cargo test --release auth
-
-# Troubleshooting only: explicitly enable debug symbols in an isolated directory.
-CARGO_PROFILE_DEV_DEBUG=2 CARGO_TARGET_DIR=../../build/backend/debug-target cargo build
-CARGO_PROFILE_TEST_DEBUG=2 CARGO_TARGET_DIR=../../build/backend/debug-target cargo test auth
-```
-
-### Frontend (src/frontend)
-```bash
-cd src/frontend
-
-pnpm dev                  # Dev server (Vite)
-pnpm build                # Production build (tsc + vite)
-pnpm lint                 # ESLint
-pnpm preview              # Preview production build
-```
-
-### Docker
-
-Docker build files live in `docker/`; the canonical `docker-compose.yaml` and
-`build_docker.sh` live at the git root. Builds use the git root as their context.
-
-```bash
-./build_docker.sh /path/to/keystore                                      # Build both images locally
-./build_docker.sh publish github yzard /path/to/keystore                 # Build and publish to GHCR
-./build_docker.sh publish docker zhuoyin /path/to/keystore               # Build and publish to Docker Hub
-docker compose up                                      # Full stack
-```
-
-The ignore files are `docker/Dockerfile.dockerignore` and
-`docker/Dockerfile.llm.dockerignore`, not `.dockerignore`. Docker resolves ignore files against the
-build context, so each file is named for the Dockerfile that uses it.
-
----
-
-## Code Style Guidelines
-
-### Rust (Backend)
-
-**Formatting**:
-- Use `cargo fmt` for formatting
-- Use `cargo clippy` for linting
-
-**Imports** (order):
-```rust
-// 1. Standard library
-use std::sync::Arc;
-use std::path::PathBuf;
-
-// 2. External crates
-use axum::{extract::State, routing::post, Json, Router};
-use serde::{Deserialize, Serialize};
-
-// 3. Local crate
-use crate::auth::{AppState, CurrentUser};
-use crate::error::AppError;
-```
-
-**Naming Conventions**:
-- Files: `snake_case.rs`
-- Structs/Enums: `PascalCase` (e.g., `MediaResponse`, `UserCreateRequest`)
-- Functions/variables: `snake_case`
-- Constants: `UPPER_SNAKE_CASE`
-- Modules: `snake_case`
-
-**Error Handling**:
-```rust
-// Use AppError for API errors
-return Err(AppError::NotFound("Media not found".to_string()));
-return Err(AppError::BadRequest("Invalid input".to_string()));
-return Err(AppError::Authentication("Invalid token".to_string()));
-```
-
-**Route Patterns**:
-- Routers use `Router::new()` with `.route()` methods
-- POST for all mutations and queries (RPC-style API)
-- Request bodies use `Json<T>` extractor
-- Response types implement `IntoResponse`
-
-### TypeScript (Frontend)
-
-**Formatting**:
-- ESLint + typescript-eslint for linting
-- Strict TypeScript (`strict: true`, `noUncheckedIndexedAccess: true`)
-
-**Imports**:
-```typescript
-// React/external first, then local
-import { useState, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
-
-import { apiClient } from './client'
-import type { Media } from './types'
-```
-
-**Naming Conventions**:
-- Files: `PascalCase.tsx` for components, `camelCase.ts` for utilities
-- Components: `PascalCase`
-- Hooks: `useCamelCase`
-- Types/Interfaces: `PascalCase`
-- Variables/functions: `camelCase`
-- API clients: `<resource>Api` (e.g., `mediaApi`, `albumsApi`)
-
-**Component Structure**:
-```typescript
-// Functional components with explicit return types optional
-function MediaCard({ media }: { media: Media }) {
-  return <div>...</div>
-}
-
-// Or with React.FC (less common in codebase)
-const MediaCard: React.FC<{ media: Media }> = ({ media }) => { ... }
-```
-
-**API Calls**:
-- Use `apiClient` from `src/frontend/api/client.ts`
-- API methods return typed responses
-- URLs relative to baseURL (`/api`)
-
----
-
-## Project Structure
-
-```
-src/
-├── backend/
-│   ├── auth/               # JWT, password, extractors
-│   ├── config/             # YAML config loading
-│   ├── database/           # SQLite pool, schema, queries
-│   ├── models/             # Request/response DTOs (serde)
-│   ├── processor/          # Import, metadata, AI, deduplication, thumbnails
-│   ├── routes/             # Public and internal Axum route handlers
-│   │   ├── ai/             # AI control/status endpoints
-│   │   ├── import/         # Local/WebDAV import endpoints
-│   ├── utils/              # Helpers (datetime, geocoding)
-│   ├── webdav/             # WebDAV server and upload processing
-│   ├── app.rs              # App factory
-│   ├── constants.rs        # Paths, defaults
-│   ├── error.rs            # AppError type
-│   ├── logging.rs          # Request logging
-│   ├── lib.rs              # Library root
-│   ├── main.rs             # Entry point
-│   └── Cargo.toml          # Rust dependencies
-│
-├── backend_llm/            # llm-service binary: providers, manifest queue, scheduler
-├── common/                 # shared Rust infrastructure for both service binaries
-└── frontend/
-    ├── api/                # API client modules
-    ├── components/         # React components
-    ├── context/            # React context providers
-    ├── hooks/              # Custom hooks
-    ├── lib/                # Shared frontend helpers
-    ├── pages/              # Route pages
-    ├── styles/             # Tailwind and global CSS
-    ├── utils/              # Frontend utilities
-    └── package.json
-
-tests/                      # Mirrors src/ 1:1 — see below
-├── backend/
-│   ├── processor/
-│   ├── routes/
-│   └── test_utils/
-├── backend_llm/
-├── common/
-└── frontend/
-
-docker/
-├── Dockerfile
-├── Dockerfile.dockerignore # NOT .dockerignore — context is the git root
-├── Dockerfile.android
-├── Dockerfile.android.dockerignore
-├── Dockerfile.llm
-├── Dockerfile.llm.dockerignore
-├── entrypoint_android.sh
-├── entrypoint.sh
-└── entrypoint_llm.sh
-
-playground/                 # End-to-end config and data
-├── config.toml             # The one config run_playground.sh starts the stack with
-├── config_llm.toml         # Checked-in llm-service config
-├── llm/
-│   ├── logs/               # llm-service daily logs
-│   ├── cache/              # Local model runtime cache
-│   └── queue/              # Durable inference queue
-├── database.sqlite         # SQLite database
-├── originals/              # Original media files
-├── previews/               # Generated previews, including one shared full-resolution AI frame per video
-├── thumbnails/             # Generated thumbnails
-├── imports/                # Import staging area
-├── webdav/                 # WebDAV processing area
-└── logs/                   # Momento API daily logs
-
-build/                      # Optional local intermediate build artifacts
-dist/                       # Optional local final build artifacts
-
-build_android_client.sh     # All Android build, debug, lint, and test operations in Docker
-build_docker.sh             # Builds locally or explicitly publishes both images
-run_playground.sh           # Builds and starts the two-container playground stack
-docker-compose.yaml         # Canonical two-container deployment
-```
-
-### The `tests/` mirror
-
-New tests must structurally mirror `src/`. A new source file's test location is derived
-mechanically by swapping the leading `src/` for `tests/` and keeping every intermediate
-directory. Existing flat tests are layout debt and should not be copied:
-
-```
-src/backend/routes/map.rs              →  tests/backend/routes/map.rs
-src/backend/processor/media.rs         →  tests/backend/processor/media.rs
-src/frontend/components/MediaCard.tsx  →  tests/frontend/components/MediaCard.test.tsx
-```
-
-Adding a source file means adding its test file in the same change. Moving or deleting
-one means moving or deleting the other. A directory present in `src/` but missing from
-`tests/` is a coverage gap, not a convention.
-
----
-
-## API Conventions
-
-**Endpoint Pattern**: `/api/v1/<resource>/<operation>`
-- Resources: `user`, `media`, `album`, `tag`, `share`, `import`, `metadata`, `ai`, `map`, `timeline`, `trash`
-- Operations: `list`, `get`, `create`, `update`, `delete`
-
-**Authentication**:
-- Bearer token in `Authorization` header
-- Token refresh via `/api/v1/user/refresh`
-- Basic auth only for initial login (`/api/v1/user/authenticate`)
-- The outbound llm-service WebSocket uses `x-momento-client-id` and `x-api-key`, never a user JWT.
-
-**Request/Response**:
-- All bodies are JSON
-- Serde handles serialization (camelCase for responses)
-- Consistent error format: `{"detail": "Error message"}`
-
----
-
-## Database
-
-- SQLite with r2d2 connection pooling
-- Schema in `src/backend/database/schema.sql`
-- Current-schema initialization only; no migration framework or compatibility DDL.
-- Helper functions in `src/backend/database/mod.rs`:
-  - `fetch_one()`, `fetch_all()` for queries
-  - `execute_query()` for mutations
-  - `insert_returning_id()` for inserts
-
----
-
-## Key Dependencies
-
-**Backend (Rust)**:
-- axum (web framework)
-- tokio (async runtime)
-- rusqlite + r2d2 (SQLite)
-- serde + serde_json (serialization)
-- jsonwebtoken (JWT)
-- argon2 + bcrypt (password hashing)
-- image + kamadak-exif (image processing)
-- reqwest (HTTP client)
-
-**Frontend**:
-- React 18
-- React Router 7
-- TanStack Query
-- Axios
-- Tailwind CSS
-- react-leaflet
-- react-virtuoso
+# Momento agent guide
+
+Momento is a self-hosted photo manager: Rust/Axum + SQLite in `src/backend/`,
+a separate durable inference service in `src/backend_llm/`, shared Rust infrastructure
+in `src/common/`, React/TypeScript in `src/frontend/`, and Android in `src/android/`.
+The monorepo uses pnpm workspaces and Turborepo.
+
+## Working scope and completion
+
+Read the affected implementation and only the guidance relevant to the change. A typo or
+style-only edit does not require loading architecture docs or the complete skill stack.
+Repository contracts below take precedence over generic skill conventions.
+
+Complete the requested behavior, update affected callers, and verify the result before
+returning it. For local checks using disposable fixtures with no production access, run
+checks, fix failures caused by the change, and rerun affected checks without repeated
+approval. Do not turn a passing focused check into an unbounded test loop. Report any
+remaining blocker or unverified behavior. This does not authorize publishing or changing
+production data; `playground/` can contain user media and is not disposable by default.
+
+New arguments require explicit updates to internal callers; avoid compatibility shims.
+Extract shared behavior before adding a near-duplicate implementation. Even a small edit
+in a nonconforming directory requires migrating the affected tree to the canonical layout
+in the same change. Update imports, callers, mirrored tests, fixtures, build/CI references,
+and docs; remove the obsolete layout rather than leaving parallel structures. This migration
+is part of the authorized repository workflow and needs no separate approval. Keep its scope
+to the affected directory and dependencies, not an unrelated repository-wide rewrite.
+
+Add or update regression tests for changed behavior and meaningful failure paths, using
+existing coverage where it already proves the contract. Do not create tests that merely
+match comments, documentation wording, or the implementation's structure. Run checks
+appropriate to the change; broad suites are warranted for cross-cutting changes or risks
+that focused checks do not cover.
+
+## Repository layout and tooling
+
+- New source belongs under its component in `src/`; use the resource hierarchy, not
+  existing flat route/query/API modules as templates. Tests mirror the source path under
+  `tests/` (for example `src/backend/routes/map.rs` → `tests/backend/routes/map.rs`).
+  Move affected tests with source. Documentation belongs in `docs/`.
+- Intermediate artifacts belong in root `build/`, deliverables in root `dist/`.
+  Runtime playground files belong in `playground/`. The root `docker-compose.yaml`,
+  `build_docker.sh`, `run_playground.sh`, and `build_android_client.sh` are intentional
+  exceptions to generic layout rules.
+- Before host development tools, create `build/tmp/` and set `TMPDIR`, `TEMP`, and `TMP`
+  to its absolute path. Host fixtures must stay there, never in system `/tmp`.
+  Rust tests use `src/test_support/temporary.rs`, including direct test-binary runs.
+  Python fixtures use context managers; shell fixtures use exit traps and explicit paths.
+  Clean only the current process's fixtures, including on failure. Rust's retained
+  fixtures have exit cleanup; forced termination can leave files behind.
+  Production temporary storage remains on the mounted volume (`/data/tmp` or `/data/llm/tmp`).
+- **Every Android build/test/debug/dependency/lint operation runs in Docker through
+  `./build_android_client.sh`.** Use `verify`, `assemble-debug`, `instrumented-test`,
+  `shell`, or `release --keystore-dir PATH`. Never run host Gradle, Java, SDK, emulator,
+  or ADB commands, invoke Android Dockerfiles directly, or copy Gradle artifacts yourself.
+  Only this script's outputs in `build/android/` and `dist/android/` are valid artifacts.
+- Rust uses the release/no-debug workflow and component-specific build directories.
+  Frontend uses strict TypeScript, its configured formatter/ESLint, and the shared typed
+  `apiClient` in `src/frontend/api/client.ts`. Exact commands: [development](docs/development.md).
+
+## Contracts to preserve
+
+- Momento business operations acquire source-owned scheduler capacity and use bounded,
+  typed CPU, File I/O, and SQLite executors. Never block network threads or create private
+  threads, Tokio tasks, blocking/Rayon pools, or semaphore concurrency windows in business
+  modules. r2d2 is the deliberate additional SQLite connection pool. SQL reads use the
+  protected reader lane; potentially mutating operations use the writer lane, regardless
+  of HTTP method. Preserve reserved file reader/writer roles. Details: [execution](docs/architecture/execution.md).
+- Import → metadata/input preparation → durable AI jobs → WebSocket submission → local
+  inference → durable result receipt → independent persistence → optional downstream work
+  are separate scheduled stages. A stage never runs its downstream stage inline.
+  Momento owns the immutable original/shared full-resolution frame; UI thumbnails are
+  never AI inputs. llm-service receives descriptors and bytes and never reads Momento paths.
+- Only one model runtime is active in llm-service. Durable receipt allows queue deletion;
+  transient failures keep work retryable. Preserve client/job/attempt/input correlation,
+  cancellation races, idempotency, restart recovery, and per-task result validation.
+- AI control/status requires an administrator. Normal media, duplicate/face/place browsing
+  filters through active `media_access`; never substitute global representatives for
+  user-visible selections. LLM transport authenticates client ID + API key, not user JWT.
+- Application API paths are `/api/v1/<resource>/<operation>` with POST for normal operations.
+  Preserve media/static GET, WebSocket handshakes, and WebDAV methods/streamed bodies.
+  Use typed JSON for ordinary application operations, camelCase responses, and
+  `AppError`/`{"detail": "Error message"}` for API errors. User auth uses Bearer tokens;
+  Basic auth is for initial `/api/v1/user/authenticate`; refresh is `/api/v1/user/refresh`.
+- SQL schema and named queries live in `src/backend/database/`, grouped by resource.
+  SQLite and Android Room define current schemas only: no migration framework or
+  compatibility DDL; keep only the current Room export. Breaking schema changes require
+  a fresh database/data directory, not automatic deletion of existing user data.
+- Both services require `-c|--config PATH`; malformed/missing config fails startup.
+  Preserve typed configuration and `ConfigManager` snapshots. Add config fields rather
+  than environment reads in business code. Existing config-loader environment exceptions,
+  initialization, and password reset are documented in [configuration](docs/architecture/configuration.md).
+
+## Read when the task crosses these boundaries
+
+The linked documents contain the detailed contracts moved out of this entrypoint. Read the
+relevant topic before changing its behavior; do not load the entire table for every edit.
+
+| Task | Reference |
+|------|-----------|
+| Scheduling, worker capacity, blocking work, SQL/file lanes | [Execution](docs/architecture/execution.md) |
+| Local/WebDAV import, metadata jobs, original/frame descriptors | [Media pipeline](docs/architecture/media-pipeline.md) |
+| WebSocket admission, submission retries, cancellation/outbox | [LLM transport](docs/architecture/llm-transport.md) |
+| Durable queue/capacity/recovery, model activation/concurrency, delivery | [LLM runtime](docs/architecture/llm-runtime.md) |
+| Result framing/receipt, validation, transactional persistence, cleanup | [LLM results](docs/architecture/llm-results.md) |
+| Adding an inference type | [Adding a type](docs/architecture/llm-results.md#adding-an-inference-type), plus media pipeline, transport, and runtime contracts above |
+| Config, hot updates, paths, logging, credentials, container initialization | [Configuration](docs/architecture/configuration.md) |
+| Face detection, crops, grouping, representatives, ordering | [Faces](docs/architecture/faces.md) |
+| Place identity, covers, location metadata, GeoNames data | [Places](docs/architecture/places.md) |
+| Build, test, playground, Docker, Android commands | [Development](docs/development.md) |
+
+## Shared skills
+
+Load a named skill only when its workflow applies. Do not recursively load every skill it
+mentions. If a name is duplicated, use `/home/zyin/dev/skills/<name>/SKILL.md` as the canonical
+personal copy; repository-specific contracts still win.
+
+- `add-modify-codebase`: changing existing behavior, signatures, or shared implementations.
+- `project-structure`: placing or moving source, tests, build outputs, or documentation.
+- `general-coding`: explicit inputs, error ownership, and shared coding conventions.
+- `naming-conventions`: introducing or renaming concepts across layers.
+- `axum-server`: Axum handlers, state, middleware, or service lifecycle.
+- `restful-api-design`: defining/changing route contracts and protocol exceptions.
+- `sql-coding`: changing schemas, queries, or transactions.
+- `docker-build`: changing images, entrypoints, or build/publish behavior.
+
+Maintain this file as a short entrypoint. Keep non-obvious shared constraints here, put
+conditional procedures in the linked topic, and update that topic when its contract changes.
+Avoid adding code inventories, generic tutorials, or one-off task history.
