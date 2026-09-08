@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use momento_common::llm::result_stream::{
     OwnedResultRecord, ResultInputCorrelation, ResultManifest, ResultRecordChunkDecoder,
     ResultRecordCollector, ResultRecordStreamValidator, ResultStatus, ValidatedResultInput,
@@ -24,6 +25,19 @@ use crate::runtime::{DurableSourceId, SchedulerAdmissionKind};
 // accounts eight times its encoded size for decoded values and containers.
 pub(crate) const DETACHED_RESULT_MEMORY_BYTES: u64 = 64 * 1024;
 const DETACHED_RESULT_ENCODED_BYTES: u64 = 8 * 1024;
+
+struct ResultReadContext<'a> {
+    executors: &'a crate::runtime::ExecutorHandles,
+    admission: &'a mut Option<crate::runtime::DurableAdmission>,
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/backend/processor/ai/result.rs"]
+mod tests;
+
+fn can_detach_result_staging(task: &str, byte_size: u64, record_count: u32) -> bool {
+    task != "face_detection" && byte_size <= DETACHED_RESULT_ENCODED_BYTES && record_count <= 32
+}
 
 pub(crate) enum QueuedResult {
     Journal {
@@ -328,26 +342,29 @@ async fn process_result_lane(
         } else {
             None
         };
+        let mut admission = Some(admission);
         let preparation_started = std::time::Instant::now();
-        let prepared_result = match prepare_queued_result(executors, queued_result, process_config)
-            .await
-        {
-            Ok(prepared_result) => prepared_result,
-            Err(error) if result_error_is_retryable(&error) => {
-                release_result_claim(&executors.sqlite, &job_id, claim_token.as_deref()).await?;
-                tracing::warn!(
+        let prepared_result =
+            match prepare_queued_result(executors, queued_result, process_config, &mut admission)
+                .await
+            {
+                Ok(prepared_result) => prepared_result,
+                Err(error) if result_error_is_retryable(&error) => {
+                    release_result_claim(&executors.sqlite, &job_id, claim_token.as_deref())
+                        .await?;
+                    tracing::warn!(
+                        job_id,
+                        error = %error,
+                        "Momento LLM result preparation failed and was moved to the queue tail"
+                    );
+                    return Err(error);
+                }
+                Err(error) => PreparedQueuedResult::PermanentFailure {
                     job_id,
-                    error = %error,
-                    "Momento LLM result preparation failed and was moved to the queue tail"
-                );
-                return Err(error);
-            }
-            Err(error) => PreparedQueuedResult::PermanentFailure {
-                job_id,
-                claim_token,
-                error: error.to_string(),
-            },
-        };
+                    claim_token,
+                    error: error.to_string(),
+                },
+            };
         let claim_identity = prepared_result.claim_identity();
         if preparation_started.elapsed() >= std::time::Duration::from_secs(1) {
             tracing::info!(
@@ -362,7 +379,7 @@ async fn process_result_lane(
             drop(admission);
             None
         } else {
-            Some(admission)
+            admission
         };
         let persistence_started = std::time::Instant::now();
         let persistence = executors
@@ -430,25 +447,22 @@ pub async fn process_available_results(
                 .cleanup_llm_result_staging_page_durable(job_id.clone(), 256)
                 .await?;
             if outcome.complete {
-                executors
-                    .sqlite
-                    .finalize_llm_result_cleanup_durable(job_id)
-                    .await?;
                 executors.scheduler.wake_journal_recovery();
             }
             continue;
         };
         let job_id = queued_result.job_id().to_string();
         let claim_token = queued_result.claim_token().map(str::to_string);
-        let prepared_result = match prepare_queued_result(executors, queued_result, &process_config)
-            .await
-        {
-            Ok(prepared_result) => prepared_result,
-            Err(error) => {
-                release_result_claim(&executors.sqlite, &job_id, claim_token.as_deref()).await?;
-                return Err(error);
-            }
-        };
+        let prepared_result =
+            match prepare_queued_result(executors, queued_result, &process_config, &mut None).await
+            {
+                Ok(prepared_result) => prepared_result,
+                Err(error) => {
+                    release_result_claim(&executors.sqlite, &job_id, claim_token.as_deref())
+                        .await?;
+                    return Err(error);
+                }
+            };
         let claim_identity = prepared_result.claim_identity();
         let persistence = executors
             .sqlite
@@ -508,26 +522,40 @@ async fn process_staging_cleanup_pages(
             .await?
     };
     let mut processed = 0;
-    for job_id in candidates {
-        let _worker_permit = scheduler
-            .acquire_durable(
-                DurableSourceId::LlmResultCleanup,
-                SchedulerAdmissionKind::ExistingClaimCompletion,
-            )
-            .await
-            .map_err(AppError::Internal)?;
-        let outcome = executors
-            .sqlite
-            .cleanup_llm_result_staging_page_durable(job_id.clone(), 256)
-            .await?;
-        if outcome.complete {
-            executors
+    let mut cleanups = futures::stream::iter(candidates)
+        .map(|job_id| async move {
+            let worker_permit = scheduler
+                .acquire_durable(
+                    DurableSourceId::LlmResultCleanup,
+                    SchedulerAdmissionKind::ExistingClaimCompletion,
+                )
+                .await
+                .map_err(AppError::Internal)?;
+            // Only the bounded job descriptor is retained while the SQLite FIFO drains.
+            drop(worker_permit);
+            let outcome = executors
                 .sqlite
-                .finalize_llm_result_cleanup_durable(job_id)
+                .cleanup_llm_result_staging_page_durable(job_id.clone(), 256)
                 .await?;
-            scheduler.wake_journal_recovery();
+            if outcome.complete {
+                scheduler.wake_journal_recovery();
+            }
+            Ok::<(), AppError>(())
+        })
+        .buffer_unordered(16);
+    let mut first_error = None;
+    while let Some(outcome) = cleanups.next().await {
+        match outcome {
+            Ok(()) => processed += 1,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
         }
-        processed += 1;
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(processed)
 }
@@ -609,6 +637,7 @@ async fn prepare_queued_result(
     executors: &crate::runtime::ExecutorHandles,
     queued: QueuedResult,
     process_config: &MediaProcessConfig,
+    admission: &mut Option<crate::runtime::DurableAdmission>,
 ) -> AppResult<PreparedQueuedResult> {
     let (request, claim_token) = match queued {
         QueuedResult::Journal {
@@ -620,7 +649,10 @@ async fn prepare_queued_result(
             claim_token,
         } => {
             let request = read_journal_result(
-                executors,
+                &mut ResultReadContext {
+                    executors,
+                    admission,
+                },
                 manifest,
                 &inbox_path,
                 next_record_sequence,
@@ -663,7 +695,7 @@ async fn prepare_queued_result(
 }
 
 async fn read_journal_result(
-    executors: &crate::runtime::ExecutorHandles,
+    context: &mut ResultReadContext<'_>,
     manifest: ResultManifest,
     inbox_path: &str,
     mut next_record_sequence: u32,
@@ -671,6 +703,7 @@ async fn read_journal_result(
     claim_token: &str,
     product_version: i64,
 ) -> AppResult<StreamedResult> {
+    let executors = context.executors;
     manifest.validate().map_err(AppError::BadRequest)?;
     let prepared_inputs = executors
         .sqlite
@@ -762,7 +795,7 @@ async fn read_journal_result(
                 .sum::<usize>();
             if staging_page.len() >= 128 || staging_payload_bytes >= 3 * 1024 * 1024 {
                 stage_result_page(
-                    executors,
+                    context,
                     &manifest,
                     &mut next_record_sequence,
                     &mut next_byte_offset,
@@ -780,7 +813,7 @@ async fn read_journal_result(
     decoder.finish().map_err(AppError::BadRequest)?;
     if !staging_page.is_empty() {
         stage_result_page(
-            executors,
+            context,
             &manifest,
             &mut next_record_sequence,
             &mut next_byte_offset,
@@ -982,7 +1015,7 @@ async fn collect_staged_result(
 }
 
 async fn stage_result_page(
-    executors: &crate::runtime::ExecutorHandles,
+    context: &mut ResultReadContext<'_>,
     manifest: &ResultManifest,
     next_record_sequence: &mut u32,
     next_byte_offset: &mut u64,
@@ -995,7 +1028,14 @@ async fn stage_result_page(
         total.checked_add(u64::from(record.encoded_size))
     });
     let records = std::mem::replace(staging_page, Vec::with_capacity(256));
-    let outcome = executors
+    let detached =
+        can_detach_result_staging(&manifest.task, manifest.byte_size, manifest.record_count)
+            && context.admission.is_some();
+    if detached {
+        context.admission.take();
+    }
+    let outcome = context
+        .executors
         .sqlite
         .stage_llm_result_page_durable(StageLlmResultPage {
             job_id: manifest.job_id.clone(),
@@ -1005,7 +1045,21 @@ async fn stage_result_page(
             expected_byte_offset: *next_byte_offset,
             records,
         })
-        .await?;
+        .await;
+    if detached {
+        *context.admission = Some(
+            context
+                .executors
+                .scheduler
+                .acquire_durable(
+                    DurableSourceId::LlmResult,
+                    SchedulerAdmissionKind::ExistingClaimCompletion,
+                )
+                .await
+                .map_err(AppError::Internal)?,
+        );
+    }
+    let outcome = outcome?;
     if outcome != StageLlmResultPageOutcome::Staged {
         return Err(AppError::Internal(
             "LLM result receipt changed during staging".to_string(),

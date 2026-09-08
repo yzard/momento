@@ -3,6 +3,107 @@ use momento_api::database::queries;
 use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
 
 #[test]
+fn latest_ai_status_and_failures_use_history_index_and_preserve_latest_semantics() {
+    let pool = create_test_db();
+    let connection = pool.get().unwrap();
+    connection
+        .execute(
+            "INSERT INTO media_similarity_runs(id,trigger,status) VALUES (1,'manual','running')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO face_grouping_runs(id,status) VALUES (1,'running')",
+            [],
+        )
+        .unwrap();
+    for task in [
+        "ocr",
+        "image_tagging",
+        "image_aesthetics",
+        "image_clustering",
+        "face_detection",
+        "screenshot_detection",
+        "document_detection",
+    ] {
+        for status in [
+            "queued",
+            "submitting",
+            "submitted",
+            "completed",
+            "cancelled",
+            "failed",
+        ] {
+            let media_id = create_test_media(&pool, &format!("{task}-{status}.jpg"));
+            for (suffix, job_status, error) in [
+                ("old", "failed", Some("old failure")),
+                ("new", status, Some("current failure")),
+            ] {
+                connection.execute("INSERT INTO llm_jobs(id,media_id,task,status,last_error,created_at,deduplicate_run_id,face_grouping_run_id) VALUES (?,?,?,?,?,'2000-01-01',?,?)", rusqlite::params![format!("{task}-{status}-{suffix}"),media_id,task,job_status,error,(task == "image_clustering").then_some(1_i64),(task == "face_detection").then_some(1_i64)]).unwrap();
+            }
+        }
+    }
+    let counts = |query: &str| {
+        connection
+            .prepare(query)
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(counts(queries::ai_jobs::SELECT_LATEST_STATUS_COUNTS), counts("SELECT task,status,COUNT(*) FROM llm_jobs WHERE rowid IN (SELECT MAX(rowid) FROM llm_jobs GROUP BY media_id,task) GROUP BY task,status ORDER BY task,status"));
+    let failures = connection
+        .prepare(queries::ai_jobs::SELECT_LATEST_FAILURES)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(2))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(failures.len(), 7);
+    assert!(failures.iter().all(|id| id.ends_with("-failed-new")));
+    connection
+        .execute(
+            "UPDATE llm_jobs SET last_error=NULL WHERE status='failed'",
+            [],
+        )
+        .unwrap();
+    assert!(connection
+        .prepare(queries::ai_jobs::SELECT_LATEST_FAILURES)
+        .unwrap()
+        .query([])
+        .unwrap()
+        .next()
+        .unwrap()
+        .is_none());
+    for query in [
+        queries::ai_jobs::SELECT_LATEST_STATUS_COUNTS,
+        queries::ai_jobs::SELECT_LATEST_FAILURES,
+    ] {
+        let plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|line| line
+                .contains("SEARCH latest USING COVERING INDEX idx_llm_jobs_media_task_history")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|line| line == "SCAN llm_jobs"), "{plan:?}");
+    }
+}
+
+#[test]
 fn shared_ai_admission_materializes_active_jobs_and_preserves_retry_eligibility() {
     assert!(queries::ai_jobs::insert_eligible("unknown").is_none());
     for task in [
@@ -395,14 +496,150 @@ fn result_cleanup_plan_starts_from_active_reservations_not_terminal_receipts() {
         .unwrap()
         .join("\n");
     assert!(
-        plan.contains("SEARCH s USING INDEX idx_data_dir_space_reservations_state"),
+        plan.contains(
+            "SEARCH s USING COVERING INDEX idx_data_dir_space_reservations_active_sqlite"
+        ),
         "{plan}"
     );
     assert!(
-        plan.contains("SEARCH r USING INDEX sqlite_autoindex_llm_result_receipts_"),
+        plan.contains("SEARCH r USING COVERING INDEX idx_llm_result_receipts_cleanup_reservation"),
         "{plan}"
     );
     assert!(!plan.contains("MULTI-INDEX OR"), "{plan}");
+}
+
+#[test]
+fn result_cleanup_preserves_state_guards_and_fifo_limit() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch("
+        CREATE TABLE llm_result_receipts(job_id TEXT PRIMARY KEY, updated_at TEXT, state TEXT, sqlite_reservation_id TEXT, journal_group_id TEXT);
+        CREATE TABLE data_dir_space_reservations(id TEXT PRIMARY KEY, class TEXT, state TEXT);
+        CREATE TABLE file_operation_groups(id TEXT PRIMARY KEY, state TEXT);
+        CREATE INDEX idx_llm_result_receipts_cleanup_reservation ON llm_result_receipts(sqlite_reservation_id,state,updated_at,job_id,journal_group_id) WHERE state IN ('file_cleanup_pending','cleaned','discarded','failed');
+    ").unwrap();
+    let mut expected = Vec::new();
+    let mut index = 0;
+    for receipt in [
+        "received",
+        "processing",
+        "cleanup_pending",
+        "file_cleanup_pending",
+        "cleaned",
+        "discarded",
+        "failed",
+    ] {
+        for reservation in ["active", "released"] {
+            for class in ["sqlite", "journal"] {
+                for group in ["cleanup_pending", "cleaned", "rolled_back"] {
+                    let id = format!("{index:04}");
+                    index += 1;
+                    connection
+                        .execute(
+                            "INSERT INTO llm_result_receipts VALUES (?1,'2026-01-01',?2,?1,?1)",
+                            rusqlite::params![id, receipt],
+                        )
+                        .unwrap();
+                    connection
+                        .execute(
+                            "INSERT INTO data_dir_space_reservations VALUES (?,?,?)",
+                            rusqlite::params![id, class, reservation],
+                        )
+                        .unwrap();
+                    connection
+                        .execute(
+                            "INSERT INTO file_operation_groups VALUES (?,?)",
+                            rusqlite::params![id, group],
+                        )
+                        .unwrap();
+                    let eligible = receipt == "cleanup_pending"
+                        || (class == "sqlite"
+                            && reservation == "active"
+                            && matches!(
+                                receipt,
+                                "file_cleanup_pending" | "cleaned" | "discarded" | "failed"
+                            )
+                            && (receipt != "file_cleanup_pending"
+                                || matches!(group, "cleaned" | "rolled_back"))
+                            && !(receipt == "discarded" && group == "rolled_back"));
+                    if eligible {
+                        expected.push(id);
+                    }
+                }
+            }
+        }
+    }
+    for limit in [0, 1, 16, 256] {
+        let actual = connection
+            .prepare(queries::llm_callback::SELECT_RESULT_STAGING_CLEANUP)
+            .unwrap()
+            .query_map([limit], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            actual,
+            expected
+                .iter()
+                .take(limit as usize)
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn linked_released_reservation_uses_point_lookups_and_only_returns_its_owner() {
+    let pool = create_test_db();
+    let connection = pool.get().unwrap();
+    let plan = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            queries::file_operations::SELECT_LINKED_RELEASED_SQLITE_RESULT_RESERVATION
+        ))
+        .unwrap()
+        .query_map(["group"], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert!(plan.contains("SEARCH r USING INDEX"), "{plan}");
+    assert!(plan.contains("SEARCH s USING INDEX"), "{plan}");
+    assert!(
+        !plan.contains("SCAN") && !plan.contains("LIST SUBQUERY"),
+        "{plan}"
+    );
+
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "
+        CREATE TABLE llm_result_receipts(journal_group_id TEXT, sqlite_reservation_id TEXT);
+        CREATE TABLE data_dir_space_reservations(id TEXT PRIMARY KEY, state TEXT);
+        INSERT INTO llm_result_receipts VALUES ('group','owned');
+        INSERT INTO data_dir_space_reservations VALUES ('other','released');
+    ",
+        )
+        .unwrap();
+    for state in [None, Some("active"), Some("released")] {
+        if let Some(state) = state {
+            connection.execute("INSERT INTO data_dir_space_reservations VALUES ('owned',?) ON CONFLICT(id) DO UPDATE SET state=excluded.state", [state]).unwrap();
+        }
+        for group in ["group", "missing"] {
+            let actual = connection
+                .prepare(queries::file_operations::SELECT_LINKED_RELEASED_SQLITE_RESULT_RESERVATION)
+                .unwrap()
+                .query_map([group], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let expected = if group == "group" && state == Some("released") {
+                vec!["owned"]
+            } else {
+                vec![]
+            };
+            assert_eq!(actual, expected);
+        }
+    }
 }
 
 #[test]

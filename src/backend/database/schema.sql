@@ -876,6 +876,9 @@ CREATE INDEX IF NOT EXISTS idx_media_ai_inputs_media_task
 CREATE INDEX IF NOT EXISTS idx_llm_jobs_claim
     ON llm_jobs (status, available_at, created_at);
 
+CREATE INDEX IF NOT EXISTS idx_llm_jobs_media_task_history
+    ON llm_jobs (media_id, task);
+
 CREATE INDEX IF NOT EXISTS idx_llm_job_inputs_job
     ON llm_job_inputs (job_id, sequence);
 
@@ -1239,6 +1242,17 @@ CREATE INDEX IF NOT EXISTS idx_file_operation_path_claims_group
 
 CREATE INDEX IF NOT EXISTS idx_data_dir_space_reservations_state
     ON data_dir_space_reservations (class, state, filesystem_id);
+
+CREATE INDEX IF NOT EXISTS idx_data_dir_space_reservations_journal_group
+    ON data_dir_space_reservations (journal_group_id, state);
+
+CREATE INDEX IF NOT EXISTS idx_data_dir_space_reservations_active_sqlite
+    ON data_dir_space_reservations (class, state, id)
+    WHERE class = 'sqlite' AND state = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_llm_result_receipts_cleanup_reservation
+    ON llm_result_receipts (sqlite_reservation_id, state, updated_at, job_id, journal_group_id)
+    WHERE state IN ('file_cleanup_pending', 'cleaned', 'discarded', 'failed');
 
 CREATE INDEX IF NOT EXISTS idx_file_operation_retry_requests_group
     ON file_operation_retry_requests (group_id, expires_at, retry_request_id);

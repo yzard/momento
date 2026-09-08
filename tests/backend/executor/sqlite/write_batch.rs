@@ -83,6 +83,128 @@ fn malformed_page() -> SqliteOperation {
     }))
 }
 
+fn cleanup(job_id: &str) -> SqliteOperation {
+    SqliteOperation::CleanupLlmResultStagingPage {
+        job_id: job_id.into(),
+        limit: 256,
+    }
+}
+
+#[test]
+fn ready_cleanup_commands_share_a_commit_and_preserve_finished_jobs() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let (context, _directory) = fixture();
+    context
+        .pool
+        .get()
+        .unwrap()
+        .execute(
+            "UPDATE llm_result_receipts SET state='cleanup_pending', claim_token=NULL",
+            [],
+        )
+        .unwrap();
+    let commits = Arc::new(AtomicUsize::new(0));
+    let observed = commits.clone();
+    context.pool.get().unwrap().commit_hook(Some(move || {
+        observed.fetch_add(1, Ordering::SeqCst);
+        false
+    }));
+    assert!(eligible(&cleanup("a"), &context.footprints));
+    let outputs = execute_batch(
+        vec![cleanup("a"), cleanup("b"), cleanup("missing")],
+        &context,
+    )
+    .unwrap();
+    assert!(outputs.iter().all(Result::is_ok));
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+    let connection = context.pool.get().unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM llm_result_receipts WHERE state='file_cleanup_pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    assert!(matches!(
+        &outputs[2],
+        Ok(SqliteOutput::LlmResultStagingCleaned(
+            operations::CleanupLlmResultStagingOutcome { complete: true, .. }
+        ))
+    ));
+}
+
+#[test]
+fn cleanup_batch_commit_failure_leaves_receipts_retryable() {
+    let (context, _directory) = fixture();
+    context
+        .pool
+        .get()
+        .unwrap()
+        .execute("UPDATE file_operation_groups SET state='cleaned'", [])
+        .unwrap();
+    context
+        .pool
+        .get()
+        .unwrap()
+        .execute(
+            "UPDATE llm_result_receipts SET state='cleanup_pending', claim_token=NULL",
+            [],
+        )
+        .unwrap();
+    context.pool.get().unwrap().commit_hook(Some(|| true));
+    assert!(execute_batch(vec![cleanup("a"), cleanup("b")], &context).is_err());
+    context
+        .pool
+        .get()
+        .unwrap()
+        .commit_hook(None::<fn() -> bool>);
+    let count: i64 = context
+        .pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM llm_result_receipts WHERE state='cleanup_pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 3);
+    let active: i64 = context
+        .pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM data_dir_space_reservations WHERE state='active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active, 3);
+    assert!(execute_batch(vec![cleanup("a"), cleanup("b")], &context)
+        .unwrap()
+        .iter()
+        .all(Result::is_ok));
+    let released: i64 = context
+        .pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM data_dir_space_reservations WHERE state='released'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(released, 2);
+    assert!(execute_batch(vec![cleanup("a"), cleanup("b")], &context)
+        .unwrap()
+        .iter()
+        .all(Result::is_ok));
+}
+
 #[test]
 fn ready_writes_share_one_commit_and_bad_record_rolls_back_only_itself() {
     use std::sync::{

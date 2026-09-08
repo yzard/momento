@@ -2355,11 +2355,6 @@ async fn journal_cleanup_may_finish_before_result_staging_cleanup() {
         .await
         .expect("cleanup staging after Journal");
     assert!(cleanup.complete);
-    assert!(executors
-        .sqlite
-        .finalize_llm_result_cleanup_durable(JOB_ID.to_string())
-        .await
-        .expect("finalize cleanup reservation"));
     let terminal: (String, String, i64) = pool
         .get()
         .expect("cleanup-order terminal state")

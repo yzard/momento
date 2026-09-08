@@ -266,7 +266,13 @@ pub mod file_operations {
       ORDER BY s.id
          LIMIT 256
     "#;
-    pub const SELECT_LINKED_RELEASED_SQLITE_RESULT_RESERVATION: &str = "SELECT sqlite_reservation_id FROM llm_result_receipts WHERE journal_group_id = ? AND sqlite_reservation_id IN (SELECT id FROM data_dir_space_reservations WHERE state = 'released')";
+    pub const SELECT_LINKED_RELEASED_SQLITE_RESULT_RESERVATION: &str = r#"
+        SELECT r.sqlite_reservation_id
+          FROM llm_result_receipts AS r
+          JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id
+         WHERE r.journal_group_id = ?
+           AND s.state = 'released'
+    "#;
     pub const SELECT_ACTIVE_SQLITE_RESULT_RESERVATION: &str = "SELECT s.id, s.class, s.owner_kind, s.owner_id, s.journal_group_id, s.filesystem_id, s.reserved_peak_additional_bytes, s.newly_allocated_blocks, s.version FROM llm_result_receipts AS r JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id WHERE r.job_id = ? AND s.class = 'sqlite' AND s.owner_kind IN ('llm_result', 'llm_result_cleanup') AND s.owner_id = r.job_id AND s.state = 'active'";
     pub const CONSUME_SQLITE_RESULT_RESERVATION: &str = "UPDATE data_dir_space_reservations SET newly_allocated_blocks = newly_allocated_blocks + ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND newly_allocated_blocks + ? <= reserved_peak_additional_bytes";
     pub const SHRINK_SQLITE_RESULT_RESERVATION_TO_CLEANUP: &str = "UPDATE data_dir_space_reservations SET owner_kind = 'llm_result_cleanup', newly_allocated_blocks = reserved_peak_additional_bytes - ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND reserved_peak_additional_bytes - newly_allocated_blocks >= ?";
@@ -1303,18 +1309,34 @@ SELECT lower(hex(randomblob(16))), media.id, ?1, 'queued'
     pub const RECLAIM_STALE: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, updated_at = datetime('now') WHERE status = 'submitting' AND (claimed_at IS NULL OR claimed_at <= datetime('now', '-5 minutes'))";
     pub const RETRY_OR_FAIL: &str = "UPDATE llm_jobs SET status = CASE WHEN attempts + 1 >= 5 THEN 'failed' ELSE 'queued' END, state_version = state_version + 1, attempts = attempts + 1, available_at = datetime('now', '+30 seconds'), last_error = ?, completed_at = CASE WHEN attempts + 1 >= 5 THEN datetime('now') ELSE NULL END, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
     pub const MARK_FAILED: &str = "UPDATE llm_jobs SET status = 'failed', state_version = state_version + 1, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
-    pub const SELECT_LATEST_STATUS_COUNTS: &str = r#"
-    SELECT task
-         , status
+    macro_rules! latest_job_rowid {
+        ($owner:literal) => {
+            concat!(
+                "(SELECT MAX(latest.rowid) FROM llm_jobs AS latest WHERE latest.media_id = ",
+                $owner,
+                ".media_id AND latest.task = ",
+                $owner,
+                ".task)"
+            )
+        };
+    }
+    pub const SELECT_LATEST_STATUS_COUNTS: &str = concat!(
+        r#"
+    SELECT r.task
+         , r.status
          , COUNT(*)
-      FROM llm_jobs
-     WHERE rowid IN (SELECT MAX(rowid) FROM llm_jobs GROUP BY media_id, task)
-     GROUP BY task
-            , status
-     ORDER BY task
-            , status
-    "#;
-    pub const SELECT_LATEST_FAILURES: &str = r#"
+      FROM (SELECT media_id, task FROM llm_jobs GROUP BY media_id, task) AS owners
+      JOIN llm_jobs AS r ON r.rowid = "#,
+        latest_job_rowid!("owners"),
+        r#"
+     GROUP BY r.task
+            , r.status
+     ORDER BY r.task
+            , r.status
+    "#
+    );
+    pub const SELECT_LATEST_FAILURES: &str = concat!(
+        r#"
     SELECT r.task
          , r.last_error
          , r.id
@@ -1325,11 +1347,14 @@ SELECT lower(hex(randomblob(16))), media.id, ?1, 'queued'
       FROM llm_jobs AS r
       JOIN media AS m ON m.id = r.media_id
      WHERE r.status = 'failed'
-       AND r.rowid IN (SELECT MAX(rowid) FROM llm_jobs GROUP BY media_id, task)
+       AND r.rowid = "#,
+        latest_job_rowid!("r"),
+        r#"
        AND last_error IS NOT NULL
      ORDER BY r.task
             , r.updated_at DESC
-    "#;
+    "#
+    );
     pub const COUNT_ACTIVE_FOR_TASK: &str = "SELECT COUNT(*) FROM llm_jobs WHERE task = ? AND status IN ('queued', 'submitting', 'submitted')";
     pub const COUNT_PENDING_RESULT_CLEANUP_FOR_TASK: &str = r#"
         SELECT COUNT(*)
@@ -2076,7 +2101,8 @@ pub mod llm_callback {
             UNION ALL
             SELECT r.job_id, r.updated_at
               FROM data_dir_space_reservations AS s
-              CROSS JOIN llm_result_receipts AS r ON r.sqlite_reservation_id = s.id
+              CROSS JOIN llm_result_receipts AS r INDEXED BY idx_llm_result_receipts_cleanup_reservation
+                 ON r.sqlite_reservation_id = s.id
              WHERE s.class = 'sqlite' AND s.state = 'active'
                AND (
                    r.state IN ('file_cleanup_pending', 'cleaned', 'discarded', 'failed')
@@ -2153,6 +2179,7 @@ pub mod llm_callback {
                    )
                )
     "#;
+    pub const SELECT_RELEASED_RESULT_RESERVATION: &str = "SELECT s.id FROM llm_result_receipts AS r JOIN data_dir_space_reservations AS s ON s.id = r.sqlite_reservation_id WHERE r.job_id = ? AND s.state = 'released'";
     pub const SELECT_RESULT_STAGING_PAGE: &str = r#"
         SELECT record_sequence, input_sequence, kind, byte_offset, encoded_size, normalized_payload
           FROM llm_result_staging

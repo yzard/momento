@@ -4936,11 +4936,10 @@ fn retire_replayable_result_receipts(
 }
 
 pub(crate) fn cleanup_llm_result_staging_page(
-    connection: &mut Connection,
+    transaction: rusqlite::Savepoint<'_>,
     job_id: &str,
     limit: i64,
 ) -> rusqlite::Result<CleanupLlmResultStagingOutcome> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let state = transaction
         .query_row(
             queries::llm_callback::SELECT_RESULT_RECEIPT_STATE_ONLY,
@@ -4991,36 +4990,18 @@ pub(crate) fn cleanup_llm_result_staging_page(
         [job_id],
         |row| row.get::<_, bool>(0),
     )?;
-    transaction.commit()?;
-    Ok(CleanupLlmResultStagingOutcome { deleted, complete })
-}
-
-pub(crate) fn finalize_llm_result_cleanup(
-    connection: &mut Connection,
-    job_id: &str,
-) -> rusqlite::Result<Option<String>> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let reservation_id = transaction
-        .query_row(
-            queries::file_operations::SELECT_TERMINAL_SQLITE_RESULT_RESERVATION,
-            [job_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let Some(reservation_id) = reservation_id else {
-        transaction.commit()?;
-        return Ok(None);
-    };
-    if transaction.execute(
-        queries::file_operations::RELEASE_SQLITE_RESULT_RESERVATION,
-        [&reservation_id],
-    )? != 1
-    {
-        transaction.rollback()?;
-        return Ok(None);
+    if complete {
+        transaction.execute(
+            queries::file_operations::RELEASE_SQLITE_RESULT_RESERVATION,
+            [transaction.query_row(
+                queries::file_operations::SELECT_TERMINAL_SQLITE_RESULT_RESERVATION,
+                [job_id],
+                |row| row.get::<_, String>(0),
+            )?],
+        )?;
     }
     transaction.commit()?;
-    Ok(Some(reservation_id))
+    Ok(CleanupLlmResultStagingOutcome { deleted, complete })
 }
 
 pub(crate) fn reject_llm_result_receipt(

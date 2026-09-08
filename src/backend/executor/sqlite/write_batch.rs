@@ -10,7 +10,9 @@ pub(super) fn eligible(
 ) -> bool {
     matches!(
         operation,
-        SqliteOperation::StageLlmResultPage(_) | SqliteOperation::PersistPreparedLlmResult(_)
+        SqliteOperation::StageLlmResultPage(_)
+            | SqliteOperation::PersistPreparedLlmResult(_)
+            | SqliteOperation::CleanupLlmResultStagingPage { .. }
     ) && matches!(
         operation.spec(footprints),
         Ok(SqliteOperationSpec {
@@ -153,6 +155,22 @@ fn execute_batch(
         let mut results = Vec::with_capacity(operations.len());
         let mut reservations = Vec::new();
         for operation in operations {
+            match completed_cleanup_output(
+                &transaction,
+                &operation,
+                &context.space_budget,
+                &context.database_path,
+            ) {
+                Ok(Some(output)) => {
+                    results.push(Ok(output));
+                    continue;
+                }
+                Err(error) => {
+                    results.push(Err(error));
+                    continue;
+                }
+                Ok(None) => {}
+            }
             let operation_name = operation.name();
             let prepared = (|| {
                 let job_id = operation.durable_parent_job_id().ok_or_else(|| {
@@ -210,9 +228,13 @@ fn execute_batch(
                 .map_err(|error| map_sqlite_error(operation_name, error))?;
             let result = execute_result_write(savepoint, operation, Some(&capacity));
             if result.is_ok() {
-                let refreshed =
-                    load_result_sqlite_reservation(&transaction, &record.owner_id, operation_name)?;
-                reservations.push((results.len(), refreshed, checkout));
+                let terminal_cleanup = matches!(&result, Ok(SqliteOutput::LlmResultStagingCleaned(outcome)) if outcome.complete);
+                let refreshed = if terminal_cleanup {
+                    record
+                } else {
+                    load_result_sqlite_reservation(&transaction, &record.owner_id, operation_name)?
+                };
+                reservations.push((results.len(), refreshed, checkout, terminal_cleanup));
             }
             results.push(result);
         }
@@ -223,8 +245,17 @@ fn execute_batch(
             .map_err(|error| {
                 ExecutorError::new(ExecutorErrorKind::Internal, name, error.to_string())
             })?;
-        for (index, record, checkout) in reservations {
-            if let Err(error) = checkout.publish_sqlite_child(&record, allocated) {
+        for (index, record, checkout, terminal_cleanup) in reservations {
+            let publication = if terminal_cleanup {
+                drop(checkout);
+                context
+                    .space_budget
+                    .release_sqlite_after_terminal_commit(&record.reservation_id, allocated)
+                    .map(|_| ())
+            } else {
+                checkout.publish_sqlite_child(&record, allocated)
+            };
+            if let Err(error) = publication {
                 results[index] = Err(ExecutorError::new(
                     ExecutorErrorKind::Internal,
                     name,
@@ -248,6 +279,11 @@ pub(super) fn execute_result_write(
 ) -> Result<SqliteOutput, ExecutorError> {
     let name = operation.name();
     match operation {
+        SqliteOperation::CleanupLlmResultStagingPage { job_id, limit } => {
+            operations::cleanup_llm_result_staging_page(savepoint, &job_id, i64::from(limit))
+                .map(SqliteOutput::LlmResultStagingCleaned)
+                .map_err(|error| map_sqlite_error(name, error))
+        }
         SqliteOperation::StageLlmResultPage(request) => {
             let capacity = capacity.ok_or_else(|| {
                 ExecutorError::new(

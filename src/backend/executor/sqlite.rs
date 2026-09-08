@@ -213,9 +213,6 @@ pub(crate) enum SqliteOperation {
         job_id: String,
         limit: u16,
     },
-    FinalizeLlmResultCleanup {
-        job_id: String,
-    },
     LoadLlmResultStagingPage {
         job_id: String,
         attempt: u32,
@@ -548,7 +545,6 @@ impl SqliteOperation {
             Self::StageLlmResultPage(_) => "stage_llm_result_page",
             Self::SelectLlmResultStagingCleanup { .. } => "select_llm_result_staging_cleanup",
             Self::CleanupLlmResultStagingPage { .. } => "cleanup_llm_result_staging_page",
-            Self::FinalizeLlmResultCleanup { .. } => "finalize_llm_result_cleanup",
             Self::LoadLlmResultStagingPage { .. } => "load_llm_result_staging_page",
             Self::ReleaseLlmResultClaim { .. } => "release_llm_result_claim",
             Self::RecoverLlmResultState => "recover_llm_result_state",
@@ -945,7 +941,6 @@ impl SqliteOperation {
                     max_growth_bytes: footprints.result_cleanup_recovery_max_growth_bytes,
                 },
             },
-            Self::FinalizeLlmResultCleanup { .. } => bounded_api_write_spec(),
             Self::ReleaseLlmResultClaim { .. } => bounded_api_write_spec(),
             Self::RecoverLlmResultState => bounded_api_write_spec(),
             Self::SelectLlmResultCandidates { .. } => bounded_api_write_spec(),
@@ -1101,7 +1096,6 @@ pub(crate) enum SqliteOutput {
     LlmResultPageStaged(StageLlmResultPageOutcome),
     LlmResultStagingCleanup(Vec<String>),
     LlmResultStagingCleaned(CleanupLlmResultStagingOutcome),
-    LlmResultCleanupFinalized(bool),
     LlmResultStagingPage(Vec<crate::database::operations::StagedLlmResultRecord>),
     LlmResultClaimReleased(bool),
     LlmResultStateRecovered(operations::LlmResultRecoveryOutcome),
@@ -1267,7 +1261,6 @@ impl SqliteOutput {
             Self::LlmResultPageStaged(_) => "llm_result_page_staged",
             Self::LlmResultStagingCleanup(_) => "llm_result_staging_cleanup",
             Self::LlmResultStagingCleaned(_) => "llm_result_staging_cleaned",
-            Self::LlmResultCleanupFinalized(_) => "llm_result_cleanup_finalized",
             Self::LlmResultStagingPage(_) => "llm_result_staging_page",
             Self::LlmResultClaimReleased(_) => "llm_result_claim_released",
             Self::LlmResultStateRecovered(_) => "llm_result_state_recovered",
@@ -4913,29 +4906,6 @@ impl SqliteExecutorHandle {
         }
     }
 
-    pub async fn finalize_llm_result_cleanup_durable(
-        &self,
-        job_id: String,
-    ) -> Result<bool, ExecutorError> {
-        if !momento_common::llm::is_valid_job_id(&job_id) {
-            return Err(ExecutorError::new(
-                ExecutorErrorKind::InvalidInput,
-                "finalize_llm_result_cleanup",
-                "LLM result cleanup finalizer requires a valid job ID",
-            ));
-        }
-        match self
-            .submit(
-                SqliteOperation::FinalizeLlmResultCleanup { job_id },
-                SubmissionMode::Durable,
-            )
-            .await?
-        {
-            SqliteOutput::LlmResultCleanupFinalized(released) => Ok(released),
-            output => Err(output.mismatch("finalize_llm_result_cleanup")),
-        }
-    }
-
     pub async fn load_llm_result_staging_page_durable(
         &self,
         job_id: String,
@@ -5450,24 +5420,10 @@ fn execute(
                 format!("SQLite connection capacity is unavailable: {error}"),
             )
         })?;
-    // Another cleanup owner may have finished after candidate selection. Check on
-    // the SQLite writer lane before requiring the now-released parent reservation.
-    if let SqliteOperation::CleanupLlmResultStagingPage { job_id, .. } = &operation {
-        let finished = connection
-            .query_row(
-                crate::database::queries::llm_callback::RESULT_CLEANUP_ALREADY_FINISHED,
-                [job_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|error| map_sqlite_error(operation_name, error))?;
-        if finished {
-            return Ok(SqliteOutput::LlmResultStagingCleaned(
-                operations::CleanupLlmResultStagingOutcome {
-                    deleted: 0,
-                    complete: true,
-                },
-            ));
-        }
+    if let Some(output) =
+        completed_cleanup_output(&connection, &operation, space_budget, database_path)?
+    {
+        return Ok(output);
     }
     let durable_capacity = match operation_spec.capacity {
         SqliteCapacitySource::DurableParent { max_growth_bytes } => {
@@ -5558,8 +5514,6 @@ fn execute(
     };
     if let Some((record, checkout)) = durable_capacity {
         if operation_result.is_ok() {
-            let refreshed =
-                load_result_sqlite_reservation(&connection, &record.owner_id, operation_name)?;
             let allocated = crate::io::space_budget::measure_sqlite_allocation(database_path)
                 .map_err(|error| {
                     ExecutorError::new(
@@ -5568,7 +5522,18 @@ fn execute(
                         error.to_string(),
                     )
                 })?;
-            if let Err(error) = checkout.publish_sqlite_child(&refreshed, allocated) {
+            let terminal_cleanup = matches!(&operation_result, Ok(SqliteOutput::LlmResultStagingCleaned(outcome)) if outcome.complete);
+            let publication = if terminal_cleanup {
+                drop(checkout);
+                space_budget
+                    .release_sqlite_after_terminal_commit(&record.reservation_id, allocated)
+                    .map(|_| ())
+            } else {
+                let refreshed =
+                    load_result_sqlite_reservation(&connection, &record.owner_id, operation_name)?;
+                checkout.publish_sqlite_child(&refreshed, allocated)
+            };
+            if let Err(error) = publication {
                 operation_result = Err(ExecutorError::new(
                     ExecutorErrorKind::Internal,
                     operation_name,
@@ -5597,6 +5562,59 @@ fn execute(
         Some(Err(error)) => Err(error),
         Some(Ok(())) | None => operation_result,
     }
+}
+
+fn completed_cleanup_output(
+    connection: &rusqlite::Connection,
+    operation: &SqliteOperation,
+    space_budget: &crate::io::space_budget::DataDirSpaceBudget,
+    database_path: &std::path::Path,
+) -> Result<Option<SqliteOutput>, ExecutorError> {
+    let SqliteOperation::CleanupLlmResultStagingPage { job_id, .. } = operation else {
+        return Ok(None);
+    };
+    let finished = connection
+        .query_row(
+            crate::database::queries::llm_callback::RESULT_CLEANUP_ALREADY_FINISHED,
+            [job_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| map_sqlite_error(operation.name(), error))?;
+    if finished {
+        let reservation_id = connection
+            .query_row(
+                crate::database::queries::llm_callback::SELECT_RELEASED_RESULT_RESERVATION,
+                [job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(operation.name(), error))?;
+        if let Some(reservation_id) = reservation_id {
+            let allocated = crate::io::space_budget::measure_sqlite_allocation(database_path)
+                .map_err(|error| {
+                    ExecutorError::new(
+                        ExecutorErrorKind::Internal,
+                        operation.name(),
+                        error.to_string(),
+                    )
+                })?;
+            space_budget
+                .release_sqlite_after_terminal_commit(&reservation_id, allocated)
+                .map_err(|error| {
+                    ExecutorError::new(
+                        ExecutorErrorKind::Internal,
+                        operation.name(),
+                        error.to_string(),
+                    )
+                })?;
+        }
+    }
+    Ok(finished.then_some(SqliteOutput::LlmResultStagingCleaned(
+        operations::CleanupLlmResultStagingOutcome {
+            deleted: 0,
+            complete: true,
+        },
+    )))
 }
 
 fn ensure_sqlite_wal_capacity(
@@ -6050,47 +6068,20 @@ fn execute_with_connection(
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         operation @ (SqliteOperation::StageLlmResultPage(_)
-        | SqliteOperation::PersistPreparedLlmResult(_)) => write_batch::execute_result_write(
-            connection
-                .savepoint()
-                .map_err(|error| map_sqlite_error(operation_name, error))?,
-            operation,
-            durable_capacity.as_ref(),
-        ),
+        | SqliteOperation::PersistPreparedLlmResult(_)
+        | SqliteOperation::CleanupLlmResultStagingPage { .. }) => {
+            write_batch::execute_result_write(
+                connection
+                    .savepoint()
+                    .map_err(|error| map_sqlite_error(operation_name, error))?,
+                operation,
+                durable_capacity.as_ref(),
+            )
+        }
         SqliteOperation::SelectLlmResultStagingCleanup { limit } => {
             operations::select_llm_result_staging_cleanup(connection, i64::from(limit))
                 .map(SqliteOutput::LlmResultStagingCleanup)
                 .map_err(|error| map_sqlite_error(operation_name, error))
-        }
-        SqliteOperation::CleanupLlmResultStagingPage { job_id, limit } => {
-            operations::cleanup_llm_result_staging_page(connection, &job_id, i64::from(limit))
-                .map(SqliteOutput::LlmResultStagingCleaned)
-                .map_err(|error| map_sqlite_error(operation_name, error))
-        }
-        SqliteOperation::FinalizeLlmResultCleanup { job_id } => {
-            let reservation_id = operations::finalize_llm_result_cleanup(connection, &job_id)
-                .map_err(|error| map_sqlite_error(operation_name, error))?;
-            let Some(reservation_id) = reservation_id else {
-                return Ok(SqliteOutput::LlmResultCleanupFinalized(false));
-            };
-            let allocated = crate::io::space_budget::measure_sqlite_allocation(database_path)
-                .map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        operation_name,
-                        error.to_string(),
-                    )
-                })?;
-            space_budget
-                .release_sqlite_after_terminal_commit(&reservation_id, allocated)
-                .map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        operation_name,
-                        error.to_string(),
-                    )
-                })?;
-            Ok(SqliteOutput::LlmResultCleanupFinalized(true))
         }
         SqliteOperation::LoadLlmResultStagingPage {
             job_id,
