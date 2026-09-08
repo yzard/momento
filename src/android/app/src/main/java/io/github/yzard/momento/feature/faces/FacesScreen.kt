@@ -40,7 +40,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -71,9 +70,7 @@ import io.github.yzard.momento.feature.media.completeCursorPage
 import io.github.yzard.momento.feature.media.emptyCursorPagingState
 import io.github.yzard.momento.feature.media.failCursorPage
 import io.github.yzard.momento.feature.media.adaptiveGridColumns
-import io.github.yzard.momento.feature.media.shouldLoadMoreMedia
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.filter
 
 fun canMergeFaceGroups(selectedIds: Set<Long>, working: Boolean): Boolean = selectedIds.size >= 2 && !working
 
@@ -151,17 +148,7 @@ fun FacesScreen(
         else -> BoxWithConstraints(Modifier.fillMaxSize()) {
             val columns = adaptiveGridColumns(maxWidth.value.toInt())
             val gridState = rememberLazyGridState()
-            LaunchedEffect(gridState, pagingState.hasMore, pagingState.loading) {
-                snapshotFlow {
-                    val layout = gridState.layoutInfo
-                    shouldLoadMoreMedia(
-                        lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
-                        totalItemsCount = layout.totalItemsCount,
-                        hasMore = pagingState.hasMore,
-                        loading = pagingState.loading,
-                    )
-                }.filter { it }.collect { loadGroups(false) }
-            }
+            FaceGroupPagingEffect(gridState, pagingState) { loadGroups(false) }
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
                 state = gridState,
@@ -271,8 +258,8 @@ internal fun FaceGroupDetailScreen(
     }
 
     MomentoCollectionDetail(
-        title = "Person ${group.faceGroupId}",
-        subtitle = "${group.mediaCount} media · ${group.faceCount} faces",
+        title = "Person",
+        subtitle = "${group.mediaCount} media",
         backContentDescription = "Back to people",
         repository = repository,
         pageState = pageState,
@@ -312,14 +299,13 @@ private fun FaceCard(
             containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
         ),
     ) {
-        Box {
+        Box(Modifier.clickable(onClick = open)) {
             if (image == null) {
                 Box(
                     Modifier
                         .fillMaxWidth()
                         .aspectRatio(1f)
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable(onClick = open),
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
                     contentAlignment = Alignment.Center,
                 ) { Icon(Icons.Default.Face, "No face thumbnail") }
             } else {
@@ -328,11 +314,11 @@ private fun FaceCard(
                     repository = repository,
                     contentDescription = "Person ${group.faceGroupId}",
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(1f).clickable(onClick = open),
+                    modifier = Modifier.fillMaxWidth().aspectRatio(1f),
                 )
             }
             if (selectable) {
-                IconButton(onClick = toggleSelection, modifier = Modifier.align(Alignment.TopEnd)) {
+                IconButton(onClick = toggleSelection, modifier = Modifier.align(Alignment.TopStart)) {
                     MomentoSelectionMark(
                         selected = selected,
                         contentDescription = if (selected) {
@@ -344,10 +330,16 @@ private fun FaceCard(
                     )
                 }
             }
-        }
-        Column(Modifier.fillMaxWidth().clickable(onClick = open).padding(12.dp)) {
-            Text("Person ${group.faceGroupId}", style = MaterialTheme.typography.titleSmall)
-            Text("${group.mediaCount} media · ${group.faceCount} faces", style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = group.mediaCount.toString(),
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(50))
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+            )
         }
     }
 }

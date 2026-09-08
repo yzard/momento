@@ -552,7 +552,7 @@ async fn load_binary_media_info(
         .ok_or_else(|| AppError::NotFound("Media not found".to_string()))
 }
 
-pub(crate) async fn serve_deleted_tiny_thumbnail(
+pub(crate) async fn serve_deleted_thumbnail(
     state: &AppState,
     admission: &HttpRequestAdmission,
     user_id: i64,
@@ -564,7 +564,7 @@ pub(crate) async fn serve_deleted_tiny_thumbnail(
         admission,
         user_id,
         media_id,
-        ThumbnailSize::Tiny,
+        ThumbnailSize::Normal,
         headers,
         true,
     )

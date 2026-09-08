@@ -22,23 +22,20 @@ const TRASH_DELETE_PAGE_SIZE: u16 = 256;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/trash/list", post(list_trash))
-        .route(
-            "/trash/:media_id/thumbnail/tiny",
-            get(get_deleted_tiny_thumbnail),
-        )
+        .route("/trash/:media_id/thumbnail", get(get_deleted_thumbnail))
         .route("/trash/restore", post(restore_from_trash))
         .route("/trash/delete", post(permanently_delete))
         .route("/trash/empty", post(empty_trash))
 }
 
-async fn get_deleted_tiny_thumbnail(
+async fn get_deleted_thumbnail(
     State(state): State<AppState>,
     Extension(admission): Extension<HttpRequestAdmission>,
     current_user: CurrentUser,
     Path(media_id): Path<i64>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    crate::routes::media::serve_deleted_tiny_thumbnail(
+    crate::routes::media::serve_deleted_thumbnail(
         &state,
         &admission,
         current_user.id,

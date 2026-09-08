@@ -214,10 +214,7 @@ async fn run_persistence(
         let processed =
             process_available_results_scheduled(executors, &process_config, &scheduler).await;
         let retry_after_failure = match processed {
-            Ok(processed) if processed > 0 => {
-                scheduler.wake_ai_finalization();
-                continue;
-            }
+            Ok(processed) if processed > 0 => continue,
             Ok(_) => false,
             Err(error) => {
                 tracing::warn!(
@@ -250,51 +247,88 @@ async fn process_available_results_scheduled(
     process_config: &MediaProcessConfig,
     scheduler: &crate::runtime::SchedulerHandle,
 ) -> AppResult<usize> {
-    let concurrency = scheduler.durable_capacity();
-    let candidates = {
-        let _admission = scheduler
-            .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
-            .await
-            .map_err(AppError::Internal)?;
-        executors
-            .sqlite
-            .select_llm_result_candidates_durable(
-                u16::try_from(concurrency.min(256)).expect("bounded result concurrency"),
-            )
-            .await?
-    };
-    let mut lanes = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let lane_executors = executors.clone();
-        let lane_config = process_config.clone();
-        let lane_scheduler = scheduler.clone();
-        lanes.push(scheduler.spawn_control(async move {
-            process_result_lane(&lane_executors, &lane_config, &lane_scheduler, candidate).await
-        }));
-    }
+    drain_result_queue(
+        scheduler.durable_capacity().min(256),
+        scheduler.llm_result_work_version(),
+        |limit| async move {
+            let _admission = scheduler
+                .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
+                .await
+                .map_err(AppError::Internal)?;
+            Ok(executors
+                .sqlite
+                .select_llm_result_candidates_durable(
+                    u16::try_from(limit).expect("bounded result concurrency"),
+                )
+                .await?)
+        },
+        |candidate| {
+            let lane_executors = executors.clone();
+            let lane_config = process_config.clone();
+            let lane_scheduler = scheduler.clone();
+            // Keep already claimed work independently polled while the dispatcher
+            // awaits admission or SQLite capacity to refill vacant slots.
+            let lane = scheduler.spawn_control(async move {
+                process_result_lane(&lane_executors, &lane_config, &lane_scheduler, candidate).await
+            });
+            async move {
+                lane.await.map_err(|error| {
+                    AppError::Internal(format!("LLM result worker lane panicked: {error}"))
+                })?
+            }
+        },
+        |observed| scheduler.wait_for_llm_result_work(observed),
+    )
+    .await
+}
+
+async fn drain_result_queue<C, Claim, Claimed, Start, Lane, Wait, Wake>(
+    capacity: usize,
+    mut observed: u64,
+    mut claim: Claim,
+    mut start: Start,
+    mut wait: Wait,
+) -> AppResult<usize>
+where
+    Claim: FnMut(usize) -> Claimed,
+    Claimed: std::future::Future<Output = AppResult<Vec<C>>>,
+    Start: FnMut(C) -> Lane,
+    Lane: std::future::Future<Output = AppResult<usize>>,
+    Wait: FnMut(u64) -> Wake,
+    Wake: std::future::Future<Output = u64>,
+{
+    assert!(capacity > 0);
+    let mut lanes = futures::stream::FuturesUnordered::new();
     let mut processed = 0;
     let mut first_error = None;
-    for lane in lanes {
-        match lane.await {
-            Ok(Ok(lane_processed)) => processed += lane_processed,
-            Ok(Err(error)) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
+    loop {
+        if first_error.is_none() && lanes.len() < capacity {
+            match claim(capacity - lanes.len()).await {
+                Ok(candidates) => {
+                    for candidate in candidates {
+                        lanes.push(start(candidate));
+                    }
                 }
+                Err(error) => first_error = Some(error),
             }
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(AppError::Internal(format!(
-                        "LLM result worker lane panicked: {error}"
-                    )));
+        }
+        if lanes.is_empty() {
+            return first_error.map_or(Ok(processed), Err);
+        }
+        tokio::select! {
+            outcome = lanes.next() => match outcome.expect("nonempty result lanes") {
+                Ok(count) => processed += count,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
                 }
+            },
+            version = wait(observed), if first_error.is_none() && lanes.len() < capacity => {
+                observed = version;
             }
         }
     }
-    if let Some(error) = first_error {
-        return Err(error);
-    }
-    Ok(processed)
 }
 
 async fn process_result_lane(
@@ -303,121 +337,103 @@ async fn process_result_lane(
     scheduler: &crate::runtime::SchedulerHandle,
     candidate: QueuedResult,
 ) -> AppResult<usize> {
-    let mut processed = 0;
-    let mut initial_candidate = Some(candidate);
-    loop {
-        let admission = scheduler
-            .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
-            .await
-            .map_err(AppError::Internal)?;
-        let queued_result = if let Some(candidate) = initial_candidate.take() {
-            Some(candidate)
-        } else {
-            executors
-                .sqlite
-                .select_llm_result_candidates_durable(1)
-                .await?
-                .into_iter()
-                .next()
-        };
-        let Some(queued_result) = queued_result else {
-            drop(admission);
-            return Ok(processed);
-        };
-        let job_id = queued_result.job_id().to_string();
-        let claim_token = queued_result.claim_token().map(str::to_string);
-        let registration = if let Some(claim_token) = &claim_token {
-            match scheduler.register_durable_claim(&admission, claim_token.clone()) {
-                Ok(registration) => Some(registration),
-                Err(error) => {
-                    release_result_claim(&executors.sqlite, &job_id, Some(claim_token)).await?;
-                    tracing::warn!(
-                        job_id,
-                        error,
-                        "LLM result claim registration failed and was requeued"
-                    );
-                    return Err(AppError::Internal(error));
-                }
-            }
-        } else {
-            None
-        };
-        let mut admission = Some(admission);
-        let preparation_started = std::time::Instant::now();
-        let prepared_result =
-            match prepare_queued_result(executors, queued_result, process_config, &mut admission)
-                .await
-            {
-                Ok(prepared_result) => prepared_result,
-                Err(error) if result_error_is_retryable(&error) => {
-                    release_result_claim(&executors.sqlite, &job_id, claim_token.as_deref())
-                        .await?;
-                    tracing::warn!(
-                        job_id,
-                        error = %error,
-                        "Momento LLM result preparation failed and was moved to the queue tail"
-                    );
-                    return Err(error);
-                }
-                Err(error) => PreparedQueuedResult::PermanentFailure {
-                    job_id,
-                    claim_token,
-                    error: error.to_string(),
-                },
-            };
-        let claim_identity = prepared_result.claim_identity();
-        if preparation_started.elapsed() >= std::time::Duration::from_secs(1) {
-            tracing::info!(
-                job_id = claim_identity.0,
-                elapsed_ms = preparation_started.elapsed().as_millis(),
-                "LLM result preparation completed"
-            );
-        }
-        // Small writes have separately budgeted retained payloads. Large/face
-        // writes keep their memory-bearing admission until persistence finishes.
-        let admission = if prepared_result.can_detach_sqlite_write() {
-            drop(admission);
-            None
-        } else {
-            admission
-        };
-        let persistence_started = std::time::Instant::now();
-        let persistence = executors
-            .sqlite
-            .persist_prepared_llm_result_durable(prepared_result)
-            .await;
-        if persistence_started.elapsed() >= std::time::Duration::from_secs(1) {
-            tracing::info!(
-                job_id = claim_identity.0,
-                elapsed_ms = persistence_started.elapsed().as_millis(),
-                succeeded = persistence.is_ok(),
-                "LLM result SQLite queue and commit completed"
-            );
-        }
-        let replaced_crops = match persistence {
-            Ok(replaced_crops) => replaced_crops,
+    let admission = scheduler
+        .acquire_durable(DurableSourceId::LlmResult, SchedulerAdmissionKind::NewClaim)
+        .await
+        .map_err(AppError::Internal)?;
+    let queued_result = candidate;
+    let job_id = queued_result.job_id().to_string();
+    let claim_token = queued_result.claim_token().map(str::to_string);
+    let registration = if let Some(claim_token) = &claim_token {
+        match scheduler.register_durable_claim(&admission, claim_token.clone()) {
+            Ok(registration) => Some(registration),
             Err(error) => {
-                release_result_claim(
-                    &executors.sqlite,
-                    &claim_identity.0,
-                    claim_identity.1.as_deref(),
-                )
-                .await?;
+                release_result_claim(&executors.sqlite, &job_id, Some(claim_token)).await?;
                 tracing::warn!(
-                    job_id = claim_identity.0,
-                    error = %error,
-                    "Momento LLM result persistence failed and was moved to the queue tail"
+                    job_id,
+                    error,
+                    "LLM result claim registration failed and was requeued"
                 );
-                return Err(error.into());
+                return Err(AppError::Internal(error));
             }
+        }
+    } else {
+        None
+    };
+    let mut admission = Some(admission);
+    let preparation_started = std::time::Instant::now();
+    let prepared_result =
+        match prepare_queued_result(executors, queued_result, process_config, &mut admission).await
+        {
+            Ok(prepared_result) => prepared_result,
+            Err(error) if result_error_is_retryable(&error) => {
+                release_result_claim(&executors.sqlite, &job_id, claim_token.as_deref()).await?;
+                tracing::warn!(
+                    job_id,
+                    error = %error,
+                    "Momento LLM result preparation failed and was moved to the queue tail"
+                );
+                return Err(error);
+            }
+            Err(error) => PreparedQueuedResult::PermanentFailure {
+                job_id,
+                claim_token,
+                error: error.to_string(),
+            },
         };
-        scheduler.wake_journal_recovery();
-        scheduler.wake_llm_results();
-        crate::processor::face_detection::retire_replaced_crops(executors, replaced_crops).await;
-        drop(registration);
-        drop(admission);
-        processed += 1;
+    let claim_identity = prepared_result.claim_identity();
+    if preparation_started.elapsed() >= std::time::Duration::from_secs(1) {
+        tracing::info!(
+            job_id = claim_identity.0,
+            elapsed_ms = preparation_started.elapsed().as_millis(),
+            "LLM result preparation completed"
+        );
     }
+    // Small writes have separately budgeted retained payloads. Large/face
+    // writes keep their memory-bearing admission until persistence finishes.
+    let admission = if prepared_result.can_detach_sqlite_write() {
+        drop(admission);
+        None
+    } else {
+        admission
+    };
+    let persistence_started = std::time::Instant::now();
+    let persistence = executors
+        .sqlite
+        .persist_prepared_llm_result_durable(prepared_result)
+        .await;
+    if persistence_started.elapsed() >= std::time::Duration::from_secs(1) {
+        tracing::info!(
+            job_id = claim_identity.0,
+            elapsed_ms = persistence_started.elapsed().as_millis(),
+            succeeded = persistence.is_ok(),
+            "LLM result SQLite queue and commit completed"
+        );
+    }
+    let replaced_crops = match persistence {
+        Ok(replaced_crops) => replaced_crops,
+        Err(error) => {
+            release_result_claim(
+                &executors.sqlite,
+                &claim_identity.0,
+                claim_identity.1.as_deref(),
+            )
+            .await?;
+            tracing::warn!(
+                job_id = claim_identity.0,
+                error = %error,
+                "Momento LLM result persistence failed and was moved to the queue tail"
+            );
+            return Err(error.into());
+        }
+    };
+    scheduler.wake_journal_recovery();
+    scheduler.wake_llm_results();
+    scheduler.wake_ai_finalization();
+    crate::processor::face_detection::retire_replaced_crops(executors, replaced_crops).await;
+    drop(registration);
+    drop(admission);
+    Ok(1)
 }
 
 pub async fn process_available_results(

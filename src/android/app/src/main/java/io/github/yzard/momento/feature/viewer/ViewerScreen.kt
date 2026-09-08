@@ -693,7 +693,7 @@ private fun VideoViewer(
             media = media,
             repository = repository,
             trashed = false,
-            tiny = true,
+            tiny = false,
             modifier = modifier,
         )
         return
@@ -961,7 +961,7 @@ private fun ViewerFilmstrip(
                     media = item,
                     repository = repository,
                     trashed = false,
-                    tiny = true,
+                    tiny = false,
                     modifier = Modifier
                         .size(thumbnailSize)
                         .clip(RoundedCornerShape(10.dp))

@@ -28,11 +28,11 @@ async fn trash_thumbnail_requires_matching_deleted_media_access() {
     grant_media_access(&pool, media_id, owner_id);
     let relative_path = format!("trash-route-tests/{media_id}.jpg");
     let thumbnail = test_data_directory(&pool)
-        .join("thumbnails_tiny")
+        .join("thumbnails")
         .join(&relative_path);
     std::fs::create_dir_all(thumbnail.parent().expect("thumbnail parent"))
         .expect("thumbnail directory");
-    std::fs::write(&thumbnail, b"tiny").expect("thumbnail bytes");
+    std::fs::write(&thumbnail, b"normal").expect("thumbnail bytes");
     pool.get()
         .expect("database")
         .execute(
@@ -57,13 +57,13 @@ async fn trash_thumbnail_requires_matching_deleted_media_access() {
         .assert_status_not_found();
 
     let response = server
-        .get(&format!("/api/v1/trash/{media_id}/thumbnail/tiny"))
+        .get(&format!("/api/v1/trash/{media_id}/thumbnail"))
         .add_header(AUTHORIZATION, owner_authorization)
         .await;
     response.assert_status_ok();
-    assert_eq!(response.as_bytes().as_ref(), b"tiny");
+    assert_eq!(response.as_bytes().as_ref(), b"normal");
     server
-        .get(&format!("/api/v1/trash/{media_id}/thumbnail/tiny"))
+        .get(&format!("/api/v1/trash/{media_id}/thumbnail"))
         .add_header(AUTHORIZATION, format!("Bearer {}", access_token(other_id)))
         .await
         .assert_status_not_found();

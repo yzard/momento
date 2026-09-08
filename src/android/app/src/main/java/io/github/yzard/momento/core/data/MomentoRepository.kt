@@ -120,7 +120,7 @@ class MomentoRepository(
     suspend fun previewUrl(mediaId: Long): String = mediaUrl(mediaId, "preview")
     override suspend fun thumbnailUrl(mediaId: Long, tiny: Boolean): String = mediaUrl(mediaId, if (tiny) "thumbnail/tiny" else "thumbnail")
     override suspend fun trashThumbnailUrl(mediaId: Long): String =
-        "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/trash/$mediaId/thumbnail/tiny"
+        "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/trash/$mediaId/thumbnail"
     private suspend fun mediaUrl(mediaId: Long, suffix: String): String = "${requireNotNull(settingsStore.settings.first().origin)}/api/v1/media/$mediaId/$suffix"
     fun authorizationHeader(): String? = tokenStore.accessToken()?.let { "Bearer $it" }
     fun authenticatedHttpClient(): OkHttpClient = networkClient.httpClient()

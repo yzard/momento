@@ -1,4 +1,4 @@
-import { apiClient } from './client'
+import { apiClient } from '../client'
 
 export interface TrashMedia {
   id: number
@@ -35,7 +35,7 @@ export const trashApi = {
     if (!Number.isSafeInteger(mediaId) || mediaId <= 0) {
       throw new Error('mediaId must be a positive safe integer')
     }
-    return `/api/v1/trash/${mediaId}/thumbnail/tiny`
+    return `/api/v1/trash/${mediaId}/thumbnail`
   },
 
   restore: async (mediaIds: number[]): Promise<TrashResponse> => {

@@ -191,7 +191,7 @@ fun TrashScreen(repository: MomentoRepository) {
                                 media = media,
                                 repository = repository,
                                 trashed = true,
-                                tiny = true,
+                                tiny = false,
                                 selected = media.id in selectedIds,
                                 modifier = Modifier
                                     .fillMaxWidth()

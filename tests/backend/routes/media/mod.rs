@@ -592,7 +592,7 @@ async fn thumbnail_readiness_preserves_access_checks_and_recovers_after_publicat
             [media_id],
         )
         .unwrap();
-    let trash_url = format!("/api/v1/trash/{media_id}/thumbnail/tiny");
+    let trash_url = format!("/api/v1/trash/{media_id}/thumbnail");
     let response = server
         .get(&trash_url)
         .add_header(AUTHORIZATION, authorization)

@@ -53,7 +53,7 @@ fun MediaGrid(
             media = mediaItem,
             repository = repository,
             trashed = false,
-            tiny = true,
+            tiny = false,
             selected = selected,
             modifier = Modifier
                 .aspectRatio(1f)

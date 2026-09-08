@@ -401,7 +401,7 @@ function FaceGroupDetail({ faceGroupId }: { faceGroupId: number }) {
           <>
             <PageHeader
               title="Face group"
-              description={`${groupQuery.data.group.faceCount} recognized faces across ${groupQuery.data.media.length} media items.`}
+              description={`${groupQuery.data.group.mediaCount} media`}
               actions={null}
             />
             {groupQuery.data.media.length > 0 ? (

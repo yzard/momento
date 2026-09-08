@@ -106,6 +106,7 @@ describe('Faces page', () => {
     expect(await screen.findByRole('link', { name: 'Face group 5, 3 media' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Face group 8, 2 media' })).toBeTruthy()
     expect(screen.queryByText('Face group 5')).toBeNull()
+    expect(screen.queryByText(/recognized faces|4 faces|Person 5/)).toBeNull()
     expect(screen.getByText('3')).toBeTruthy()
     expect(screen.getByText('2')).toBeTruthy()
     expect(mocks.getThumbnailURL).toHaveBeenCalledWith({ faceGroupId: 5 })

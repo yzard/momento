@@ -638,7 +638,7 @@ private fun AlbumTile(
 private fun AlbumThumbnailCollage(album: Album, repository: MomentoRepository) {
     val thumbnailMediaIds = album.thumbnailMediaIds.take(4)
     val urls by produceState<List<String>>(emptyList(), thumbnailMediaIds) {
-        value = thumbnailMediaIds.map { mediaId -> repository.thumbnailUrl(mediaId, true) }
+        value = thumbnailMediaIds.map { mediaId -> repository.thumbnailUrl(mediaId, false) }
     }
 
     @Composable
