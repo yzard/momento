@@ -1,3 +1,4 @@
+use crate::database::map::cluster_precision_bits_for_zoom;
 use axum::{extract::State, response::Response, routing::post, Router};
 
 use crate::auth::{AppState, CurrentUser};
@@ -12,24 +13,12 @@ pub fn router() -> Router<AppState> {
         .route("/map/media", post(get_media))
 }
 
-fn zoom_to_geohash_precision(zoom: u8) -> usize {
-    match zoom {
-        0..=3 => 2,
-        4..=6 => 3,
-        7..=9 => 4,
-        10..=12 => 5,
-        13..=15 => 6,
-        16..=18 => 8,
-        _ => 8,
-    }
-}
-
 async fn get_clusters(
     State(state): State<AppState>,
     current_user: CurrentUser,
     CpuJson(req): CpuJson<MapClustersRequest>,
 ) -> AppResult<Response> {
-    let precision = zoom_to_geohash_precision(req.zoom);
+    let precision_bits = cluster_precision_bits_for_zoom(req.zoom);
     let response = state
         .executors
         .sqlite
@@ -41,7 +30,7 @@ async fn get_clusters(
                 east: req.bounds.east,
                 west: req.bounds.west,
             },
-            precision,
+            precision_bits,
         })
         .await?;
     render_json(&state, response).await

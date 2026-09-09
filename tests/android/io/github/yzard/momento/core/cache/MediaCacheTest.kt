@@ -163,4 +163,56 @@ class MediaCacheTest {
         assertNull(cache.snapshot("asset", clock))
         assertNull(cache.begin("overflow", Long.MAX_VALUE, CachedMediaMetadata(null, null, null, clock)))
     }
+    @Test fun mapClustersAreCachedOnDemandByViewportAndZoomAndRefreshAfterExpiry() {
+        val directory = temporary.newFolder()
+        val cache = DiskMediaCache(directory, 1024 * 1024)
+        var requests = 0
+        val client = client(cache) { requests++; response(it, "clusters-$requests", 200, "") }
+        fun request(body: String) = Request.Builder().url("https://momento.example/api/v1/map/clusters")
+            .post(body.toRequestBody("application/json".toMediaType())).build()
+        fun fetch(body: String): String = client.newCall(request(body)).execute().use { it.body!!.string() }
+        assertEquals(0, requests)
+        assertEquals("clusters-1", fetch("viewport-a-zoom-6"))
+        assertEquals("clusters-1", fetch("viewport-a-zoom-6"))
+        assertEquals("clusters-2", fetch("viewport-a-zoom-7"))
+        assertEquals("clusters-3", fetch("viewport-b-zoom-6"))
+        assertEquals("clusters-1", fetch("viewport-a-zoom-6"))
+        clock += MediaCacheInterceptor.MAP_FRESH_MILLIS + 1
+        assertEquals("clusters-4", fetch("viewport-a-zoom-6"))
+        online = false
+        val reopened = client(DiskMediaCache(directory, 1024 * 1024)) { throw IOException("Offline") }
+        reopened.newCall(request("viewport-a-zoom-6")).execute().use { assertEquals("clusters-4", it.body!!.string()) }
+        namespace = "account-b"
+        assertThrows(IOException::class.java) { reopened.newCall(request("viewport-a-zoom-6")).execute() }
+    }
+
+    @Test fun successfulMutationsInvalidateMapResultsAndPendingResponses() {
+        val cache = DiskMediaCache(temporary.newFolder(), 1024 * 1024)
+        var requests = 0
+        val client = client(cache) { requests++; response(it, "response-$requests", 200, "") }
+        fun request(path: String) = Request.Builder().url("https://momento.example/api/v1/$path")
+            .post("{}".toRequestBody("application/json".toMediaType())).build()
+        val map = request("map/clusters")
+        client.newCall(map).execute().use { assertEquals("response-1", it.body!!.string()) }
+        client.newCall(map).execute().use { assertEquals("response-1", it.body!!.string()) }
+        clock += MediaCacheInterceptor.MAP_FRESH_MILLIS + 1
+        val pending = client.newCall(map).execute()
+        client.newCall(request("media/delete")).execute().close()
+        pending.use { assertEquals("response-2", it.body!!.string()) }
+        client.newCall(map).execute().use { assertEquals("response-4", it.body!!.string()) }
+    }
+
+    @Test fun statusPollingDoesNotInvalidateFreshMapResults() {
+        val cache = DiskMediaCache(temporary.newFolder(), 1024 * 1024)
+        var requests = 0
+        val client = client(cache) { requests++; response(it, "response-$requests", 200, "") }
+        fun request(path: String) = Request.Builder().url("https://momento.example/api/v1/$path")
+            .post("{}".toRequestBody("application/json".toMediaType())).build()
+        val map = request("map/clusters")
+        client.newCall(map).execute().use { assertEquals("response-1", it.body!!.string()) }
+        client.newCall(request("metadata/status")).execute().close()
+        client.newCall(map).execute().use { assertEquals("response-1", it.body!!.string()) }
+        assertEquals(2, requests)
+    }
+
 }

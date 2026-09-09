@@ -13,8 +13,20 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 let client: QueryClient
 const bounds = { north: 42, south: 40, west: -75, east: -73 }
-const first = { id: 'dr5', lat: 40.2, lng: -74.2, count: 8, representativeId: 10 }
-const second = { id: 'dr6', lat: 40.2001, lng: -74.2001, count: 2, representativeId: 20 }
+const first = {
+  id: 'dr5',
+  lat: 40.2,
+  lng: -74.2,
+  count: 8,
+  representativeId: 10,
+}
+const second = {
+  id: 'dr6',
+  lat: 40.2001,
+  lng: -74.2001,
+  count: 2,
+  representativeId: 20,
+}
 
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -55,5 +67,26 @@ describe('useMapClusters', () => {
     rerender({ bounds })
     await waitFor(() => expect(result.current.error).toBeTruthy())
     expect(result.current.clusters).toEqual([])
+  })
+  it('reuses visited viewports and zoom levels and refreshes invalidated results', async () => {
+    getClusters.mockResolvedValue({ clusters: [first], totalCount: 8 })
+    const { result, rerender } = renderHook(
+      ({ bounds, zoom }: { bounds: BoundingBox; zoom: number }) => useMapClusters({ bounds, zoom }),
+      { wrapper, initialProps: { bounds, zoom: 8 } }
+    )
+    await waitFor(() => expect(result.current.clusters).toHaveLength(1))
+    rerender({ bounds, zoom: 9 })
+    await waitFor(() => expect(getClusters).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.clusters).toHaveLength(1))
+    rerender({ bounds: { ...bounds, west: -74.5 }, zoom: 8 })
+    await waitFor(() => expect(getClusters).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(result.current.clusters).toHaveLength(1))
+    rerender({ bounds, zoom: 8 })
+    expect(result.current.clusters).toHaveLength(1)
+    expect(getClusters).toHaveBeenCalledTimes(3)
+    getClusters.mockResolvedValue({ clusters: [second], totalCount: 2 })
+    await client.invalidateQueries({ queryKey: ['map-clusters'] })
+    await waitFor(() => expect(result.current.totalCount).toBe(2))
+    expect(getClusters).toHaveBeenCalledTimes(4)
   })
 })

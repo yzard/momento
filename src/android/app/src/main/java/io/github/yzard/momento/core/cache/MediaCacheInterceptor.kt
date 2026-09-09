@@ -1,6 +1,7 @@
 package io.github.yzard.momento.core.cache
 
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
@@ -19,18 +20,30 @@ internal class MediaCacheInterceptor(
     private val online: () -> Boolean,
     private val now: () -> Long,
 ) : Interceptor {
+    private val mapGeneration = AtomicLong()
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val scope = namespace() ?: return chain.proceed(request)
         val asset = isCachedMediaRequest(request)
         val metadata = (request.method == "POST" && request.url.encodedPath in OFFLINE_READ_PATHS) ||
             (request.method == "GET" && request.url.encodedPath == "/api/v1/client/capabilities")
-        if (!asset && !metadata) return chain.proceed(request)
+        if (!asset && !metadata) {
+            val response = chain.proceed(request)
+            if (request.method != "GET" && request.url.pathSegments.last() !in READ_OPERATIONS && response.isSuccessful) {
+                mapGeneration.incrementAndGet()
+                try { cache.removePrefix(MAP_KEY_PREFIX) } catch (_: IOException) { /* Best-effort invalidation. */ }
+            }
+            return response
+        }
+        val map = request.method == "POST" && request.url.encodedPath == "/api/v1/map/clusters"
+        val generation = mapGeneration.get()
         val body = Buffer().also { request.body?.writeTo(it) }
-        val key = Buffer().writeUtf8(scope).writeUtf8("\n${request.method}\n${request.url}\n")
+        val digest = Buffer().writeUtf8(scope).writeUtf8("\n${request.method}\n${request.url}\n")
             .apply { write(body, body.size) }.sha256().hex()
+        val key = if (map) MAP_KEY_PREFIX + digest else digest
         val cached = try { cache.snapshot(key, now()) } catch (_: IOException) { null }
-        if (cached != null && (!online() || (asset && now() - cached.metadata.validatedAt in 0 until FRESH_MILLIS))) {
+        if (cached != null && (!online() || ((asset || map) && now() - cached.metadata.validatedAt in 0 until (if (map) MAP_FRESH_MILLIS else FRESH_MILLIS)))) {
             return cached.response(request)
         }
         // Cache complete representations, including when the video player asks for a range.
@@ -49,7 +62,7 @@ internal class MediaCacheInterceptor(
             cached?.close()
             throw error
         }
-        if (namespace() != scope) { cached?.close(); return response }
+        if (namespace() != scope || (map && mapGeneration.get() != generation)) { cached?.close(); return response }
         if (response.code == 304 && cached != null) {
             response.close()
             try { cache.revalidated(cached, now()) } catch (_: IOException) { /* Keep the usable snapshot. */ }
@@ -75,7 +88,7 @@ internal class MediaCacheInterceptor(
             override fun read(sink: Buffer, byteCount: Long): Long {
                 val read = try { super.read(sink, byteCount) } catch (error: IOException) { abortCache(); throw error }
                 try {
-                    if (namespace() != scope) editor.abort()
+                    if (namespace() != scope || (map && mapGeneration.get() != generation)) editor.abort()
                     else if (read == -1L) editor.complete()
                     else editor.append(sink, sink.size - read, read)
                 } catch (_: IOException) { abortCache() }
@@ -106,6 +119,9 @@ internal class MediaCacheInterceptor(
         }).build()
 
     internal companion object {
+        const val MAP_FRESH_MILLIS = 30_000L
+        private val READ_OPERATIONS = setOf("get", "list", "status", "markers", "authenticate", "refresh")
+        private const val MAP_KEY_PREFIX = "map-"
         const val FRESH_MILLIS = 5L * 60 * 1000
         private val MEDIA_PATH = Regex("/api/v1/(media/[^/]+/(thumbnail(/tiny)?|preview)|trash/[^/]+/thumbnail|faces/groups/[^/]+/thumbnail|places/[^/]+/thumbnail)")
         fun isCachedMediaRequest(request: Request): Boolean = request.method == "GET" && MEDIA_PATH.matches(request.url.encodedPath)

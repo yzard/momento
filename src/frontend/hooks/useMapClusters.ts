@@ -25,7 +25,8 @@ export function useMapClusters({ bounds, zoom }: UseMapClustersProps) {
       return mapApi.getClusters(bounds, zoom)
     },
     enabled: !!bounds,
-    staleTime: 5000,
+    staleTime: 30_000,
+    gcTime: 10 * 60_000,
   })
   // Server centers are based on the user's entire library. Never recluster a viewport subset.
   const clusters = useMemo<MapCluster[]>(

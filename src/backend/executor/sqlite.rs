@@ -1901,11 +1901,11 @@ impl SqliteExecutorHandle {
             bounds: normalize_spatial_bounds(request.bounds, "load_map_clusters")?,
             ..request
         };
-        if !(2..=8).contains(&request.precision) {
+        if !(10..=40).contains(&request.precision_bits) {
             return Err(ExecutorError::new(
                 ExecutorErrorKind::InvalidInput,
                 "load_map_clusters",
-                "geohash precision must be between 2 and 8",
+                "geohash precision must be between 10 and 40 bits",
             ));
         }
         match self
@@ -1932,12 +1932,12 @@ impl SqliteExecutorHandle {
             || request
                 .geohash_prefixes
                 .iter()
-                .any(|prefix| prefix.is_empty() || prefix.len() > 12 || !prefix.is_ascii())
+                .any(|prefix| crate::database::map::cluster_media_pattern(prefix).is_none())
         {
             return Err(ExecutorError::new(
                 ExecutorErrorKind::InvalidInput,
                 "load_map_media",
-                "geohash prefixes must contain at most 256 non-empty ASCII values of 12 bytes",
+                "geohash prefixes must contain at most 256 valid cluster IDs",
             ));
         }
         match self

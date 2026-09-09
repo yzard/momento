@@ -7,15 +7,61 @@ use crate::database::operations::{MapClustersQuery, SpatialBounds};
 use crate::database::queries::map::build_clusters_query;
 use crate::models::{Cluster, MapClustersResponse};
 
-// Per pooled connection: four user/level indexes, with a shared 32 MiB ceiling.
+// Per pooled connection: sixteen user/level indexes, with a shared 32 MiB ceiling.
 // SQL orders latitude bands and then longitude; building the spatial index only maps rows.
 const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
-const MAX_INDEX_ENTRIES: usize = 4;
+const MAX_INDEX_ENTRIES: usize = 16;
 const MAX_RESPONSE_ROWS: usize = 4096;
+
+/// Add two spatial bits per zoom step: at most four children per stable cell.
+pub fn cluster_precision_bits_for_zoom(zoom: u8) -> usize {
+    (10 + usize::from(zoom.saturating_sub(5)) * 2).min(40)
+}
+
+pub(crate) const GEOHASH_ALPHABET: &str = "0123456789bcdefghjkmnpqrstuvwxyz";
+
+/// Full prefixes and partial-bit cells share the existing opaque cluster ID transport.
+/// Partial cells use the lowest child prefix followed by :1 through :4.
+pub(crate) fn cluster_media_pattern(id: &str) -> Option<String> {
+    let (prefix, partial) = match id.split_once(':') {
+        Some((prefix, bits)) => (
+            prefix,
+            Some(match bits {
+                "1" => 1,
+                "2" => 2,
+                "3" => 3,
+                "4" => 4,
+                _ => return None,
+            }),
+        ),
+        None => (id, None),
+    };
+    if prefix.is_empty()
+        || prefix.len() > 12
+        || !prefix
+            .bytes()
+            .all(|byte| GEOHASH_ALPHABET.as_bytes().contains(&byte))
+    {
+        return None;
+    }
+    let Some(bits) = partial else {
+        return Some(format!("{prefix}*"));
+    };
+    let start = GEOHASH_ALPHABET.find(prefix.chars().last()?)?;
+    let width = 1 << (5 - bits);
+    if start % width != 0 {
+        return None;
+    }
+    Some(format!(
+        "{}[{}]*",
+        &prefix[..prefix.len() - 1],
+        &GEOHASH_ALPHABET[start..start + width]
+    ))
+}
 
 struct ClusterIndex {
     user_id: i64,
-    precision: usize,
+    precision_bits: usize,
     clusters: Vec<Cluster>,
     bytes: usize,
 }
@@ -56,12 +102,12 @@ impl IndexedConnection {
             self.revision = Some(revision);
         }
         let cached = self.indexes.iter().position(|index| {
-            index.user_id == request.user_id && index.precision == request.precision
+            index.user_id == request.user_id && index.precision_bits == request.precision_bits
         });
         let index = if let Some(position) = cached {
             self.indexes.remove(position).expect("existing map index")
         } else {
-            let query = build_clusters_query(request.precision);
+            let query = build_clusters_query(request.precision_bits);
             let mut statement = transaction.prepare(&query)?;
             let mut rows = statement.query([request.user_id])?;
             let mut clusters = Vec::new();
@@ -88,7 +134,7 @@ impl IndexedConnection {
             }
             ClusterIndex {
                 user_id: request.user_id,
-                precision: request.precision,
+                precision_bits: request.precision_bits,
                 clusters,
                 bytes,
             }

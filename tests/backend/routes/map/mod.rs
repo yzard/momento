@@ -2,6 +2,7 @@ use crate::test_utils::{
     create_test_db, create_test_media_with_gps, create_test_media_with_gps_and_date,
     create_test_user, grant_media_access, test_executor_handles,
 };
+use momento_api::database::map::cluster_precision_bits_for_zoom;
 use momento_api::database::DbPool;
 use momento_api::executor::SqliteExecutorHandle;
 use momento_api::models::{
@@ -12,18 +13,6 @@ use momento_api::{
     database::operations::SpatialBounds,
 };
 use std::time::{Duration, Instant};
-
-fn zoom_to_geohash_precision(zoom: u8) -> usize {
-    match zoom {
-        0..=3 => 2,
-        4..=6 => 3,
-        7..=9 => 4,
-        10..=12 => 5,
-        13..=15 => 6,
-        16..=18 => 8,
-        _ => 8,
-    }
-}
 
 fn make_request(bounds: (f64, f64, f64, f64), zoom: u8) -> MapClustersRequest {
     MapClustersRequest {
@@ -42,7 +31,7 @@ async fn get_clusters(
     user_id: i64,
     req: &MapClustersRequest,
 ) -> MapClustersResponse {
-    let precision = zoom_to_geohash_precision(req.zoom);
+    let precision_bits = cluster_precision_bits_for_zoom(req.zoom);
     test_executor_handles(pool.clone())
         .sqlite
         .load_map_clusters_request(MapClustersQuery {
@@ -53,7 +42,7 @@ async fn get_clusters(
                 east: req.bounds.east,
                 west: req.bounds.west,
             },
-            precision,
+            precision_bits,
         })
         .await
         .expect("map clusters")
@@ -73,7 +62,7 @@ async fn get_clusters_with_executor(
                 east: req.bounds.east,
                 west: req.bounds.west,
             },
-            precision: zoom_to_geohash_precision(req.zoom),
+            precision_bits: cluster_precision_bits_for_zoom(req.zoom),
         })
         .await
         .expect("map clusters")
@@ -329,7 +318,7 @@ async fn test_map_bounds_still_reject_non_finite_coordinates() {
                 east: 10.0,
                 west: -10.0,
             },
-            precision: 2,
+            precision_bits: 10,
         })
         .await
         .expect_err("non-finite map bounds must fail");
@@ -475,21 +464,33 @@ fn test_rtree_query_performance() {
 }
 
 #[test]
-fn test_zoom_to_geohash_precision() {
-    assert_eq!(zoom_to_geohash_precision(0), 2);
-    assert_eq!(zoom_to_geohash_precision(3), 2);
-    assert_eq!(zoom_to_geohash_precision(4), 3);
-    assert_eq!(zoom_to_geohash_precision(6), 3);
-    assert_eq!(zoom_to_geohash_precision(7), 4);
-    assert_eq!(zoom_to_geohash_precision(9), 4);
-    assert_eq!(zoom_to_geohash_precision(10), 5);
-    assert_eq!(zoom_to_geohash_precision(12), 5);
-    assert_eq!(zoom_to_geohash_precision(13), 6);
-    assert_eq!(zoom_to_geohash_precision(15), 6);
-    assert_eq!(zoom_to_geohash_precision(16), 8);
-    assert_eq!(zoom_to_geohash_precision(18), 8);
-    assert_eq!(zoom_to_geohash_precision(19), 8);
-    assert_eq!(zoom_to_geohash_precision(25), 8);
+fn test_cluster_precision_bits_for_zoom() {
+    for (zoom, precision_bits) in [
+        (0, 10),
+        (5, 10),
+        (6, 12),
+        (7, 14),
+        (8, 16),
+        (9, 18),
+        (10, 20),
+        (11, 22),
+        (12, 24),
+        (13, 26),
+        (14, 28),
+        (15, 30),
+        (16, 32),
+        (17, 34),
+        (18, 36),
+        (19, 38),
+        (20, 40),
+        (255, 40),
+    ] {
+        assert_eq!(
+            cluster_precision_bits_for_zoom(zoom),
+            precision_bits,
+            "zoom {zoom}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -504,7 +505,7 @@ async fn selected_cluster_includes_accessible_members_outside_viewport() {
     let clusters = get_clusters_with_executor(
         &executors.sqlite,
         user_id,
-        &make_request((41., 40., -73., -75.), 4),
+        &make_request((41., 40., -73., -75.), 6),
     )
     .await;
     let response = executors

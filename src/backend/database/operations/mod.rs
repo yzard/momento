@@ -622,7 +622,7 @@ pub struct SpatialBounds {
 pub struct MapClustersQuery {
     pub user_id: i64,
     pub bounds: SpatialBounds,
-    pub precision: usize,
+    pub precision_bits: usize,
 }
 
 #[derive(Debug)]
@@ -1319,7 +1319,12 @@ pub(crate) fn load_map_media(
         request
             .geohash_prefixes
             .into_iter()
-            .map(|prefix| rusqlite::types::Value::Text(format!("{prefix}%"))),
+            .map(|prefix| {
+                crate::database::map::cluster_media_pattern(&prefix)
+                    .map(rusqlite::types::Value::Text)
+                    .ok_or_else(|| rusqlite::Error::InvalidParameterName(prefix))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?,
     );
     let mut statement = connection.prepare(&query)?;
     let mut rows = statement.query(params_from_iter(values))?;

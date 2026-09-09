@@ -92,6 +92,11 @@ internal class DiskMediaCache(private val directory: File, private var maxBytes:
         File(directory, "$key.meta").delete()
     }
 
+    @Synchronized fun removePrefix(prefix: String) {
+        initialize()
+        (entries.keys + editors.map { it.key }).filter { it.startsWith(prefix) }.toSet().forEach { remove(it) }
+    }
+
     @Synchronized fun revalidated(snapshot: CachedMediaSnapshot, now: Long) {
         val entry = entries[snapshot.key] ?: return
         if (entry.file.name != snapshot.filename) return
