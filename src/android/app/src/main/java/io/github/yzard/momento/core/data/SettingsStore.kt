@@ -140,8 +140,17 @@ class EncryptedTokenStore(context: Context) {
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
         return cipher.doFinal(bytes.copyOfRange(12, bytes.size)).decodeToString()
     }
+    @Synchronized
+    fun mediaCacheNamespace(): String? {
+        if (!storage.contains("access")) return null
+        storage.getString("media_cache_namespace", null)?.let { return it }
+        val namespace = UUID.randomUUID().toString()
+        return if (storage.edit().putString("media_cache_namespace", namespace).commit()) namespace else null
+    }
+
     fun saveLoginTokens(tokens: TokenPair) {
         storage.edit()
+            .putString("media_cache_namespace", UUID.randomUUID().toString())
             .putString("access", encrypt(tokens.accessToken))
             .putString("refresh", encrypt(tokens.refreshToken))
             .putBoolean(authenticationCompleteKey, false)

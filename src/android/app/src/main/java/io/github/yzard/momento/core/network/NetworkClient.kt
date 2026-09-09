@@ -19,9 +19,11 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.Base64
 
 @OptIn(ExperimentalSerializationApi::class)
-class NetworkClient(private val tokenStore: EncryptedTokenStore) {
+class NetworkClient(private val tokenStore: EncryptedTokenStore, cacheStore: io.github.yzard.momento.core.cache.MediaCacheStore) {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
-    private val client = OkHttpClient.Builder().addInterceptor(BearerInterceptor(tokenStore, this)).build()
+    private val client = OkHttpClient.Builder()
+        .addInterceptor(cacheStore.interceptor(tokenStore::mediaCacheNamespace))
+        .addInterceptor(BearerInterceptor(tokenStore, this)).build()
     private var currentOrigin: String? = null
     private var currentApi: MomentoApi? = null
     private var imageLoader: ImageLoader? = null
@@ -39,6 +41,8 @@ class NetworkClient(private val tokenStore: EncryptedTokenStore) {
         if (imageLoader != null) return requireNotNull(imageLoader)
         return ImageLoader.Builder(context.applicationContext)
             .okHttpClient { client }
+            .diskCache(null)
+            .memoryCache(null)
             .build()
             .also { imageLoader = it }
     }
@@ -90,7 +94,10 @@ internal class BearerInterceptor(
         if (existingAuthorization != null || response.code != 401 || request.header("X-Momento-Retry") != null || token == null) return response
 
         val origin = request.url.newBuilder().encodedPath("/").query(null).fragment(null).build().toString().removeSuffix("/")
-        val refreshed = runBlocking { networkClient.refresh(origin, token) }
+        val refreshed = try { runBlocking { networkClient.refresh(origin, token) } } catch (error: java.io.IOException) {
+            response.close()
+            throw error
+        }
         if (!refreshed) return response
 
         response.close()

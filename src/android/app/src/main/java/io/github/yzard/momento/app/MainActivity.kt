@@ -17,7 +17,7 @@ class MainActivity : ComponentActivity() {
         initializeOpenStreetMap(this)
         val settingsStore = SettingsStore(this)
         val tokenStore = EncryptedTokenStore(this)
-        val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
+        val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore, io.github.yzard.momento.core.cache.MediaCacheStore.get(this)))
         setContent { MomentoApplication(settingsStore, repository, tokenStore) }
     }
 }

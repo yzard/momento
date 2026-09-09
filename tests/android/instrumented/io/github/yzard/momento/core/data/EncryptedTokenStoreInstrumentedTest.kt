@@ -3,6 +3,9 @@ package io.github.yzard.momento.core.data
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yzard.momento.core.model.TokenPair
 import org.junit.After
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,5 +46,19 @@ class EncryptedTokenStoreInstrumentedTest {
         tokenStore.replaceSessionTokens(TokenPair("access-2", "refresh-2", "Bearer"))
 
         assertFalse(tokenStore.isAuthenticated.value)
+    }
+    @Test
+    fun mediaCacheNamespaceSurvivesRefreshButChangesForANewLogin() {
+        tokenStore.saveLoginTokens(TokenPair("access-1", "refresh-1", "Bearer"))
+        val namespace = tokenStore.mediaCacheNamespace()
+        assertNotNull(namespace)
+        tokenStore.replaceSessionTokens(TokenPair("access-2", "refresh-2", "Bearer"))
+        assertEquals(namespace, tokenStore.mediaCacheNamespace())
+        val reopened = EncryptedTokenStore(InstrumentationRegistry.getInstrumentation().targetContext)
+        assertEquals(namespace, reopened.mediaCacheNamespace())
+        tokenStore.clear()
+        assertNull(tokenStore.mediaCacheNamespace())
+        tokenStore.saveLoginTokens(TokenPair("access-3", "refresh-3", "Bearer"))
+        assertNotEquals(namespace, tokenStore.mediaCacheNamespace())
     }
 }

@@ -37,6 +37,6 @@ class MomentoAsyncImageInstrumentedTest {
     private fun testRepository(): MomentoRepository {
         val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
         val tokenStore = EncryptedTokenStore(context)
-        return MomentoRepository(SettingsStore(context), tokenStore, NetworkClient(tokenStore))
+        return MomentoRepository(SettingsStore(context), tokenStore, NetworkClient(tokenStore, io.github.yzard.momento.core.cache.MediaCacheStore.get(context)))
     }
 }

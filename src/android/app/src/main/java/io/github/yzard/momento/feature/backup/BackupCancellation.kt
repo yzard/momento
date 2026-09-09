@@ -93,7 +93,7 @@ class BackupCancellationWorker(context: Context, parameters: WorkerParameters) :
             val settingsStore = SettingsStore(applicationContext)
             val tokenStore = EncryptedTokenStore(applicationContext)
             if (!tokenStore.isAuthenticated.value || settingsStore.settings.first().origin == null) return Result.failure()
-            val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
+            val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore, io.github.yzard.momento.core.cache.MediaCacheStore.get(applicationContext)))
             var waiting = false
             for (asset in database.backupAssetDao().cancellationPending()) {
                 if (cancelBackupAsset(asset, database.backupAssetDao(), repository) == BackupProgress.WAITING_FOR_SERVER) {

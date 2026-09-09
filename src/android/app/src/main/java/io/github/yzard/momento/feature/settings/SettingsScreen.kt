@@ -69,6 +69,8 @@ fun SettingsScreen(
                     backupAvailable = backupAvailable,
                 )
             }
+            item(key = "backup-cache-divider") { HorizontalDivider() }
+            item(key = "media-cache") { MediaCacheSettingsSection() }
             item(key = "backup-appearance-divider") { HorizontalDivider() }
             item(key = "appearance") {
                 AppearanceSettingsSection(

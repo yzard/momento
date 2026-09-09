@@ -99,7 +99,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             val assets = database.backupAssetDao()
             val settingsStore = SettingsStore(applicationContext)
             val tokenStore = EncryptedTokenStore(applicationContext)
-            val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore))
+            val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore, io.github.yzard.momento.core.cache.MediaCacheStore.get(applicationContext)))
             val settings = settingsStore.settings.first()
             if (!tokenStore.isAuthenticated.value || settings.origin == null) return Result.failure()
             val mediaAccess = currentBackupMediaAccess(applicationContext)
