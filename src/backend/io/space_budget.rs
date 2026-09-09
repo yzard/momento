@@ -253,6 +253,16 @@ pub enum SpaceBudgetError {
     InvalidIdentity,
     InvalidReservationSize,
     InvalidReconstruction(&'static str),
+    SqliteGrowthExceeded {
+        operation: &'static str,
+        reservation_id: String,
+        baseline_bytes: u64,
+        outstanding_bytes: u64,
+        physical_bytes: u64,
+        logical_bytes: u64,
+        charged_bytes: u64,
+        excess_bytes: u64,
+    },
     ReconstructionPageTooLarge,
     ReconstructionAlreadyPublished,
     ReconstructionNotPublished,
@@ -290,6 +300,10 @@ impl fmt::Display for SpaceBudgetError {
             }
             Self::InvalidReconstruction(detail) => {
                 write!(formatter, "durable space reconstruction is invalid: {detail}")
+            }
+            Self::SqliteGrowthExceeded { operation, reservation_id, baseline_bytes,
+                outstanding_bytes, physical_bytes, logical_bytes, charged_bytes, excess_bytes } => {
+                write!(formatter, "SQLite growth budget exceeded: operation={operation} reservation_id={reservation_id} baseline_bytes={baseline_bytes} outstanding_bytes={outstanding_bytes} physical_bytes={physical_bytes} logical_bytes={logical_bytes} charged_bytes={charged_bytes} excess_bytes={excess_bytes}")
             }
             Self::ReconstructionPageTooLarge => {
                 formatter.write_str("space reconstruction page exceeds 256 records")
@@ -780,11 +794,14 @@ impl DataDirSpaceBudget {
     pub(crate) fn release_sqlite_after_terminal_commit(
         &self,
         reservation_id: &str,
-        allocated_bytes: u64,
+        database_path: &std::path::Path,
+        operation: &'static str,
     ) -> Result<bool, SpaceBudgetError> {
         validate_identity(reservation_id)?;
         let observed = self.observe()?;
         let mut state = self.lock_state()?;
+        let allocation = inspect_sqlite_allocation(database_path)?;
+        let allocated_bytes = allocation.charged_bytes;
         let Some(entry) = state.reservations.get(reservation_id) else {
             return Ok(false);
         };
@@ -799,9 +816,12 @@ impl DataDirSpaceBudget {
             .checked_add(state.sqlite_outstanding_bytes)
             .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
         if allocated_bytes > maximum_declared_allocation {
-            return Err(SpaceBudgetError::InvalidReconstruction(
-                "SQLite allocation exceeded all live declared growth",
-            ));
+            return Err(allocation.exceeded(
+                operation,
+                reservation_id,
+                state.sqlite_allocated_bytes,
+                state.sqlite_outstanding_bytes,
+            )?);
         }
         let entry = state
             .reservations
@@ -1125,13 +1145,16 @@ impl ProvisionalSpaceToken {
 
     pub(crate) fn publish_ephemeral_sqlite_allocation(
         mut self,
-        allocated_bytes: u64,
+        database_path: &std::path::Path,
+        operation: &'static str,
     ) -> Result<(), SpaceBudgetError> {
         if self.class != SpaceReservationClass::Sqlite {
             return Err(SpaceBudgetError::ReservationStateMismatch);
         }
         let observed = self.budget.observe()?;
         let mut state = self.budget.lock_state()?;
+        let allocation = inspect_sqlite_allocation(database_path)?;
+        let allocated_bytes = allocation.charged_bytes;
         let entry = state
             .reservations
             .get(&self.reservation_id)
@@ -1148,6 +1171,16 @@ impl ProvisionalSpaceToken {
             .checked_add(state.sqlite_outstanding_bytes)
             .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
         let exceeded_declaration = allocated_bytes > maximum_declared_allocation;
+        let growth_error = exceeded_declaration
+            .then(|| {
+                allocation.exceeded(
+                    operation,
+                    &self.reservation_id,
+                    state.sqlite_allocated_bytes,
+                    state.sqlite_outstanding_bytes,
+                )
+            })
+            .transpose()?;
         let entry = state
             .reservations
             .remove(&self.reservation_id)
@@ -1161,10 +1194,8 @@ impl ProvisionalSpaceToken {
         state.epoch = checked_increment(state.epoch)?;
         refresh_health(&self.budget.inner.layout, &mut state, observed.free_bytes)?;
         self.armed = false;
-        if exceeded_declaration {
-            return Err(SpaceBudgetError::InvalidReconstruction(
-                "SQLite allocation exceeded all live declared growth",
-            ));
+        if let Some(error) = growth_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -1301,7 +1332,8 @@ impl DurableSpaceCheckout {
     pub(crate) fn publish_sqlite_child(
         mut self,
         record: &DurableSpaceReservationRecord,
-        allocated_bytes: u64,
+        database_path: &std::path::Path,
+        operation: &'static str,
     ) -> Result<(), SpaceBudgetError> {
         if self.class != SpaceReservationClass::Sqlite {
             return Err(SpaceBudgetError::ReservationStateMismatch);
@@ -1321,6 +1353,8 @@ impl DurableSpaceCheckout {
         }
         let observed = self.budget.observe()?;
         let mut state = self.budget.lock_state()?;
+        let allocation = inspect_sqlite_allocation(database_path)?;
+        let allocated_bytes = allocation.charged_bytes;
         let current = state
             .reservations
             .get(&self.reservation_id)
@@ -1342,9 +1376,12 @@ impl DurableSpaceCheckout {
             .checked_add(state.sqlite_outstanding_bytes)
             .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
         if allocated_bytes > maximum_declared_allocation {
-            return Err(SpaceBudgetError::InvalidReconstruction(
-                "SQLite allocation exceeded its live result reservation",
-            ));
+            return Err(allocation.exceeded(
+                operation,
+                &self.reservation_id,
+                state.sqlite_allocated_bytes,
+                state.sqlite_outstanding_bytes,
+            )?);
         }
         subtract_outstanding(&mut state, SpaceReservationClass::Sqlite, consumed)?;
         let current = state
@@ -1592,6 +1629,43 @@ fn snapshot_from_state(
 pub(crate) fn measure_sqlite_allocation(
     database_path: &std::path::Path,
 ) -> Result<u64, SpaceBudgetError> {
+    Ok(inspect_sqlite_allocation(database_path)?.charged_bytes)
+}
+
+#[derive(Default)]
+struct SqliteAllocation {
+    physical_bytes: u64,
+    logical_bytes: u64,
+    charged_bytes: u64,
+}
+
+impl SqliteAllocation {
+    fn exceeded(
+        &self,
+        operation: &'static str,
+        reservation_id: &str,
+        baseline_bytes: u64,
+        outstanding_bytes: u64,
+    ) -> Result<SpaceBudgetError, SpaceBudgetError> {
+        let limit = baseline_bytes
+            .checked_add(outstanding_bytes)
+            .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
+        Ok(SpaceBudgetError::SqliteGrowthExceeded {
+            operation,
+            reservation_id: reservation_id.to_string(),
+            baseline_bytes,
+            outstanding_bytes,
+            physical_bytes: self.physical_bytes,
+            logical_bytes: self.logical_bytes,
+            charged_bytes: self.charged_bytes,
+            excess_bytes: self.charged_bytes.saturating_sub(limit),
+        })
+    }
+}
+
+fn inspect_sqlite_allocation(
+    database_path: &std::path::Path,
+) -> Result<SqliteAllocation, SpaceBudgetError> {
     use std::os::unix::fs::MetadataExt;
 
     [
@@ -1600,7 +1674,7 @@ pub(crate) fn measure_sqlite_allocation(
         database_path.with_extension("sqlite-shm"),
     ]
     .into_iter()
-    .try_fold(0_u64, |total, path| {
+    .try_fold(SqliteAllocation::default(), |mut total, path| {
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 Err(SpaceBudgetError::FilesystemObservation(format!(
@@ -1608,11 +1682,27 @@ pub(crate) fn measure_sqlite_allocation(
                     path.display()
                 )))
             }
-            Ok(metadata) => metadata
-                .blocks()
-                .checked_mul(512)
-                .and_then(|bytes| total.checked_add(bytes))
-                .ok_or(SpaceBudgetError::ArithmeticOverflow),
+            Ok(metadata) => {
+                let physical = metadata
+                    .blocks()
+                    .checked_mul(512)
+                    .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
+                let logical = metadata.len();
+                total.physical_bytes = total
+                    .physical_bytes
+                    .checked_add(physical)
+                    .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
+                total.logical_bytes = total
+                    .logical_bytes
+                    .checked_add(logical)
+                    .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
+                // Charge logical extents before delayed allocation/compression catches up.
+                total.charged_bytes = total
+                    .charged_bytes
+                    .checked_add(physical.max(logical))
+                    .ok_or(SpaceBudgetError::ArithmeticOverflow)?;
+                Ok(total)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(total),
             Err(error) => Err(SpaceBudgetError::FilesystemObservation(format!(
                 "could not measure SQLite storage {}: {error}",
@@ -1765,57 +1855,5 @@ fn checked_increment(value: u64) -> Result<u64, SpaceBudgetError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn layout() -> BudgetLayout {
-        BudgetLayout {
-            filesystem_id: "filesystem-1".to_string(),
-            total_bytes: 100 * GIBIBYTE,
-            fragment_size: 4096,
-            recovery_floor_bytes: 5 * GIBIBYTE,
-            sqlite_wal_limit_bytes: 2 * GIBIBYTE,
-            log_quota_bytes: GIBIBYTE,
-            data_hard_limit_bytes: 94 * GIBIBYTE,
-        }
-    }
-
-    #[test]
-    fn runtime_observation_accepts_total_capacity_changes() {
-        let layout = layout();
-        for (total_bytes, free_bytes) in [
-            (80 * GIBIBYTE, 20 * GIBIBYTE),
-            (120 * GIBIBYTE, 60 * GIBIBYTE),
-        ] {
-            validate_runtime_observation(
-                &layout,
-                &FilesystemSpaceSnapshot {
-                    filesystem_id: layout.filesystem_id.clone(),
-                    total_bytes,
-                    free_bytes,
-                    fragment_size: layout.fragment_size,
-                },
-            )
-            .expect("same filesystem with changed capacity");
-        }
-    }
-
-    #[test]
-    fn runtime_observation_rejects_filesystem_or_allocation_unit_changes() {
-        let layout = layout();
-        for (filesystem_id, fragment_size) in [("filesystem-2", 4096), ("filesystem-1", 8192)] {
-            assert_eq!(
-                validate_runtime_observation(
-                    &layout,
-                    &FilesystemSpaceSnapshot {
-                        filesystem_id: filesystem_id.to_string(),
-                        total_bytes: layout.total_bytes,
-                        free_bytes: 50 * GIBIBYTE,
-                        fragment_size,
-                    },
-                ),
-                Err(SpaceBudgetError::InvalidFilesystemSnapshot)
-            );
-        }
-    }
-}
+#[path = "../../../tests/backend/io/space_budget/accounting.rs"]
+mod tests;

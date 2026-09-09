@@ -55,10 +55,23 @@ pub struct ParsedFfprobeMetadata {
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub video_codec: Option<String>,
+    pub video_profile: Option<String>,
+    pub pixel_format: Option<String>,
+    pub audio_present: bool,
+    pub audio_stream_ordinal: Option<usize>,
+    pub audio_stream_count: usize,
+    pub audio_codec: Option<String>,
+    pub major_brand: Option<String>,
     pub duration_seconds: Option<f64>,
     pub date_taken: Option<DateTime<Utc>>,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
+}
+
+impl ParsedFfprobeMetadata {
+    pub fn audio_can_copy(&self) -> bool {
+        self.audio_codec.as_deref() == Some("aac")
+    }
 }
 
 const VALUE_CHARGE_BYTES: usize = 32;
@@ -894,12 +907,15 @@ impl StringOrNumber {
 struct RawFfprobeStream {
     codec_type: Option<String>,
     codec_name: Option<String>,
+    profile: Option<String>,
+    pix_fmt: Option<String>,
     width: Option<JsonNumber>,
     height: Option<JsonNumber>,
 }
 
 #[derive(Deserialize)]
 struct RawFfprobeTags {
+    major_brand: Option<String>,
     creation_time: Option<String>,
     #[serde(rename = "com.apple.quicktime.creationdate")]
     quicktime_creation_date: Option<String>,
@@ -930,6 +946,20 @@ pub(crate) fn parse_ffprobe_metadata(bytes: &[u8]) -> Result<ParsedFfprobeMetada
             .find(|stream| stream.codec_type.as_deref() == Some("video"))
     });
     let format = data.format.as_ref();
+    let audio_streams = data
+        .streams
+        .iter()
+        .flatten()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .collect::<Vec<_>>();
+    // First AAC track wins, regardless of default flag/profile/channel count.
+    // Without AAC, select the first audio track and let conversion errors propagate.
+    let selected_audio = audio_streams
+        .iter()
+        .enumerate()
+        .find(|(_, stream)| stream.codec_name.as_deref() == Some("aac"))
+        .or_else(|| audio_streams.iter().enumerate().next());
+    let audio_stream = selected_audio.map(|(_, stream)| *stream);
     let tags = format.and_then(|format| format.tags.as_ref());
     let date_taken = tags
         .and_then(|tags| {
@@ -961,6 +991,13 @@ pub(crate) fn parse_ffprobe_metadata(bytes: &[u8]) -> Result<ParsedFfprobeMetada
             "height",
         )?,
         video_codec: video_stream.and_then(|stream| stream.codec_name.clone()),
+        video_profile: video_stream.and_then(|stream| stream.profile.clone()),
+        pixel_format: video_stream.and_then(|stream| stream.pix_fmt.clone()),
+        audio_present: audio_stream.is_some(),
+        audio_stream_ordinal: selected_audio.map(|(ordinal, _)| ordinal),
+        audio_stream_count: audio_streams.len(),
+        audio_codec: audio_stream.and_then(|stream| stream.codec_name.clone()),
+        major_brand: tags.and_then(|tags| tags.major_brand.clone()),
         duration_seconds,
         date_taken,
         gps_latitude: coordinates.map(|value| value.0),

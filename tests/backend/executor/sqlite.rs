@@ -3,6 +3,67 @@ use std::time::Duration;
 use momento_api::database::operations::BinaryMediaQuery;
 
 #[tokio::test]
+async fn metadata_queue_preserves_completed_videos_without_previews() {
+    use crate::test_utils::{create_test_db, create_test_media, test_executor_handles};
+
+    let pool = create_test_db();
+    let mut cases = Vec::new();
+    for (status, preview, expected) in [
+        ("completed", None, "completed"),
+        ("completed", Some(""), "completed"),
+        ("completed", Some("video/preview.mp4"), "completed"),
+        ("failed", None, "queued"),
+        ("cancelled", None, "queued"),
+        ("queued", None, "queued"),
+    ] {
+        let id = create_test_media(&pool, "video.mov");
+        let connection = pool.get().unwrap();
+        connection
+            .execute("UPDATE media SET media_type='video' WHERE id=?", [id])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE media_metadata SET preview_path=? WHERE media_id=?",
+                rusqlite::params![preview, id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_metadata_jobs(media_id,status) VALUES (?,?)",
+                rusqlite::params![id, status],
+            )
+            .unwrap();
+        cases.push((id, expected));
+    }
+    let missing = create_test_media(&pool, "new.mov");
+    pool.get()
+        .unwrap()
+        .execute("DELETE FROM media_metadata WHERE media_id=?", [missing])
+        .unwrap();
+    let handles = test_executor_handles(pool.clone());
+    assert_eq!(
+        handles
+            .sqlite
+            .queue_incomplete_metadata_request()
+            .await
+            .unwrap(),
+        3
+    );
+    cases.push((missing, "queued"));
+    let connection = pool.get().unwrap();
+    for (id, expected) in cases {
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM media_metadata_jobs WHERE media_id=?",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, expected);
+    }
+}
+
+#[tokio::test]
 async fn result_cleanup_with_no_remaining_receipt_is_idempotent() {
     let handles = crate::test_utils::test_executor_handles(crate::test_utils::create_test_db());
     for _ in 0..2 {

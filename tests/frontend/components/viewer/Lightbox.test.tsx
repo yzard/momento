@@ -65,6 +65,7 @@ describe('Lightbox', () => {
       await waitFor(() => expect(clicked).toHaveLength(1))
       expect(clicked[0].getAttribute('href')).toBe('/stream/1')
       expect(clicked[0].download).toBe(filename)
+      expect(mocks.getFileStreamURL).toHaveBeenCalledWith(1, 'original')
       expect(document.body.contains(clicked[0])).toBe(false)
     }
   )

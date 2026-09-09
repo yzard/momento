@@ -4,7 +4,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use crate::config::{Config, MediaProcessConfig};
-use crate::constants::{image_mime_type, video_mime_type};
+use crate::constants::image_mime_type;
 use crate::executor::process::{
     bounded_error_detail, ffprobe_single_thread_arguments, run_storage_media_tool,
     ExternalProcessOutput, MediaTool, StorageChildDescriptor,
@@ -626,11 +626,7 @@ pub async fn extract_video_metadata(
         metadata.gps_longitude = ffprobe_payload.gps_longitude;
     }
 
-    metadata.mime_type = Some(
-        video_mime_type(file_path)
-            .unwrap_or("application/octet-stream")
-            .to_string(),
-    );
+    // Keep ExifTool's content-derived MIME; never overwrite it from the suffix.
 
     log_extracted_metadata(file_path, metadata);
     Ok(extracted)

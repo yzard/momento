@@ -308,10 +308,8 @@ impl ExecutorRuntime {
                     .into_result()
                     .map_err(|error| error.to_string())?;
                 let pool = create_pool()?;
-                let allocated = crate::io::space_budget::measure_sqlite_allocation(&database_path)
-                    .map_err(|error| error.to_string())?;
                 token
-                    .publish_ephemeral_sqlite_allocation(allocated)
+                    .publish_ephemeral_sqlite_allocation(&database_path, "sqlite_fresh_bootstrap")
                     .map_err(|error| error.to_string())?;
                 pool
             }
@@ -378,10 +376,11 @@ impl ExecutorRuntime {
                     .into_result()
                     .map_err(|error| error.to_string())?;
                 let pool = create_pool()?;
-                let allocated = crate::io::space_budget::measure_sqlite_allocation(&database_path)
-                    .map_err(|error| error.to_string())?;
                 pool_token
-                    .publish_ephemeral_sqlite_allocation(allocated)
+                    .publish_ephemeral_sqlite_allocation(
+                        &database_path,
+                        "sqlite_existing_pool_bootstrap",
+                    )
                     .map_err(|error| error.to_string())?;
                 pool
             }

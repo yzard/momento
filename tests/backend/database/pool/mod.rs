@@ -103,6 +103,10 @@ fn fresh_bootstrap_recovers_only_a_valid_empty_source_owned_temporary() {
         .path()
         .join(".database.sqlite.momento-bootstrap.tmp");
     let pool = create_pool_at(&database_path, 1).expect("initial fresh database");
+    pool.get()
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+        .unwrap();
     drop(pool);
     std::fs::rename(&database_path, &temporary_path).expect("simulate pre-publish crash");
 
@@ -132,6 +136,10 @@ fn fresh_bootstrap_preserves_untrusted_or_nonempty_temporaries_for_inspection() 
                     [],
                 )
                 .expect("unexpected bootstrap data");
+            pool.get()
+                .unwrap()
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+                .unwrap();
             drop(pool);
             std::fs::rename(&database_path, &temporary_path)
                 .expect("simulate nonempty pre-publish crash");
@@ -157,6 +165,10 @@ fn bootstrap_rejects_a_schema_shaped_file_without_momento_identity() {
         .expect("database connection")
         .pragma_update(None, "application_id", 0)
         .expect("remove Momento identity");
+    pool.get()
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+        .unwrap();
     drop(pool);
     std::fs::rename(&database_path, &temporary_path).expect("simulate foreign bootstrap file");
 

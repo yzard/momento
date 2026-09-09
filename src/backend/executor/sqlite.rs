@@ -5514,24 +5514,20 @@ fn execute(
     };
     if let Some((record, checkout)) = durable_capacity {
         if operation_result.is_ok() {
-            let allocated = crate::io::space_budget::measure_sqlite_allocation(database_path)
-                .map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        operation_name,
-                        error.to_string(),
-                    )
-                })?;
             let terminal_cleanup = matches!(&operation_result, Ok(SqliteOutput::LlmResultStagingCleaned(outcome)) if outcome.complete);
             let publication = if terminal_cleanup {
                 drop(checkout);
                 space_budget
-                    .release_sqlite_after_terminal_commit(&record.reservation_id, allocated)
+                    .release_sqlite_after_terminal_commit(
+                        &record.reservation_id,
+                        database_path,
+                        operation_name,
+                    )
                     .map(|_| ())
             } else {
                 let refreshed =
                     load_result_sqlite_reservation(&connection, &record.owner_id, operation_name)?;
-                checkout.publish_sqlite_child(&refreshed, allocated)
+                checkout.publish_sqlite_child(&refreshed, database_path, operation_name)
             };
             if let Err(error) = publication {
                 operation_result = Err(ExecutorError::new(
@@ -5547,8 +5543,8 @@ fn execute(
         | SqliteCapacitySource::ProvisionalParent { .. }
         | SqliteCapacitySource::DurableParent { .. } => None,
         SqliteCapacitySource::Fresh { .. } => capacity_token.map(|token| {
-            crate::io::space_budget::measure_sqlite_allocation(database_path)
-                .and_then(|allocated| token.publish_ephemeral_sqlite_allocation(allocated))
+            token
+                .publish_ephemeral_sqlite_allocation(database_path, operation_name)
                 .map_err(|error| {
                     ExecutorError::new(
                         ExecutorErrorKind::Internal,
@@ -5590,16 +5586,12 @@ fn completed_cleanup_output(
             .optional()
             .map_err(|error| map_sqlite_error(operation.name(), error))?;
         if let Some(reservation_id) = reservation_id {
-            let allocated = crate::io::space_budget::measure_sqlite_allocation(database_path)
-                .map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        operation.name(),
-                        error.to_string(),
-                    )
-                })?;
             space_budget
-                .release_sqlite_after_terminal_commit(&reservation_id, allocated)
+                .release_sqlite_after_terminal_commit(
+                    &reservation_id,
+                    database_path,
+                    operation.name(),
+                )
                 .map_err(|error| {
                     ExecutorError::new(
                         ExecutorErrorKind::Internal,
@@ -5733,7 +5725,7 @@ fn load_result_sqlite_reservation(
 }
 
 fn execute_with_connection(
-    connection: &mut rusqlite::Connection,
+    connection: &mut crate::database::map::IndexedConnection,
     operation: SqliteOperation,
     space_budget: &crate::io::space_budget::DataDirSpaceBudget,
     database_path: &std::path::Path,
@@ -5841,11 +5833,10 @@ fn execute_with_connection(
         SqliteOperation::DeleteUser { user_id } => operations::delete_user(connection, user_id)
             .map(SqliteOutput::UserDeleted)
             .map_err(|error| map_sqlite_error(operation_name, error)),
-        SqliteOperation::LoadMapClusters(request) => {
-            operations::load_map_clusters(connection, request)
-                .map(SqliteOutput::MapClusters)
-                .map_err(|error| map_sqlite_error(operation_name, error))
-        }
+        SqliteOperation::LoadMapClusters(request) => connection
+            .load_map_clusters(request)
+            .map(SqliteOutput::MapClusters)
+            .map_err(|error| map_sqlite_error(operation_name, error)),
         SqliteOperation::LoadMapMedia(request) => operations::load_map_media(connection, request)
             .map(SqliteOutput::MapMedia)
             .map_err(|error| map_sqlite_error(operation_name, error)),
@@ -5960,7 +5951,7 @@ fn execute_with_connection(
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::QueueIncompleteMetadata => {
-            crate::database::metadata::queue_with_temporary_mov_preview_backfill(connection)
+            operations::queue_incomplete_metadata(connection)
                 .map(SqliteOutput::IncompleteMetadataQueued)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
@@ -6109,17 +6100,13 @@ fn execute_with_connection(
             let outcome = operations::recover_llm_result_state(connection)
                 .map_err(|error| map_sqlite_error(operation_name, error))?;
             if !outcome.released_active_reservation_ids.is_empty() {
-                let allocated = crate::io::space_budget::measure_sqlite_allocation(database_path)
-                    .map_err(|error| {
-                    ExecutorError::new(
-                        ExecutorErrorKind::Internal,
-                        operation_name,
-                        error.to_string(),
-                    )
-                })?;
                 for reservation_id in &outcome.released_active_reservation_ids {
                     space_budget
-                        .release_sqlite_after_terminal_commit(reservation_id, allocated)
+                        .release_sqlite_after_terminal_commit(
+                            reservation_id,
+                            database_path,
+                            operation_name,
+                        )
                         .map_err(|error| {
                             ExecutorError::new(
                                 ExecutorErrorKind::Internal,
@@ -6886,12 +6873,8 @@ fn release_rolled_back_sqlite_result_space(
     let Some(reservation_id) = reservation_id else {
         return Ok(());
     };
-    let allocated =
-        crate::io::space_budget::measure_sqlite_allocation(database_path).map_err(|error| {
-            ExecutorError::new(ExecutorErrorKind::Internal, operation, error.to_string())
-        })?;
     budget
-        .release_sqlite_after_terminal_commit(&reservation_id, allocated)
+        .release_sqlite_after_terminal_commit(&reservation_id, database_path, operation)
         .map_err(|error| {
             ExecutorError::new(ExecutorErrorKind::Internal, operation, error.to_string())
         })?;

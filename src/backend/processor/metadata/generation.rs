@@ -145,6 +145,21 @@ pub async fn generate_media_metadata(
         claim_token,
     )
     .await?;
+    let video_plan = if media_type == "video" {
+        let source = complete_metadata
+            .sources
+            .iter()
+            .find(|source| source.source_type == super::MetadataSourceType::Ffprobe)
+            .ok_or_else(|| "video metadata is missing verified ffprobe content".to_string())?;
+        let probe = executors
+            .cpu
+            .parse_ffprobe_metadata_durable(source.payload_json.as_bytes().to_vec())
+            .await
+            .map_err(|error| error.to_string())?;
+        Some(super::video_preview::PreviewPlan::from_probe(&probe)?)
+    } else {
+        None
+    };
     let sources = std::mem::take(&mut complete_metadata.sources)
         .into_iter()
         .map(|source| MetadataSourceWrite {
@@ -157,11 +172,7 @@ pub async fn generate_media_metadata(
         .join(media_id.to_string())
         .join(format!("v{artifact_version}-{claim_token}"))
         .join("thumbnail.jpg");
-    let video_preview = media_type == "video"
-        && crate::constants::requires_mp4_preview(
-            std::path::Path::new(&file_path),
-            media.mime_type.as_deref(),
-        );
+    let video_preview = video_plan.as_ref().is_some_and(|plan| plan.required);
     let preview_relative = if video_preview
         || (media_type == "image"
             && crate::constants::requires_jpeg_preview(
@@ -210,9 +221,25 @@ pub async fn generate_media_metadata(
         config.media_process.maximum_normalized_image_output_bytes as u64,
     )?;
     if video_preview {
-        artifact_output_limits.push(super::video_preview::output_limit(
-            metadata.duration_seconds,
-        )?);
+        let (session, snapshot) = executors
+            .file_io
+            .open_storage_read_session_durable(
+                original_file.storage_root,
+                original_file.path.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        executors
+            .file_io
+            .close_storage_session_durable(session)
+            .await
+            .map_err(|error| error.to_string())?;
+        artifact_output_limits.push(
+            video_plan
+                .as_ref()
+                .ok_or_else(|| "video preview plan missing".to_string())?
+                .output_limit(snapshot.byte_size)?,
+        );
     }
     let maximum_artifact_batch_bytes = artifact_output_limits
         .iter()
@@ -232,7 +259,7 @@ pub async fn generate_media_metadata(
         &artifact_batch,
         &original_file,
         &media_type,
-        metadata.duration_seconds,
+        video_plan.as_ref(),
         &artifact_output_limits,
         config,
     )
@@ -317,7 +344,7 @@ async fn generate_metadata_artifact_batch(
     batch: &crate::processor::artifact::PreparedMetadataArtifactBatch,
     original: &StorageMediaFile,
     media_type: &str,
-    duration_seconds: Option<f64>,
+    video_plan: Option<&super::video_preview::PreviewPlan>,
     output_limits: &[u64],
     config: &Config,
 ) -> Result<(), String> {
@@ -340,7 +367,7 @@ async fn generate_metadata_artifact_batch(
                 original,
                 &preview,
                 output_limits[2],
-                duration_seconds,
+                video_plan.ok_or_else(|| "video preview plan missing".to_string())?,
                 config.media_process.maximum_stderr_bytes,
             )
             .await?;

@@ -384,7 +384,7 @@ async fn converted_preview_uses_the_atomically_persisted_generation_path() {
 }
 
 #[tokio::test]
-async fn mov_preview_supports_ranges_and_preserves_original_access() {
+async fn video_preview_uses_persisted_path_not_extension_and_preserves_original_access() {
     let (app, pool) = create_test_app();
     let user = create_test_user(&pool, "mov-owner", "mov-owner@example.com");
     let other = create_test_user(&pool, "mov-other", "mov-other@example.com");
@@ -392,10 +392,10 @@ async fn mov_preview_supports_ranges_and_preserves_original_access() {
         create_test_media_with_gps_and_date(&pool, "video.MOV", 40.0, -74.0, "2024-01-15T10:30:00");
     grant_media_access(&pool, media, user);
     let data = test_data_directory(&pool);
-    std::fs::write(data.join("originals/video.MOV"), b"original MOV").unwrap();
+    std::fs::write(data.join("originals/video.bin"), b"original MOV").unwrap();
     std::fs::write(data.join("previews/video.mp4"), b"0123456789").unwrap();
     let connection = pool.get().unwrap();
-    connection.execute("UPDATE media SET media_type='video', file_path='video.MOV', mime_type='video/quicktime' WHERE id=?", [media]).unwrap();
+    connection.execute("UPDATE media SET media_type='video', file_path='video.bin', mime_type='application/octet-stream' WHERE id=?", [media]).unwrap();
     connection
         .execute(
             "UPDATE media_metadata SET preview_path='video.mp4' WHERE media_id=?",
@@ -436,7 +436,7 @@ async fn mov_preview_supports_ranges_and_preserves_original_access() {
         .get(&preview_url)
         .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
         .await
-        .assert_status(StatusCode::NOT_FOUND);
+        .assert_status_ok();
     pool.get()
         .unwrap()
         .execute(
@@ -454,7 +454,7 @@ async fn mov_preview_supports_ranges_and_preserves_original_access() {
 }
 
 #[tokio::test]
-async fn browser_supported_preview_serves_original_even_when_a_converted_preview_exists() {
+async fn image_preview_prefers_published_preview_regardless_of_original_format() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "original-preview", "original-preview@example.com");
     let media_id = create_test_media_with_gps_and_date(
@@ -466,6 +466,11 @@ async fn browser_supported_preview_serves_original_even_when_a_converted_preview
     );
     grant_media_access(&pool, media_id, user_id);
     let data_directory = test_data_directory(&pool);
+    std::fs::write(
+        data_directory.join("previews/published-preview.jpg"),
+        b"preview bytes",
+    )
+    .unwrap();
     let server = TestServer::new(app).expect("server");
     for (filename, mime_type) in [
         ("photo.png", "image/png"),
@@ -484,15 +489,137 @@ async fn browser_supported_preview_serves_original_even_when_a_converted_preview
                 rusqlite::params![filename, mime_type, media_id],
             )
             .expect("media format");
-        connection.execute("UPDATE media_metadata SET preview_path = 'obsolete-preview.jpg' WHERE media_id = ?", [media_id]).expect("obsolete preview");
+        connection.execute("UPDATE media_metadata SET preview_path = 'published-preview.jpg' WHERE media_id = ?", [media_id]).expect("published preview");
         drop(connection);
         let response = server
             .get(&format!("/api/v1/media/{media_id}/preview"))
             .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user_id)))
             .await;
         response.assert_status_ok();
-        assert_eq!(response.as_bytes().as_ref(), b"original bytes");
-        response.assert_header("content-type", mime_type);
+        assert_eq!(response.as_bytes().as_ref(), b"preview bytes");
+        response.assert_header("content-type", "image/jpeg");
+    }
+}
+
+#[tokio::test]
+async fn preview_tickets_hide_conversion_and_cannot_authorize_original_downloads() {
+    let (app, pool) = create_test_app();
+    let user = create_test_user(&pool, "preview-ticket", "preview-ticket@example.com");
+    let other = create_test_user(&pool, "preview-other", "preview-other@example.com");
+    let data = test_data_directory(&pool);
+    let server = TestServer::new(app).unwrap();
+    for (kind, mime, converted_mime) in [
+        ("image", "image/jpeg", "image/jpeg"),
+        ("video", "video/mp4", "video/mp4"),
+    ] {
+        let id = create_test_media_with_gps_and_date(
+            &pool,
+            "asset.bin",
+            40.0,
+            -74.0,
+            "2024-01-15T10:30:00",
+        );
+        grant_media_access(&pool, id, user);
+        std::fs::write(data.join("originals/asset.bin"), b"original bytes").unwrap();
+        std::fs::write(data.join("previews/converted.bin"), b"preview bytes").unwrap();
+        pool.get()
+            .unwrap()
+            .execute(
+                "UPDATE media SET media_type=?,mime_type=?,file_path='asset.bin' WHERE id=?",
+                params![kind, mime, id],
+            )
+            .unwrap();
+        for converted in [false, true] {
+            pool.get()
+                .unwrap()
+                .execute(
+                    "UPDATE media_metadata SET preview_path=? WHERE media_id=?",
+                    params![converted.then_some("converted.bin"), id],
+                )
+                .unwrap();
+            let ticket = server
+                .post("/api/v1/media/access-ticket")
+                .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
+                .json(&json!({"mediaId":id,"resource":"preview"}))
+                .await;
+            ticket.assert_status_ok();
+            let body: Value = ticket.json();
+            let url = body["url"].as_str().unwrap();
+            let response = server.get(url).await;
+            response.assert_status_ok();
+            response.assert_header(
+                "content-type",
+                if converted { converted_mime } else { mime },
+            );
+            assert_eq!(
+                response.as_bytes().as_ref(),
+                if converted {
+                    b"preview bytes".as_slice()
+                } else {
+                    b"original bytes".as_slice()
+                }
+            );
+            if kind == "video" {
+                let partial = server.get(url).add_header(RANGE, "bytes=0-2").await;
+                partial.assert_status(StatusCode::PARTIAL_CONTENT);
+                assert_eq!(
+                    partial.as_bytes().as_ref(),
+                    if converted { b"pre" } else { b"ori" }
+                );
+            }
+            server
+                .get(&url.replace("/preview?", "/original?"))
+                .await
+                .assert_status_forbidden();
+            server
+                .get(&url.replace(&format!("/{id}/preview"), &format!("/{}/preview", id + 1)))
+                .await
+                .assert_status_forbidden();
+            server
+                .get(&format!("{url}tampered"))
+                .await
+                .assert_status_unauthorized();
+            server
+                .get(&format!("/api/v1/media/{id}/preview"))
+                .await
+                .assert_status_unauthorized();
+            server
+                .post("/api/v1/media/access-ticket")
+                .add_header(AUTHORIZATION, format!("Bearer {}", access_token(other)))
+                .json(&json!({"mediaId":id,"resource":"preview"}))
+                .await
+                .assert_status_not_found();
+            let original_ticket = server
+                .post("/api/v1/media/access-ticket")
+                .add_header(AUTHORIZATION, format!("Bearer {}", access_token(user)))
+                .json(&json!({"mediaId":id,"resource":"original"}))
+                .await;
+            original_ticket.assert_status_ok();
+            let original_body: Value = original_ticket.json();
+            let original_url = original_body["url"].as_str().unwrap();
+            let original = server.get(original_url).await;
+            original.assert_status_ok();
+            assert_eq!(original.as_bytes().as_ref(), b"original bytes");
+            server
+                .get(&original_url.replace("/original?", "/preview?"))
+                .await
+                .assert_status_forbidden();
+            pool.get()
+                .unwrap()
+                .execute(
+                    "UPDATE media_access SET deleted_at=datetime('now') WHERE media_id=? AND user_id=?",
+                    params![id, user],
+                )
+                .unwrap();
+            server.get(url).await.assert_status_not_found();
+            pool.get()
+                .unwrap()
+                .execute(
+                    "UPDATE media_access SET deleted_at=NULL WHERE media_id=? AND user_id=?",
+                    params![id, user],
+                )
+                .unwrap();
+        }
     }
 }
 

@@ -13,9 +13,9 @@ use crate::io::journal::{
 };
 use crate::models::{
     map_media_response, map_media_response_with_content_hash, AlbumDetailResponse, AlbumResponse,
-    BackupUploadResponse, Cluster, DeduplicateGroup, DeduplicateGroupsResponse,
-    FaceGroupMediaResponse, FaceGroupResponse, FaceGroupsListResponse, MapClustersResponse,
-    MapMediaListResponse, MediaResponse, ShareLinkResponse, TimelineDirection, TrashMediaResponse,
+    BackupUploadResponse, DeduplicateGroup, DeduplicateGroupsResponse, FaceGroupMediaResponse,
+    FaceGroupResponse, FaceGroupsListResponse, MapMediaListResponse, MediaResponse,
+    ShareLinkResponse, TimelineDirection, TrashMediaResponse,
 };
 use crate::processor::face_detection::FaceRepresentativeCandidate;
 
@@ -1300,57 +1300,17 @@ pub(crate) enum DeleteUserOutcome {
     Deleted,
 }
 
-pub(crate) fn load_map_clusters(
-    connection: &Connection,
-    request: MapClustersQuery,
-) -> rusqlite::Result<MapClustersResponse> {
-    let longitude_clause = longitude_clause(request.bounds);
-    let query = queries::map::build_clusters_query(request.precision, longitude_clause);
-    let mut statement = connection.prepare(&query)?;
-    let mut rows = statement.query(params![
-        request.user_id,
-        request.bounds.south,
-        request.bounds.north,
-        request.bounds.west,
-        request.bounds.east,
-    ])?;
-    let mut clusters = Vec::new();
-    let mut mapped_bytes = 0usize;
-    while let Some(row) = rows.next()? {
-        if clusters.len() == MAX_API_QUERY_ROWS {
-            return Err(bounded_output_error("map clusters exceed 4096 rows"));
-        }
-        let cluster = Cluster {
-            id: row.get(0)?,
-            count: row.get(1)?,
-            lat: row.get(2)?,
-            lng: row.get(3)?,
-            representative_id: row.get(4)?,
-        };
-        mapped_bytes = mapped_bytes
-            .checked_add(cluster.id.len())
-            .and_then(|bytes| bytes.checked_add(size_of::<Cluster>()))
-            .ok_or_else(|| bounded_output_error("map cluster output size overflow"))?;
-        if mapped_bytes > MAX_API_QUERY_BYTES {
-            return Err(bounded_output_error("map clusters exceed one mebibyte"));
-        }
-        clusters.push(cluster);
-    }
-    let total_count = clusters.iter().map(|cluster| cluster.count).sum();
-    Ok(MapClustersResponse {
-        clusters,
-        total_count,
-    })
-}
-
 pub(crate) fn load_map_media(
     connection: &Connection,
     request: MapMediaQuery,
 ) -> rusqlite::Result<MapMediaListResponse> {
     let longitude_clause = longitude_clause(request.bounds);
     let query = queries::map::build_media_query(request.geohash_prefixes.len(), longitude_clause);
-    let mut values = Vec::with_capacity(5 + request.geohash_prefixes.len());
+    let mut values = Vec::with_capacity(6 + request.geohash_prefixes.len());
     values.push(rusqlite::types::Value::Integer(request.user_id));
+    values.push(rusqlite::types::Value::Integer(i64::from(
+        !request.geohash_prefixes.is_empty(),
+    )));
     values.push(rusqlite::types::Value::Real(request.bounds.south));
     values.push(rusqlite::types::Value::Real(request.bounds.north));
     values.push(rusqlite::types::Value::Real(request.bounds.west));

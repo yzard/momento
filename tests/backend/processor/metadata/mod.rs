@@ -583,12 +583,323 @@ async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
 }
 
 #[tokio::test]
-async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
-    assert_video_metadata("mp4", "video/mp4").await;
-    assert_video_metadata("MOV", "video/quicktime").await;
+async fn video_preview_skips_unknown_first_audio_and_copies_default_aac() {
+    let pool = create_test_db();
+    let id = create_test_media(&pool, "multi-audio.bin");
+    let (executors, directory) = test_executor_handles_with_data_directory(pool.clone());
+    let original = directory.join("originals/multi-audio.bin");
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    let generated = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x32:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:duration=1",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "pools=none:frame-threads=1:wpp=0:log-level=error",
+            "-c:a:0",
+            "pcm_s16le",
+            "-c:a:1",
+            "aac",
+            "-ac:a:1",
+            "2",
+            "-disposition:a:0",
+            "0",
+            "-disposition:a:1",
+            "default",
+            "-f",
+            "mov",
+        ])
+        .arg(&original)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    // Simulate an unsupported APAC sample entry without needing an APAC encoder.
+    let mut bytes = fs::read(&original).unwrap();
+    let entries = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(i, b)| (b == b"sowt").then_some(i))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    bytes[entries[0]..entries[0] + 4].copy_from_slice(b"apac");
+    fs::write(&original, &bytes).unwrap();
+    pool.get().unwrap().execute("UPDATE media SET file_path='multi-audio.bin', media_type='video', mime_type='application/octet-stream', import_state='imported' WHERE id=?", [id]).unwrap();
+    let token = claim_metadata_job(&pool, &executors, id).await;
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors,
+        id,
+        &token,
+        &Config::default(),
+    )
+    .await
+    .unwrap();
+    let path: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT preview_path FROM media_metadata WHERE media_id=?",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let preview = directory.join("previews").join(path);
+    let hashes = |path: &std::path::Path, selection: &str| {
+        let output = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                selection,
+                "-show_packets",
+                "-show_data_hash",
+                "sha256",
+                "-show_entries",
+                "packet=data_hash",
+                "-of",
+                "json",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["data_hash"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let audio = hashes(&original, "a:1");
+    assert!(!audio.is_empty());
+    assert_eq!(hashes(&preview, "a:0"), audio);
+    assert!(hashes(&preview, "a:1").is_empty());
+    assert_eq!(hashes(&preview, "v:0"), hashes(&original, "v:0"));
+    assert_eq!(fs::read(&original).unwrap(), bytes);
 }
 
-async fn assert_video_metadata(extension: &str, mime: &str) {
+#[tokio::test]
+async fn video_preview_transcodes_incompatible_content_without_changing_original() {
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "animation.MOV");
+    let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
+    let original_path = data_directory.join("originals/animation.mp4");
+    fs::create_dir_all(original_path.parent().unwrap()).unwrap();
+    let result = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=64x32:d=1",
+            "-c:v",
+            "qtrle",
+            "-threads",
+            "1",
+            "-f",
+            "mov",
+        ])
+        .arg(&original_path)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let original_bytes = fs::read(&original_path).unwrap();
+    pool.get().unwrap().execute(
+        "UPDATE media SET file_path = 'animation.mp4', media_type = 'video', mime_type = 'video/mp4', import_state = 'imported' WHERE id = ?",
+        [media_id],
+    ).unwrap();
+    let token = claim_metadata_job(&pool, &executors, media_id).await;
+    momento_api::processor::metadata::generate_media_metadata(
+        &executors,
+        media_id,
+        &token,
+        &Config::default(),
+    )
+    .await
+    .expect("incompatible content must be transcoded despite the MP4 name/MIME");
+    assert_eq!(fs::read(&original_path).unwrap(), original_bytes);
+    let preview: String = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT preview_path FROM media_metadata WHERE media_id = ?",
+            [media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let result = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-show_streams", "-of", "json"])
+        .arg(data_directory.join("previews").join(preview))
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["streams"][0]["codec_name"], "h264");
+    assert_eq!(value["streams"][0]["pix_fmt"], "yuv420p");
+    assert_eq!(value["streams"][0]["width"], 64);
+    assert_eq!(value["streams"][0]["height"], 32);
+}
+
+#[tokio::test]
+async fn metadata_reuses_one_unscaled_full_resolution_video_frame_for_ai() {
+    assert_video_metadata(
+        "mp4",
+        "video/mp4",
+        "mp4",
+        "aac",
+        "libx264",
+        "yuv420p",
+        false,
+    )
+    .await;
+    assert_video_metadata(
+        "MOV",
+        "video/quicktime",
+        "mov",
+        "aac",
+        "libx264",
+        "yuv420p",
+        true,
+    )
+    .await;
+    assert_video_metadata("mp4", "video/mp4", "mov", "aac", "libx264", "yuv420p", true).await;
+    assert_video_metadata(
+        "MOV",
+        "video/quicktime",
+        "mp4",
+        "aac",
+        "libx264",
+        "yuv420p",
+        false,
+    )
+    .await;
+    assert_video_metadata(
+        "bin",
+        "application/octet-stream",
+        "mov",
+        "pcm_s16le",
+        "libx264",
+        "yuv420p",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn hevc_preview_copies_encoded_video_and_only_transcodes_pcm_audio() {
+    assert_video_metadata(
+        "bin",
+        "application/octet-stream",
+        "mov",
+        "pcm_s16le",
+        "libx265",
+        "yuv420p",
+        true,
+    )
+    .await;
+    assert_video_metadata(
+        "mp4",
+        "video/mp4",
+        "mov",
+        "pcm_s16le",
+        "libx265",
+        "yuv420p10le",
+        true,
+    )
+    .await;
+    assert_video_metadata(
+        "MOV",
+        "video/quicktime",
+        "mov",
+        "aac",
+        "libx265",
+        "yuv420p",
+        true,
+    )
+    .await;
+    assert_video_metadata(
+        "MOV",
+        "video/quicktime",
+        "mp4",
+        "aac",
+        "libx265",
+        "yuv420p",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn full_range_video_preview_preserves_packets_and_color_range() {
+    for encoder in ["libx264", "libx265"] {
+        assert_video_metadata(
+            "bin",
+            "application/octet-stream",
+            "mov",
+            "pcm_s16le",
+            encoder,
+            "yuvj420p",
+            true,
+        )
+        .await;
+        assert_video_metadata(
+            "MOV",
+            "video/quicktime",
+            "mov",
+            "aac",
+            encoder,
+            "yuvj420p",
+            true,
+        )
+        .await;
+        assert_video_metadata(
+            "MOV",
+            "video/quicktime",
+            "mp4",
+            "aac",
+            encoder,
+            "yuvj420p",
+            false,
+        )
+        .await;
+    }
+}
+
+async fn assert_video_metadata(
+    extension: &str,
+    mime: &str,
+    container: &str,
+    audio_codec: &str,
+    video_encoder: &str,
+    pixels: &str,
+    expects_preview: bool,
+) {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "full-resolution-frame.mp4");
     let (executors, data_directory) = test_executor_handles_with_data_directory(pool.clone());
@@ -602,20 +913,46 @@ async fn assert_video_metadata(extension: &str, mime: &str) {
     let relative_path = format!("full-resolution-frame-{media_id}.{extension}");
     let original_path = data_directory.join("originals").join(&relative_path);
     fs::create_dir_all(original_path.parent().expect("original parent")).expect("original parent");
-    let ffmpeg = std::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=blue:s=64x32:d=1",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=1",
-            "-pix_fmt",
-            "yuv420p",
-        ])
+    let mut command = std::process::Command::new("ffmpeg");
+    command.args([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=blue:s=64x32:d=1",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-pix_fmt",
+        if pixels == "yuvj420p" {
+            "yuv420p"
+        } else {
+            pixels
+        },
+        "-c:v",
+        video_encoder,
+        "-threads",
+        "1",
+        "-c:a",
+        audio_codec,
+        "-f",
+        container,
+    ]);
+    if pixels == "yuvj420p" {
+        command.args(["-color_range", "pc"]);
+    }
+    if video_encoder == "libx265" {
+        command.args([
+            "-x265-params",
+            if pixels == "yuvj420p" {
+                "pools=none:frame-threads=1:wpp=0:log-level=error:range=full"
+            } else {
+                "pools=none:frame-threads=1:wpp=0:log-level=error"
+            },
+        ]);
+    }
+    let ffmpeg = command
         .arg(&original_path)
         .output()
         .expect("video fixture command");
@@ -649,27 +986,90 @@ async fn assert_video_metadata(extension: &str, mime: &str) {
             |row| row.get(0),
         )
         .unwrap();
-    if extension == "MOV" {
+    if expects_preview {
         let preview = preview.expect("MOV requires MP4 playback preview");
         assert!(preview.ends_with("preview.mp4"));
+        let preview_path = data_directory.join("previews").join(preview);
         let probe = std::process::Command::new("ffprobe")
             .args([
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=codec_name,width,height",
+                "stream=codec_name,codec_tag_string,pix_fmt,color_range,width,height",
                 "-of",
                 "json",
             ])
-            .arg(data_directory.join("previews").join(preview))
+            .arg(&preview_path)
             .output()
             .unwrap();
         assert!(probe.status.success());
         let info: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
-        assert_eq!(info["streams"][0]["codec_name"], "h264");
+        assert_eq!(
+            info["streams"][0]["codec_name"],
+            if video_encoder == "libx265" {
+                "hevc"
+            } else {
+                "h264"
+            }
+        );
+        assert_eq!(info["streams"][0]["pix_fmt"], pixels);
+        if pixels == "yuvj420p" {
+            assert_eq!(
+                info["streams"][0]["color_range"], "pc",
+                "stream copy must preserve full range"
+            );
+        }
+        if video_encoder == "libx265" {
+            assert_eq!(info["streams"][0]["codec_tag_string"], "hvc1");
+        }
         assert_eq!(info["streams"][0]["width"], 64);
         assert_eq!(info["streams"][0]["height"], 32);
         assert_eq!(info["streams"][1]["codec_name"], "aac");
+        // Same codecs/dimensions alone would also pass after lossy transcoding.
+        // Compare every encoded audio/video packet to prove this is stream copy.
+        let packet_hashes = |path: &std::path::Path| {
+            let result = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_packets",
+                    "-show_data_hash",
+                    "sha256",
+                    "-show_entries",
+                    "packet=stream_index,data_hash",
+                    "-of",
+                    "json",
+                ])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+            let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            (0..2)
+                .map(|index| {
+                    value["packets"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|packet| packet["stream_index"] == index)
+                        .map(|packet| packet["data_hash"].as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let original_packets = packet_hashes(&original_path);
+        assert!(original_packets.iter().all(|packets| !packets.is_empty()));
+        let preview_packets = packet_hashes(&preview_path);
+        assert_eq!(
+            preview_packets[0], original_packets[0],
+            "compatible video must not be transcoded even when audio is"
+        );
+        if audio_codec == "aac" {
+            assert_eq!(preview_packets[1], original_packets[1]);
+        } else {
+            assert!(!preview_packets[1].is_empty());
+            assert_ne!(preview_packets[1], original_packets[1]);
+        }
     } else {
         assert!(preview.is_none(), "MP4 must not be transcoded");
     }

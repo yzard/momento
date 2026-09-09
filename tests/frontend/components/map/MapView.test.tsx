@@ -13,7 +13,6 @@ vi.mock('../../../../src/frontend/hooks/useMapClusters', () => ({
     clusters: [],
     isLoading: false,
     error: null,
-    supercluster: {},
   }),
 }))
 

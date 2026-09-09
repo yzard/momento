@@ -491,3 +491,35 @@ fn test_zoom_to_geohash_precision() {
     assert_eq!(zoom_to_geohash_precision(19), 8);
     assert_eq!(zoom_to_geohash_precision(25), 8);
 }
+
+#[tokio::test]
+async fn selected_cluster_includes_accessible_members_outside_viewport() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "whole-cell", "whole-cell@example.com");
+    let first = create_test_media_with_gps(&pool, "first.jpg", 40.712, -74.006);
+    let second = create_test_media_with_gps(&pool, "second.jpg", 40.713, -74.006);
+    grant_media_access(&pool, first, user_id);
+    grant_media_access(&pool, second, user_id);
+    let executors = test_executor_handles(pool.clone());
+    let clusters = get_clusters_with_executor(
+        &executors.sqlite,
+        user_id,
+        &make_request((41., 40., -73., -75.), 4),
+    )
+    .await;
+    let response = executors
+        .sqlite
+        .load_map_media_request(MapMediaQuery {
+            user_id,
+            bounds: SpatialBounds {
+                north: 40.7125,
+                south: 40.7115,
+                west: -75.,
+                east: -73.,
+            },
+            geohash_prefixes: vec![clusters.clusters[0].id.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.items.len(), 2);
+}

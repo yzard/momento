@@ -97,27 +97,6 @@ function MapViewportTracker({
   return null
 }
 
-function MapZoomTracker({ onZoomChange }: { onZoomChange: (zoom: number) => void }) {
-  const animationFrameReference = useRef<number | null>(null)
-  const map = useMapEvents({
-    zoom: () => {
-      if (animationFrameReference.current) cancelAnimationFrame(animationFrameReference.current)
-      animationFrameReference.current = requestAnimationFrame(() => {
-        onZoomChange(map.getZoom())
-      })
-    },
-  })
-
-  useEffect(
-    () => () => {
-      if (animationFrameReference.current) cancelAnimationFrame(animationFrameReference.current)
-    },
-    []
-  )
-
-  return null
-}
-
 interface MapClusterMarkersProps {
   clusters: MapCluster[]
   onClusterClick: (cluster: MapCluster) => void
@@ -129,10 +108,7 @@ function MapClusterMarkers({ clusters, onClusterClick }: MapClusterMarkersProps)
       {clusters.map((cluster) => {
         const [longitude, latitude] = cluster.geometry.coordinates as [number, number]
         const { count, representativeId } = cluster.properties
-        const fallbackKey = `${latitude}-${longitude}`
-        const clusterKey = cluster.properties.cluster
-          ? `cluster-${cluster.properties.cluster_id ?? fallbackKey}`
-          : `cell-${cluster.properties.cellId ?? representativeId ?? fallbackKey}`
+        const clusterKey = cluster.properties.cellId
 
         return (
           <ClusterMarker
@@ -155,38 +131,18 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
   const initialZoom = savedViewport?.zoom ?? 2
   const [bounds, setBounds] = useState<BoundingBox | null>(null)
   const [clusterDataZoom, setClusterDataZoom] = useState(initialZoom)
-  const [visibleZoom, setVisibleZoom] = useState(initialZoom)
-  const { clusters, isLoading, supercluster, error } = useMapClusters({
+  const { clusters, isLoading, error } = useMapClusters({
     bounds,
-    zoom: visibleZoom,
-    dataZoom: clusterDataZoom,
+    zoom: clusterDataZoom,
   })
 
   const handleViewportChange = ({ bounds: nextBounds, zoom: nextZoom }: MapViewportUpdate) => {
     setBounds(nextBounds)
     setClusterDataZoom(nextZoom)
-    setVisibleZoom(nextZoom)
   }
 
   const handleClusterClick = (cluster: MapCluster) => {
-    const { count, representativeId, cluster_id: clusterId, cellId } = cluster.properties
-
-    if (count > 1 && clusterId !== undefined && bounds) {
-      const maximumLeaves = Math.min(count, 500)
-      const clusterLeaves = supercluster.getLeaves(clusterId, maximumLeaves)
-      const geohashPrefixes = Array.from(
-        new Set(
-          clusterLeaves
-            .map((clusterLeaf) => clusterLeaf.properties.cellId)
-            .filter((cellId): cellId is string => typeof cellId === 'string' && cellId.length > 0)
-        )
-      )
-
-      if (geohashPrefixes.length > 0) {
-        onClusterClick?.({ bounds, geohashPrefixes, representativeId })
-        return
-      }
-    }
+    const { count, representativeId, cellId } = cluster.properties
 
     if (count > 1 && cellId && bounds) {
       onClusterClick?.({ bounds, geohashPrefixes: [cellId], representativeId })
@@ -224,7 +180,6 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
       >
         <MapViewportPersistence />
         <MapViewportTracker onViewportChange={handleViewportChange} />
-        <MapZoomTracker onZoomChange={setVisibleZoom} />
         <TileLayer
           attribution={OPENSTREETMAP_ATTRIBUTION}
           detectRetina

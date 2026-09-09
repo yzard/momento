@@ -450,12 +450,13 @@ async fn get_media_tiny_thumbnail(
 async fn get_media_preview(
     State(state): State<AppState>,
     Extension(admission): Extension<HttpRequestAdmission>,
-    current_user: CurrentUser,
+    authorization: MediaAccessAuthorization,
     Path(media_id): Path<i64>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let media = load_binary_media_info(&state, current_user.id, media_id, false).await?;
-    let (storage_root, path, content_type) = resolve_preview_path(&media, media_id)?;
+    let user_id = authorization.authorize(media_id, MediaAccessResource::Preview)?;
+    let media = load_binary_media_info(&state, user_id, media_id, false).await?;
+    let (storage_root, path, content_type) = resolve_preview_path(&media)?;
     serve_file(
         &state.executors.file_io,
         storage_root,
@@ -580,20 +581,9 @@ fn thumbnail_storage_root(size: ThumbnailSize) -> StorageRootId {
 
 fn resolve_preview_path(
     media: &BinaryMediaRecord,
-    _media_id: i64,
 ) -> AppResult<(StorageRootId, NormalizedStoragePath, String)> {
-    let video_preview = media.media_type == "video"
-        && crate::constants::requires_mp4_preview(
-            std::path::Path::new(&media.file_path),
-            media.mime_type.as_deref(),
-        );
-    if !video_preview
-        && (media.media_type == "video"
-            || !crate::constants::requires_jpeg_preview(
-                std::path::Path::new(&media.file_path),
-                media.mime_type.as_deref(),
-            ))
-    {
+    // Metadata's content probe owns this decision, never the filename/MIME.
+    if media.preview_path.is_none() {
         let relative_path = NormalizedStoragePath::parse(&media.file_path)
             .map_err(|_| AppError::NotFound("Media file path is invalid".to_string()))?;
         return Ok((
@@ -617,7 +607,7 @@ fn resolve_preview_path(
     Ok((
         StorageRootId::Previews,
         relative_path,
-        if video_preview {
+        if media.media_type == "video" {
             "video/mp4"
         } else {
             "image/jpeg"

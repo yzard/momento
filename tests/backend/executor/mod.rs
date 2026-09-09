@@ -13,6 +13,68 @@ use momento_api::runtime::{ExecutorRuntime, RuntimeSizing};
 mod control_json;
 mod sqlite;
 
+#[tokio::test]
+async fn ffprobe_audio_selection_uses_first_aac_or_first_audio() {
+    let handles = crate::test_utils::test_executor_handles(crate::test_utils::create_test_db());
+    for (audio, ordinal, copy) in [
+        (
+            r#"[{"codec_type":"audio","codec_tag_string":"apac"},{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2,"disposition":{"default":1}}]"#,
+            Some(1),
+            true,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2},{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":1,"disposition":{"default":1}}]"#,
+            Some(0),
+            true,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_name":"pcm_s16le","disposition":{"default":1}},{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2}]"#,
+            Some(1),
+            true,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_name":"none","disposition":{"default":1}},{"codec_type":"audio","codec_name":"pcm_s16le"}]"#,
+            Some(0),
+            false,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2},{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2}]"#,
+            Some(0),
+            true,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_tag_string":"apac"}]"#,
+            Some(0),
+            false,
+        ),
+        ("[]", None, false),
+        (
+            r#"[{"codec_type":"audio","codec_name":"aac","profile":"HE-AAC","channels":6},{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2,"disposition":{"default":1}}]"#,
+            Some(0),
+            true,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_name":"pcm_s16le"},{"codec_type":"audio","codec_name":"mp3","disposition":{"default":1}}]"#,
+            Some(0),
+            false,
+        ),
+        (
+            r#"[{"codec_type":"audio","codec_name":"aac"}]"#,
+            Some(0),
+            true,
+        ),
+    ] {
+        let probe = handles
+            .cpu
+            .parse_ffprobe_metadata_durable(format!("{{\"streams\":{audio}}}").into_bytes())
+            .await
+            .unwrap();
+        assert_eq!(probe.audio_stream_ordinal, ordinal, "{audio}");
+        assert_eq!(probe.audio_present, ordinal.is_some());
+        assert_eq!(probe.audio_can_copy(), copy, "{audio}");
+    }
+}
+
 fn journal_reservation(
     file_io: &momento_api::executor::FileIoExecutorHandle,
     reservation_id: &str,

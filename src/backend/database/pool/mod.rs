@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use crate::database::map::IndexedConnection;
 use crate::database::schema::sql;
 use crate::error::{AppError, AppResult};
 use crate::io::session::rename_descriptor_entry;
@@ -80,7 +81,7 @@ pub struct BudgetedSqliteConnectionManager {
 }
 
 impl ManageConnection for BudgetedSqliteConnectionManager {
-    type Connection = Connection;
+    type Connection = IndexedConnection;
     type Error = rusqlite::Error;
 
     fn connect(&self) -> Result<Self::Connection, Self::Error> {
@@ -102,22 +103,25 @@ impl ManageConnection for BudgetedSqliteConnectionManager {
                     .map_err(sqlite_capacity_error)
             })
             .transpose()?;
-        let mut connection = Connection::open_with_flags(
-            &self.database_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        configure_connection(&mut connection)?;
-        connection.query_row("SELECT 1", [], |_| Ok(()))?;
+        let connection = (|| {
+            let mut connection = Connection::open_with_flags(
+                &self.database_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            configure_connection(&mut connection)?;
+            connection.query_row("SELECT 1", [], |_| Ok(()))?;
+            Ok(connection)
+        })();
         if let (Some(token), Some(connection_budget)) = (capacity_token, connection_budget) {
-            let allocated = crate::io::space_budget::measure_sqlite_allocation(
-                &connection_budget.database_path,
-            )
-            .map_err(sqlite_capacity_error)?;
             token
-                .publish_ephemeral_sqlite_allocation(allocated)
+                .publish_ephemeral_sqlite_allocation(
+                    &connection_budget.database_path,
+                    "sqlite_connection_open",
+                )
                 .map_err(sqlite_capacity_error)?;
         }
-        Ok(connection)
+        connection.map(IndexedConnection::new)
     }
 
     fn is_valid(&self, connection: &mut Self::Connection) -> Result<(), Self::Error> {
@@ -532,6 +536,11 @@ fn initialize_database_file(database_path: &Path) -> AppResult<()> {
 }
 
 pub fn configure_connection(connection: &mut Connection) -> rusqlite::Result<()> {
+    // Idle pool retirement must not checkpoint outside the budgeted SQLite writer.
+    connection.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )?;
     connection.execute_batch(sql::PRAGMA_FOREIGN_KEYS_ON)?;
     connection.busy_timeout(DATABASE_BUSY_TIMEOUT)?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
@@ -599,109 +608,5 @@ pub fn insert_returning_id(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::os::unix::fs::MetadataExt;
-
-    use super::*;
-    use r2d2::ManageConnection;
-
-    #[derive(Debug, Eq, PartialEq)]
-    struct FileSnapshot {
-        device: u64,
-        inode: u64,
-        length: u64,
-        blocks: u64,
-        modified_seconds: i64,
-        modified_nanoseconds: i64,
-        changed_seconds: i64,
-        changed_nanoseconds: i64,
-        bytes: Vec<u8>,
-    }
-
-    #[test]
-    fn replacement_connection_creation_checks_out_and_publishes_sqlite_capacity() {
-        let directory = crate::temporary::tempdir().expect("temporary database directory");
-        let database_path = directory.path().join("database.sqlite");
-        prepare_database_file(&database_path).expect("prepare database");
-        initialize_database_file(&database_path).expect("initialize database");
-        let budget = crate::io::space_budget::DataDirSpaceBudget::from_directory(
-            File::open(directory.path()).expect("data directory descriptor"),
-        )
-        .expect("space budget");
-        let allocated = crate::io::space_budget::measure_sqlite_allocation(&database_path)
-            .expect("SQLite allocation");
-        let mut reconstruction = budget.begin_reconstruction();
-        reconstruction.set_allocated_bytes(allocated, 0);
-        reconstruction.publish().expect("publish reconstruction");
-        budget.mark_running().expect("running budget");
-        let connection_budget = Arc::new(RwLock::new(Some(SqliteConnectionBudget {
-            budget: budget.clone(),
-            database_path: database_path.clone(),
-            peak_additional_bytes: 1024 * 1024,
-        })));
-        let manager = create_connection_manager(&database_path, connection_budget);
-
-        let connection = manager.connect().expect("budgeted replacement connection");
-        connection
-            .query_row("SELECT 1", [], |_| Ok(()))
-            .expect("validated replacement");
-        let snapshot = budget.snapshot().expect("space budget snapshot");
-        assert_eq!(snapshot.sqlite_outstanding_bytes, 0);
-        assert!(snapshot.sqlite_allocated_bytes >= allocated);
-    }
-
-    fn snapshot(path: &Path) -> FileSnapshot {
-        let metadata = std::fs::metadata(path).expect("SQLite file metadata");
-        FileSnapshot {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            length: metadata.len(),
-            blocks: metadata.blocks(),
-            modified_seconds: metadata.mtime(),
-            modified_nanoseconds: metadata.mtime_nsec(),
-            changed_seconds: metadata.ctime(),
-            changed_nanoseconds: metadata.ctime_nsec(),
-            bytes: std::fs::read(path).expect("SQLite file bytes"),
-        }
-    }
-
-    #[test]
-    fn existing_database_read_only_probe_does_not_mutate_main_wal_or_shm() {
-        let directory = crate::temporary::tempdir().expect("database directory");
-        let database_path = directory.path().join("database.sqlite");
-        prepare_database_file(&database_path).expect("fresh database");
-        initialize_database_file(&database_path).expect("WAL activation");
-        let mut writer = Connection::open(&database_path).expect("writer connection");
-        configure_connection(&mut writer).expect("writer configuration");
-        writer
-            .execute(
-                "INSERT INTO users (username, email, hashed_password) VALUES ('probe', 'probe@example.com', 'hash')",
-                [],
-            )
-            .expect("WAL frame");
-        writer
-            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))
-            .expect("initialize shared memory");
-
-        let paths = [
-            database_path.clone(),
-            database_path.with_extension("sqlite-wal"),
-            database_path.with_extension("sqlite-shm"),
-        ];
-        let before = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
-
-        let read_only =
-            open_existing_database_read_only(&database_path).expect("read-only database probe");
-        assert_eq!(
-            read_only
-                .query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))
-                .expect("read through probe"),
-            1
-        );
-        drop(read_only);
-
-        let after = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
-        assert_eq!(after, before);
-        drop(writer);
-    }
-}
+#[path = "../../../../tests/backend/database/pool/connection_budget.rs"]
+mod tests;

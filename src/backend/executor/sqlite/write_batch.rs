@@ -241,19 +241,19 @@ fn execute_batch(
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(name, error))?;
-        let allocated = crate::io::space_budget::measure_sqlite_allocation(&context.database_path)
-            .map_err(|error| {
-                ExecutorError::new(ExecutorErrorKind::Internal, name, error.to_string())
-            })?;
         for (index, record, checkout, terminal_cleanup) in reservations {
             let publication = if terminal_cleanup {
                 drop(checkout);
                 context
                     .space_budget
-                    .release_sqlite_after_terminal_commit(&record.reservation_id, allocated)
+                    .release_sqlite_after_terminal_commit(
+                        &record.reservation_id,
+                        &context.database_path,
+                        name,
+                    )
                     .map(|_| ())
             } else {
-                checkout.publish_sqlite_child(&record, allocated)
+                checkout.publish_sqlite_child(&record, &context.database_path, name)
             };
             if let Err(error) = publication {
                 results[index] = Err(ExecutorError::new(

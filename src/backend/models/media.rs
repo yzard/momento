@@ -166,12 +166,14 @@ pub struct MediaDeleteRequest {
 #[serde(rename_all = "snake_case")]
 pub enum MediaAccessResource {
     Original,
+    Preview,
 }
 
 impl MediaAccessResource {
     pub fn path_segment(self) -> &'static str {
         match self {
             Self::Original => "original",
+            Self::Preview => "preview",
         }
     }
 }
