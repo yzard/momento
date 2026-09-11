@@ -984,9 +984,6 @@ impl SqliteOperation {
                 32 * 1024 * 1024,
             ),
             Self::RestoreTrash(_)
-            | Self::DeleteTrashMedia(_)
-            | Self::DeleteTrashPage(_)
-            | Self::DeleteExpiredTrashPage(_)
             | Self::MergeFaceGroups { .. }
             | Self::StartAiFeature { .. }
             | Self::CancelAiFeature { .. }
@@ -1000,6 +997,9 @@ impl SqliteOperation {
             | Self::FinishBackupChunk(_)
             | Self::AbandonBackupChunk(_)
             | Self::CancelBackupUpload(_) => bounded_api_write_spec(),
+            Self::DeleteTrashMedia(_)
+            | Self::DeleteTrashPage(_)
+            | Self::DeleteExpiredTrashPage(_) => trash_delete_write_spec(),
             Self::CreateBackupUpload(_) => SqliteOperationSpec::fresh_write(
                 OperationSpec {
                     domain: ExecutorDomain::Sqlite,
@@ -1573,6 +1573,13 @@ fn bounded_api_write_spec() -> SqliteOperationSpec {
             maximum_temporary_bytes: 1024 * 1024,
         },
         BOUNDED_SQLITE_MAX_GROWTH_BYTES,
+    )
+}
+
+fn trash_delete_write_spec() -> SqliteOperationSpec {
+    SqliteOperationSpec::fresh_write(
+        bounded_api_write_spec().resources,
+        BULK_SQLITE_MAX_GROWTH_BYTES,
     )
 }
 

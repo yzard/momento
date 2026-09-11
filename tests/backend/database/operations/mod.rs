@@ -1,7 +1,7 @@
 use crate::test_utils::{create_test_db, create_test_media, create_test_user, grant_media_access};
 use momento_api::config::{FaceGroupConfig, ThreadPoolConfig};
 use momento_api::database::operations::{
-    DeleteTrashMedia, FinishLlmSubmission, TrashDeletionOutcome,
+    DeleteTrashMedia, DeleteTrashPage, FinishLlmSubmission, TrashDeletionOutcome,
 };
 use momento_api::processor::face_detection;
 use momento_api::runtime::{ExecutorHandles, ExecutorRuntime, RuntimeSizing};
@@ -415,6 +415,75 @@ async fn permanent_delete_commits_database_and_cleanup_journal_atomically() {
         "cleaned"
     );
 
+    drop(handles);
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn trash_page_delete_reserves_bulk_sqlite_capacity() {
+    let pool = create_test_db();
+    let user_id = create_test_user(&pool, "bulk-trash", "bulk-trash@example.com");
+    let media_id = create_test_media(&pool, "bulk-trash.jpg");
+    grant_media_access(&pool, media_id, user_id);
+    trash_media(&pool, media_id, user_id);
+    let (_directory, runtime, handles) = start_runtime(pool.clone());
+    let writer = pool.get().expect("database writer");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("hold writer lock");
+    let delete_handles = handles.clone();
+    let deletion = tokio::spawn(async move {
+        delete_handles
+            .sqlite
+            .delete_trash_page_request(DeleteTrashPage {
+                user_id,
+                limit: 128,
+            })
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let reserved = loop {
+        let outstanding = handles
+            .file_io
+            .space_budget_snapshot()
+            .expect("space budget")
+            .sqlite_outstanding_bytes;
+        if outstanding > 0 {
+            break outstanding;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "trash deletion did not reserve SQLite capacity"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(reserved, 32 * 1024 * 1024);
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("release writer lock");
+    let outcome = deletion
+        .await
+        .expect("trash deletion task")
+        .expect("bulk trash page deletion");
+    assert_eq!(
+        outcome,
+        TrashDeletionOutcome::Deleted {
+            affected_count: 1,
+            cleanup_groups: 1,
+            has_more: false,
+        }
+    );
+    assert_eq!(
+        pool.get()
+            .expect("database")
+            .query_row(
+                "SELECT COUNT(*) FROM media WHERE id = ?",
+                [media_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("media count"),
+        0
+    );
     drop(handles);
     runtime.shutdown().await.expect("runtime shutdown");
 }

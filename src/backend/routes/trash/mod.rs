@@ -17,7 +17,7 @@ use crate::models::{TrashDeleteRequest, TrashListResponse, TrashResponse, TrashR
 use crate::routes::{render_json, CpuJson};
 use crate::runtime::HttpRequestAdmission;
 
-const TRASH_DELETE_PAGE_SIZE: u16 = 256;
+const TRASH_DELETE_PAGE_SIZE: u16 = 128;
 
 pub fn router() -> Router<AppState> {
     Router::new()
