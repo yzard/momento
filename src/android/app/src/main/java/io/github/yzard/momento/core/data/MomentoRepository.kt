@@ -81,9 +81,13 @@ class MomentoRepository(
     suspend fun place(placeId: String, cursor: String?): PlaceResponse = api().place(PlaceRequest(placeId, cursor, 100))
     suspend fun placeCover(placeId: String): ByteArray = api().placeCover(placeId).bytes()
     suspend fun faces(cursor: String?): FacesResponse = api().faces(pagedListRequest(cursor))
+    private val faceRevisionState = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val faceRevision: kotlinx.coroutines.flow.StateFlow<Int> = faceRevisionState
+    suspend fun rejectFaces(request: RejectFacesRequest): RejectFacesResponse = api().rejectFaces(request).also { faceRevisionState.value += 1 }
+    suspend fun faceCrop(id: Long): ByteArray = api().faceCrop(id).bytes()
     suspend fun faceGroup(id: Long): FaceGroupMediaResponse = api().face(FaceGroupRequest(id))
     suspend fun faceThumbnail(id: Long): ByteArray = api().faceThumbnail(id).bytes()
-    suspend fun mergeFaces(ids: List<Long>): FaceMergeResponse = api().mergeFaces(FaceMergeRequest(ids))
+    suspend fun mergeFaces(ids: List<Long>): FaceMergeResponse = api().mergeFaces(FaceMergeRequest(ids)).also { faceRevisionState.value += 1 }
     suspend fun trash(): List<TrashMedia> = api().trash().items
     suspend fun restore(ids: List<Long>): MessageResponse = api().restore(MediaIdsRequest(ids))
     suspend fun deleteForever(ids: List<Long>): MessageResponse = api().deleteForever(MediaIdsRequest(ids))

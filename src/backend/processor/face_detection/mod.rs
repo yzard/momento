@@ -1,3 +1,4 @@
+pub mod rejections;
 use std::ffi::OsString;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -25,6 +26,7 @@ const FINALIZATION_PAGE_SIZE: usize = 64;
 #[derive(Clone)]
 struct FaceResult {
     sequence: i64,
+    frame_timestamp_ms: Option<i64>,
     index: i64,
     x: f64,
     y: f64,
@@ -315,7 +317,11 @@ pub async fn prepare_typed_result(
                     "face_detection face indices must be contiguous and ordered".to_string(),
                 ));
             }
-            faces.push(parse_typed_face(i64::from(input_result.sequence), face)?);
+            faces.push(parse_typed_face(
+                i64::from(input_result.sequence),
+                input_result.frame_timestamp_ms,
+                face,
+            )?);
         }
     }
     prepare_typed_faces(
@@ -474,7 +480,7 @@ pub fn persist_prepared_result(
         media_id,
         model_version,
         faces,
-        old_crop_paths,
+        mut old_crop_paths,
         artifact_groups,
     } = prepared;
     for group in artifact_groups {
@@ -498,7 +504,7 @@ pub fn persist_prepared_result(
     }
     connection.execute(queries::faces::DELETE_MEDIA_FACES, [media_id])?;
     for (face, crop_path) in faces {
-        connection.execute(
+        let inserted = connection.execute(
             queries::faces::INSERT_FACE,
             rusqlite::params![
                 media_id,
@@ -514,9 +520,16 @@ pub fn persist_prepared_result(
                 face.visibility_score,
                 face.feature_clarity_score,
                 face.embedding,
-                crop_path
+                crop_path,
+                face.frame_timestamp_ms
             ],
         )?;
+        if inserted == 0 {
+            old_crop_paths.push(
+                crate::io::file::NormalizedStoragePath::parse(&crop_path)
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            );
+        }
     }
     connection.execute(
         queries::faces::UPSERT_RESULT,
@@ -525,7 +538,11 @@ pub fn persist_prepared_result(
     Ok(old_crop_paths)
 }
 
-fn parse_typed_face(sequence: i64, face: &FacePayload) -> AppResult<FaceResult> {
+fn parse_typed_face(
+    sequence: i64,
+    frame_timestamp_ms: Option<i64>,
+    face: &FacePayload,
+) -> AppResult<FaceResult> {
     let values = [
         face.x,
         face.y,
@@ -582,6 +599,7 @@ fn parse_typed_face(sequence: i64, face: &FacePayload) -> AppResult<FaceResult> 
     }
     Ok(FaceResult {
         sequence,
+        frame_timestamp_ms,
         index: i64::from(face.index),
         x: f64::from(face.x),
         y: f64::from(face.y),
@@ -1763,11 +1781,31 @@ pub fn update_group_representative(
     group_id: i64,
     config: &FaceGroupConfig,
 ) -> AppResult<()> {
-    let candidates = connection
-        .prepare(queries::faces::SELECT_GROUP_REPRESENTATIVE_CANDIDATES)?
-        .query_map([group_id], map_representative_candidate)?
-        .collect::<Result<Vec<_>, _>>()?;
-    let representative_id = select_representative(&candidates, config).map(|face| face.id);
+    let mut after_id = 0;
+    let mut best: Option<FaceRepresentativeCandidate> = None;
+    loop {
+        let candidates = connection
+            .prepare(queries::faces::SELECT_GROUP_REPRESENTATIVE_CANDIDATE_PAGE)?
+            .query_map(
+                rusqlite::params![group_id, after_id, 256],
+                map_representative_candidate,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some(last) = candidates.last() else { break };
+        after_id = last.id;
+        if let Some(candidate) = select_representative(&candidates, config) {
+            let replace = best.as_ref().map_or(true, |current| {
+                representative_score(candidate, config)
+                    .total_cmp(&representative_score(current, config))
+                    .then_with(|| current.id.cmp(&candidate.id))
+                    .is_gt()
+            });
+            if replace {
+                best = Some(candidate.clone());
+            }
+        }
+    }
+    let representative_id = best.map(|face| face.id);
     connection.execute(
         queries::faces::UPDATE_GROUP_REPRESENTATIVE_ID,
         rusqlite::params![representative_id, group_id],

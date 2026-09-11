@@ -21,6 +21,7 @@ export interface FaceGroupsListRequest {
 export interface FaceGroupResponse {
   group: FaceGroup
   media: Media[]
+  faces: FaceDetection[]
 }
 
 export interface FaceGroupGetRequest {
@@ -40,6 +41,9 @@ export interface FaceGroupsMergeResponse {
 }
 
 export const facesApi = {
+  reject: async (request: RejectFacesRequest): Promise<{ rejectedCount: number }> => {
+    return (await apiClient.post<{ rejectedCount: number }>('/faces/reject', request)).data
+  },
   listGroups: async (request: FaceGroupsListRequest): Promise<FaceGroupsListResponse> => {
     const response = await apiClient.post<FaceGroupsListResponse>('/faces/groups/list', request)
     return response.data
@@ -61,4 +65,20 @@ export const facesApi = {
     const response = await apiClient.post<FaceGroupsMergeResponse>('/faces/groups/merge', request)
     return response.data
   },
+}
+
+export interface FaceDetection {
+  faceId: number
+  mediaId: number
+  inputSequence: number
+  x: number
+  y: number
+  width: number
+  height: number
+}
+export interface RejectFacesRequest {
+  requestId: string
+  groupIds: number[]
+  faceGroupId: number | null
+  faceIds: number[]
 }

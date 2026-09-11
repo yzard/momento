@@ -1,7 +1,8 @@
-import { useRef, type RefObject } from 'react'
+import { useCollectionScrollAnchor } from '../hooks/useCollectionScrollAnchor'
+import { useCallback, useRef, type RefObject } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { AlertCircle, ChevronLeft, ImageOff, Loader2, MapPinned } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { placesApi, type PlaceSummary } from '../api/places'
 import type { Media } from '../api/types'
@@ -13,18 +14,41 @@ import ManagedLightbox from '../components/viewer/ManagedLightbox'
 import { useInfiniteScroll } from '../hooks/useInfiniteScroll'
 import { queryKeys } from '../lib/queryKeys'
 import { useLazyImage } from '../hooks/useLazyImage'
-import { useLightbox } from '../hooks/useLightbox'
+import { useCollectionLightbox } from '../hooks/useCollectionLightbox'
+import CollectionOverlay from '../components/common/CollectionOverlay'
 
 const PAGE_LIMIT = 100
 const placeCoverLoader = { load: placesApi.getCover }
 
 export default function Places() {
   const { placeId } = useParams()
-  if (placeId) return <PlaceDetail placeId={placeId} />
-  return <PlaceList />
+  const navigate = useNavigate()
+  const location = useLocation()
+  const hasBackground = Boolean(location.state?.collectionBackground)
+  const close = useCallback(() => {
+    if (hasBackground) navigate(-1)
+    else navigate('/places', { replace: true })
+  }, [hasBackground, navigate])
+  return (
+    <div className="relative flex min-h-0 flex-1">
+      <div
+        className="flex min-h-0 flex-1"
+        style={{ visibility: placeId ? 'hidden' : 'visible' }}
+        aria-hidden={Boolean(placeId)}
+      >
+        <PlaceList />
+      </div>
+      {placeId && (
+        <CollectionOverlay close={close}>
+          <PlaceDetail placeId={placeId} close={close} />
+        </CollectionOverlay>
+      )}
+    </div>
+  )
 }
 
 function PlaceList() {
+  const active = !useParams().placeId
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const loadMoreRef = useRef<HTMLDivElement>(null)
   const placesQuery = useInfiniteQuery({
@@ -36,10 +60,11 @@ function PlaceList() {
   })
   const places = placesQuery.data?.pages.flatMap((page) => page.places) ?? []
 
+  useCollectionScrollAnchor(scrollContainerRef, placesQuery.dataUpdatedAt)
   useInfiniteScroll({
     scrollContainerRef,
     loadMoreRef,
-    hasNextPage: placesQuery.hasNextPage,
+    hasNextPage: active && placesQuery.hasNextPage,
     isFetchingNextPage: placesQuery.isFetchingNextPage,
     isFetchNextPageError: placesQuery.isFetchNextPageError,
     fetchNextPage: placesQuery.fetchNextPage,
@@ -117,6 +142,7 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
   return (
     <Link
       ref={cardRef}
+      state={{ collectionBackground: true }}
       to={`/places/${encodeURIComponent(place.placeId)}`}
       aria-label={`${accessibleLocation}, ${place.mediaCount} media`}
       className="group relative aspect-[3/2] overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
@@ -143,11 +169,10 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
   )
 }
 
-function PlaceDetail({ placeId }: { placeId: string }) {
-  const navigate = useNavigate()
+function PlaceDetail({ placeId, close }: { placeId: string; close: () => void }) {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const loadMoreRef = useRef<HTMLDivElement>(null)
-  const lightbox = useLightbox()
+  const lightbox = useCollectionLightbox()
   const placeQuery = useInfiniteQuery({
     queryKey: queryKeys.places.detail(placeId),
     initialPageParam: null as string | null,
@@ -180,7 +205,7 @@ function PlaceDetail({ placeId }: { placeId: string }) {
       <PageFrame className="animate-fade-in">
         <button
           type="button"
-          onClick={() => navigate('/places')}
+          onClick={close}
           className="mb-6 flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm font-bold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <ChevronLeft className="h-4 w-4" />

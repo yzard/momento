@@ -5,6 +5,7 @@ export default function ManagedLightbox({ controller }: { controller: LightboxCo
   if (!controller.state) return null
   return (
     <Lightbox
+      manageHistory={controller.manageHistory}
       mediaIds={controller.state.mediaIds}
       currentIndex={controller.state.currentIndex}
       onClose={controller.close}

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { BrowserRouter, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -21,6 +21,20 @@ vi.mock('../../../../src/frontend/components/viewer/MediaDetails', () => ({
 }))
 
 import Lightbox from '../../../../src/frontend/components/viewer/Lightbox'
+import ManagedLightbox from '../../../../src/frontend/components/viewer/ManagedLightbox'
+import { useCollectionLightbox } from '../../../../src/frontend/hooks/useCollectionLightbox'
+
+function CollectionViewerHarness() {
+  const controller = useCollectionLightbox()
+  const location = useLocation()
+  return (
+    <>
+      <div data-testid="route">{location.pathname}</div>
+      <button onClick={() => controller.open(1, [1, 2])}>Open viewer</button>
+      <ManagedLightbox controller={controller} />
+    </>
+  )
+}
 
 describe('Lightbox', () => {
   beforeEach(() => {
@@ -40,6 +54,33 @@ describe('Lightbox', () => {
     vi.restoreAllMocks()
   })
 
+  it.each(['/faces/5', '/places/7'])(
+    'closes %s viewer with X and browser back one layer at a time',
+    async (path) => {
+      window.history.replaceState({}, '', path)
+      render(
+        <BrowserRouter>
+          <CollectionViewerHarness />
+        </BrowserRouter>
+      )
+      const pushState = vi.spyOn(window.history, 'pushState')
+      fireEvent.click(screen.getByRole('button', { name: 'Open viewer' }))
+      const close = await screen.findByRole('button', { name: 'Close viewer' })
+      expect(pushState).toHaveBeenCalledTimes(1)
+      fireEvent.click(close)
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Close viewer' })).toBeNull())
+      expect(screen.getByTestId('route').textContent).toBe(path)
+      fireEvent.click(screen.getByRole('button', { name: 'Open viewer' }))
+      await screen.findByRole('button', { name: 'Close viewer' })
+      window.history.back()
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Close viewer' })).toBeNull())
+      expect(screen.getByTestId('route').textContent).toBe(path)
+      window.history.forward()
+      fireEvent.click(await screen.findByRole('button', { name: 'Close viewer' }))
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Close viewer' })).toBeNull())
+    }
+  )
+
   it.each(['photo.nef', 'photo.heic', 'video.mp4'])(
     'downloads original bytes for %s',
     async (filename) => {
@@ -58,7 +99,13 @@ describe('Lightbox', () => {
       })
       render(
         <MemoryRouter>
-          <Lightbox mediaIds={[1]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+          <Lightbox
+            manageHistory={true}
+            mediaIds={[1]}
+            currentIndex={0}
+            onClose={vi.fn()}
+            onIndexChange={vi.fn()}
+          />
         </MemoryRouter>
       )
       fireEvent.click(await screen.findByRole('button', { name: 'Download original' }))
@@ -74,7 +121,13 @@ describe('Lightbox', () => {
     mocks.getFileStreamURL.mockRejectedValueOnce(new Error('unavailable'))
     render(
       <MemoryRouter>
-        <Lightbox mediaIds={[1]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+        <Lightbox
+          manageHistory={true}
+          mediaIds={[1]}
+          currentIndex={0}
+          onClose={vi.fn()}
+          onIndexChange={vi.fn()}
+        />
       </MemoryRouter>
     )
     fireEvent.click(await screen.findByRole('button', { name: 'Download original' }))
@@ -87,7 +140,13 @@ describe('Lightbox', () => {
   it('updates the binary preview URL when the selected media changes', async () => {
     const view = render(
       <MemoryRouter>
-        <Lightbox mediaIds={[1, 2]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+        <Lightbox
+          manageHistory={true}
+          mediaIds={[1, 2]}
+          currentIndex={0}
+          onClose={vi.fn()}
+          onIndexChange={vi.fn()}
+        />
       </MemoryRouter>
     )
     expect((await screen.findByRole('img', { name: 'first.jpg' })).getAttribute('src')).toBe(
@@ -96,7 +155,13 @@ describe('Lightbox', () => {
 
     view.rerender(
       <MemoryRouter>
-        <Lightbox mediaIds={[1, 2]} currentIndex={1} onClose={vi.fn()} onIndexChange={vi.fn()} />
+        <Lightbox
+          manageHistory={true}
+          mediaIds={[1, 2]}
+          currentIndex={1}
+          onClose={vi.fn()}
+          onIndexChange={vi.fn()}
+        />
       </MemoryRouter>
     )
     expect((await screen.findByRole('img', { name: 'second.jpg' })).getAttribute('src')).toBe(
@@ -111,7 +176,13 @@ describe('Lightbox', () => {
 
     const view = render(
       <MemoryRouter>
-        <Lightbox mediaIds={[7]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+        <Lightbox
+          manageHistory={true}
+          mediaIds={[7]}
+          currentIndex={0}
+          onClose={vi.fn()}
+          onIndexChange={vi.fn()}
+        />
       </MemoryRouter>
     )
 
@@ -130,7 +201,13 @@ describe('Lightbox', () => {
       .mockResolvedValueOnce('/stream/8/refreshed')
     const view = render(
       <MemoryRouter>
-        <Lightbox mediaIds={[8]} currentIndex={0} onClose={vi.fn()} onIndexChange={vi.fn()} />
+        <Lightbox
+          manageHistory={true}
+          mediaIds={[8]}
+          currentIndex={0}
+          onClose={vi.fn()}
+          onIndexChange={vi.fn()}
+        />
       </MemoryRouter>
     )
     await waitFor(() =>

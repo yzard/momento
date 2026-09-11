@@ -83,6 +83,7 @@ fun placeDetailSubtitle(place: Place): String =
 fun PlacesScreen(
     repository: MomentoRepository,
     libraryChange: LibraryChange?,
+    active: Boolean,
     openPlace: (Place) -> Unit,
 ) {
     var pagingState by remember(repository) { mutableStateOf(emptyCursorPagingState<Place>()) }
@@ -133,7 +134,7 @@ fun PlacesScreen(
             else -> PlaceTiles(
                 places = pagingState.entries,
                 repository = repository,
-                hasMore = pagingState.hasMore,
+                hasMore = active && pagingState.hasMore,
                 loading = pagingState.loading,
                 contentPadding = contentPadding,
                 loadMore = { scope.launch { loadPlaces(false) } },

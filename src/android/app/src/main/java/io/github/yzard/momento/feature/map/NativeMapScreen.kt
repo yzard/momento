@@ -132,13 +132,12 @@ class MapViewportRequestTracker {
         request.generation == latestGeneration.get()
 }
 
-fun removedMapClusterIds(currentIds: Set<String>, incomingIds: Set<String>): Set<String> =
+fun <T> removedMapMarkerIds(currentIds: Set<T>, incomingIds: Set<T>): Set<T> =
     currentIds - incomingIds
 
 fun mapClusterThumbnailChanged(existing: MapCluster?, incoming: MapCluster): Boolean =
     existing == null ||
-        existing.representativeId != incoming.representativeId ||
-        existing.count != incoming.count
+        existing.representativeId != incoming.representativeId
 
 data class MapPosition(
     val latitude: Double,
@@ -174,6 +173,8 @@ fun representativeMediaIndex(media: List<Media>, representativeId: Long): Int {
 private data class RenderedMapCluster(
     val cluster: MapCluster,
     val marker: Marker,
+    val thumbnail: Bitmap?,
+    val librarySequence: Int?,
 )
 
 private data class OwnedMapView(
@@ -240,7 +241,7 @@ fun NativeMapScreen(
         OwnedMapView(view, listener)
     }
     val mapView = ownedMapView.view
-    val renderedClusters = remember(mapView) { mutableMapOf<String, RenderedMapCluster>() }
+    val renderedClusters = remember(mapView) { mutableMapOf<Long, RenderedMapCluster>() }
 
     LaunchedEffect(mapView) {
         repeat(INITIAL_VIEWPORT_RETRIES) {
@@ -261,16 +262,19 @@ fun NativeMapScreen(
                 val clusters = repository.mapClusters(viewport.bounds, viewport.zoom).clusters
                 if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
 
-                val incomingClusters = clusters.associateBy { cluster -> cluster.id }
+                val incomingClusters = clusters.associateBy { cluster -> cluster.representativeId }
                 val clustersNeedingThumbnails = clusters.filter { cluster ->
-                    mapClusterThumbnailChanged(renderedClusters[cluster.id]?.cluster, cluster)
+                    renderedClusters[cluster.representativeId].let { existing ->
+                        mapClusterThumbnailChanged(existing?.cluster, cluster) ||
+                            existing?.thumbnail == null || existing.librarySequence != libraryChange?.sequence
+                    }
                 }
-                val loadedThumbnails = mutableMapOf<String, Bitmap?>()
+                val loadedThumbnails = mutableMapOf<Long, Bitmap?>()
                 clustersNeedingThumbnails.chunked(THUMBNAIL_LOAD_BATCH_SIZE).forEach { clusterBatch ->
                     val loadedBatch = coroutineScope {
                         clusterBatch.map { cluster ->
                             async {
-                                cluster.id to loadClusterThumbnail(
+                                cluster.representativeId to loadClusterThumbnail(
                                     context,
                                     repository,
                                     imageSource,
@@ -286,23 +290,25 @@ fun NativeMapScreen(
                 // Commit the new viewport only after its marker visuals are ready. A cancelled
                 // zoom request therefore leaves the previous complete marker set on screen.
                 if (!viewportRequestTracker.isCurrent(request)) return@collectLatest
-                removedMapClusterIds(renderedClusters.keys, incomingClusters.keys).forEach { clusterId ->
-                    renderedClusters.remove(clusterId)?.let { renderedCluster ->
+                removedMapMarkerIds(renderedClusters.keys, incomingClusters.keys).forEach { representativeId ->
+                    renderedClusters.remove(representativeId)?.let { renderedCluster ->
                         mapView.overlays.remove(renderedCluster.marker)
                     }
                 }
 
-                incomingClusters.forEach { (clusterId, cluster) ->
-                    val existing = renderedClusters[clusterId]
+                incomingClusters.forEach { (representativeId, cluster) ->
+                    val existing = renderedClusters[representativeId]
                     val marker = existing?.marker ?: Marker(mapView).also { newMarker ->
                         newMarker.setAnchor(CLUSTER_MARKER_ANCHOR_X, CLUSTER_MARKER_ANCHOR_Y)
                         mapView.overlays.add(newMarker)
                     }
-                    val thumbnailChanged = mapClusterThumbnailChanged(existing?.cluster, cluster)
+                    val thumbnail = loadedThumbnails[representativeId] ?: existing?.thumbnail
                     marker.position = GeoPoint(cluster.lat, cluster.lng)
                     marker.title = "${cluster.count} photos"
-                    if (thumbnailChanged) {
-                        marker.icon = clusterMarkerDrawable(context, loadedThumbnails[clusterId], cluster.count)
+                    if (existing == null || thumbnail !== existing.thumbnail) {
+                        marker.icon = clusterMarkerDrawable(context, thumbnail, cluster.count)
+                    } else if (existing.cluster.count != cluster.count) {
+                        (marker.icon as ClusterMarkerDrawable).updateCount(cluster.count)
                     }
                     marker.setOnMarkerClickListener { _, _ ->
                         if (!viewportRequestTracker.isCurrent(request)) return@setOnMarkerClickListener true
@@ -315,8 +321,8 @@ fun NativeMapScreen(
                         )
                         true
                     }
-                    val renderedCluster = RenderedMapCluster(cluster, marker)
-                    renderedClusters[clusterId] = renderedCluster
+                    val renderedCluster = RenderedMapCluster(cluster, marker, thumbnail, libraryChange?.sequence)
+                    renderedClusters[representativeId] = renderedCluster
                 }
                 mapView.invalidate()
                 error = null
@@ -452,9 +458,14 @@ private fun clusterMarkerDrawable(context: Context, thumbnail: Bitmap?, mediaCou
 private class ClusterMarkerDrawable(
     private val density: Float,
     private val thumbnail: Bitmap?,
-    private val mediaCount: Long,
+    private var mediaCount: Long,
 ) : Drawable() {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    fun updateCount(count: Long) {
+        mediaCount = count
+        invalidateSelf()
+    }
 
     override fun draw(canvas: Canvas) {
         val width = CLUSTER_MARKER_WIDTH_DP * density

@@ -95,4 +95,30 @@ pub struct FaceGroupsListResponse {
 pub struct FaceGroupMediaResponse {
     pub group: FaceGroupResponse,
     pub media: Vec<crate::models::MediaResponse>,
+    pub faces: Vec<FaceDetectionResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RejectFacesRequest {
+    pub request_id: String,
+    pub group_ids: Vec<i64>,
+    pub face_group_id: Option<i64>,
+    pub face_ids: Vec<i64>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RejectFacesResponse {
+    pub rejected_count: usize,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetectionResponse {
+    pub face_id: i64,
+    pub media_id: i64,
+    pub input_sequence: i64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }

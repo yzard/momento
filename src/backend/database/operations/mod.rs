@@ -3795,7 +3795,16 @@ pub(crate) fn load_face_group(
         mapped_bytes = add_media_response_bytes(mapped_bytes, &item)?;
         media.push(item);
     }
-    Ok(Some(FaceGroupMediaResponse { group, media }))
+    let faces = crate::processor::face_detection::rejections::visible_faces(
+        connection,
+        request.face_group_id,
+        request.user_id,
+    )?;
+    Ok(Some(FaceGroupMediaResponse {
+        group,
+        media,
+        faces,
+    }))
 }
 
 pub(crate) fn queue_incomplete_metadata(connection: &Connection) -> rusqlite::Result<usize> {

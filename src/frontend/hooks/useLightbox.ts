@@ -6,6 +6,7 @@ export interface LightboxState {
 }
 
 export interface LightboxController {
+  manageHistory: boolean
   state: LightboxState | null
   open: (mediaId: number, mediaIds: readonly number[]) => void
   openAtIndex: (mediaIds: readonly number[], currentIndex: number) => void
@@ -39,5 +40,5 @@ export function useLightbox(): LightboxController {
     })
   }, [])
 
-  return { state, open, openAtIndex, close, setCurrentIndex }
+  return { manageHistory: true, state, open, openAtIndex, close, setCurrentIndex }
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet'
 import type { LatLngTuple } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import ClusterMarker from './ClusterMarker'
+import MapClusterMarkers from './MapClusterMarkers'
 import { useMapClusters, type MapCluster } from '../../hooks/useMapClusters'
 import { normalizeMapBounds, type BoundingBox } from '../../api/map'
 import { Loader2 } from 'lucide-react'
@@ -97,34 +97,6 @@ function MapViewportTracker({
   return null
 }
 
-interface MapClusterMarkersProps {
-  clusters: MapCluster[]
-  onClusterClick: (cluster: MapCluster) => void
-}
-
-function MapClusterMarkers({ clusters, onClusterClick }: MapClusterMarkersProps) {
-  return (
-    <>
-      {clusters.map((cluster) => {
-        const [longitude, latitude] = cluster.geometry.coordinates as [number, number]
-        const { count, representativeId } = cluster.properties
-        const clusterKey = cluster.properties.cellId
-
-        return (
-          <ClusterMarker
-            key={clusterKey}
-            latitude={latitude}
-            longitude={longitude}
-            count={count}
-            representativeId={representativeId}
-            onClick={() => onClusterClick(cluster)}
-          />
-        )
-      })}
-    </>
-  )
-}
-
 export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) {
   const savedViewport = getSavedViewport()
   const initialCenter: LatLngTuple = savedViewport?.center ?? [0, 0]
@@ -136,10 +108,13 @@ export default function MapView({ onPhotoClick, onClusterClick }: MapViewProps) 
     zoom: clusterDataZoom,
   })
 
-  const handleViewportChange = ({ bounds: nextBounds, zoom: nextZoom }: MapViewportUpdate) => {
-    setBounds(nextBounds)
-    setClusterDataZoom(nextZoom)
-  }
+  const handleViewportChange = useCallback(
+    ({ bounds: nextBounds, zoom: nextZoom }: MapViewportUpdate) => {
+      setBounds(nextBounds)
+      setClusterDataZoom(nextZoom)
+    },
+    []
+  )
 
   const handleClusterClick = (cluster: MapCluster) => {
     const { count, representativeId, cellId } = cluster.properties

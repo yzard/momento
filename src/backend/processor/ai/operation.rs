@@ -468,6 +468,8 @@ pub(crate) fn clean_feature_on_connection(
             transaction.execute(queries::faces::CLEAN_RUNS, [])?;
             transaction.execute(queries::faces::CLEAN_MANUAL_STATE, [])?;
             transaction.execute(queries::faces::CLEAN_FACES, [])?;
+            transaction.execute(queries::face_rejections::CLEAN, [])?;
+            transaction.execute(queries::face_rejections::CLEAN_OPERATIONS, [])?;
             transaction.execute(queries::faces::CLEAN_RESULTS, [])?;
             true
         }

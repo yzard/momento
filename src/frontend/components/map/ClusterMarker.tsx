@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useLayoutEffect, useMemo } from 'react'
 import { Marker } from 'react-leaflet'
 import { DivIcon } from 'leaflet'
-import { tinyThumbnailUrlLoader } from '../../utils/assetUrlLoader'
-import { clusterIconSize, createClusterIconElement } from './clusterIcon'
+import { mediaApi } from '../../api/media'
+import { clusterIconSize, createClusterIconElement, updateClusterIconCount } from './clusterIcon'
 
 interface ClusterMarkerProps {
   latitude: number
@@ -19,30 +19,8 @@ export default function ClusterMarker({
   representativeId,
   onClick,
 }: ClusterMarkerProps) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!representativeId) {
-      setThumbnailUrl(null)
-      return
-    }
-
-    let cancelled = false
-    const loadThumbnail = async () => {
-      try {
-        const url = await tinyThumbnailUrlLoader.load(representativeId)
-        if (!cancelled && url) setThumbnailUrl(url)
-      } catch (error) {
-        console.error('Failed to load cluster thumbnail:', error)
-      }
-    }
-    loadThumbnail()
-
-    return () => {
-      cancelled = true
-    }
-  }, [representativeId])
-
+  const thumbnailUrl = representativeId ? mediaApi.getThumbnailURL(representativeId, 'tiny') : null
+  const element = useMemo(() => createClusterIconElement(thumbnailUrl, 1), [thumbnailUrl])
   const icon = useMemo(
     () =>
       new DivIcon({
@@ -50,10 +28,11 @@ export default function ClusterMarker({
         iconSize: [clusterIconSize, clusterIconSize],
         iconAnchor: [clusterIconSize / 2, clusterIconSize / 2],
         popupAnchor: [0, -clusterIconSize / 2],
-        html: createClusterIconElement(thumbnailUrl, count),
+        html: element,
       }),
-    [count, thumbnailUrl]
+    [element]
   )
+  useLayoutEffect(() => updateClusterIconCount(element, count), [element, count])
 
   return (
     <Marker

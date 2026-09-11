@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { mapApi, type BoundingBox } from '../api/map'
 import { queryKeys } from '../lib/queryKeys'
 
@@ -25,6 +25,7 @@ export function useMapClusters({ bounds, zoom }: UseMapClustersProps) {
       return mapApi.getClusters(bounds, zoom)
     },
     enabled: !!bounds,
+    placeholderData: keepPreviousData,
     staleTime: 30_000,
     gcTime: 10 * 60_000,
   })

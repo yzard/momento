@@ -79,6 +79,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.autofill.AutofillType
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -872,24 +873,22 @@ private fun ShellDestination(
         AlbumDetailScreen(repository, route.albumId, closeDetail, libraryChange, openMedia)
         return
     }
-    if (route is MainRoute.PlaceDetail) {
-        PlaceDetailScreen(repository, route.place, closeDetail, libraryChange, openMedia)
-        return
+    val destination = when(route) {
+        is MainRoute.Collection -> route.destination
+        is MainRoute.PlaceDetail -> Destination.PLACES
+        is MainRoute.FaceDetail -> Destination.FACES
+        else -> error("Unexpected collection route")
     }
-    if (route is MainRoute.FaceDetail) {
-        FaceGroupDetailScreen(repository, route.group, closeDetail, libraryChange, openMedia)
-        return
-    }
-    require(route is MainRoute.Collection) { "Viewer routes are rendered by the shell overlay" }
-    if (route.destination.isAdminPage() && user?.role != "admin") return
-    when (route.destination) {
+    if (destination.isAdminPage() && user?.role != "admin") return
+    Box(Modifier.fillMaxSize().then(if (route is MainRoute.Collection) Modifier else Modifier.clearAndSetSemantics {})) {
+    when (destination) {
         Destination.TIMELINE,
         Destination.PHOTOS,
         Destination.VIDEOS,
         Destination.SCREENSHOTS,
         Destination.DOCUMENTS -> TimelineScreen(
             repository = repository,
-            page = timelinePage(route.destination),
+            page = timelinePage(destination),
             period = timelinePeriod,
             search = timelineSearchQuery,
             libraryChange = libraryChange,
@@ -904,8 +903,8 @@ private fun ShellDestination(
         )
         Destination.ALBUMS -> AlbumsScreen(repository, libraryChange, openAlbum)
         Destination.MAP -> NativeMapScreen(repository, libraryChange, openMedia)
-        Destination.PLACES -> PlacesScreen(repository, libraryChange, openPlace)
-        Destination.FACES -> FacesScreen(repository, user?.role == "admin", libraryChange, openFace)
+        Destination.PLACES -> PlacesScreen(repository, libraryChange, route is MainRoute.Collection, openPlace)
+        Destination.FACES -> FacesScreen(repository, user?.role == "admin", libraryChange, route is MainRoute.Collection, openFace)
         Destination.DEDUPLICATE -> DeduplicateScreen(repository, user?.role == "admin", libraryChange, openMedia)
         Destination.TRASH -> TrashScreen(repository)
         Destination.ADMIN_IMPORT -> AdminScreen(repository, settingsStore, AdminSection.IMPORT, user?.id)
@@ -913,6 +912,14 @@ private fun ShellDestination(
         Destination.ADMIN_AI -> AdminScreen(repository, settingsStore, AdminSection.AI, user?.id)
         Destination.ADMIN_USERS -> AdminScreen(repository, settingsStore, AdminSection.USERS, user?.id)
     }
+    }
+    if (route is MainRoute.PlaceDetail) Surface(Modifier.fillMaxSize()) {
+        PlaceDetailScreen(repository, route.place, closeDetail, libraryChange, openMedia)
+    }
+    if (route is MainRoute.FaceDetail) Surface(Modifier.fillMaxSize()) {
+        FaceGroupDetailScreen(repository, route.group, user?.role == "admin", closeDetail, libraryChange, openMedia)
+    }
+
 }
 
 private fun timelinePage(destination: Destination): TimelinePage = when (destination) {

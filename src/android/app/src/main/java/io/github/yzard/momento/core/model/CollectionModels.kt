@@ -11,7 +11,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class FaceGroup(val faceGroupId: Long, val faceCount: Long, val mediaCount: Long)
 @Serializable data class FacesResponse(val groups: List<FaceGroup>, val nextCursor: String?, val hasMore: Boolean)
 @Serializable data class FaceGroupRequest(val faceGroupId: Long)
-@Serializable data class FaceGroupMediaResponse(val group: FaceGroup, val media: List<Media>)
+@Serializable data class FaceGroupMediaResponse(val group: FaceGroup, val media: List<Media>, val faces: List<FaceDetection>)
 @Serializable data class FaceMergeRequest(val faceGroupIds: List<Long>)
 @Serializable data class FaceMergeResponse(val group: FaceGroup)
 
@@ -40,3 +40,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class MapCluster(val id: String, val lat: Double, val lng: Double, val count: Long, val representativeId: Long)
 @Serializable data class MapClustersResponse(val clusters: List<MapCluster>, val totalCount: Long)
 @Serializable data class MapMediaResponse(val items: List<Media>)
+
+@Serializable data class FaceDetection(val faceId: Long, val mediaId: Long, val inputSequence: Long, val x: Double, val y: Double, val width: Double, val height: Double)
+@Serializable data class RejectFacesRequest(val requestId: String, val groupIds: List<Long>, val faceGroupId: Long?, val faceIds: List<Long>)
+@Serializable data class RejectFacesResponse(val rejectedCount: Int)

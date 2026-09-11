@@ -72,6 +72,7 @@ describe('Places page', () => {
   beforeEach(() => {
     observedElements.length = 0
     mocks.list.mockReset()
+    mocks.list.mockResolvedValue({ places: [], nextCursor: null, hasMore: false })
     mocks.get.mockReset()
     mocks.loadThumbnail.mockReset().mockResolvedValue('place-cover')
     mocks.photoGrid.mockReset()

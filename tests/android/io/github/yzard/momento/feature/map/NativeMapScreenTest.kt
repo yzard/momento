@@ -59,7 +59,7 @@ class NativeMapScreenTest {
     @Test fun removesOnlyClustersOutsideTheNewestViewport() {
         assertEquals(
             setOf("old"),
-            removedMapClusterIds(
+            removedMapMarkerIds(
                 currentIds = setOf("old", "stable"),
                 incomingIds = setOf("stable", "new"),
             ),
@@ -70,7 +70,8 @@ class NativeMapScreenTest {
         val cluster = MapCluster("u4pr", 52.0, 5.0, 3, 10)
         assertTrue(mapClusterThumbnailChanged(null, cluster))
         assertFalse(mapClusterThumbnailChanged(cluster, cluster.copy(lat = 52.1)))
-        assertTrue(mapClusterThumbnailChanged(cluster, cluster.copy(count = 4)))
+        assertFalse(mapClusterThumbnailChanged(cluster, cluster.copy(count = 4)))
+        assertFalse(mapClusterThumbnailChanged(cluster, cluster.copy(id = "u4pr0:2", count = 2)))
         assertTrue(mapClusterThumbnailChanged(cluster, cluster.copy(representativeId = 20)))
     }
 

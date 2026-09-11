@@ -77,7 +77,8 @@ fn insert_face(
                 1.0_f64,
                 1.0_f64,
                 embedding,
-                "faces/test.jpg"
+                "faces/test.jpg",
+                Option::<i64>::None
             ],
         )
         .expect("face");
@@ -450,7 +451,8 @@ async fn face_group_representative_recomputes_from_configured_visibility_and_cla
                     visibility_score,
                     feature_clarity_score,
                     &embedding,
-                    "faces/test.jpg"
+                    "faces/test.jpg",
+                    Option::<i64>::None
                 ],
             )
             .expect("face");
@@ -648,7 +650,8 @@ async fn automatic_regrouping_attaches_new_faces_to_any_matching_manual_anchor()
                     1.0,
                     1.0,
                     face_embedding,
-                    "faces/test.jpg"
+                    "faces/test.jpg",
+                    Option::<i64>::None
                 ],
             )
             .expect("face");

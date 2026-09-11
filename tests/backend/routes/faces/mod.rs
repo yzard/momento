@@ -237,3 +237,202 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
         .expect("source group count");
     assert_eq!(source_count, 0);
 }
+
+#[tokio::test]
+async fn rejecting_a_detection_is_admin_only_global_precise_and_survives_redetection() {
+    let (app, pool) = create_test_app();
+    let admin = create_test_user(&pool, "reject-admin", "reject-admin@example.com");
+    let viewer = create_test_user(&pool, "reject-viewer", "reject-viewer@example.com");
+    let media = create_test_media(&pool, "mixed-faces.jpg");
+    grant_media_access(&pool, media, admin);
+    grant_media_access(&pool, media, viewer);
+    let c = pool.get().unwrap();
+    c.execute("UPDATE users SET role='admin' WHERE id=?", [admin])
+        .unwrap();
+    let insert = "INSERT INTO media_faces (media_id,input_sequence,face_index,x,y,width,height,confidence,face_size_score,frontality_score,visibility_score,feature_clarity_score,embedding,crop_path) VALUES (?,0,?, ?,0.1,0.1,0.1,1,1,1,1,1,?, 'faces/test.jpg')";
+    let embedding = vec![0u8; 512 * 4];
+    c.execute(insert, rusqlite::params![media, 0, 0.1, embedding])
+        .unwrap();
+    let false_face = c.last_insert_rowid();
+    c.execute(
+        "UPDATE media_faces SET crop_path='faces/rejected-only.jpg' WHERE id=?",
+        [false_face],
+    )
+    .unwrap();
+    c.execute(insert, rusqlite::params![media, 1, 0.7, embedding])
+        .unwrap();
+    let true_face = c.last_insert_rowid();
+    c.execute(
+        "INSERT INTO face_groups (representative_face_id) VALUES (?)",
+        [false_face],
+    )
+    .unwrap();
+    let group = c.last_insert_rowid();
+    for face in [false_face, true_face] {
+        c.execute(
+            "INSERT INTO face_group_members(face_group_id,face_id,manual_anchor) VALUES (?,?,0)",
+            [group, face],
+        )
+        .unwrap();
+    }
+    drop(c);
+    let server = TestServer::new(app).unwrap();
+    let body = json!({"requestId":uuid::Uuid::new_v4().to_string(),"groupIds":[],"faceGroupId":group,"faceIds":[false_face]});
+    server
+        .post("/api/v1/faces/reject")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(viewer, "user")))
+        .json(&body)
+        .await
+        .assert_status_forbidden();
+    for _ in 0..2 {
+        let response = server
+            .post("/api/v1/faces/reject")
+            .add_header(AUTHORIZATION, format!("Bearer {}", token(admin, "admin")))
+            .json(&body)
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.json::<serde_json::Value>()["rejectedCount"], 1);
+    }
+    let response = server
+        .post("/api/v1/faces/groups/get")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(viewer, "user")))
+        .json(&json!({"faceGroupId":group}))
+        .await;
+    response.assert_status_ok();
+    let data = response.json::<serde_json::Value>();
+    assert_eq!(data["faces"].as_array().unwrap().len(), 1);
+    assert_eq!(data["faces"][0]["faceId"], true_face);
+    let c = pool.get().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT COUNT(*) FROM file_operation_groups WHERE owner_kind='face_rejection'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1,
+        "unreferenced rejected crop has durable cleanup"
+    );
+    assert_eq!(
+        c.execute(insert, rusqlite::params![media, 2, 0.105, embedding])
+            .unwrap(),
+        0,
+        "slightly shifted false detection stays suppressed"
+    );
+    assert_eq!(
+        c.execute(insert, rusqlite::params![media, 3, 0.7, embedding])
+            .unwrap(),
+        1,
+        "another face in the same image remains valid"
+    );
+    assert_eq!(
+        c.query_row("SELECT COUNT(*) FROM media WHERE id=?", [media], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let other_frame = insert
+        .replace("crop_path)", "crop_path,frame_timestamp_ms)")
+        .replace("'faces/test.jpg')", "'faces/test.jpg',1000)");
+    assert_eq!(
+        c.execute(&other_frame, rusqlite::params![media, 4, 0.105, embedding])
+            .unwrap(),
+        1,
+        "same box in a different frame is not excluded"
+    );
+    drop(c);
+    let response = server.post("/api/v1/faces/reject")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(admin, "admin")))
+        .json(&json!({"requestId":uuid::Uuid::new_v4().to_string(),"groupIds":[group],"faceGroupId":null,"faceIds":[]})).await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<serde_json::Value>()["rejectedCount"], 1);
+    // The fixture has no background worker; drain the committed crop cleanup before
+    // requesting the exclusive face-directory cleanup.
+    let (executors, _) = crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    momento_api::io::recovery::recover_generic_file_operations(&executors)
+        .await
+        .unwrap();
+    server
+        .post("/api/v1/ai/face_detection/clean")
+        .add_header(AUTHORIZATION, format!("Bearer {}", token(admin, "admin")))
+        .json(&json!({}))
+        .await
+        .assert_status_ok();
+    let c = pool.get().unwrap();
+    assert_eq!(
+        c.query_row("SELECT COUNT(*) FROM face_rejections", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        c.execute(insert, rusqlite::params![media, 2, 0.105, embedding])
+            .unwrap(),
+        1,
+        "admin clean resets exclusion"
+    );
+}
+
+#[tokio::test]
+async fn rejection_does_not_accept_hidden_faces_or_widen_a_changed_selection() {
+    let (app, pool) = create_test_app();
+    let admin = create_test_user(&pool, "reject-hidden", "reject-hidden@example.com");
+    let visible = create_test_media(&pool, "visible-rejection.jpg");
+    let hidden = create_test_media(&pool, "hidden-rejection.jpg");
+    grant_media_access(&pool, visible, admin);
+    let c = pool.get().unwrap();
+    c.execute("UPDATE users SET role='admin' WHERE id=?", [admin])
+        .unwrap();
+    let mut ids = Vec::new();
+    for media in [visible, hidden] {
+        c.execute("INSERT INTO media_faces (media_id,input_sequence,face_index,x,y,width,height,confidence,face_size_score,frontality_score,visibility_score,feature_clarity_score,embedding,crop_path) VALUES (?,0,0,0.1,0.1,0.1,0.1,1,1,1,1,1,?,'faces/shared-hidden.jpg')", rusqlite::params![media, vec![0u8;2048]]).unwrap();
+        ids.push(c.last_insert_rowid());
+    }
+    c.execute(
+        "INSERT INTO face_groups (representative_face_id) VALUES (?)",
+        [ids[0]],
+    )
+    .unwrap();
+    let group = c.last_insert_rowid();
+    for face in &ids {
+        c.execute(
+            "INSERT INTO face_group_members (face_group_id,face_id,manual_anchor) VALUES (?,?,0)",
+            [group, *face],
+        )
+        .unwrap();
+    }
+    drop(c);
+    let server = TestServer::new(app).unwrap();
+    server.post("/api/v1/faces/reject")
+        .add_header(AUTHORIZATION,format!("Bearer {}",token(admin,"admin")))
+        .json(&json!({"requestId":uuid::Uuid::new_v4().to_string(),"groupIds":[],"faceGroupId":group,"faceIds":ids})).await.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        pool.get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM media_faces WHERE media_id IN (?,?)",
+                [visible, hidden],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2,
+        "invalid mixed selection rolls back entirely"
+    );
+    let response = server.post("/api/v1/faces/reject")
+        .add_header(AUTHORIZATION,format!("Bearer {}",token(admin,"admin")))
+        .json(&json!({"requestId":uuid::Uuid::new_v4().to_string(),"groupIds":[group],"faceGroupId":null,"faceIds":[]})).await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<serde_json::Value>()["rejectedCount"], 1);
+    assert_eq!(
+        pool.get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM media_faces WHERE id=?",
+                [ids[1]],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1,
+        "group operation preserves inaccessible media detections"
+    );
+}

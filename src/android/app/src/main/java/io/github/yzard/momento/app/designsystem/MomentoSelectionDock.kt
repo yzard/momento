@@ -55,7 +55,6 @@ fun MomentoSelectionDock(
     clearSelection: () -> Unit,
     modifier: Modifier,
 ) {
-    val colors = momentoFloatingControlColors()
     MomentoFloatingDock(modifier) {
         Row(
             modifier = Modifier.padding(start = 10.dp),
@@ -65,21 +64,28 @@ fun MomentoSelectionDock(
             Text(momentoSelectionCountLabel(selectedCount))
             Spacer(Modifier.width(2.dp))
             actions.forEach { action ->
-                TextButton(
-                    onClick = action.perform,
-                    enabled = action.enabled,
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = if (action.destructive) Color(0xFFFF453A) else colors.content,
-                    ),
-                ) {
-                    Icon(action.icon, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text(action.label)
-                }
+                MomentoSelectionActionButton(action, Modifier)
             }
             IconButton(onClick = clearSelection) {
                 Icon(Icons.Default.Close, "Clear selection")
             }
         }
+    }
+}
+
+@Composable
+fun MomentoSelectionActionButton(action: MomentoSelectionAction, modifier: Modifier) {
+    val colors = momentoFloatingControlColors()
+    TextButton(
+        onClick = action.perform,
+        enabled = action.enabled,
+        modifier = modifier,
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = if (action.destructive) Color(0xFFFF453A) else colors.content,
+        ),
+    ) {
+        Icon(action.icon, contentDescription = null)
+        Spacer(Modifier.width(6.dp))
+        Text(action.label)
     }
 }

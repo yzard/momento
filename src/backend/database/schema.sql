@@ -459,6 +459,7 @@ CREATE TABLE IF NOT EXISTS media_faces (
     media_id INTEGER NOT NULL,
     input_sequence INTEGER NOT NULL,
     face_index INTEGER NOT NULL,
+    frame_timestamp_ms INTEGER,
     x REAL NOT NULL,
     y REAL NOT NULL,
     width REAL NOT NULL,
@@ -482,6 +483,38 @@ CREATE TABLE IF NOT EXISTS media_face_detection_results (
     completed_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 );
+
+-- Human-reviewed negatives survive detector and grouping rebuilds.
+CREATE TABLE IF NOT EXISTS face_rejections (
+    face_id INTEGER PRIMARY KEY,
+    content_hash TEXT NOT NULL,
+    input_sequence INTEGER NOT NULL,
+    frame_timestamp_ms INTEGER,
+    x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL,
+    crop_path TEXT NOT NULL,
+    rejected_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_face_rejections_input ON face_rejections(content_hash, frame_timestamp_ms);
+CREATE TABLE IF NOT EXISTS face_rejection_operations (
+    request_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    selection TEXT NOT NULL,
+    rejected_count INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS suppress_rejected_face BEFORE INSERT ON media_faces
+WHEN EXISTS (
+    SELECT 1 FROM face_rejections r JOIN media m ON m.id = NEW.media_id
+    WHERE r.content_hash = m.content_hash AND r.frame_timestamp_ms IS NEW.frame_timestamp_ms
+      AND ABS((NEW.x + NEW.width/2) - (r.x + r.width/2)) <= r.width * 0.2
+      AND ABS((NEW.y + NEW.height/2) - (r.y + r.height/2)) <= r.height * 0.2
+      AND MAX(0, MIN(NEW.x+NEW.width,r.x+r.width)-MAX(NEW.x,r.x))
+          * MAX(0, MIN(NEW.y+NEW.height,r.y+r.height)-MAX(NEW.y,r.y))
+          >= 0.7 * (NEW.width*NEW.height + r.width*r.height
+          - MAX(0, MIN(NEW.x+NEW.width,r.x+r.width)-MAX(NEW.x,r.x))
+          * MAX(0, MIN(NEW.y+NEW.height,r.y+r.height)-MAX(NEW.y,r.y)))
+)
+BEGIN SELECT RAISE(IGNORE); END;
 
 CREATE TABLE IF NOT EXISTS face_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

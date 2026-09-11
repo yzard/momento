@@ -28,11 +28,18 @@ export function createClusterIconElement(
   }
   marker.append(bubble)
 
-  if (count > 1) {
-    const badge = document.createElement('span')
-    badge.className = 'map-marker__badge'
-    badge.textContent = String(count)
-    marker.append(badge)
-  }
+  updateClusterIconCount(marker, count)
   return marker
+}
+
+export function updateClusterIconCount(marker: HTMLDivElement, count: number): void {
+  const existing = marker.querySelector('.map-marker__badge')
+  if (count <= 1) {
+    existing?.remove()
+    return
+  }
+  const badge = existing ?? document.createElement('span')
+  badge.className = 'map-marker__badge'
+  badge.textContent = String(count)
+  if (!existing) marker.append(badge)
 }

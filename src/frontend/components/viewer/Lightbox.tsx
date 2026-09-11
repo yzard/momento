@@ -17,6 +17,7 @@ import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
 import { MediaDetails } from './MediaDetails'
 
 interface LightboxProps {
+  manageHistory: boolean
   mediaIds: number[]
   currentIndex: number
   onClose: () => void
@@ -65,28 +66,38 @@ function DownloadOriginal({ media }: { media: Media }) {
   )
 }
 
-function useLightboxHistory(onClose: () => void): () => void {
+function useLightboxHistory(onClose: () => void, manageHistory: boolean): () => void {
   const location = useLocation()
   const hasClosedRef = useRef(false)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
 
   useEffect(() => {
+    if (!manageHistory) return
     hasClosedRef.current = false
-    window.history.pushState({ lightbox: true, path: location.pathname }, '')
+    window.history.pushState(
+      { ...window.history.state, lightbox: true, path: location.pathname },
+      ''
+    )
     const handlePopState = () => {
       if (hasClosedRef.current) return
       hasClosedRef.current = true
-      onClose()
+      closeRef.current()
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [location.pathname, onClose])
+  }, [location.pathname, manageHistory])
 
   return useCallback(() => {
+    if (!manageHistory) {
+      onClose()
+      return
+    }
     if (hasClosedRef.current) return
     hasClosedRef.current = true
     window.history.back()
     onClose()
-  }, [onClose])
+  }, [onClose, manageHistory])
 }
 
 function useLightboxMedia(
@@ -308,8 +319,9 @@ export default function Lightbox({
   currentIndex,
   onClose,
   onIndexChange,
+  manageHistory,
 }: LightboxProps) {
-  const handleClose = useLightboxHistory(onClose)
+  const handleClose = useLightboxHistory(onClose, manageHistory)
   const mediaState = useLightboxMedia(mediaIds, currentIndex, onIndexChange)
   const goToPrevious = useCallback(() => {
     if (mediaState.safeIndex > 0) onIndexChange(mediaState.safeIndex - 1)
@@ -321,7 +333,14 @@ export default function Lightbox({
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') handleClose()
+      if (
+        (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')
+      )
+        return
+      if (event.key === 'Escape' || event.key === 'Backspace') {
+        event.preventDefault()
+        handleClose()
+      }
       if (event.key === 'ArrowLeft') goToPrevious()
       if (event.key === 'ArrowRight') goToNext()
     }
@@ -332,7 +351,10 @@ export default function Lightbox({
   if (!mediaState.currentMedia) {
     if (!mediaState.isLoading && !mediaState.hasError) return null
     return (
-      <div className="absolute inset-0 z-[2000] flex items-center justify-center bg-background/95 backdrop-blur-sm">
+      <div
+        data-media-viewer
+        className="absolute inset-0 z-[2000] flex items-center justify-center bg-background/95 backdrop-blur-sm"
+      >
         {mediaState.hasError ? (
           <p className="text-destructive">Unable to load media.</p>
         ) : (
@@ -343,7 +365,10 @@ export default function Lightbox({
   }
 
   const content = (
-    <div className="absolute inset-0 z-[2000] flex bg-background/95 backdrop-blur-sm">
+    <div
+      data-media-viewer
+      className="absolute inset-0 z-[2000] flex bg-background/95 backdrop-blur-sm"
+    >
       <div className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center p-4">
         <button
           type="button"

@@ -24,6 +24,8 @@ use axum::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/faces/reject", post(reject_faces))
+        .route("/faces/detections/:face_id/thumbnail", get(get_face_crop))
         .route("/faces/groups/list", post(list_groups))
         .route("/faces/groups/get", post(get_group))
         .route("/faces/groups/:face_group_id/thumbnail", get(get_thumbnail))
@@ -144,6 +146,85 @@ async fn merge_groups(
                 face_count: group.face_count,
                 media_count: group.media_count,
             },
+        },
+    )
+    .await
+}
+
+async fn reject_faces(
+    State(state): State<AppState>,
+    RequireAdmin(user): RequireAdmin,
+    CpuJson(request): CpuJson<crate::models::RejectFacesRequest>,
+) -> AppResult<Response> {
+    let groups = request.face_group_id.is_none()
+        && !request.group_ids.is_empty()
+        && request.face_ids.is_empty();
+    let faces = request.face_group_id.is_some()
+        && request.group_ids.is_empty()
+        && !request.face_ids.is_empty();
+    if !(groups || faces)
+        || request.group_ids.len() > 200
+        || request.face_ids.len() > 4096
+        || request
+            .group_ids
+            .iter()
+            .chain(request.face_ids.iter())
+            .any(|id| *id <= 0)
+        || request.face_group_id.is_some_and(|id| id <= 0)
+        || uuid::Uuid::parse_str(&request.request_id).is_err()
+    {
+        return Err(AppError::BadRequest(
+            "Provide a requestId and either groupIds or faceGroupId with faceIds".into(),
+        ));
+    }
+    let count = state
+        .executors
+        .sqlite
+        .reject_faces_request(user.id, request, state.config.current().face_group.clone())
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "The selected faces changed or are no longer accessible; refresh and select again"
+                    .into(),
+            )
+        })?;
+    render_json(
+        &state,
+        crate::models::RejectFacesResponse {
+            rejected_count: count,
+        },
+    )
+    .await
+}
+
+async fn get_face_crop(
+    State(state): State<AppState>,
+    Extension(admission): Extension<HttpRequestAdmission>,
+    current_user: CurrentUser,
+    Path(face_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let crop_path = state
+        .executors
+        .sqlite
+        .load_face_crop_request(face_id, current_user.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Face group thumbnail not found".to_string()))?;
+    let path = NormalizedStoragePath::parse(&crop_path)
+        .map_err(|_| AppError::NotFound("Face group thumbnail not found".to_string()))?;
+    serve_file(
+        &state.executors.file_io,
+        StorageRootId::Previews,
+        path,
+        FileResponseOptions {
+            admission: &admission,
+            content_type: "image/jpeg",
+            headers: &headers,
+            filename: None,
+            allow_ranges: false,
+            content_disposition: ContentDisposition::Inline,
+            cache_control: "private",
+            head_only: false,
         },
     )
     .await

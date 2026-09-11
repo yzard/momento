@@ -409,7 +409,8 @@ async fn recover_file_operations(
             };
             blocking_turn = !blocking_turn;
             if first || last_progress_log.elapsed().as_secs() >= 5 {
-                tracing::info!(group_id = %group.group_id, state = ?group.state, recovered_entries,
+                tracing::info!(group_id = %group.group_id, kind = %group.kind,
+                    state = ?group.state, recovered_entries,
                     queue = ?lane, in_flight = running.len(), concurrency, "Journal recovery progress");
                 first = false;
                 last_progress_log = std::time::Instant::now();
@@ -430,7 +431,8 @@ async fn recover_file_operations(
                     .await
                 {
                     Ok(disposition) => {
-                        tracing::warn!(group_id = %group.group_id, error = %error, ?disposition,
+                        tracing::warn!(group_id = %group.group_id, kind = %group.kind,
+                        error = %error, ?disposition,
                         "Journal operation deferred to FIFO tail")
                     }
                     Err(error) => {
@@ -481,7 +483,7 @@ async fn run_recovery_step(
                 .sqlite
                 .load_file_operation_cancellation_status_durable(group.group_id.clone())
                 .await?;
-            if status.is_some_and(|status| {
+            let stalled = status.as_ref().is_some_and(|status| {
                 status.version == group.version
                     && status.state
                         == match group.state {
@@ -490,7 +492,40 @@ async fn run_recovery_step(
                             JournalRecoveryState::CleanupPending => "cleanup_pending",
                             JournalRecoveryState::RollbackPending => "rollback_pending",
                         }
-            }) {
+            });
+            if stalled
+                && scope == JournalRecoveryScope::All
+                && group.state == JournalRecoveryState::Publishing
+                && group.kind == "video_ai_frame"
+                && group.owner_kind == "generated_artifact"
+            {
+                match cancel_generic_file_operation(
+                    executors,
+                    group.group_id.clone(),
+                    group.version,
+                )
+                .await?
+                {
+                    JournalCancellationOutcome::Requested { state, version }
+                    | JournalCancellationOutcome::AlreadyRequested { state, version }
+                        if state == "cleanup_pending" =>
+                    {
+                        tracing::warn!(
+                            group_id = %group.group_id,
+                            kind = %group.kind,
+                            previous_version = group.version,
+                            version,
+                            "Discarding a stalled generated AI frame after its owner claim expired"
+                        );
+                        return Ok(0);
+                    }
+                    JournalCancellationOutcome::VersionConflict => return Ok(0),
+                    JournalCancellationOutcome::Requested { .. }
+                    | JournalCancellationOutcome::AlreadyRequested { .. }
+                    | JournalCancellationOutcome::NotCancellable => {}
+                }
+            }
+            if stalled {
                 return Err(ExecutorError::new(
                     ExecutorErrorKind::Conflict,
                     "recover_generic_file_operations",

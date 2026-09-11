@@ -32,7 +32,7 @@ internal class MediaCacheInterceptor(
             val response = chain.proceed(request)
             if (request.method != "GET" && request.url.pathSegments.last() !in READ_OPERATIONS && response.isSuccessful) {
                 mapGeneration.incrementAndGet()
-                try { cache.removePrefix(MAP_KEY_PREFIX) } catch (_: IOException) { /* Best-effort invalidation. */ }
+                try { cache.removePrefix(MAP_KEY_PREFIX); cache.removePrefix("faces-") } catch (_: IOException) { /* Best-effort invalidation. */ }
             }
             return response
         }
@@ -41,7 +41,7 @@ internal class MediaCacheInterceptor(
         val body = Buffer().also { request.body?.writeTo(it) }
         val digest = Buffer().writeUtf8(scope).writeUtf8("\n${request.method}\n${request.url}\n")
             .apply { write(body, body.size) }.sha256().hex()
-        val key = if (map) MAP_KEY_PREFIX + digest else digest
+        val key = if (map) MAP_KEY_PREFIX + digest else if (request.url.encodedPath.startsWith("/api/v1/faces/")) "faces-" + digest else digest
         val cached = try { cache.snapshot(key, now()) } catch (_: IOException) { null }
         if (cached != null && (!online() || ((asset || map) && now() - cached.metadata.validatedAt in 0 until (if (map) MAP_FRESH_MILLIS else FRESH_MILLIS)))) {
             return cached.response(request)
@@ -62,7 +62,7 @@ internal class MediaCacheInterceptor(
             cached?.close()
             throw error
         }
-        if (namespace() != scope || (map && mapGeneration.get() != generation)) { cached?.close(); return response }
+        if (namespace() != scope || ((map || request.url.encodedPath.startsWith("/api/v1/faces/")) && mapGeneration.get() != generation)) { cached?.close(); return response }
         if (response.code == 304 && cached != null) {
             response.close()
             try { cache.revalidated(cached, now()) } catch (_: IOException) { /* Keep the usable snapshot. */ }
@@ -88,7 +88,7 @@ internal class MediaCacheInterceptor(
             override fun read(sink: Buffer, byteCount: Long): Long {
                 val read = try { super.read(sink, byteCount) } catch (error: IOException) { abortCache(); throw error }
                 try {
-                    if (namespace() != scope || (map && mapGeneration.get() != generation)) editor.abort()
+                    if (namespace() != scope || ((map || request.url.encodedPath.startsWith("/api/v1/faces/")) && mapGeneration.get() != generation)) editor.abort()
                     else if (read == -1L) editor.complete()
                     else editor.append(sink, sink.size - read, read)
                 } catch (_: IOException) { abortCache() }
@@ -123,7 +123,7 @@ internal class MediaCacheInterceptor(
         private val READ_OPERATIONS = setOf("get", "list", "status", "markers", "authenticate", "refresh")
         private const val MAP_KEY_PREFIX = "map-"
         const val FRESH_MILLIS = 5L * 60 * 1000
-        private val MEDIA_PATH = Regex("/api/v1/(media/[^/]+/(thumbnail(/tiny)?|preview)|trash/[^/]+/thumbnail|faces/groups/[^/]+/thumbnail|places/[^/]+/thumbnail)")
+        private val MEDIA_PATH = Regex("/api/v1/(media/[^/]+/(thumbnail(/tiny)?|preview)|trash/[^/]+/thumbnail|faces/(groups|detections)/[^/]+/thumbnail|places/[^/]+/thumbnail)")
         fun isCachedMediaRequest(request: Request): Boolean = request.method == "GET" && MEDIA_PATH.matches(request.url.encodedPath)
         val OFFLINE_READ_PATHS = setOf(
             "/api/v1/user/get", "/api/v1/timeline/list", "/api/v1/album/list", "/api/v1/album/get",

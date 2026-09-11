@@ -89,4 +89,25 @@ describe('useMapClusters', () => {
     await waitFor(() => expect(result.current.totalCount).toBe(2))
     expect(getClusters).toHaveBeenCalledTimes(4)
   })
+  it('keeps markers visible while a new zoom loads and accepts an empty result', async () => {
+    let finish!: (value: { clusters: (typeof first)[]; totalCount: number }) => void
+    getClusters.mockResolvedValueOnce({ clusters: [first], totalCount: 8 }).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const { result, rerender } = renderHook(
+      ({ zoom }: { zoom: number }) => useMapClusters({ bounds, zoom }),
+      { wrapper, initialProps: { zoom: 8 } }
+    )
+    await waitFor(() => expect(result.current.clusters).toHaveLength(1))
+    const visible = result.current.clusters[0]
+    rerender({ zoom: 9 })
+    await waitFor(() => expect(getClusters).toHaveBeenCalledTimes(2))
+    expect(result.current.clusters[0]).toEqual(visible)
+    expect(result.current.isLoading).toBe(false)
+    finish({ clusters: [], totalCount: 0 })
+    await waitFor(() => expect(result.current.clusters).toHaveLength(0))
+  })
 })

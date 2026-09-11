@@ -8,6 +8,8 @@ import retrofit2.http.Path
 import retrofit2.http.POST
 
 interface LibraryApi {
+    @POST("api/v1/faces/reject") suspend fun rejectFaces(@Body request: RejectFacesRequest): RejectFacesResponse
+    @GET("api/v1/faces/detections/{faceId}/thumbnail") suspend fun faceCrop(@Path("faceId") faceId: Long): ResponseBody
     @POST("api/v1/timeline/list") suspend fun timeline(@Body request: TimelineRequest): TimelineResponse
     @POST("api/v1/album/list") suspend fun albums(): AlbumsResponse
     @POST("api/v1/album/get") suspend fun album(@Body request: AlbumIdRequest): AlbumDetail

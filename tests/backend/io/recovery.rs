@@ -817,6 +817,42 @@ async fn interrupted_video_frame_cleanup_preserves_current_and_snapshotted_input
 }
 
 #[tokio::test]
+async fn background_recovery_discards_a_video_frame_after_its_owner_claim_expires() {
+    let pool = crate::test_utils::create_test_db();
+    let (executors, directory) =
+        crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+    let connection = pool.get().unwrap();
+    connection.execute("INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, entry_count, version) VALUES ('stale-frame', 'video_ai_frame', 'generated_artifact', 'stale-frame', '00000000-0000-0000-0000-000000000091', 'publishing', 1, 2)", []).unwrap();
+    connection.execute("INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path) VALUES ('stale-frame', 0, 'publish', 'previews', 'partial-frame', 'frame.png')", []).unwrap();
+    drop(connection);
+    std::fs::write(directory.join("previews/partial-frame"), b"partial").unwrap();
+    std::fs::write(directory.join("previews/frame.png"), b"unreferenced").unwrap();
+
+    assert_eq!(
+        recover_generic_file_operations(&executors).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        recover_generic_file_operations(&executors).await.unwrap(),
+        0
+    );
+    assert!(!directory.join("previews/partial-frame").exists());
+    assert!(!directory.join("previews/frame.png").exists());
+    let (state, outcome, version): (String, String, i64) = pool
+        .get()
+        .unwrap()
+        .query_row(
+            "SELECT state, completion_outcome, version FROM file_operation_groups WHERE id = 'stale-frame'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "cleaned");
+    assert_eq!(outcome, "discarded");
+    assert_eq!(version, 5);
+}
+
+#[tokio::test]
 async fn unknown_stale_owner_does_not_spin_or_delete_originals() {
     let pool = crate::test_utils::create_test_db();
     let (executors, directory) =

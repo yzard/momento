@@ -249,9 +249,18 @@ pub(crate) enum SqliteOperation {
     DeleteExpiredTrashPage(DeleteExpiredTrashPage),
     LoadFaceGroupsPage(FaceGroupsPageQuery),
     LoadFaceGroup(FaceGroupQuery),
+    LoadFaceCrop {
+        face_id: i64,
+        user_id: i64,
+    },
     LoadVisibleFaceRepresentative {
         face_group_id: i64,
         user_id: i64,
+        config: FaceGroupConfig,
+    },
+    RejectFaces {
+        user_id: i64,
+        request: crate::models::RejectFacesRequest,
         config: FaceGroupConfig,
     },
     MergeFaceGroups {
@@ -563,8 +572,10 @@ impl SqliteOperation {
             Self::DeleteExpiredTrashPage(_) => "delete_expired_trash_page",
             Self::LoadFaceGroupsPage(_) => "load_face_groups_page",
             Self::LoadFaceGroup(_) => "load_face_group",
+            Self::LoadFaceCrop { .. } => "load_face_crop",
             Self::LoadVisibleFaceRepresentative { .. } => "load_visible_face_representative",
             Self::MergeFaceGroups { .. } => "merge_face_groups",
+            Self::RejectFaces { .. } => "reject_faces",
             Self::LoadAiStatus { .. } => "load_ai_status",
             Self::StartAiFeature { .. } => "start_ai_feature",
             Self::CancelAiFeature { .. } => "cancel_ai_feature",
@@ -711,6 +722,7 @@ impl SqliteOperation {
             Self::LoadTrash { .. }
             | Self::LoadFaceGroupsPage(_)
             | Self::LoadFaceGroup(_)
+            | Self::LoadFaceCrop { .. }
             | Self::LoadVisibleFaceRepresentative { .. }
             | Self::LoadAiStatus { .. }
             | Self::LoadFaceRepresentativeGroupPage(_)
@@ -781,6 +793,7 @@ impl SqliteOperation {
             | Self::LoadTrash { .. }
             | Self::LoadFaceGroupsPage(_)
             | Self::LoadFaceGroup(_)
+            | Self::LoadFaceCrop { .. }
             | Self::LoadVisibleFaceRepresentative { .. }
             | Self::LoadAiStatus { .. }
             | Self::LoadFaceRepresentativeGroupPage(_)
@@ -961,6 +974,15 @@ impl SqliteOperation {
                     None => bounded_api_write_spec(),
                 }
             }
+            Self::RejectFaces { .. } => SqliteOperationSpec::fresh_write(
+                OperationSpec {
+                    domain: ExecutorDomain::Sqlite,
+                    maximum_input_bytes: 256 * 1024,
+                    maximum_output_bytes: 1024 * 1024,
+                    maximum_temporary_bytes: 16 * 1024 * 1024,
+                },
+                32 * 1024 * 1024,
+            ),
             Self::RestoreTrash(_)
             | Self::DeleteTrashMedia(_)
             | Self::DeleteTrashPage(_)
@@ -1114,6 +1136,7 @@ pub(crate) enum SqliteOutput {
     FaceGroup(Option<FaceGroupMediaResponse>),
     VisibleFaceRepresentative(Option<String>),
     FaceGroupsMerged(MergeFaceGroupsOutcome),
+    FacesRejected(Option<usize>),
     AiStatus(Box<AiStatusResponse>),
     AiFeatureStarted(usize),
     AiFeatureCancelled(AiFeatureActionResult),
@@ -1279,6 +1302,7 @@ impl SqliteOutput {
             Self::FaceGroup(_) => "face_group",
             Self::VisibleFaceRepresentative(_) => "visible_face_representative",
             Self::FaceGroupsMerged(_) => "face_groups_merged",
+            Self::FacesRejected(_) => "faces_rejected",
             Self::AiStatus(_) => "ai_status",
             Self::AiFeatureStarted(_) => "ai_feature_started",
             Self::AiFeatureCancelled(_) => "ai_feature_cancelled",
@@ -2557,6 +2581,22 @@ impl SqliteExecutorHandle {
         }
     }
 
+    pub async fn load_face_crop_request(
+        &self,
+        face_id: i64,
+        user_id: i64,
+    ) -> Result<Option<String>, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::LoadFaceCrop { face_id, user_id },
+                SubmissionMode::Request,
+            )
+            .await?
+        {
+            SqliteOutput::VisibleFaceRepresentative(path) => Ok(path),
+            output => Err(output.mismatch("load_face_crop")),
+        }
+    }
     pub async fn load_face_group_request(
         &self,
         request: FaceGroupQuery,
@@ -2592,6 +2632,38 @@ impl SqliteExecutorHandle {
         {
             SqliteOutput::VisibleFaceRepresentative(path) => Ok(path),
             output => Err(output.mismatch("load_visible_face_representative")),
+        }
+    }
+
+    pub async fn reject_faces_request(
+        &self,
+        user_id: i64,
+        request: crate::models::RejectFacesRequest,
+        config: FaceGroupConfig,
+    ) -> Result<Option<usize>, ExecutorError> {
+        if request.group_ids.len() > 200
+            || request.face_ids.len() > 4096
+            || request.request_id.len() > 36
+        {
+            return Err(ExecutorError::new(
+                ExecutorErrorKind::InvalidInput,
+                "reject_faces",
+                "Face selection exceeds its limit",
+            ));
+        }
+        match self
+            .submit(
+                SqliteOperation::RejectFaces {
+                    user_id,
+                    request,
+                    config,
+                },
+                SubmissionMode::Request,
+            )
+            .await?
+        {
+            SqliteOutput::FacesRejected(value) => Ok(value),
+            output => Err(output.mismatch("reject_faces")),
         }
     }
 
@@ -6197,6 +6269,24 @@ fn execute_with_connection(
         )
         .map(SqliteOutput::VisibleFaceRepresentative)
         .map_err(|error| map_sqlite_error(operation_name, error)),
+        SqliteOperation::RejectFaces {
+            user_id,
+            request,
+            config,
+        } => crate::processor::face_detection::rejections::reject(
+            connection, user_id, request, &config,
+        )
+        .map(SqliteOutput::FacesRejected)
+        .map_err(|error| map_sqlite_error(operation_name, error)),
+        SqliteOperation::LoadFaceCrop { face_id, user_id } => connection
+            .query_row(
+                crate::database::queries::face_rejections::VISIBLE_CROP,
+                rusqlite::params![face_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(SqliteOutput::VisibleFaceRepresentative)
+            .map_err(|error| map_sqlite_error(operation_name, error)),
         SqliteOperation::MergeFaceGroups { group_ids, config } => {
             crate::processor::face_detection::merge_groups(connection, group_ids, &config)
                 .map(SqliteOutput::FaceGroupsMerged)

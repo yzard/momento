@@ -491,7 +491,8 @@ fn face_schema_stores_independent_bounded_quality_scores() {
                     invalid_scores.3,
                     invalid_scores.4,
                     [0_u8; 4],
-                    "faces/invalid.jpg"
+                    "faces/invalid.jpg",
+                    Option::<i64>::None
                 ],
             )
             .is_err());
