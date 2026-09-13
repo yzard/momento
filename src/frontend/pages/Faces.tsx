@@ -51,6 +51,7 @@ export default function Faces() {
       {faceGroupId && (
         <CollectionOverlay close={close}>
           <FaceGroupDetail
+            key={faceGroupId}
             faceGroupId={Number(faceGroupId)}
             close={close}
             refreshThumbnails={refreshThumbnails}
@@ -497,6 +498,7 @@ function FaceGroupDetail({
 }) {
   const { user } = useAuth()
   const queryClient = useQueryClient()
+  const [selecting, setSelecting] = useState(false)
   const [selectedMedia, setSelectedMedia] = useState<Set<number>>(new Set())
   const [selectedFaces, setSelectedFaces] = useState<Set<number>>(new Set())
   const rejectionRequest = useMemo(
@@ -516,6 +518,7 @@ function FaceGroupDetail({
   const rejection = useMutation({
     mutationFn: facesApi.reject,
     onSuccess: async () => {
+      setSelecting(false)
       setSelectedMedia(new Set())
       setSelectedFaces(new Set())
       await queryClient.invalidateQueries({ queryKey: queryKeys.faces.all })
@@ -586,7 +589,24 @@ function FaceGroupDetail({
             <PageHeader
               title={`Face Group #${faceGroupId}`}
               description={`${groupQuery.data.group.mediaCount} media`}
-              actions={null}
+              actions={
+                user?.role === 'admin' && groupQuery.data.media.length > 0 ? (
+                  <button
+                    type="button"
+                    aria-pressed={selecting}
+                    disabled={rejection.isPending}
+                    onClick={() => {
+                      setSelecting((current) => !current)
+                      setSelectedMedia(new Set())
+                      setSelectedFaces(new Set())
+                      rejection.reset()
+                    }}
+                    className="min-h-11 rounded-full border border-border px-5 text-sm font-semibold transition-colors hover:bg-muted disabled:opacity-50"
+                  >
+                    {selecting ? 'Cancel selection' : 'Select'}
+                  </button>
+                ) : null
+              }
             />
             {groupQuery.data.media.length > 0 ? (
               <>
@@ -594,12 +614,12 @@ function FaceGroupDetail({
                   media={groupQuery.data.media}
                   onPhotoClick={openMedia}
                   selection={
-                    user?.role === 'admin'
+                    user?.role === 'admin' && selecting
                       ? { selectedMediaIds: selectedMedia, toggleSelection: toggleMedia }
                       : null
                   }
                 />
-                {user?.role === 'admin' && selectedMedia.size > 0 && (
+                {user?.role === 'admin' && selecting && selectedMedia.size > 0 && (
                   <div className="sticky bottom-0 z-30 rounded-xl border bg-background p-4">
                     <p>
                       Select the exact faces to exclude. Other faces in the same media will be kept.

@@ -48,7 +48,7 @@ COPY src/backend_llm ./src/backend_llm
 COPY src/backend/version.txt ./src/backend/version.txt
 COPY src/common ./src/common
 
-RUN CARGO_TARGET_DIR=/app/build/target cargo build --release --locked --manifest-path /app/src/backend_llm/Cargo.toml
+RUN CARGO_TARGET_DIR=/app/build/backend_llm/target cargo build --release --locked --manifest-path /app/src/backend_llm/Cargo.toml
 
 FROM ${UV_IMAGE} AS uv
 
@@ -407,7 +407,7 @@ RUN set -eux; \
 
 WORKDIR /app
 
-COPY --from=rust-builder /app/build/target/release/llm-service /app/llm-service
+COPY --from=rust-builder /app/build/backend_llm/target/release/llm-service /app/llm-service
 COPY src/backend_llm/*.py /app/runtimes/
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 COPY docker/entrypoint_common.sh /entrypoint_common.sh

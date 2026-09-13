@@ -22,7 +22,8 @@ target/
 /src/android/**/password.txt
 
 # Rust
-.cargo/
+.cargo/*
+!.cargo/config.toml
 *.rs.bk
 
 # Python

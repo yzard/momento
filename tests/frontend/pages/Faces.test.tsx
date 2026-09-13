@@ -37,7 +37,12 @@ vi.mock('../../../src/frontend/components/timeline/PhotoGrid', () => ({
     selection: { toggleSelection: (id: number) => void } | null
   }) => (
     <>
-      <button type="button" onClick={() => onPhotoClick(media[1])}>
+      <button
+        type="button"
+        onClick={() =>
+          selection ? selection.toggleSelection(media[1].id) : onPhotoClick(media[1])
+        }
+      >
         Open second media
       </button>
       {selection &&
@@ -300,6 +305,34 @@ describe('Faces page', () => {
       )
     )
   })
+  it('defaults admins to browsing and clears selections when cancelling selection mode', async () => {
+    mocks.role = 'admin'
+    mocks.getGroup.mockResolvedValue({
+      group: { faceGroupId: 5, faceCount: 2, mediaCount: 2 },
+      media: [{ id: 10 }, { id: 11 }],
+      faces: [
+        { faceId: 100, mediaId: 10 },
+        { faceId: 101, mediaId: 11 },
+      ],
+    })
+    renderFaces('/faces/5')
+    await screen.findByRole('heading', { name: 'Face Group #5' })
+    expect(screen.queryByRole('button', { name: 'Select media 10' })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Select', exact: true }))
+    await userEvent.click(screen.getByRole('button', { name: 'Open second media' }))
+    expect(screen.getByRole('button', { name: 'Not a face (1)' })).toBeTruthy()
+    expect(mocks.lightbox).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel selection' }))
+    expect(screen.queryByRole('button', { name: /Not a face/ })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Select', exact: true }))
+    expect(screen.queryByRole('button', { name: /Not a face/ })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel selection' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Open second media' }))
+    expect(mocks.lightbox).toHaveBeenCalledWith(
+      expect.objectContaining({ mediaIds: [10, 11], currentIndex: 1 })
+    )
+  })
+
   it('requires explicit choices when a selected media has multiple faces in the group', async () => {
     mocks.role = 'admin'
     vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -313,6 +346,7 @@ describe('Faces page', () => {
     })
     renderFaces('/faces/5')
     await screen.findByRole('heading', { name: 'Face Group #5' })
+    await userEvent.click(screen.getByRole('button', { name: 'Select', exact: true }))
     await userEvent.click(screen.getByRole('button', { name: 'Select media 10' }))
     expect(screen.getByRole('button', { name: 'Not a face (0)' }).hasAttribute('disabled')).toBe(
       true
