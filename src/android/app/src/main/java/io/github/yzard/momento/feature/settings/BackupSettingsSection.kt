@@ -1,5 +1,13 @@
 package io.github.yzard.momento.feature.settings
 
+import android.content.Intent
+import android.content.ActivityNotFoundException
+import android.net.Uri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import io.github.yzard.momento.feature.backup.BackupMediaAccess
+import io.github.yzard.momento.feature.backup.BackupLocationMetadataAccess
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -34,6 +42,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.work.await
+import io.github.yzard.momento.feature.backup.IMMEDIATE_BACKUP_WORK_NAME
+import io.github.yzard.momento.feature.backup.BACKUP_PHASE_KEY
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import io.github.yzard.momento.core.data.Settings
@@ -46,8 +57,6 @@ import io.github.yzard.momento.feature.backup.BackupHistoryClearResult
 import io.github.yzard.momento.feature.backup.BackupHistoryRepairResult
 import io.github.yzard.momento.feature.backup.PERIODIC_BACKUP_WORK_NAME
 import io.github.yzard.momento.feature.backup.backupCanReadOriginalMedia
-import io.github.yzard.momento.feature.backup.backupLocationMetadataAccessLabel
-import io.github.yzard.momento.feature.backup.backupMediaAccessLabel
 import io.github.yzard.momento.feature.backup.backupPermissions
 import io.github.yzard.momento.feature.backup.clearBackupHistory
 import io.github.yzard.momento.feature.backup.currentBackupLocationMetadataAccess
@@ -72,11 +81,43 @@ fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): Stri
         .filter { it.state == BackupState.TERMINAL_FAILED || it.state == BackupState.CANCELLED }
         .sumOf { it.count }
     val cancelling = counts.filter { it.state == BackupState.CANCELLING }.sumOf { it.count }
+    if (total == 0L) return "No media backed up yet"
     if (cancelling > 0) return "$uploaded/$total media uploaded, $cancelling cancelling..."
     if (failed > 0) return "$uploaded/$total media uploaded, $failed failed."
     if (uploaded == total) return "$uploaded/$total media uploaded, all set."
     if (!networkAllowed) return "$uploaded/$total media uploaded, pausing"
     return "$uploaded/$total media uploaded, uploading..."
+}
+
+internal fun backupActivitySummary(
+    starting: Boolean,
+    workState: WorkInfo.State?,
+    phase: String?,
+    networkAllowed: Boolean,
+    counts: List<BackupQueueCount>,
+): String = when {
+    starting -> "Starting backup…"
+    workState == WorkInfo.State.ENQUEUED || workState == WorkInfo.State.BLOCKED ->
+        if (networkAllowed) "Backup queued — waiting to start or retry" else "Backup waiting for an allowed network"
+    workState == WorkInfo.State.RUNNING && phase == "scanning" -> "Scanning photos and videos…"
+    workState == WorkInfo.State.RUNNING && phase != "uploading" -> "Preparing backup…"
+    workState == WorkInfo.State.FAILED -> "Backup could not finish. Copy logs for details."
+    workState == WorkInfo.State.CANCELLED -> "Backup cancelled"
+    workState == WorkInfo.State.SUCCEEDED && counts.isEmpty() -> "Scan complete — no media to back up"
+    else -> backupSummary(counts, networkAllowed)
+}
+
+internal fun backupPermissionSummary(
+    media: BackupMediaAccess,
+    location: BackupLocationMetadataAccess,
+): String {
+    val photos = when (media) {
+        BackupMediaAccess.FULL -> "Photos and videos: granted"
+        BackupMediaAccess.PARTIAL -> "Photos and videos: partially granted"
+        BackupMediaAccess.DENIED -> "Photos and videos: not granted"
+    }
+    val metadata = if (location == BackupLocationMetadataAccess.PRESERVED) "granted" else "not granted"
+    return "$photos · Photo location: $metadata"
 }
 
 fun backupIntegritySummary(summary: BackupIntegritySummary): String = when {
@@ -135,6 +176,11 @@ internal fun BackupSettingsSection(
         database.backupAssetDao().observeIntegritySummary()
     }.collectAsState(initial = BackupIntegritySummary(0, 0, 0, 0))
     val workManager = remember(context) { WorkManager.getInstance(context.applicationContext) }
+    val immediateWorkInfos by remember(workManager) {
+        workManager.getWorkInfosForUniqueWorkFlow(IMMEDIATE_BACKUP_WORK_NAME)
+    }.collectAsState(initial = emptyList())
+    var startingBackup by remember { mutableStateOf(false) }
+    var startError by remember { mutableStateOf<String?>(null) }
     val periodicWorkInfos by remember(workManager) {
         workManager.getWorkInfosForUniqueWorkFlow(PERIODIC_BACKUP_WORK_NAME)
     }.collectAsState(initial = emptyList())
@@ -154,6 +200,18 @@ internal fun BackupSettingsSection(
     var historyStatus by remember { mutableStateOf<String?>(null) }
     var mediaAccess by remember { mutableStateOf(currentBackupMediaAccess(context)) }
     var locationAccess by remember { mutableStateOf(currentBackupLocationMetadataAccess(context)) }
+    var permissionSettingsError by remember { mutableStateOf<String?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                mediaAccess = currentBackupMediaAccess(context)
+                locationAccess = currentBackupLocationMetadataAccess(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val scope = rememberCoroutineScope()
     val hasRequiredAccess = backupCanReadOriginalMedia(mediaAccess, locationAccess)
     val activePeriodicWork = periodicWorkInfos.firstOrNull { !it.state.isFinished }
@@ -162,26 +220,44 @@ internal fun BackupSettingsSection(
         null -> BackupScheduleStatus.NOT_SCHEDULED
         else -> BackupScheduleStatus.WAITING
     }
+    val immediateWork = immediateWorkInfos.firstOrNull { !it.state.isFinished } ?: immediateWorkInfos.firstOrNull()
+    val visibleWork = activePeriodicWork?.takeIf { it.state == WorkInfo.State.RUNNING } ?: immediateWork
+    val backupRunning = startingBackup || visibleWork?.state == WorkInfo.State.RUNNING
+    val historyScheduleStatus = if (backupRunning) BackupScheduleStatus.RUNNING else scheduleStatus
     val nextScheduledAt = activePeriodicWork?.nextScheduleTimeMillis
         ?.takeIf { it > 0 && it < Long.MAX_VALUE }
         ?.let { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it)) }
     val canCancel = backupHasActiveRecords(allQueueCounts)
     val recordCount = allQueueCounts.sumOf { it.count }
-    val canClear = backupHistoryCanBeCleared(allQueueCounts, scheduleStatus)
+    val canClear = backupHistoryCanBeCleared(allQueueCounts, historyScheduleStatus)
     val canRepair = backupIntegrity.unverifiedCompletedRecords > 0 &&
         !backupHasActiveRecords(allQueueCounts) &&
-        scheduleStatus != BackupScheduleStatus.RUNNING
+        historyScheduleStatus != BackupScheduleStatus.RUNNING
     val historyDescription = historyStatus ?: when {
         recordCount == 0L -> "No local backup history"
         canClear -> "$recordCount local records. Clear them to back up the selected range again."
         else -> "$recordCount local records. Finish or cancel the current backup before clearing."
     }
+    fun startBackup() {
+        startingBackup = true
+        startError = null
+        scope.launch {
+            try {
+                schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
+                scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled).await()
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                startError = "Could not start backup. Try again."
+            } finally {
+                startingBackup = false
+            }
+        }
+    }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         mediaAccess = currentBackupMediaAccess(context)
         locationAccess = currentBackupLocationMetadataAccess(context)
         if (backupCanReadOriginalMedia(mediaAccess, locationAccess)) {
-            schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
-            scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
+            startBackup()
         }
     }
 
@@ -202,6 +278,28 @@ internal fun BackupSettingsSection(
                 leadingContent = { Icon(Icons.Default.Backup, null) },
             )
         } else {
+            ListItem(
+                headlineContent = { Text("Backup permissions") },
+                supportingContent = {
+                    Column {
+                        Text(backupPermissionSummary(mediaAccess, locationAccess))
+                        permissionSettingsError?.let { Text(it) }
+                    }
+                },
+                trailingContent = {
+                    TextButton(onClick = {
+                        permissionSettingsError = null
+                        try {
+                            context.startActivity(Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", context.packageName, null),
+                            ))
+                        } catch (_: ActivityNotFoundException) {
+                            permissionSettingsError = "Open system Settings → Apps → Momento → Permissions."
+                        }
+                    }) { Text("Settings") }
+                },
+            )
             SettingsSwitch("Camera folder only", settings.cameraOnly) { enabled ->
                 scope.launch {
                     settingsStore.setCameraOnly(enabled)
@@ -218,9 +316,10 @@ internal fun BackupSettingsSection(
                 headlineContent = { Text("Back up this device") },
                 supportingContent = {
                     Column {
-                        Text(backupMediaAccessLabel(mediaAccess))
-                        Text(backupLocationMetadataAccessLabel(locationAccess))
-                        Text(backupSummary(queueCounts, networkAllowed))
+                        Text(startError ?: backupActivitySummary(
+                            startingBackup, visibleWork?.state,
+                            visibleWork?.progress?.getString(BACKUP_PHASE_KEY), networkAllowed, queueCounts,
+                        ))
                         Text(backupScheduleSummary(scheduleStatus, nextScheduledAt))
                         latestBackupError?.let { Text("Recent issue: ${conciseBackupIssue(it)}") }
                         Text("Metadata and AI processing run separately on the server schedule.")
@@ -243,18 +342,17 @@ internal fun BackupSettingsSection(
                             ) { Text("Cancel") }
                         }
                         TextButton(
-                            enabled = !clearBusy,
+                            enabled = !clearBusy && !backupRunning,
                             onClick = {
                                 mediaAccess = currentBackupMediaAccess(context)
                                 locationAccess = currentBackupLocationMetadataAccess(context)
                                 if (!backupCanReadOriginalMedia(mediaAccess, locationAccess)) {
                                     permissionRequest.launch(backupPermissions(Build.VERSION.SDK_INT))
                                 } else {
-                                    schedulePeriodicBackup(context.applicationContext, settings.mobileDataEnabled)
-                                    scheduleImmediateBackup(context.applicationContext, settings.mobileDataEnabled)
+                                    startBackup()
                                 }
                             },
-                        ) { Text("Back up now") }
+                        ) { Text(if (startingBackup) "Starting…" else if (backupRunning) "Backing up…" else "Back up now") }
                     }
                 },
                 leadingContent = { Icon(Icons.Default.Backup, null) },

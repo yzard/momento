@@ -117,9 +117,11 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 return Result.retry()
             }
 
+            setProgress(androidx.work.workDataOf(BACKUP_PHASE_KEY to "preparing"))
             setForeground(progress("Preparing backup"))
             val deviceId = settingsStore.deviceId()
             repository.registerBackupDevice(deviceId, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+            setProgress(androidx.work.workDataOf(BACKUP_PHASE_KEY to "scanning"))
             MediaStoreScanner(
                 applicationContext,
                 assets,
@@ -131,6 +133,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 return Result.success()
             }
             val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
+            setProgress(androidx.work.workDataOf(BACKUP_PHASE_KEY to "uploading"))
             var waitingForServer = false
             for (asset in assets.pending(settings.cameraOnly)) {
                 val backupProgress = transfer(
@@ -377,3 +380,5 @@ internal const val BACKUP_CHANNEL = "backup"
 internal const val BACKUP_CANCELLATION_WORK = "momento_backup_cancellation"
 internal const val LOSSLESS_BACKUP_PROTOCOL_VERSION = 2
 private const val BACKUP_SNAPSHOT_DIRECTORY = "backup-snapshots"
+
+internal const val BACKUP_PHASE_KEY = "backup_phase"

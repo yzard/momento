@@ -25,9 +25,9 @@ private fun ensureBackupNotificationChannel(context: Context) {
     )
 }
 
-fun scheduleImmediateBackup(context: Context, allowMobileData: Boolean) {
+fun scheduleImmediateBackup(context: Context, allowMobileData: Boolean): androidx.work.Operation {
     ensureBackupNotificationChannel(context)
-    WorkManager.getInstance(context).enqueueUniqueWork(
+    return WorkManager.getInstance(context).enqueueUniqueWork(
         IMMEDIATE_BACKUP_WORK_NAME,
         ExistingWorkPolicy.KEEP,
         OneTimeWorkRequestBuilder<BackupWorker>()

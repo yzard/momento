@@ -9,6 +9,38 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SettingsScreenTest {
+    @Test fun permissionRowDistinguishesFullPartialAndMissingAccess() {
+        assertEquals("Photos and videos: granted · Photo location: granted", backupPermissionSummary(
+            io.github.yzard.momento.feature.backup.BackupMediaAccess.FULL,
+            io.github.yzard.momento.feature.backup.BackupLocationMetadataAccess.PRESERVED,
+        ))
+        assertEquals("Photos and videos: partially granted · Photo location: granted", backupPermissionSummary(
+            io.github.yzard.momento.feature.backup.BackupMediaAccess.PARTIAL,
+            io.github.yzard.momento.feature.backup.BackupLocationMetadataAccess.PRESERVED,
+        ))
+        assertEquals("Photos and videos: granted · Photo location: not granted", backupPermissionSummary(
+            io.github.yzard.momento.feature.backup.BackupMediaAccess.FULL,
+            io.github.yzard.momento.feature.backup.BackupLocationMetadataAccess.DENIED,
+        ))
+        assertEquals("Photos and videos: not granted · Photo location: not granted", backupPermissionSummary(
+            io.github.yzard.momento.feature.backup.BackupMediaAccess.DENIED,
+            io.github.yzard.momento.feature.backup.BackupLocationMetadataAccess.DENIED,
+        ))
+    }
+
+    @Test fun showsActualBackupLifecycleBeforeQueueCounts() {
+        val oldCounts = listOf(BackupQueueCount(BackupState.COMPLETED, 132))
+        fun summary(state: androidx.work.WorkInfo.State?, phase: String?, network: Boolean = true) =
+            backupActivitySummary(false, state, phase, network, oldCounts)
+        assertEquals("Starting backup…", backupActivitySummary(true, null, null, true, emptyList()))
+        assertEquals("Preparing backup…", summary(androidx.work.WorkInfo.State.RUNNING, null))
+        assertEquals("Scanning photos and videos…", summary(androidx.work.WorkInfo.State.RUNNING, "scanning"))
+        assertEquals("Backup waiting for an allowed network", summary(androidx.work.WorkInfo.State.ENQUEUED, null, false))
+        assertEquals("Backup queued — waiting to start or retry", summary(androidx.work.WorkInfo.State.ENQUEUED, null))
+        assertEquals("Backup could not finish. Copy logs for details.", summary(androidx.work.WorkInfo.State.FAILED, null))
+        assertEquals("Scan complete — no media to back up", backupActivitySummary(false, androidx.work.WorkInfo.State.SUCCEEDED, null, true, emptyList()))
+    }
+
     @Test
     fun summarizesLosslessBackupVerification() {
         assertEquals(
@@ -27,7 +59,7 @@ class SettingsScreenTest {
 
     @Test
     fun summarizesEmptyBackupQueueAsComplete() {
-        assertEquals("0/0 media uploaded, all set.", backupSummary(emptyList(), networkAllowed = false))
+        assertEquals("No media backed up yet", backupSummary(emptyList(), networkAllowed = false))
     }
 
     @Test
