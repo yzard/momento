@@ -1,5 +1,10 @@
 package io.github.yzard.momento.feature.settings
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import io.github.yzard.momento.feature.backup.backupDiagnosticReport
+import io.github.yzard.momento.feature.backup.conciseBackupIssue
 import android.database.sqlite.SQLiteException
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -138,6 +143,10 @@ internal fun BackupSettingsSection(
     }.collectAsState(
         initial = isBackupNetworkAllowed(context.applicationContext, settings.mobileDataEnabled),
     )
+    var diagnosticParts by remember { mutableStateOf<List<String>>(emptyList()) }
+    var diagnosticPartIndex by remember { mutableStateOf(0) }
+    var copyingDiagnostics by remember { mutableStateOf(false) }
+    var diagnosticStatus by remember { mutableStateOf<String?>(null) }
     var clearDialog by remember { mutableStateOf(false) }
     var repairDialog by remember { mutableStateOf(false) }
     var clearBusy by remember { mutableStateOf(false) }
@@ -213,7 +222,7 @@ internal fun BackupSettingsSection(
                         Text(backupLocationMetadataAccessLabel(locationAccess))
                         Text(backupSummary(queueCounts, networkAllowed))
                         Text(backupScheduleSummary(scheduleStatus, nextScheduledAt))
-                        latestBackupError?.let { Text("Recent issue: $it") }
+                        latestBackupError?.let { Text("Recent issue: ${conciseBackupIssue(it)}") }
                         Text("Metadata and AI processing run separately on the server schedule.")
                     }
                 },
@@ -249,6 +258,37 @@ internal fun BackupSettingsSection(
                     }
                 },
                 leadingContent = { Icon(Icons.Default.Backup, null) },
+            )
+            ListItem(
+                headlineContent = { Text("Backup diagnostics") },
+                supportingContent = { Text(diagnosticStatus ?: "Copy failure details and recent logs for your developer. Includes file names.") },
+                trailingContent = {
+                    TextButton(enabled = !copyingDiagnostics, onClick = {
+                        scope.launch {
+                            copyingDiagnostics = true
+                            try {
+                                if (diagnosticPartIndex >= diagnosticParts.size) {
+                                    val report = backupDiagnosticReport(context.applicationContext, settings, database.backupAssetDao())
+                                    diagnosticParts = report.chunked(100_000)
+                                    diagnosticPartIndex = 0
+                                }
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Momento backup diagnostics", diagnosticParts[diagnosticPartIndex]))
+                                diagnosticPartIndex += 1
+                                diagnosticStatus = if (diagnosticParts.size == 1) "Diagnostic logs copied" else
+                                    "Copied part $diagnosticPartIndex of ${diagnosticParts.size}. Paste it before copying the next part."
+                            } catch (_: IOException) {
+                                diagnosticStatus = "Could not read diagnostic logs. Try again."
+                            } catch (_: SQLiteException) {
+                                diagnosticStatus = "Could not read backup records. Try again."
+                            } catch (_: IllegalStateException) {
+                                diagnosticStatus = "Could not copy diagnostic logs. Try again."
+                            } finally {
+                                copyingDiagnostics = false
+                            }
+                        }
+                    }) { Text(if (copyingDiagnostics) "Preparing…" else if (diagnosticPartIndex < diagnosticParts.size) "Copy next part" else "Copy logs") }
+                },
             )
             ListItem(
                 headlineContent = { Text("Backup history") },

@@ -30,20 +30,20 @@ internal suspend fun cancelBackupAsset(
     return try {
         recordCancellationStatus(asset, repository.cancelBackupUpload(uploadId), assets)
     } catch (error: IOException) {
-        assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message, asset.protocolVersion, asset.contentHash)
+        assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, backupFailureDetail(error), asset.protocolVersion, asset.contentHash)
         BackupProgress.WAITING_FOR_SERVER
     } catch (error: HttpException) {
         if (!isCancellationRetryable(error.code())) {
-            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${error.code()} while cancelling", asset.protocolVersion, asset.contentHash)
+            assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, asset.uploadedBytes, uploadId, asset.mediaId, backupFailureDetail(error), asset.protocolVersion, asset.contentHash)
             return BackupProgress.COMPLETED
         }
         val current = try {
             repository.backupUploadStatus(uploadId)
         } catch (_: IOException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, error.message, asset.protocolVersion, asset.contentHash)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, backupFailureDetail(error), asset.protocolVersion, asset.contentHash)
             return BackupProgress.WAITING_FOR_SERVER
         } catch (statusError: HttpException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, "HTTP ${statusError.code()} while checking cancellation", asset.protocolVersion, asset.contentHash)
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, asset.uploadedBytes, uploadId, asset.mediaId, backupFailureDetail(statusError), asset.protocolVersion, asset.contentHash)
             return BackupProgress.WAITING_FOR_SERVER
         }
         recordCancellationStatus(asset, current, assets)

@@ -1,0 +1,3 @@
+[build]
+# Cargo resolves this relative to src/common, not to the .cargo directory.
+target-dir = "../../build/common/target"

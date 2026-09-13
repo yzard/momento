@@ -94,6 +94,7 @@ internal fun completedBackupHashMatches(
 
 class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
+        BackupDiagnosticLog.append(applicationContext, "Backup started: work=$id attempt=$runAttemptCount")
         val database = BackupDatabase.create(applicationContext)
         return try {
             val assets = database.backupAssetDao()
@@ -101,11 +102,20 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             val tokenStore = EncryptedTokenStore(applicationContext)
             val repository = MomentoRepository(settingsStore, tokenStore, NetworkClient(tokenStore, io.github.yzard.momento.core.cache.MediaCacheStore.get(applicationContext)))
             val settings = settingsStore.settings.first()
-            if (!tokenStore.isAuthenticated.value || settings.origin == null) return Result.failure()
+            if (!tokenStore.isAuthenticated.value || settings.origin == null) {
+                BackupDiagnosticLog.append(applicationContext, "Backup stopped: sign in and configure a server first")
+                return Result.failure()
+            }
             val mediaAccess = currentBackupMediaAccess(applicationContext)
             val locationMetadataAccess = currentBackupLocationMetadataAccess(applicationContext)
-            if (!backupCanReadOriginalMedia(mediaAccess, locationMetadataAccess)) return Result.success()
-            if (!isBackupNetworkAllowed(applicationContext, settings.mobileDataEnabled)) return Result.retry()
+            if (!backupCanReadOriginalMedia(mediaAccess, locationMetadataAccess)) {
+                BackupDiagnosticLog.append(applicationContext, "Backup blocked: media=$mediaAccess location=$locationMetadataAccess")
+                return Result.success()
+            }
+            if (!isBackupNetworkAllowed(applicationContext, settings.mobileDataEnabled)) {
+                BackupDiagnosticLog.append(applicationContext, "Backup waiting for an allowed network")
+                return Result.retry()
+            }
 
             setForeground(progress("Preparing backup"))
             val deviceId = settingsStore.deviceId()
@@ -116,7 +126,10 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 settingsStore.backupGeneration(),
             ).scan(settings.cameraOnly)
             val backupCapabilities = repository.capabilities(settings.origin).backup
-            if (!backupCanRun(backupCapabilities)) return Result.success()
+            if (!backupCanRun(backupCapabilities)) {
+                BackupDiagnosticLog.append(applicationContext, "Backup unavailable: $backupCapabilities")
+                return Result.success()
+            }
             val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
             var waitingForServer = false
             for (asset in assets.pending(settings.cameraOnly)) {
@@ -134,11 +147,18 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                     waitingForServer = true
                 }
             }
+            BackupDiagnosticLog.append(applicationContext, "Backup pass finished: waitingForServer=$waitingForServer")
             if (waitingForServer) Result.retry() else Result.success()
         } catch (error: IOException) {
+            BackupDiagnosticLog.append(applicationContext, backupFailureDetail(error))
             Result.retry()
         } catch (error: HttpException) {
+            BackupDiagnosticLog.append(applicationContext, backupFailureDetail(error))
             if (isRetryable(error.code())) Result.retry() else Result.failure()
+        } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            BackupDiagnosticLog.append(applicationContext, backupFailureDetail(error))
+            throw error
         } finally {
             database.close()
         }
@@ -245,14 +265,17 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 activeContentHash,
             )
         } catch (error: HttpException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, "HTTP ${error.code()}", activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
             if (isRetryable(error.code())) throw error
             return BackupProgress.COMPLETED
         } catch (error: IOException) {
-            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
             throw error
         } catch (error: TerminalBackupException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
@@ -266,7 +289,8 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 repository,
             )
         } catch (error: SecurityException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
@@ -280,7 +304,8 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 repository,
             )
         } catch (error: IllegalArgumentException) {
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, error.message, activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
@@ -311,6 +336,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             BackupProgress.COMPLETED
         }
         "failed" -> {
+            BackupDiagnosticLog.append(applicationContext, "Server failed: operation=${asset.operationId} upload=${response.uploadId}: ${response.error}")
             assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, response.uploadedSize, response.uploadId, response.mediaId, response.error ?: "Server upload ${response.status}", protocolVersion, contentHash)
             BackupProgress.COMPLETED
         }

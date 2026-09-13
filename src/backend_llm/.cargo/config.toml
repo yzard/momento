@@ -1,0 +1,3 @@
+[build]
+# Cargo resolves this relative to src/backend_llm, not to the .cargo directory.
+target-dir = "../../build/backend_llm/target"
