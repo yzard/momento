@@ -1348,6 +1348,7 @@ async fn publish_supplemental_metadata(
     executors: &crate::runtime::ExecutorHandles,
     destination_path: NormalizedStoragePath,
     supplemental_metadata: &PreparedSupplementalMetadata,
+    claim_token: &str,
 ) -> AppResult<()> {
     let existing_snapshot = match executors
         .file_io
@@ -1458,7 +1459,7 @@ async fn publish_supplemental_metadata(
             kind: "import_sidecar_publication".to_string(),
             owner_kind: "import".to_string(),
             owner_id: group_id.clone(),
-            claim_token: None,
+            claim_token: Some(claim_token.to_string()),
             product_target: None,
             product_version: None,
             entries: entries.clone(),
@@ -1948,6 +1949,7 @@ async fn attempt_prepared_staged_import(
                 .await?;
             let result = absorb_existing_media(
                 ExistingStagedImport {
+                    claim_token: &claim_token,
                     source: &source,
                     source_snapshot,
                     supplemental_metadata: supplemental_metadata.as_ref(),
@@ -2007,6 +2009,7 @@ async fn attempt_prepared_staged_import(
                 .await?;
             let result = absorb_existing_media(
                 ExistingStagedImport {
+                    claim_token: &claim_token,
                     source: &source,
                     source_snapshot,
                     supplemental_metadata: supplemental_metadata.as_ref(),
@@ -2266,6 +2269,7 @@ fn select_existing_media(
 }
 
 struct ExistingStagedImport<'a> {
+    claim_token: &'a str,
     source: &'a StagedImportFile,
     source_snapshot: StorageFileSnapshot,
     supplemental_metadata: Option<&'a PreparedSupplementalMetadata>,
@@ -2280,6 +2284,7 @@ async fn absorb_existing_media(
     executors: &crate::runtime::ExecutorHandles,
 ) -> AppResult<ImportStagedFileOutcome> {
     let ExistingStagedImport {
+        claim_token,
         source,
         source_snapshot,
         supplemental_metadata,
@@ -2348,6 +2353,7 @@ async fn absorb_existing_media(
                 executors,
                 canonical_supplemental_metadata_relative_path(&existing_original_path)?,
                 supplemental_metadata,
+                claim_token,
             )
             .await?;
         }
