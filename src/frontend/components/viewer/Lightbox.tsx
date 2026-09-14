@@ -15,6 +15,7 @@ import { mediaApi } from '../../api/media'
 import type { Media } from '../../api/types'
 import { useMediaStreamURL } from '../../hooks/useMediaStreamURL'
 import { MediaDetails } from './MediaDetails'
+import { ThumbnailStrip } from './ThumbnailStrip'
 
 interface LightboxProps {
   manageHistory: boolean
@@ -105,44 +106,39 @@ function useLightboxMedia(
   currentIndex: number,
   onIndexChange: (index: number) => void
 ) {
-  const [mediaList, setMediaList] = useState<Media[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [hasError, setHasError] = useState(false)
+  const safeIndex = Math.max(0, Math.min(currentIndex, mediaIds.length - 1))
+  const mediaId = mediaIds[safeIndex]
+  const [result, setResult] = useState<{ id: number; media: Media | undefined } | null>(null)
+  const [retryAttempt, setRetryAttempt] = useState(0)
 
   useEffect(() => {
-    let active = true
-    setIsLoading(mediaIds.length > 0)
-    setHasError(false)
-    if (mediaIds.length === 0) {
-      setMediaList([])
-      return () => {
-        active = false
-      }
-    }
+    const controller = new AbortController()
+    setResult(null)
+    if (mediaId === undefined) return
     void mediaApi
-      .getBatch(mediaIds)
+      .getBatch([mediaId], controller.signal)
       .then((items) => {
-        if (!active) return
-        setMediaList(items)
-        setIsLoading(false)
+        if (controller.signal.aborted) return
+        setResult({ id: mediaId, media: items.find((item) => item.id === mediaId) })
       })
       .catch(() => {
-        if (!active) return
-        setMediaList([])
-        setIsLoading(false)
-        setHasError(true)
+        if (controller.signal.aborted) return
+        setResult({ id: mediaId, media: undefined })
       })
-    return () => {
-      active = false
-    }
-  }, [mediaIds])
+    return () => controller.abort()
+  }, [mediaId, retryAttempt])
 
-  const safeIndex = mediaList.length > 0 ? Math.min(currentIndex, mediaList.length - 1) : 0
   useEffect(() => {
-    if (mediaList.length > 0 && currentIndex >= mediaList.length) onIndexChange(0)
-  }, [currentIndex, mediaList.length, onIndexChange])
+    if (mediaIds.length > 0 && currentIndex !== safeIndex) onIndexChange(safeIndex)
+  }, [currentIndex, mediaIds.length, safeIndex, onIndexChange])
 
-  return { mediaList, currentMedia: mediaList[safeIndex], safeIndex, isLoading, hasError }
+  const currentResult = result?.id === mediaId ? result : null
+  return {
+    currentMedia: currentResult?.media,
+    safeIndex,
+    isLoading: mediaId !== undefined && currentResult === null,
+    retry: () => setRetryAttempt((attempt) => attempt + 1),
+  }
 }
 
 function useImageZoom(mediaId: number | undefined) {
@@ -221,14 +217,12 @@ function useDisplayedMedia(currentMedia: Media | undefined) {
 
 interface LightboxStageProps {
   media: Media
-  metadataLoading: boolean
-  metadataError: boolean
 }
 
-function LightboxStage({ media, metadataLoading, metadataError }: LightboxStageProps) {
+function LightboxStage({ media }: LightboxStageProps) {
   const displayed = useDisplayedMedia(media)
   const zoom = useImageZoom(media.id)
-  if (displayed.isLoading || metadataLoading) {
+  if (displayed.isLoading) {
     return (
       <Loader2
         aria-label="Loading media"
@@ -236,8 +230,6 @@ function LightboxStage({ media, metadataLoading, metadataError }: LightboxStageP
       />
     )
   }
-  if (metadataError)
-    return <div className="text-sm text-muted-foreground">Unable to load media details.</div>
   if (!displayed.displayedUrl)
     return <div className="text-muted-foreground">Failed to load media</div>
   if (displayed.isVideo) {
@@ -327,9 +319,8 @@ export default function Lightbox({
     if (mediaState.safeIndex > 0) onIndexChange(mediaState.safeIndex - 1)
   }, [mediaState.safeIndex, onIndexChange])
   const goToNext = useCallback(() => {
-    if (mediaState.safeIndex < mediaState.mediaList.length - 1)
-      onIndexChange(mediaState.safeIndex + 1)
-  }, [mediaState.mediaList.length, mediaState.safeIndex, onIndexChange])
+    if (mediaState.safeIndex < mediaIds.length - 1) onIndexChange(mediaState.safeIndex + 1)
+  }, [mediaIds.length, mediaState.safeIndex, onIndexChange])
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -348,57 +339,59 @@ export default function Lightbox({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [goToNext, goToPrevious, handleClose])
 
-  if (!mediaState.currentMedia) {
-    if (!mediaState.isLoading && !mediaState.hasError) return null
-    return (
-      <div
-        data-media-viewer
-        className="absolute inset-0 z-[2000] flex items-center justify-center bg-background/95 backdrop-blur-sm"
-      >
-        {mediaState.hasError ? (
-          <p className="text-destructive">Unable to load media.</p>
-        ) : (
-          <Loader2 className="h-12 w-12 animate-spin text-muted-foreground" />
-        )}
-      </div>
-    )
-  }
-
   const content = (
     <div
       data-media-viewer
       className="absolute inset-0 z-[2000] flex bg-background/95 backdrop-blur-sm"
     >
-      <div className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center p-4">
-        <button
-          type="button"
-          aria-label="Close viewer"
-          onClick={handleClose}
-          className="absolute right-4 top-4 z-50 rounded-full border border-border/10 bg-background/20 p-2 text-foreground backdrop-blur-md transition-colors hover:bg-background/40"
-        >
-          <X className="h-6 w-6" />
-        </button>
-        <LightboxNavigation
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="Close viewer"
+            onClick={handleClose}
+            className="absolute right-4 top-4 z-50 rounded-full border border-border/10 bg-background/20 p-2 text-foreground backdrop-blur-md transition-colors hover:bg-background/40"
+          >
+            <X className="h-6 w-6" />
+          </button>
+          <LightboxNavigation
+            currentIndex={mediaState.safeIndex}
+            mediaCount={mediaIds.length}
+            onPrevious={goToPrevious}
+            onNext={goToNext}
+          />
+          {mediaState.currentMedia ? (
+            <LightboxStage key={mediaState.currentMedia.id} media={mediaState.currentMedia} />
+          ) : mediaState.isLoading ? (
+            <Loader2 aria-label="Loading media" className="h-12 w-12 animate-spin" />
+          ) : (
+            <div role="alert">
+              <p>Unable to load media.</p>
+              <button type="button" onClick={mediaState.retry}>
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
+        <ThumbnailStrip
+          mediaIds={mediaIds}
           currentIndex={mediaState.safeIndex}
-          mediaCount={mediaState.mediaList.length}
-          onPrevious={goToPrevious}
-          onNext={goToNext}
-        />
-        <LightboxStage
-          media={mediaState.currentMedia}
-          metadataLoading={mediaState.isLoading}
-          metadataError={mediaState.hasError}
+          onIndexChange={onIndexChange}
         />
       </div>
       <aside className="h-full w-[320px] shrink-0 overflow-y-auto border-l border-border bg-card p-6">
-        <DownloadOriginal key={mediaState.currentMedia.id} media={mediaState.currentMedia} />
-        <MediaDetails
-          media={mediaState.currentMedia}
-          className="border-0 bg-transparent p-0 shadow-none"
-        />
+        {mediaState.currentMedia && (
+          <>
+            <DownloadOriginal key={mediaState.currentMedia.id} media={mediaState.currentMedia} />
+            <MediaDetails
+              media={mediaState.currentMedia}
+              className="border-0 bg-transparent p-0 shadow-none"
+            />
+          </>
+        )}
         <div className="mt-6 border-t border-border pt-6">
           <p className="text-center text-xs text-muted-foreground">
-            {mediaState.safeIndex + 1} / {mediaState.mediaList.length}
+            {mediaIds.length ? mediaState.safeIndex + 1 : 0} / {mediaIds.length}
           </p>
         </div>
       </aside>

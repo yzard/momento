@@ -92,11 +92,13 @@ export const mediaApi = {
     return response.data
   },
 
-  getBatch: async (mediaIds: number[]): Promise<Media[]> => {
+  getBatch: async (mediaIds: number[], signal: AbortSignal): Promise<Media[]> => {
     if (mediaIds.length === 0) return []
-    const response = await apiClient.post<MediaBatchResponse>('/media/get-batch', {
-      ids: mediaIds,
-    } as MediaBatchRequest)
+    const response = await apiClient.post<MediaBatchResponse>(
+      '/media/get-batch',
+      { ids: mediaIds } as MediaBatchRequest,
+      { signal }
+    )
     return response.data.items
   },
 

@@ -13,6 +13,7 @@ vi.mock('../../../../src/frontend/api/media', () => ({
     getBatch: mocks.getBatch,
     getPreviewURL: mocks.getPreviewURL,
     getFileStreamURL: mocks.getFileStreamURL,
+    getThumbnailURL: (id: number) => `/thumbnail/${id}`,
   },
 }))
 
@@ -37,7 +38,90 @@ function CollectionViewerHarness() {
 }
 
 describe('Lightbox', () => {
+  const photo = (id: number) => ({
+    id,
+    mediaType: 'image',
+    originalFilename: `${id}.jpg`,
+  })
+  function viewer(ids: number[], index: number, onIndexChange = vi.fn()) {
+    return (
+      <MemoryRouter>
+        <Lightbox
+          manageHistory={false}
+          mediaIds={ids}
+          currentIndex={index}
+          onClose={vi.fn()}
+          onIndexChange={onIndexChange}
+        />
+      </MemoryRouter>
+    )
+  }
+
+  it('loads only the visible item in a large group and preserves the global position', async () => {
+    mocks.getBatch.mockImplementation(async (ids: number[]) => ids.map(photo))
+    const ids = Array.from({ length: 1500 }, (_, i) => i + 1)
+    const change = vi.fn()
+    const view = render(viewer(ids, 900, change))
+    await screen.findByRole('img', { name: '901.jpg' })
+    expect(mocks.getBatch).toHaveBeenCalledWith([901], expect.any(AbortSignal))
+    expect(screen.getByText('901 / 1500')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Next media' }))
+    expect(change).toHaveBeenCalledWith(901)
+    view.rerender(viewer(ids, 901, change))
+    await screen.findByRole('img', { name: '902.jpg' })
+    view.rerender(viewer([...ids], 1499, change))
+    await screen.findByRole('img', { name: '1500.jpg' })
+    expect(screen.queryByRole('button', { name: 'Next media' })).toBeNull()
+    expect(mocks.getBatch.mock.calls.map(([batch]) => batch)).toEqual([[901], [902], [1500]])
+    view.rerender(viewer([...ids], 1499, change))
+    expect(mocks.getBatch).toHaveBeenCalledTimes(3)
+  })
+
+  it('cancels obsolete loads and ignores late responses after navigation and close', async () => {
+    let finish!: (items: ReturnType<typeof photo>[]) => void
+    mocks.getBatch
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          })
+      )
+      .mockImplementation(async (ids: number[]) => ids.map(photo))
+    const view = render(viewer([1, 2], 0))
+    const signal = mocks.getBatch.mock.calls[0][1] as AbortSignal
+    view.rerender(viewer([1, 2], 1))
+    await screen.findByRole('img', { name: '2.jpg' })
+    expect(signal.aborted).toBe(true)
+    finish([photo(1)])
+    await waitFor(() => expect(screen.queryByRole('img', { name: '1.jpg' })).toBeNull())
+    view.unmount()
+    expect((mocks.getBatch.mock.calls[1][1] as AbortSignal).aborted).toBe(true)
+  })
+
+  it('keeps navigation and retry available for missing or failed media', async () => {
+    mocks.getBatch
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce([photo(2)])
+    const view = render(viewer([1, 2], 0))
+    await screen.findByRole('alert')
+    expect(screen.getByRole('button', { name: 'Close viewer' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Next media' })).toBeTruthy()
+    view.rerender(viewer([1, 2], 1))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await screen.findByRole('img', { name: '2.jpg' })
+    expect(screen.getByText('2 / 2')).toBeTruthy()
+  })
+
   beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    )
     mocks.getBatch.mockReset()
     mocks.getPreviewURL.mockReset()
     mocks.getPreviewURL.mockImplementation((id: number) => `/api/v1/media/${id}/preview`)
@@ -52,6 +136,7 @@ describe('Lightbox', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it.each(['/faces/5', '/places/7'])(

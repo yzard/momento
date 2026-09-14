@@ -962,7 +962,7 @@ private fun ViewerFilmstrip(
                     media = item,
                     repository = repository,
                     trashed = false,
-                    tiny = false,
+                    tiny = true,
                     modifier = Modifier
                         .size(thumbnailSize)
                         .clip(RoundedCornerShape(10.dp))

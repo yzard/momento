@@ -4,9 +4,25 @@ import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.feature.timeline.TimelinePeriod
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class MainShellStateTest {
+    @Test fun largeViewerNavigatesExistingCollectionWithoutReloadingOrTruncatingIt() {
+        val state = MainShellState()
+        val media = (1L..2000L).map(::media)
+        state.openViewer(media, 1500)
+        assertSame(media, state.viewer!!.media)
+        for (index in listOf(1501, 1999, 0, 999)) {
+            state.updateViewerIndex(index)
+            assertSame(media, state.viewer!!.media)
+            assertEquals(index, state.viewer!!.index)
+            assertEquals((index + 1).toLong(), state.viewer!!.media[index].id)
+        }
+        state.closeViewer()
+        assertNull(state.viewer)
+    }
+
     @Test fun navigationAndTimelineChoicesStayInOneStateOwner() {
         val state = MainShellState()
 
