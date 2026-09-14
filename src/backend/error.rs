@@ -8,10 +8,9 @@ use thiserror::Error;
 
 use crate::executor::{CpuExecutorHandle, ErrorResponse};
 
-const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal server error";
-const FALLBACK_INTERNAL_ERROR_JSON: &str = r#"{"detail":"Internal server error"}"#;
-const FALLBACK_SERVICE_UNAVAILABLE_JSON: &str =
-    r#"{"detail":"Service unavailable; retry shortly","code":"service_unavailable"}"#;
+const INTERNAL_SERVER_ERROR_MESSAGE: &str = "Internal Server Error";
+const FALLBACK_INTERNAL_ERROR_JSON: &str = r#"{"detail":"Internal Server Error"}"#;
+const FALLBACK_SERVICE_UNAVAILABLE_JSON: &str = r#"{"detail":"Service Unavailable"}"#;
 const FALLBACK_ERROR_JSON: &str = r#"{"detail":"Request could not be completed"}"#;
 
 #[derive(Clone, Debug)]
@@ -101,44 +100,23 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         if matches!(&self, AppError::DatabaseBusy) {
-            return unavailable_response(
-                "database_busy",
-                r#"{"detail":"Database is busy; retry shortly","code":"database_busy"}"#,
-                self.to_string(),
-            );
+            return unavailable_response("database_busy", self.to_string());
         }
         if let AppError::StreamUnavailable(reason) = &self {
-            return unavailable_response(
-                "stream_unavailable",
-                r#"{"detail":"Media streaming capacity is unavailable; retry shortly","code":"stream_unavailable"}"#,
-                reason.clone(),
-            );
+            return unavailable_response("stream_unavailable", reason.clone());
         }
         if let AppError::Unavailable(reason) = &self {
-            return unavailable_response(
-                "service_unavailable",
-                FALLBACK_SERVICE_UNAVAILABLE_JSON,
-                reason.clone(),
-            );
+            return unavailable_response("service_unavailable", reason.clone());
         }
         if let AppError::ExecutorUnavailable(error) = &self {
             use crate::executor::ExecutorErrorKind;
-            let (code, json) = match error.kind {
-                ExecutorErrorKind::Overloaded => (
-                    "executor_overloaded",
-                    r#"{"detail":"Server work queue is at capacity; retry shortly","code":"executor_overloaded"}"#,
-                ),
-                ExecutorErrorKind::ShuttingDown => (
-                    "server_shutting_down",
-                    r#"{"detail":"Server is shutting down; retry shortly","code":"server_shutting_down"}"#,
-                ),
-                ExecutorErrorKind::DatabaseBusy => (
-                    "database_busy",
-                    r#"{"detail":"Database is busy; retry shortly","code":"database_busy"}"#,
-                ),
-                _ => ("service_unavailable", FALLBACK_SERVICE_UNAVAILABLE_JSON),
+            let code = match error.kind {
+                ExecutorErrorKind::Overloaded => "executor_overloaded",
+                ExecutorErrorKind::ShuttingDown => "server_shutting_down",
+                ExecutorErrorKind::DatabaseBusy => "database_busy",
+                _ => "service_unavailable",
             };
-            return unavailable_response(code, json, error.to_string());
+            return unavailable_response(code, error.to_string());
         }
         if let AppError::RateLimited {
             retry_after_seconds,
@@ -239,13 +217,31 @@ fn pending_error_response(
         code: code.unwrap_or("http_error"),
         message: detail.clone(),
     });
+    // Diagnostics are server-only. Only explicitly public business states may
+    // retain a more specific message/code; never serialize arbitrary causes.
+    let public_code = code.filter(|code| *code == "password_change_required");
+    let detail = if public_code.is_none() {
+        status
+            .canonical_reason()
+            .unwrap_or("Request failed")
+            .to_string()
+    } else {
+        detail
+    };
     response
         .extensions_mut()
-        .insert(PendingErrorResponse(ErrorResponse { detail, code }));
+        .insert(PendingErrorResponse(ErrorResponse {
+            detail,
+            code: public_code,
+        }));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
     response
 }
 
-fn unavailable_response(code: &'static str, json: &'static str, message: String) -> Response {
+fn unavailable_response(code: &'static str, message: String) -> Response {
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         [
@@ -254,7 +250,7 @@ fn unavailable_response(code: &'static str, json: &'static str, message: String)
             (header::CACHE_CONTROL, "no-store"),
             (header::CONNECTION, "close"),
         ],
-        json,
+        FALLBACK_SERVICE_UNAVAILABLE_JSON,
     )
         .into_response();
     response

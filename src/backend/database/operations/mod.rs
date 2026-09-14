@@ -5451,9 +5451,28 @@ pub(crate) fn cleanup_refresh_tokens(connection: &Connection) -> rusqlite::Resul
     connection.execute(queries::auth::DELETE_EXPIRED_OR_REVOKED_TOKENS, [])
 }
 
+pub(crate) fn revoke_user_sessions(
+    connection: &mut Connection,
+    user_id: i64,
+    auth_version: i64,
+) -> rusqlite::Result<bool> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = transaction.execute(
+        queries::auth::REVOKE_USER_AUTH_VERSION,
+        params![user_id, auth_version],
+    )?;
+    if changed != 1 {
+        return Ok(false);
+    }
+    transaction.execute(queries::auth::DELETE_ALL_USER_TOKENS, [user_id])?;
+    transaction.commit()?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserForToken {
     pub id: i64,
+    pub auth_version: i64,
     pub username: String,
     pub email: String,
     pub role: String,
@@ -5469,6 +5488,7 @@ pub(crate) fn load_user_for_token(
         .query_row(queries::auth::SELECT_USER_FOR_TOKEN, [user_id], |row| {
             Ok(UserForToken {
                 id: row.get(0)?,
+                auth_version: row.get(6)?,
                 username: row.get(1)?,
                 email: row.get(2)?,
                 role: row.get(3)?,
@@ -5488,6 +5508,7 @@ pub(crate) enum UserAuthIdentifier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserForAuthentication {
     pub id: i64,
+    pub auth_version: i64,
     pub username: String,
     pub role: String,
     pub hashed_password: String,
@@ -5501,6 +5522,7 @@ pub(crate) fn load_user_for_authentication(
     let mapper = |row: &rusqlite::Row<'_>| {
         Ok(UserForAuthentication {
             id: row.get(0)?,
+            auth_version: row.get(6)?,
             username: row.get(1)?,
             role: row.get(3)?,
             hashed_password: row.get(4)?,
@@ -5521,6 +5543,7 @@ pub(crate) fn load_user_for_authentication(
 pub(crate) struct InsertRefreshToken {
     pub token_hash: String,
     pub user_id: i64,
+    pub auth_version: i64,
     pub expires_at: String,
 }
 
@@ -5528,10 +5551,18 @@ pub(crate) fn insert_refresh_token(
     connection: &Connection,
     request: InsertRefreshToken,
 ) -> rusqlite::Result<()> {
-    connection.execute(
-        queries::auth::INSERT_REFRESH_TOKEN,
-        params![request.token_hash, request.user_id, request.expires_at],
+    let inserted = connection.execute(
+        queries::auth::INSERT_REFRESH_TOKEN_IF_CURRENT,
+        params![
+            request.token_hash,
+            request.expires_at,
+            request.user_id,
+            request.auth_version
+        ],
     )?;
+    if inserted != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 
@@ -5546,6 +5577,7 @@ pub(crate) struct RotateRefreshToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RotatedRefreshIdentity {
     pub user_id: i64,
+    pub auth_version: i64,
     pub username: String,
     pub role: String,
 }
@@ -5566,11 +5598,12 @@ pub(crate) fn rotate_refresh_token(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, i32>(6)? != 0,
+                    row.get::<_, i64>(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((token_id, user_id, username, role, is_active)) = token else {
+    let Some((token_id, user_id, username, role, is_active, auth_version)) = token else {
         transaction.rollback()?;
         return Ok(None);
     };
@@ -5598,6 +5631,7 @@ pub(crate) fn rotate_refresh_token(
     transaction.commit()?;
     Ok(Some(RotatedRefreshIdentity {
         user_id,
+        auth_version,
         username,
         role,
     }))

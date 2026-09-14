@@ -11,8 +11,15 @@ use momento_api::config::Config;
 use serde_json::{json, Value};
 
 fn authorization(user_id: i64, username: &str) -> String {
-    let token = create_access_token(user_id, username, "user", &Config::default(), None)
-        .expect("access token");
+    let token = create_access_token(
+        user_id,
+        0,
+        username,
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("access token");
     format!("Bearer {token}")
 }
 
@@ -224,7 +231,7 @@ async fn public_share_password_verification_is_rate_limited() {
             rusqlite::params![owner_id, media_id, password_hash],
         )
         .expect("share link");
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.security.password_attempts_per_identity = 2;
     config.security.password_attempts_per_source = 10;
     let app = create_app(

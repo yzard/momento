@@ -26,6 +26,7 @@ pub fn router() -> Router<AppState> {
         .route("/user/authenticate", post(login))
         .route("/user/refresh", post(refresh))
         .route("/user/logout", post(logout))
+        .route("/user/logout-all", post(logout_all))
         .route("/user/session/create", post(create_browser_session))
         .route("/user/session/refresh", post(refresh_browser_session))
         .route("/user/session/delete", post(delete_browser_session))
@@ -133,6 +134,7 @@ async fn authenticate(
     let config = state.config.current();
     let access_token = create_access_token(
         user.id,
+        user.auth_version,
         &user.username,
         &user.role,
         &config,
@@ -149,6 +151,7 @@ async fn authenticate(
             .insert_refresh_token_request(InsertRefreshToken {
                 token_hash,
                 user_id: user.id,
+                auth_version: user.auth_version,
                 expires_at: expires_at.to_rfc3339(),
             })
             .await
@@ -195,12 +198,30 @@ async fn rotate_refresh_token(state: &AppState, refresh_token: &str) -> AppResul
         .ok_or_else(|| AppError::Authentication("Invalid refresh token".to_string()))?;
     let access_token = create_access_token(
         token_row.user_id,
+        token_row.auth_version,
         &token_row.username,
         &token_row.role,
         &config,
         None,
     )?;
     Ok(TokenResponse::new(access_token, raw_refresh))
+}
+
+async fn logout_all(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> AppResult<Response> {
+    if !state
+        .executors
+        .sqlite
+        .revoke_user_sessions_request(current_user.id, current_user.auth_version)
+        .await?
+    {
+        return Err(AppError::Authentication(
+            "Session has already been revoked".into(),
+        ));
+    }
+    cleared_session_response(&state, "All sessions revoked").await
 }
 
 async fn logout(

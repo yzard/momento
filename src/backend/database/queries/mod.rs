@@ -2791,6 +2791,7 @@ pub mod auth {
          , role
          , hashed_password
          , is_active
+         , auth_version
       FROM users
      WHERE username = ?
     "#;
@@ -2802,6 +2803,7 @@ pub mod auth {
          , role
          , hashed_password
          , is_active
+         , auth_version
       FROM users
      WHERE id = ?
     "#;
@@ -2809,6 +2811,7 @@ pub mod auth {
     pub const UPDATE_PASSWORD: &str = r#"
     UPDATE users
        SET hashed_password = ?
+         , auth_version = auth_version + 1
      WHERE id = ?
     "#;
 
@@ -2816,6 +2819,7 @@ pub mod auth {
     UPDATE users
        SET hashed_password = ?
          , must_change_password = 0
+         , auth_version = auth_version + 1
      WHERE id = ?
        AND hashed_password = ?
     "#;
@@ -2828,6 +2832,11 @@ pub mod auth {
     ) VALUES (?, ?, ?)
     "#;
 
+    pub const INSERT_REFRESH_TOKEN_IF_CURRENT: &str = r#"
+    INSERT INTO refresh_tokens (token_hash, user_id, expires_at)
+    SELECT ?, id, ? FROM users WHERE id = ? AND auth_version = ? AND is_active = 1
+    "#;
+
     pub const VALIDATE_REFRESH_TOKEN: &str = r#"
     SELECT rt.id
          , rt.user_id
@@ -2836,6 +2845,7 @@ pub mod auth {
          , u.username
          , u.role
          , u.is_active
+         , u.auth_version
       FROM refresh_tokens AS rt
       JOIN users AS u ON rt.user_id = u.id
      WHERE rt.token_hash = ?
@@ -2859,6 +2869,11 @@ pub mod auth {
     pub const DELETE_ALL_USER_TOKENS: &str = r#"
     DELETE FROM refresh_tokens
      WHERE user_id = ?
+    "#;
+
+    pub const REVOKE_USER_AUTH_VERSION: &str = r#"
+    UPDATE users SET auth_version = auth_version + 1
+    WHERE id = ? AND auth_version = ? AND is_active = 1
     "#;
 
     pub const DELETE_REVOKED_TOKEN: &str = r#"
@@ -2886,6 +2901,7 @@ pub mod auth {
          , role
          , must_change_password
          , is_active
+         , auth_version
       FROM users
      WHERE id = ?
     "#;

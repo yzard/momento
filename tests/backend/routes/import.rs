@@ -47,9 +47,10 @@ async fn local_import_status_reports_distinct_imported_media_separately_from_sou
 
     let access_token = create_access_token(
         administrator_id,
+        0,
         "import-status-admin",
         "admin",
-        &Config::default(),
+        &crate::test_utils::test_config(),
         None,
     )
     .expect("access token");

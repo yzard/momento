@@ -103,6 +103,10 @@ pub(crate) enum SqliteOperation {
         sequence: u64,
     },
     RegisterAuthAttempt(RegisterAuthAttempt),
+    RevokeUserSessions {
+        user_id: i64,
+        auth_version: i64,
+    },
     ClearAuthAttempts(ClearAuthAttempts),
     LoadUserForToken {
         user_id: i64,
@@ -486,6 +490,7 @@ impl SqliteOperation {
         match self {
             Self::Probe { .. } => "sqlite_probe",
             Self::RegisterAuthAttempt(_) => "register_auth_attempt",
+            Self::RevokeUserSessions { .. } => "revoke_user_sessions",
             Self::ClearAuthAttempts(_) => "clear_auth_attempts",
             Self::LoadUserForToken { .. } => "load_user_for_token",
             Self::LoadUserForAuthentication(_) => "load_user_for_authentication",
@@ -838,6 +843,7 @@ impl SqliteOperation {
             Self::InsertRefreshToken(_) => auth_write_spec(size_of::<InsertRefreshToken>()),
             Self::RotateRefreshToken(_) => auth_write_spec(size_of::<RotateRefreshToken>()),
             Self::RevokeRefreshToken { .. } => auth_write_spec(256),
+            Self::RevokeUserSessions { .. } => auth_write_spec(16),
             Self::ReplacePassword(_) => auth_write_spec(size_of::<ReplacePassword>()),
             Self::InsertDefaultAdmin { .. } => auth_write_spec(512),
             Self::PrepareAdminPasswordReset { .. } => auth_write_spec(size_of::<i64>()),
@@ -1059,6 +1065,7 @@ pub(crate) enum SqliteOutput {
     RefreshTokenInserted,
     RefreshTokenRotated(Option<RotatedRefreshIdentity>),
     RefreshTokenRevoked,
+    UserSessionsRevoked(bool),
     PasswordHash(Option<String>),
     PasswordReplaced(bool),
     AdminId(Option<i64>),
@@ -1225,6 +1232,7 @@ impl SqliteOutput {
             Self::RefreshTokenInserted => "refresh_token_inserted",
             Self::RefreshTokenRotated(_) => "refresh_token_rotated",
             Self::RefreshTokenRevoked => "refresh_token_revoked",
+            Self::UserSessionsRevoked(_) => "user_sessions_revoked",
             Self::PasswordHash(_) => "password_hash",
             Self::PasswordReplaced(_) => "password_replaced",
             Self::AdminId(_) => "admin_id",
@@ -1734,6 +1742,26 @@ impl SqliteExecutorHandle {
         {
             SqliteOutput::RefreshTokenRotated(identity) => Ok(identity),
             output => Err(output.mismatch("rotate_refresh_token")),
+        }
+    }
+
+    pub(crate) async fn revoke_user_sessions_request(
+        &self,
+        user_id: i64,
+        auth_version: i64,
+    ) -> Result<bool, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::RevokeUserSessions {
+                    user_id,
+                    auth_version,
+                },
+                SubmissionMode::Request,
+            )
+            .await?
+        {
+            SqliteOutput::UserSessionsRevoked(changed) => Ok(changed),
+            output => Err(output.mismatch("revoke_user_sessions")),
         }
     }
 
@@ -5830,6 +5858,12 @@ fn execute_with_connection(
                 .map(SqliteOutput::AuthAttempt)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
+        SqliteOperation::RevokeUserSessions {
+            user_id,
+            auth_version,
+        } => operations::revoke_user_sessions(connection, user_id, auth_version)
+            .map(SqliteOutput::UserSessionsRevoked)
+            .map_err(|error| map_sqlite_error(operation_name, error)),
         SqliteOperation::ClearAuthAttempts(request) => {
             operations::clear_auth_attempts(connection, request)
                 .map(|()| SqliteOutput::AuthAttemptsCleared)

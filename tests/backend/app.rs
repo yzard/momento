@@ -81,12 +81,16 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
     std::fs::create_dir(&static_directory).expect("static directory");
     std::fs::write(static_directory.join("index.html"), b"<main>momento</main>")
         .expect("index asset");
-    std::fs::write(static_directory.join("app.js"), b"console.log('momento')")
-        .expect("script asset");
+    std::fs::create_dir(static_directory.join("assets")).unwrap();
+    std::fs::write(
+        static_directory.join("assets/app.js"),
+        b"console.log('momento')",
+    )
+    .expect("script asset");
 
     let pool = create_pool_at(&data_directory.join("database.sqlite"), 2).expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.server.data_dir = data_directory.clone();
     config.server.static_dir = static_directory.clone();
     config.webdav.mount_path = "/webdav".to_string();
@@ -123,12 +127,12 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
     );
     let server = TestServer::new(application).expect("static server");
 
-    let script = server.get("/app.js").await;
+    let script = server.get("/assets/app.js").await;
     script.assert_status_ok();
     script.assert_header("content-type", "text/javascript");
     assert_eq!(script.as_bytes().as_ref(), b"console.log('momento')");
     let navigation = server
-        .get("/albums/one")
+        .get("/albums")
         .add_header("accept", "text/html")
         .await;
     navigation.assert_status_ok();
@@ -138,6 +142,24 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
         .add_header("accept", "text/html")
         .await
         .assert_status_not_found();
+    std::fs::write(
+        config_path.parent().unwrap().join("static/.env"),
+        b"PRIVATE",
+    )
+    .unwrap();
+    for path in [
+        "/.env",
+        "/%2eenv",
+        "/wp-config.php",
+        "/database.sql",
+        "/unknown-page",
+        "/assets/../.env",
+        "/assets/.secret.js",
+    ] {
+        let response = server.get(path).add_header("accept", "text/html").await;
+        response.assert_status_not_found();
+        assert_eq!(response.text(), "Not Found");
+    }
     server
         .get("/webdav/missing")
         .add_header("accept", "text/html")

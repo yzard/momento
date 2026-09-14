@@ -18,6 +18,7 @@ use serde::Deserialize;
 #[derive(Clone, Debug)]
 pub struct CurrentUser {
     pub id: i64,
+    pub auth_version: i64,
     pub username: String,
     pub email: String,
     pub role: String,
@@ -69,7 +70,13 @@ where
             }
         }
 
-        load_current_user(&app_state, user_id).await
+        let user = load_current_user(&app_state, user_id).await?;
+        if user.auth_version != claims.auth_version {
+            return Err(AppError::Authentication(
+                "Authentication version has been revoked".into(),
+            ));
+        }
+        Ok(user)
     }
 }
 
@@ -116,6 +123,11 @@ where
                 .parse::<i64>()
                 .map_err(|_| AppError::Authentication("Invalid media access ticket".to_string()))?;
             let current_user = load_current_user(&app_state, user_id).await?;
+            if current_user.auth_version != claims.auth_version {
+                return Err(AppError::Authentication(
+                    "Media ticket has been revoked".into(),
+                ));
+            }
             if current_user.must_change_password {
                 return Err(AppError::PasswordChangeRequired);
             }
@@ -182,6 +194,7 @@ async fn load_current_user(app_state: &AppState, user_id: i64) -> Result<Current
 
     Ok(CurrentUser {
         id: user.id,
+        auth_version: user.auth_version,
         username: user.username,
         email: user.email,
         role: user.role,

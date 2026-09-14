@@ -133,6 +133,7 @@ impl Drop for LogEventWriter {
 #[derive(Clone)]
 pub struct RequestLoggerState {
     pub cpu: crate::executor::CpuExecutorHandle,
+    pub trusted_proxy_ip_addresses: Vec<std::net::IpAddr>,
 }
 
 pub async fn request_logger(
@@ -142,13 +143,24 @@ pub async fn request_logger(
 ) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let path = uri.path().to_string();
+    let path = redacted_request_path(uri.path());
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|peer| peer.0);
+    let client_ip =
+        crate::auth::client_source(request.headers(), peer, &state.trusted_proxy_ip_addresses);
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     let is_static = path.starts_with("/assets/") || path.ends_with(".js") || path.ends_with(".css");
     let payload_capture = begin_payload_capture(&mut request);
 
     let start = Instant::now();
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        "x-request-id",
+        request_id.parse().expect("UUID is a valid header"),
+    );
     let duration = start.elapsed();
     let status = response.status();
 
@@ -160,12 +172,15 @@ pub async fn request_logger(
             None => "{}".to_string(),
         };
         let log_line = format!(
-            "{} {} {} {}ms {}",
+            "{} {} {} {}ms {} request_id={} client_ip={} peer_ip={:?}",
             method,
             path,
             status.as_u16(),
             duration_text,
-            payload_text
+            payload_text,
+            request_id,
+            client_ip,
+            peer.map(|address| address.ip())
         );
 
         let status_code = status.as_u16();
@@ -427,9 +442,21 @@ fn is_sensitive_field(key: &str) -> bool {
             | "refreshtoken"
             | "apikey"
             | "secret"
+            | "secretkey"
+            | "clientsecret"
             | "authorization"
             | "token"
     )
+}
+
+pub fn redacted_request_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/api/v1/public/share/") {
+        return match rest.split_once('/') {
+            Some((_, suffix)) => format!("/api/v1/public/share/[redacted]/{suffix}"),
+            None => "/api/v1/public/share/[redacted]".to_string(),
+        };
+    }
+    path.to_string()
 }
 
 fn is_binary_field(key: &str) -> bool {

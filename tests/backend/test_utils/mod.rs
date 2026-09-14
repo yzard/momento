@@ -72,7 +72,8 @@ pub fn test_executor_handles_with_data_directory(
     )
     .expect("test runtime sizing");
     let config_path = data_directory_path.join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write executor config");
+    std::fs::write(&config_path, toml::to_string(&test_config()).unwrap())
+        .expect("write executor config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load executor config")
         .identity;
@@ -137,9 +138,15 @@ pub fn test_scheduler(pool: DbPool) -> momento_api::runtime::SchedulerHandle {
     test_executor_handles(pool).scheduler
 }
 
+pub fn test_config() -> Config {
+    let mut config = Config::default();
+    config.security.secret_key = "test-only-key-0cb5961f-4491-47f0-ab54-0e7b902856ad".into();
+    config
+}
+
 pub fn create_test_app() -> (Router, DbPool) {
     let pool = create_test_db();
-    let config_manager = create_test_config_manager(Config::default());
+    let config_manager = create_test_config_manager(crate::test_utils::test_config());
     let app = create_app(config_manager, test_app_dependencies(pool.clone(), None));
     (app, pool)
 }

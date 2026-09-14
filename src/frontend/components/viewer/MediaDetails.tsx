@@ -78,6 +78,8 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
   )
 
   const details = [
+    { icon: KeyRound, label: 'Media ID', value: String(media.id) },
+    { icon: FileType, label: 'Filename', value: media.originalFilename },
     { icon: Calendar, label: 'Date Taken', value: formatDateTaken(media.dateTaken) },
     {
       icon: isPhone ? Smartphone : Camera,
@@ -103,7 +105,6 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
     { icon: FileType, label: 'Duration Seconds', value: rawValue(media.durationSeconds) },
     { icon: FileType, label: 'File Size', value: formatFileSize(media.fileSize) },
     { icon: FileType, label: 'Video Codec', value: rawValue(media.videoCodec) },
-    { icon: FileType, label: 'Stored Filename', value: rawValue(media.filename) },
     { icon: MapPin, label: 'Location', value: locationValue },
     { icon: MapPin, label: 'GPS (Lat, Long, Alt)', value: gpsValue },
     { icon: KeyRound, label: 'Keywords', value: rawValue(media.keywords) },
@@ -118,14 +119,6 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
         className
       )}
     >
-      <div className="mb-6 pb-4 border-b border-border">
-        <h3 className="font-semibold text-base text-foreground break-all leading-relaxed">
-          {media.originalFilename}
-        </h3>
-        <p className="text-xs text-muted-foreground mt-1 uppercase tracking-wide">
-          {media.mediaType}
-        </p>
-      </div>
       <div className="space-y-4">
         {details.map((item) => (
           <div key={item.label} className="flex items-start gap-3">
@@ -134,7 +127,11 @@ export function MediaDetails({ media, className = '' }: MediaDetailsProps) {
               <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-bold block mb-0.5">
                 {item.label}
               </span>
-              <div className="text-sm text-foreground/90 font-medium break-all">{item.value}</div>
+              {item.label === 'Filename' ? (
+                <h3 className="text-sm text-foreground/90 font-medium break-all">{item.value}</h3>
+              ) : (
+                <div className="text-sm text-foreground/90 font-medium break-all">{item.value}</div>
+              )}
             </div>
           </div>
         ))}

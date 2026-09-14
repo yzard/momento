@@ -9,9 +9,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::time::Duration;
 
 #[tokio::test]
-async fn unavailable_responses_explain_the_cause_without_cpu_serialization_or_internal_details() {
+async fn unavailable_responses_hide_the_cause_without_cpu_serialization() {
     use momento_api::executor::{ExecutorError, ExecutorErrorKind};
-    for (error, code) in [
+    for (error, _internal_code) in [
         (AppError::DatabaseBusy, "database_busy"),
         (
             AppError::StreamUnavailable("stream-session admission is at capacity".into()),
@@ -40,8 +40,7 @@ async fn unavailable_responses_explain_the_cause_without_cpu_serialization_or_in
         assert_eq!(response.headers()["cache-control"], "no-store");
         let body = to_bytes(response.into_body(), 2048).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["code"], code);
-        assert!(value["detail"].as_str().unwrap().contains("retry"));
+        assert_eq!(value, serde_json::json!({"detail": "Service Unavailable"}));
         assert!(!String::from_utf8_lossy(&body).contains("private-path"));
     }
 }
@@ -76,8 +75,10 @@ async fn sqlite_execution_timeout_is_not_reported_as_capacity_contention() {
         momento_api::error::render_pending_error_response(&executors.cpu, response).await;
     let body = to_bytes(response.into_body(), 2048).await.unwrap();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["code"], "database_timeout");
-    assert_eq!(value["detail"], "Database operation timed out");
+    assert_eq!(
+        value,
+        serde_json::json!({"detail": "Internal Server Error"})
+    );
 }
 
 #[test]
@@ -127,7 +128,47 @@ async fn assert_generic_internal_error(error: AppError) {
         .expect("response body");
     let response_body: serde_json::Value =
         serde_json::from_slice(&response_body).expect("JSON body");
-    assert_eq!(response_body["detail"], "Internal server error");
+    assert_eq!(response_body["detail"], "Internal Server Error");
+}
+
+#[tokio::test]
+async fn public_errors_do_not_expose_arbitrary_internal_causes() {
+    for (error, status) in [
+        (
+            AppError::Authentication("JWT signature detail".into()),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            AppError::Forbidden("user admin exists".into()),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            AppError::NotFound("/data/private/config.toml".into()),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            AppError::Validation("private database field".into()),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            AppError::Conflict("journal private path".into()),
+            StatusCode::CONFLICT,
+        ),
+        (
+            AppError::UnprocessableEntity("decoder internal command".into()),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let response = render_error(error).await;
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = to_bytes(response.into_body(), 2048).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"detail": status.canonical_reason().unwrap()})
+        );
+    }
 }
 
 async fn render_error(error: AppError) -> axum::response::Response {

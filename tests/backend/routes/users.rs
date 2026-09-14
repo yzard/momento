@@ -14,9 +14,15 @@ async fn user_update_requires_the_target_user_id_in_the_json_body() {
         .expect("database")
         .execute("UPDATE users SET role = 'admin' WHERE id = ?", [admin_id])
         .expect("administrator role");
-    let access_token =
-        create_access_token(admin_id, "update-admin", "admin", &Config::default(), None)
-            .expect("access token");
+    let access_token = create_access_token(
+        admin_id,
+        0,
+        "update-admin",
+        "admin",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("access token");
     let server = TestServer::new(app).expect("server");
     let authorization = format!("Bearer {access_token}");
 
@@ -50,8 +56,15 @@ async fn reserved_admin_cannot_be_deactivated_or_deleted_by_another_administrato
         .expect("administrator roles");
     drop(connection);
 
-    let access_token = create_access_token(actor_id, "manager", "admin", &Config::default(), None)
-        .expect("access token");
+    let access_token = create_access_token(
+        actor_id,
+        0,
+        "manager",
+        "admin",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("access token");
     let authorization = format!("Bearer {access_token}");
     let server = TestServer::new(app).expect("server");
 

@@ -83,8 +83,15 @@ async fn media_delete_accepts_media_ids_batch() {
 }
 
 fn access_token(user_id: i64) -> String {
-    create_access_token(user_id, "testuser", "user", &Config::default(), None)
-        .expect("Failed to create test access token")
+    create_access_token(
+        user_id,
+        0,
+        "testuser",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("Failed to create test access token")
 }
 
 #[tokio::test]

@@ -118,9 +118,12 @@ impl Default for SecurityConfig {
 
 impl SecurityConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.secret_key.trim().is_empty() {
+        if self.secret_key.trim().len() < 32
+            || self.secret_key == defaults::SECURITY_SECRET_KEY
+            || self.secret_key.contains("${")
+        {
             return Err(std::io::Error::other(
-                "security secret_key must not be empty",
+                "security secret_key must be explicitly configured with at least 32 random bytes; default and placeholder keys are forbidden",
             ));
         }
         if self.access_token_expire_minutes <= 0 || self.refresh_token_expire_days <= 0 {

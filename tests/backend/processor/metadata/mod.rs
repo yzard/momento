@@ -116,7 +116,7 @@ async fn metadata_quota_failure_uses_runtime_limit_and_stops_automatic_retry() {
         [media_id],
     ).unwrap();
     let token = claim_metadata_job(&pool, &executors, media_id).await;
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.server.data_dir = data_directory.clone();
     config.media_process.magick_memory_quota_bytes = 8 * 1024 * 1024 * 1024;
     config.metadata.thumbnails_max_size = 16000;
@@ -296,7 +296,7 @@ async fn tiny_thumbnail_reuses_the_normal_thumbnail_pixels() {
         "UPDATE media SET file_path = ?, mime_type = ?, import_state = 'imported' WHERE id = ?",
         rusqlite::params![filename, format!("image/{extension}"), media_id]).expect("media");
         let claim = claim_metadata_job(&pool, &executors, media_id).await;
-        let config = Config::default();
+        let config = crate::test_utils::test_config();
         momento_api::processor::metadata::generate_media_metadata(
             &executors, media_id, &claim, &config,
         )
@@ -401,7 +401,7 @@ async fn qoi_original_is_preserved_for_every_photo_inference_task() {
         )
         .expect("QOI media");
     let claim_token = claim_metadata_job(&pool, &executors, media_id).await;
-    let config = Config::default();
+    let config = crate::test_utils::test_config();
     momento_api::processor::metadata::generate_media_metadata(
         &executors,
         media_id,
@@ -532,7 +532,7 @@ async fn metadata_references_the_canonical_original_for_every_photo_ai_task() {
         &executors,
         photo_id,
         &claim_token,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await
     .expect("metadata generation");
@@ -651,7 +651,7 @@ async fn video_preview_skips_unknown_first_audio_and_copies_default_aac() {
         &executors,
         id,
         &token,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await
     .unwrap();
@@ -739,7 +739,7 @@ async fn video_preview_transcodes_incompatible_content_without_changing_original
         &executors,
         media_id,
         &token,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await
     .expect("incompatible content must be transcoded despite the MP4 name/MIME");
@@ -973,7 +973,7 @@ async fn assert_video_metadata(
         &executors,
         media_id,
         &claim_token,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await
     .expect("video metadata generation");
@@ -1105,7 +1105,7 @@ async fn assert_video_metadata(
         &executors,
         &data_directory,
         &thumbnail_path,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await;
 
@@ -1113,7 +1113,7 @@ async fn assert_video_metadata(
         &executors,
         media_id,
         &claim_token,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await
     .expect("repeated video metadata generation");
@@ -1192,7 +1192,7 @@ async fn metadata_rejects_an_original_without_an_image_mime_type() {
         &executors,
         media_id,
         &claim_token,
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .await
     .expect_err("unsupported original should fail");

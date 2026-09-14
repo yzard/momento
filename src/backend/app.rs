@@ -152,9 +152,100 @@ fn names_static_asset(path: &str) -> bool {
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const MAX_REQUEST_URI_BYTES: usize = 8 * 1024;
 
+#[derive(Clone)]
+struct PublicIngressPolicy {
+    webdav_mount_path: String,
+    trusted_proxies: Vec<std::net::IpAddr>,
+    rejected: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+fn public_path_allowed(path: &str) -> bool {
+    if matches!(
+        path,
+        "/" | "/index.html" | "/favicon.ico" | "/momento-android.apk"
+    ) {
+        return true;
+    }
+    if path.starts_with("/assets/") {
+        return !path.split('/').any(|part| part.starts_with('.'))
+            && matches!(
+                path.rsplit('.').next(),
+                Some(
+                    "js" | "css"
+                        | "woff"
+                        | "woff2"
+                        | "ttf"
+                        | "png"
+                        | "jpg"
+                        | "jpeg"
+                        | "webp"
+                        | "avif"
+                        | "svg"
+                        | "ico"
+                )
+            );
+    }
+    matches!(
+        path.trim_end_matches('/'),
+        "/login"
+            | "/timeline"
+            | "/timeline/photos"
+            | "/timeline/videos"
+            | "/timeline/screenshots"
+            | "/timeline/documents"
+            | "/albums"
+            | "/map"
+            | "/places"
+            | "/faces"
+            | "/utility"
+            | "/utility/deduplicate"
+            | "/settings"
+            | "/admin"
+            | "/admin/import"
+            | "/admin/metadata"
+            | "/admin/ai"
+            | "/admin/users"
+            | "/trash"
+    ) || ["/places/", "/faces/"].iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    })
+}
+
+async fn public_ingress_guard(
+    axum::extract::State(policy): axum::extract::State<PublicIngressPolicy>,
+    request: Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    let is_api = path == "/api/v1" || path.starts_with("/api/v1/");
+    let is_webdav = path == policy.webdav_mount_path
+        || path
+            .strip_prefix(&policy.webdav_mount_path)
+            .is_some_and(|suffix| suffix.starts_with('/'));
+    if path.len() <= MAX_REQUEST_URI_BYTES && (is_api || is_webdav || public_path_allowed(path)) {
+        return next.run(request).await;
+    }
+    let count = policy
+        .rejected
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    // Bounded log volume: the first rejection and then one summary per 128 rejects.
+    if count == 1 || count.is_multiple_of(128) {
+        let peer = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|value| value.0);
+        let client_ip =
+            crate::auth::client_source(request.headers(), peer, &policy.trusted_proxies);
+        tracing::warn!(%client_ip, rejected_total=count, event="public_path_rejected", "Rejected unrecognized public paths before scheduler admission");
+    }
+    close_connection_response(StatusCode::NOT_FOUND)
+}
+
 async fn http_protocol_guard(request: Request<Body>, next: middleware::Next) -> Response {
     if request.uri().to_string().len() > MAX_REQUEST_URI_BYTES {
-        return close_connection_response(StatusCode::URI_TOO_LONG, "Request URI is too long");
+        return close_connection_response(StatusCode::URI_TOO_LONG);
     }
     if request
         .headers()
@@ -167,19 +258,27 @@ async fn http_protocol_guard(request: Request<Body>, next: middleware::Next) -> 
             Err(_) => true,
         })
     {
-        return close_connection_response(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "Request content encoding is not supported",
-        );
+        return close_connection_response(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     next.run(request).await
 }
 
-fn close_connection_response(status: StatusCode, message: &'static str) -> Response {
-    let mut response = (status, message).into_response();
+fn close_connection_response(status: StatusCode) -> Response {
+    let mut response = (
+        status,
+        status.canonical_reason().unwrap_or("Request Failed"),
+    )
+        .into_response();
     response
         .headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     response
 }
 
@@ -268,6 +367,7 @@ pub fn create_app(config_manager: ConfigManager, dependencies: AppDependencies) 
         .layer(middleware::from_fn_with_state(
             RequestLoggerState {
                 cpu: state.executors.cpu.clone(),
+                trusted_proxy_ip_addresses: config.security.trusted_proxy_ip_addresses.clone(),
             },
             request_logger,
         ))
@@ -280,6 +380,14 @@ pub fn create_app(config_manager: ConfigManager, dependencies: AppDependencies) 
         .layer(middleware::from_fn_with_state(
             scheduler,
             schedule_client_request,
+        ))
+        .layer(middleware::from_fn_with_state(
+            PublicIngressPolicy {
+                webdav_mount_path: config.webdav.mount_path.clone(),
+                trusted_proxies: config.security.trusted_proxy_ip_addresses.clone(),
+                rejected: Default::default(),
+            },
+            public_ingress_guard,
         ))
         .with_state(state)
 }

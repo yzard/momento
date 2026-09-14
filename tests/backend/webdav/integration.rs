@@ -16,7 +16,7 @@ use crate::test_utils::{
 async fn webdav_password_authentication_is_rate_limited() {
     let _webdav_test_guard = lock_webdav_test().await;
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.security.password_attempts_per_identity = 1;
     config.security.password_attempts_per_source = 10;
     let app = create_app(
@@ -60,7 +60,7 @@ async fn test_authenticated_non_default_mount_enforces_limit_and_stages_upload()
     let (_, data_directory) = test_executor_handles_with_data_directory(pool.clone());
     let user_root = data_directory.join("webdav").join(&username);
 
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.server.api_request_body_max_bytes = 1;
     config.webdav.mount_path = "/photos".to_string();
     config.webdav.max_upload_bytes = 11;

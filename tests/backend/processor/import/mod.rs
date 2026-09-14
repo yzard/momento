@@ -730,7 +730,7 @@ async fn test_webdav_import_waits_for_active_uploads_before_claiming() {
     let source_path = user_root.join("photo.jpg");
     std::fs::write(&source_path, b"incomplete upload").expect("staged upload");
 
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.webdav.stable_file_age_seconds = 0;
     let gate = Arc::new(tokio::sync::RwLock::new(()));
     let upload_permit = gate.read().await;
@@ -827,7 +827,7 @@ async fn test_webdav_import_rechecks_readiness_after_waiting_for_uploads() {
     std::fs::write(&source_path, b"previous completed upload").expect("staged upload");
     mark_webdav_file_ready(&pool, user_id, "video.mp4");
 
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.webdav.stable_file_age_seconds = 0;
     let gate = Arc::new(tokio::sync::RwLock::new(()));
     let upload_permit = gate.read().await;
@@ -928,7 +928,7 @@ async fn test_webdav_duplicate_reuses_existing_media() {
         second_user_id,
         "duplicate.jpg.supplemental-metadata(2).json",
     );
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.webdav.stable_file_age_seconds = 0;
     let gate = Arc::new(tokio::sync::RwLock::new(()));
 
@@ -1230,7 +1230,7 @@ async fn test_webdav_import_handles_nested_ready_source() {
     std::fs::create_dir_all(&source_directory).expect("source directory");
     std::fs::write(source_directory.join("photo.jpg"), b"photo bytes").expect("source file");
     mark_webdav_file_ready(&pool, user_id, "Camera Roll/photo.jpg");
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.webdav.stable_file_age_seconds = 0;
     let gate = Arc::new(tokio::sync::RwLock::new(()));
     run_webdav_import_cycle(

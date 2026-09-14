@@ -6,8 +6,15 @@ use momento_api::config::Config;
 use serde_json::{json, Value};
 
 fn access_token(user_id: i64) -> String {
-    create_access_token(user_id, "album-owner", "user", &Config::default(), None)
-        .expect("Failed to create access token")
+    create_access_token(
+        user_id,
+        0,
+        "album-owner",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("Failed to create access token")
 }
 
 fn insert_aesthetic_score(

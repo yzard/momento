@@ -12,8 +12,15 @@ const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e7304
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 fn token(user_id: i64) -> String {
-    create_access_token(user_id, "backup-user", "user", &Config::default(), None)
-        .expect("backup access token")
+    create_access_token(
+        user_id,
+        0,
+        "backup-user",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("backup access token")
 }
 
 async fn register_device(server: &TestServer, access_token: &str, device_id: &str) {

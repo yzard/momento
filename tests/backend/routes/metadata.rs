@@ -11,8 +11,15 @@ use momento_api::processor::ai;
 async fn metadata_generate_requires_administrator() {
     let (application, pool) = create_test_app();
     let user_id = create_test_user(&pool, "metadata-user", "metadata-user@example.com");
-    let token = create_access_token(user_id, "metadata-user", "user", &Config::default(), None)
-        .expect("token");
+    let token = create_access_token(
+        user_id,
+        0,
+        "metadata-user",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("token");
     let server = TestServer::new(application).expect("server");
     server
         .post("/api/v1/metadata/generate")
@@ -55,9 +62,10 @@ async fn metadata_cancel_stops_queued_and_processing_jobs_without_allowing_a_lat
     drop(connection);
     let token = create_access_token(
         administrator_id,
+        0,
         "metadata-cancel-admin",
         "admin",
-        &Config::default(),
+        &crate::test_utils::test_config(),
         None,
     )
     .expect("token");
@@ -163,9 +171,10 @@ async fn metadata_clean_removes_generated_data_without_regenerating_it() {
     drop(connection);
     let token = create_access_token(
         administrator_id,
+        0,
         "metadata-clean-admin",
         "admin",
-        &Config::default(),
+        &crate::test_utils::test_config(),
         None,
     )
     .expect("token");
@@ -243,9 +252,10 @@ async fn metadata_status_returns_complete_failure_diagnostics() {
     drop(connection);
     let token = create_access_token(
         administrator_id,
+        0,
         "metadata-status-admin",
         "admin",
-        &Config::default(),
+        &crate::test_utils::test_config(),
         None,
     )
     .expect("token");

@@ -1,5 +1,27 @@
 mod defaults;
 
+#[test]
+fn signing_secret_must_be_explicit_and_not_a_known_default() {
+    for secret in [
+        None,
+        Some(""),
+        Some("short"),
+        Some("change-me-in-production-use-openssl-rand-hex-32"),
+        Some("${UNRESOLVED_SECRET_KEY_PLACEHOLDER}"),
+    ] {
+        let dir = crate::temporary::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let content = secret
+            .map(|key| format!("[security]\nsecret_key={key:?}\n"))
+            .unwrap_or_default();
+        std::fs::write(&path, content).unwrap();
+        assert!(load_config(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("secret_key"));
+    }
+}
+
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
@@ -39,6 +61,18 @@ fn magick_memory_quota_belongs_only_to_media_process() {
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
+    let mut contents = contents.to_string();
+    if !contents.contains("secret_key") {
+        let key = format!(
+            "secret_key = {:?}\n",
+            crate::test_utils::test_config().security.secret_key
+        );
+        if contents.contains("[security]") {
+            contents = contents.replacen("[security]", &format!("[security]\n{key}"), 1);
+        } else {
+            contents.push_str(&format!("\n[security]\n{key}"));
+        }
+    }
     std::fs::write(&path, contents).expect("Failed to write test config");
     path
 }
@@ -47,8 +81,11 @@ fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
 fn config_bootstrap_enforces_the_exact_file_size_boundary() {
     let directory = crate::temporary::tempdir().expect("temporary directory");
     let path = directory.path().join("config.toml");
-    let mut exact = String::from("#");
-    exact.push_str(&"x".repeat(1024 * 1024 - 2));
+    let mut exact = format!(
+        "[security]\nsecret_key = {:?}\n#",
+        crate::test_utils::test_config().security.secret_key
+    );
+    exact.push_str(&"x".repeat(1024 * 1024 - exact.len() - 1));
     exact.push('\n');
     assert_eq!(exact.len(), 1024 * 1024);
     std::fs::write(&path, &exact).expect("write exact-size config");
@@ -250,7 +287,7 @@ fn config_environment_defaults_missing_or_empty_admin_reset_to_false() {
 
 #[test]
 fn config_environment_overrides_recovery_and_shared_secrets() {
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
 
     apply_config_environment(
         &mut config,
@@ -278,7 +315,7 @@ fn config_environment_overrides_recovery_and_shared_secrets() {
 fn config_environment_rejects_invalid_recovery_and_empty_secrets() {
     for reset_admin_password in ["TRUE", "1", "yes"] {
         let error = apply_config_environment(
-            &mut Config::default(),
+            &mut crate::test_utils::test_config(),
             Some(reset_admin_password),
             None,
             None,
@@ -292,8 +329,13 @@ fn config_environment_rejects_invalid_recovery_and_empty_secrets() {
         (None, Some(""), "LLM_SERVICE_API_KEY"),
         (None, Some("   "), "LLM_SERVICE_API_KEY"),
     ] {
-        let error = apply_config_environment(&mut Config::default(), None, secret_key, api_key)
-            .expect_err("empty secret must fail");
+        let error = apply_config_environment(
+            &mut crate::test_utils::test_config(),
+            None,
+            secret_key,
+            api_key,
+        )
+        .expect_err("empty secret must fail");
         assert!(error.to_string().contains(expected_name));
     }
 }
@@ -472,7 +514,7 @@ fn test_load_config_omitted_sections_use_defaults() {
     let path = write_config(&dir, "[server]\nport = 9001\n");
 
     let config = load_config(&path).expect("Failed to load config");
-    let defaults = Config::default();
+    let defaults = crate::test_utils::test_config();
 
     assert_eq!(config.server.port, 9001);
     assert!(!config.server.reset_admin_password);
@@ -612,7 +654,7 @@ async fn config_manager_rejects_external_edits_without_changing_live_state() {
 
 #[test]
 fn test_server_path_defaults_match_container_layout() {
-    let config = Config::default();
+    let config = crate::test_utils::test_config();
 
     assert_eq!(config.server.data_dir, PathBuf::from("/data"));
     assert_eq!(config.server.static_dir, PathBuf::from("/app/static"));

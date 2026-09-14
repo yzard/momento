@@ -6,8 +6,15 @@ use momento_api::config::Config;
 use serde_json::{json, Value};
 
 fn token(user_id: i64) -> String {
-    create_access_token(user_id, "testuser", "user", &Config::default(), None)
-        .expect("access token")
+    create_access_token(
+        user_id,
+        0,
+        "testuser",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("access token")
 }
 
 #[tokio::test]

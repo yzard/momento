@@ -11,8 +11,15 @@ use momento_api::processor::ai::operation::AiFeature;
 use serde_json::{json, Value};
 
 fn admin_token(user_id: i64) -> String {
-    create_access_token(user_id, "admin", "admin", &Config::default(), None)
-        .expect("Failed to create token")
+    create_access_token(
+        user_id,
+        0,
+        "admin",
+        "admin",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("Failed to create token")
 }
 
 fn action_affected_jobs(body: &Value, feature: &str) -> i64 {
@@ -48,8 +55,15 @@ fn feature_schedule<'a>(body: &'a Value, feature: &str) -> &'a Value {
 async fn aggregate_status_requires_an_administrator() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "ai-viewer", "ai-viewer@example.com");
-    let token = create_access_token(user_id, "ai-viewer", "user", &Config::default(), None)
-        .expect("user token");
+    let token = create_access_token(
+        user_id,
+        0,
+        "ai-viewer",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("user token");
     let server = TestServer::new(app).expect("server");
 
     server
@@ -69,7 +83,7 @@ async fn aggregate_status_requires_an_administrator() {
 async fn administrator_updates_a_live_ai_schedule_and_persists_config() {
     let directory = crate::temporary::tempdir().expect("temporary config directory");
     let config_path = directory.path().join("config.toml");
-    let config = Config::default();
+    let config = crate::test_utils::test_config();
     std::fs::write(
         &config_path,
         format!(
@@ -272,7 +286,7 @@ async fn face_cancel_reports_an_active_downstream_grouping_run() {
 #[tokio::test]
 async fn start_succeeds_when_deduplicate_is_already_running() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -378,7 +392,7 @@ async fn failed_jobs_can_be_cleaned_and_restarted_for_every_ai_feature() {
     .enumerate()
     {
         let pool = create_test_db();
-        let mut config = Config::default();
+        let mut config = crate::test_utils::test_config();
         config.llm.enabled = true;
         let app = create_app(
             create_test_config_manager(config),
@@ -499,7 +513,7 @@ async fn manual_start_queues_a_new_attempt_after_failure_for_every_ai_feature() 
 
     for (case_index, (feature, task)) in cases.into_iter().enumerate() {
         let pool = create_test_db();
-        let mut config = Config::default();
+        let mut config = crate::test_utils::test_config();
         config.llm.enabled = true;
         let app = create_app(
             create_test_config_manager(config),
@@ -558,7 +572,7 @@ async fn clean_rejects_an_active_feature() {
 #[tokio::test]
 async fn image_aesthetics_admin_controls_queue_report_and_clean_results() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -686,7 +700,7 @@ async fn removed_image_aesthetics_reset_returns_not_found() {
 #[tokio::test]
 async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -785,7 +799,7 @@ async fn classifier_admin_controls_queue_report_cancel_and_clean_results() {
 #[tokio::test]
 async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -857,7 +871,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
         .assert_status_ok();
     momento_api::processor::face_detection::finalize_ready_runs(
         &crate::test_utils::test_executor_handles(pool.clone()),
-        &Config::default().face_group,
+        &crate::test_utils::test_config().face_group,
     )
     .await
     .expect("finalize cancel");
@@ -1003,7 +1017,7 @@ async fn face_admin_start_cancel_and_clean_use_a_durable_grouping_run() {
 #[tokio::test]
 async fn different_ai_features_start_independently() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -1123,7 +1137,7 @@ async fn removed_trigger_and_image_clustering_routes_return_not_found() {
 #[tokio::test]
 async fn aggregate_status_reports_exact_independent_job_states_without_a_body() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -1182,7 +1196,7 @@ async fn aggregate_status_reports_exact_independent_job_states_without_a_body() 
 #[tokio::test]
 async fn aggregate_status_reports_only_each_media_tasks_latest_job() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(
@@ -1249,7 +1263,7 @@ async fn aggregate_status_reports_only_each_media_tasks_latest_job() {
 #[tokio::test]
 async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let config_manager = create_test_config_manager(config);
     let app = create_app(

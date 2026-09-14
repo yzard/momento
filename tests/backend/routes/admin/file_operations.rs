@@ -7,7 +7,15 @@ use serde_json::{json, Value};
 use crate::test_utils::{create_test_app, create_test_user, test_executor_handles};
 
 fn token(user_id: i64, username: &str, role: &str) -> String {
-    create_access_token(user_id, username, role, &Config::default(), None).expect("token")
+    create_access_token(
+        user_id,
+        0,
+        username,
+        role,
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("token")
 }
 
 fn insert_failed_operation(pool: &momento_api::database::DbPool, id: &str, version: i64) {

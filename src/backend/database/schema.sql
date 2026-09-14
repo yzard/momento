@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE NOT NULL,
     email TEXT UNIQUE NOT NULL,
     hashed_password TEXT NOT NULL,
+    auth_version INTEGER NOT NULL DEFAULT 0 CHECK(auth_version >= 0),
     role TEXT CHECK(role IN ('admin', 'user')) DEFAULT 'user',
     must_change_password INTEGER DEFAULT 1,
     is_active INTEGER DEFAULT 1,

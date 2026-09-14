@@ -9,8 +9,15 @@ use momento_api::models::MediaAccessResource;
 
 #[test]
 fn access_tokens_always_use_hs256() {
-    let token = create_access_token(1, "user", "user", &Config::default(), None)
-        .expect("Failed to create access token");
+    let token = create_access_token(
+        1,
+        0,
+        "user",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("Failed to create access token");
 
     let header = decode_header(&token).expect("Failed to decode access token header");
 
@@ -19,9 +26,9 @@ fn access_tokens_always_use_hs256() {
 
 #[test]
 fn scoped_tokens_are_domain_separated_and_bound_to_their_resource() {
-    let config = Config::default();
+    let config = crate::test_utils::test_config();
     let (media_ticket, media_expiration) =
-        create_media_access_ticket(7, 42, MediaAccessResource::Original, &config)
+        create_media_access_ticket(7, 0, 42, MediaAccessResource::Original, &config)
             .expect("media ticket");
     let media_claims = decode_media_access_ticket(&media_ticket, &config).expect("media claims");
     assert_eq!(media_claims.sub, "7");
@@ -45,9 +52,9 @@ fn scoped_tokens_are_domain_separated_and_bound_to_their_resource() {
 
 #[test]
 fn expired_scoped_tokens_are_rejected() {
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.security.media_access_ticket_expire_hours = -1;
-    let (ticket, _) = create_media_access_ticket(7, 42, MediaAccessResource::Original, &config)
+    let (ticket, _) = create_media_access_ticket(7, 0, 42, MediaAccessResource::Original, &config)
         .expect("expired media ticket");
 
     assert!(decode_media_access_ticket(&ticket, &config).is_none());
@@ -56,8 +63,10 @@ fn expired_scoped_tokens_are_rejected() {
         11,
         "expired-share",
         Some(Utc::now() - Duration::hours(1)),
-        &Config::default(),
+        &crate::test_utils::test_config(),
     )
     .expect("expired share session");
-    assert!(decode_share_session_token(&share_session, &Config::default()).is_none());
+    assert!(
+        decode_share_session_token(&share_session, &crate::test_utils::test_config()).is_none()
+    );
 }

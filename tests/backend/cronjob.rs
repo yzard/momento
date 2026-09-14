@@ -48,7 +48,7 @@ fn schedule_uses_the_explicit_immutable_timezone_snapshot() {
 
 #[tokio::test]
 async fn schedules_dispatch_through_the_correct_run_abstractions() {
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let scheduled_for = "2026-08-17T03:00:00Z";
 
@@ -159,7 +159,7 @@ async fn schedules_dispatch_through_the_correct_run_abstractions() {
 
 #[tokio::test]
 async fn classification_schedules_queue_their_exact_durable_tasks() {
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let pool = create_test_db();
     prepare_task_input(&pool, "screenshot_detection", "screenshot.jpg");
@@ -203,7 +203,7 @@ async fn classification_schedules_queue_their_exact_durable_tasks() {
 
 #[tokio::test]
 async fn scheduled_occurrences_queue_a_new_attempt_after_failure_for_every_ai_feature() {
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let cases = [
         (ScheduledTask::Ocr, "ocr"),
@@ -250,7 +250,7 @@ async fn scheduled_occurrences_queue_a_new_attempt_after_failure_for_every_ai_fe
 
 #[tokio::test]
 async fn disabled_global_llm_does_not_queue_classification_schedules() {
-    let config = Config::default();
+    let config = crate::test_utils::test_config();
     let pool = create_test_db();
     prepare_task_input(&pool, "screenshot_detection", "screenshot.jpg");
     prepare_task_input(&pool, "document_detection", "document.jpg");
@@ -277,7 +277,7 @@ async fn disabled_global_llm_does_not_queue_classification_schedules() {
 
 #[tokio::test]
 async fn disabled_global_llm_prevents_every_scheduled_task() {
-    let config = Config::default();
+    let config = crate::test_utils::test_config();
     let pool = create_test_db();
     let executors = crate::test_utils::test_executor_handles(pool.clone());
 
@@ -314,7 +314,7 @@ async fn disabled_global_llm_prevents_every_scheduled_task() {
 
 #[tokio::test]
 async fn one_scheduled_feature_does_not_wait_for_another_feature_result() {
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.llm.enabled = true;
     let pool = create_test_db();
     prepare_task_input(&pool, "ocr", "long-running-ocr.jpg");

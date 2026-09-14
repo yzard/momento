@@ -19,6 +19,98 @@ fn basic_credentials(username: &str, password: &str) -> String {
     format!("Basic {encoded}")
 }
 
+#[tokio::test]
+async fn password_change_and_logout_all_revoke_access_refresh_and_media_tickets() {
+    for change_password in [false, true] {
+        let (pool, user_id) = create_admin_fixture();
+        let server = create_server(pool.clone(), None);
+        let login = server
+            .post("/api/v1/user/authenticate")
+            .add_header(
+                AUTHORIZATION,
+                basic_credentials("stored-admin", "stored-password"),
+            )
+            .await;
+        login.assert_status_ok();
+        let tokens: Value = login.json();
+        let authorization = format!("Bearer {}", tokens["accessToken"].as_str().unwrap());
+        let (ticket, _) = momento_api::auth::create_media_access_ticket(
+            user_id,
+            0,
+            1,
+            momento_api::models::MediaAccessResource::Preview,
+            &crate::test_utils::test_config(),
+        )
+        .unwrap();
+        server
+            .post("/api/v1/user/list")
+            .add_header(AUTHORIZATION, authorization.clone())
+            .json(&json!({}))
+            .await
+            .assert_status_ok();
+        if change_password {
+            server.post("/api/v1/user/change-password").add_header(AUTHORIZATION, authorization.clone()).json(&json!({"currentPassword":"stored-password","newPassword":"replacement-password"})).await.assert_status_ok();
+        } else {
+            server
+                .post("/api/v1/user/logout-all")
+                .add_header(AUTHORIZATION, authorization.clone())
+                .await
+                .assert_status_ok();
+        }
+        server
+            .post("/api/v1/user/list")
+            .add_header(AUTHORIZATION, authorization)
+            .json(&json!({}))
+            .await
+            .assert_status_unauthorized();
+        server
+            .get(&format!("/api/v1/media/1/preview?ticket={ticket}"))
+            .await
+            .assert_status_unauthorized();
+        server
+            .post("/api/v1/user/refresh")
+            .json(&json!({"refreshToken":tokens["refreshToken"]}))
+            .await
+            .assert_status_unauthorized();
+        assert_eq!(
+            pool.get()
+                .unwrap()
+                .query_row(
+                    "SELECT auth_version FROM users WHERE id=?",
+                    [user_id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let next = server
+            .post("/api/v1/user/authenticate")
+            .add_header(
+                AUTHORIZATION,
+                basic_credentials(
+                    "stored-admin",
+                    if change_password {
+                        "replacement-password"
+                    } else {
+                        "stored-password"
+                    },
+                ),
+            )
+            .await;
+        next.assert_status_ok();
+        let next: Value = next.json();
+        server
+            .post("/api/v1/user/list")
+            .add_header(
+                AUTHORIZATION,
+                format!("Bearer {}", next["accessToken"].as_str().unwrap()),
+            )
+            .json(&json!({}))
+            .await
+            .assert_status_ok();
+    }
+}
+
 fn create_admin_fixture() -> (momento_api::database::DbPool, i64) {
     let pool = create_test_db();
     let admin_id = create_test_user(&pool, "stored-admin", "stored-admin@example.com");
@@ -34,7 +126,7 @@ fn create_admin_fixture() -> (momento_api::database::DbPool, i64) {
 }
 
 fn create_server(pool: momento_api::database::DbPool, reset_user_id: Option<i64>) -> TestServer {
-    create_server_with_config(pool, reset_user_id, Config::default())
+    create_server_with_config(pool, reset_user_id, crate::test_utils::test_config())
 }
 
 fn create_server_with_config(
@@ -80,7 +172,7 @@ async fn new_database_admin_uses_initial_credentials_without_reset_configuration
 #[tokio::test]
 async fn token_and_browser_password_logins_share_the_same_rate_limit() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.security.password_attempts_per_identity = 2;
     config.security.password_attempts_per_source = 10;
     let server = create_server_with_config(pool, None, config);
@@ -108,7 +200,7 @@ async fn token_and_browser_password_logins_share_the_same_rate_limit() {
 #[tokio::test]
 async fn buffered_json_routes_enforce_the_configured_body_limit() {
     let pool = create_test_db();
-    let mut config = Config::default();
+    let mut config = crate::test_utils::test_config();
     config.server.api_request_body_max_bytes = 16;
     let config_manager = create_test_config_manager(config);
     let app = create_app(

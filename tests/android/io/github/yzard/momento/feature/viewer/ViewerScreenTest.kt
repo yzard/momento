@@ -9,6 +9,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ViewerScreenTest {
+    @Test fun showsMediaIdAsItsOwnMetadataField() {
+        val rows = mediaMetadataRows(media(9260))
+        assertEquals("Media ID" to "9260", rows.first())
+        assertEquals("9260.jpg", rows.toMap()["Filename"])
+    }
+
     @Test
     fun clampsNavigationAtBothEndsAndHandlesAnEmptyViewer() {
         assertEquals(0, viewerIndex(0, -1, 2))

@@ -9,7 +9,15 @@ use serde_json::json;
 use crate::test_utils::{create_test_app, create_test_media, create_test_user, grant_media_access};
 
 fn token(user_id: i64, role: &str) -> String {
-    create_access_token(user_id, "faces", role, &Config::default(), None).expect("token")
+    create_access_token(
+        user_id,
+        0,
+        "faces",
+        role,
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("token")
 }
 
 #[test]
@@ -51,7 +59,7 @@ fn inaccessible_representative_uses_weighted_visible_face_score() {
         &connection,
         group_id,
         viewer_id,
-        &Config::default().face_group,
+        &crate::test_utils::test_config().face_group,
     )
     .expect("visible representative query")
     .expect("visible representative crop");
@@ -216,7 +224,7 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
         &connection,
         1,
         viewer_id,
-        &Config::default().face_group,
+        &crate::test_utils::test_config().face_group,
     )
     .expect("viewer representative query")
     .expect("viewer crop");
@@ -224,7 +232,7 @@ async fn face_groups_are_filtered_to_media_access_and_admin_can_merge() {
         &connection,
         1,
         administrator_id,
-        &Config::default().face_group,
+        &crate::test_utils::test_config().face_group,
     )
     .expect("administrator representative query")
     .expect("administrator crop");

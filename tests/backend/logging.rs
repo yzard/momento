@@ -26,6 +26,7 @@ async fn request_failure_logs_include_the_response_cause_and_request_path() {
         .layer(axum::middleware::from_fn_with_state(
             momento_api::logging::RequestLoggerState {
                 cpu: test_cpu_executor(),
+                trusted_proxy_ip_addresses: Vec::new(),
             },
             momento_api::logging::request_logger,
         ));
@@ -43,8 +44,15 @@ async fn request_failure_logs_include_the_response_cause_and_request_path() {
         response.status(),
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     );
+    let request_id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let body = to_bytes(response.into_body(), 2048).await.unwrap();
+    assert_eq!(body.as_ref(), br#"{"detail":"Service Unavailable"}"#);
     let bytes = buffer.0.lock().unwrap().clone();
     let log = String::from_utf8(bytes).unwrap();
+    assert!(log.contains(&request_id), "{log}");
     assert!(log.contains("GET /thumbnail 503"), "{log}");
     assert!(log.contains("stream_unavailable"), "{log}");
     assert!(
@@ -55,6 +63,26 @@ async fn request_failure_logs_include_the_response_cause_and_request_path() {
 
 fn test_cpu_executor() -> momento_api::executor::CpuExecutorHandle {
     crate::test_utils::test_executor_handles(crate::test_utils::create_test_db()).cpu
+}
+
+#[test]
+fn share_capabilities_are_redacted_from_log_paths() {
+    assert_eq!(
+        momento_api::logging::redacted_request_path("/api/v1/public/share/secret"),
+        "/api/v1/public/share/[redacted]"
+    );
+    assert_eq!(
+        momento_api::logging::redacted_request_path("/api/v1/public/share/secret/media/42"),
+        "/api/v1/public/share/[redacted]/media/42"
+    );
+    assert_eq!(
+        momento_api::logging::redacted_request_path("/api/v1/media/42/preview"),
+        "/api/v1/media/42/preview"
+    );
+    let mut value =
+        serde_json::json!({"security":{"secret_key":"private"},"clientSecret":"private"});
+    redact_request_values(&mut value);
+    assert!(!value.to_string().contains("private"));
 }
 
 #[test]

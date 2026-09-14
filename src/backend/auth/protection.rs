@@ -142,7 +142,7 @@ fn duration_to_i64(value: u64, name: &str) -> AppResult<i64> {
         .map_err(|_| AppError::Internal(format!("{name} exceeds the supported duration")))
 }
 
-fn client_source(
+pub(crate) fn client_source(
     headers: &HeaderMap,
     peer_address: Option<SocketAddr>,
     trusted_proxy_ip_addresses: &[IpAddr],

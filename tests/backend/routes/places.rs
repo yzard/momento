@@ -9,7 +9,15 @@ use crate::test_utils::{
 };
 
 fn token(user_id: i64) -> String {
-    create_access_token(user_id, "places", "user", &Config::default(), None).expect("token")
+    create_access_token(
+        user_id,
+        0,
+        "places",
+        "user",
+        &crate::test_utils::test_config(),
+        None,
+    )
+    .expect("token")
 }
 
 fn set_place(

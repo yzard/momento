@@ -4,7 +4,7 @@ use momento_api::config::{default_config_template, Config};
 fn rendered_template_and_runtime_share_face_group_threshold() {
     let template: toml::Value =
         toml::from_str(default_config_template()).expect("rendered template must be valid TOML");
-    let runtime_defaults = Config::default();
+    let runtime_defaults = crate::test_utils::test_config();
 
     assert_eq!(
         template["server"]["api_request_body_max_bytes"].as_integer(),
@@ -133,7 +133,7 @@ fn rendered_template_and_runtime_share_face_group_threshold() {
 #[test]
 fn thumbnail_defaults_match_for_template_runtime_and_omitted_fields() {
     let template: toml::Value = toml::from_str(default_config_template()).expect("valid template");
-    let runtime = Config::default();
+    let runtime = crate::test_utils::test_config();
     for (field, value, expected) in [
         (
             "thumbnails_max_size",
@@ -168,7 +168,7 @@ fn thumbnail_defaults_match_for_template_runtime_and_omitted_fields() {
 
 #[test]
 fn all_generated_defaults_match_runtime_and_omitted_sections() {
-    let mut expected = Config::default();
+    let mut expected = crate::test_utils::test_config();
     // These four fields are explicit container environment bindings, not alternate defaults.
     expected.security.secret_key = "test-secret".to_string();
     expected.llm.api_key = "test-api-key".to_string();
@@ -185,7 +185,7 @@ fn all_generated_defaults_match_runtime_and_omitted_sections() {
         toml::Value::try_from(generated).unwrap(),
         toml::Value::try_from(expected).unwrap()
     );
-    let runtime = toml::Value::try_from(Config::default()).unwrap();
+    let runtime = toml::Value::try_from(crate::test_utils::test_config()).unwrap();
     let omitted: Config = toml::from_str("").unwrap();
     assert_eq!(toml::Value::try_from(omitted).unwrap(), runtime);
     for section in runtime

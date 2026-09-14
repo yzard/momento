@@ -14,6 +14,7 @@ const SHARE_SESSION_CONTEXT: &str = "momento-share-session-v1";
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
+    pub auth_version: i64,
     pub username: String,
     pub role: String,
     pub exp: i64,
@@ -26,6 +27,7 @@ pub struct Claims {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MediaAccessTicketClaims {
     pub sub: String,
+    pub auth_version: i64,
     pub media_id: i64,
     pub resource: MediaAccessResource,
     pub exp: i64,
@@ -44,6 +46,7 @@ pub struct ShareSessionClaims {
 
 pub fn create_access_token(
     user_id: i64,
+    auth_version: i64,
     username: &str,
     role: &str,
     config: &Config,
@@ -53,6 +56,7 @@ pub fn create_access_token(
 
     let claims = Claims {
         sub: user_id.to_string(),
+        auth_version,
         username: username.to_string(),
         role: role.to_string(),
         exp: expiration.timestamp(),
@@ -102,6 +106,7 @@ pub fn decode_access_token(token: &str, config: &Config) -> Option<Claims> {
 
 pub fn create_media_access_ticket(
     user_id: i64,
+    auth_version: i64,
     media_id: i64,
     resource: MediaAccessResource,
     config: &Config,
@@ -109,6 +114,7 @@ pub fn create_media_access_ticket(
     let expires_at = Utc::now() + Duration::hours(config.security.media_access_ticket_expire_hours);
     let claims = MediaAccessTicketClaims {
         sub: user_id.to_string(),
+        auth_version,
         media_id,
         resource,
         exp: expires_at.timestamp(),

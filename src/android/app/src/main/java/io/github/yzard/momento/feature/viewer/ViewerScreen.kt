@@ -184,6 +184,7 @@ fun viewerTimestamp(media: Media): ViewerTimestamp {
 }
 
 fun mediaMetadataRows(media: Media): List<Pair<String, String>> = listOfNotNull(
+    "Media ID" to media.id.toString(),
     "Filename" to media.originalFilename,
     "Type" to media.mediaType.replaceFirstChar { it.uppercase() },
     media.mimeType?.let { "MIME type" to it },
@@ -1256,8 +1257,8 @@ private fun MediaInformationContent(
         }
         items(rows) { (label, value) ->
             ListItem(
+                overlineContent = { Text(label) },
                 headlineContent = { Text(value) },
-                supportingContent = { Text(label) },
             )
             HorizontalDivider()
         }
