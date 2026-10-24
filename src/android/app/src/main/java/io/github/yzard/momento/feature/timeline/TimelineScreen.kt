@@ -49,7 +49,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -73,7 +72,6 @@ import io.github.yzard.momento.feature.media.PageState
 import io.github.yzard.momento.feature.media.SelectableMediaThumbnail
 import io.github.yzard.momento.feature.media.adaptiveGridColumns
 import io.github.yzard.momento.feature.media.toggleMediaSelection
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
@@ -172,6 +170,7 @@ private fun TimelinePageContent(
     openMedia: (List<Media>, Int) -> Unit,
 ) {
     var pagingState by remember { mutableStateOf(TimelinePagingState.initial()) }
+    var requestGeneration by remember { mutableStateOf(0L) }
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var confirmTrash by remember { mutableStateOf(false) }
@@ -187,6 +186,8 @@ private fun TimelinePageContent(
     val scope = rememberCoroutineScope()
 
     suspend fun load(reset: Boolean, direction: TimelineDirection) {
+        if (reset) requestGeneration += 1
+        val generation = requestGeneration
         val requestCursor = pagingState.cursor(direction)
         val loadingState = pagingState.begin(reset, direction) ?: return
         pagingState = loadingState
@@ -202,10 +203,12 @@ private fun TimelinePageContent(
             )
         }) {
             is RequestResult.Success -> {
-                pagingState = loadingState.complete(requestResult.response, reset, direction)
+                if (generation != requestGeneration) return
+                pagingState = pagingState.complete(requestResult.response, reset, direction)
             }
             is RequestResult.Failure -> {
-                pagingState = loadingState.fail(
+                if (generation != requestGeneration) return
+                pagingState = pagingState.fail(
                     direction,
                     requestResult.error.userMessage("Could not load timeline"),
                 )
@@ -235,6 +238,7 @@ private fun TimelinePageContent(
     }
 
     fun refreshTimeline() {
+        requestGeneration += 1
         anchorDate = Instant.now().toString()
         refreshVersion += 1
     }
@@ -243,29 +247,8 @@ private fun TimelinePageContent(
         load(reset = true, direction = TimelineDirection.OLDER)
     }
 
-    LaunchedEffect(gridState, pagingState.olderCursor, pagingState.hasOlder) {
-        snapshotFlow {
-            val layout = gridState.layoutInfo
-            shouldAppendTimeline(
-                lastVisibleItemIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1,
-                totalItemsCount = layout.totalItemsCount,
-                visibleItemsCount = layout.visibleItemsInfo.size,
-                hasOlder = pagingState.hasOlder && pagingState.message == null,
-                loading = pagingState.loadingDirection != null,
-            )
-        }.filter { it }.collect { load(reset = false, direction = TimelineDirection.OLDER) }
-    }
-
-    LaunchedEffect(gridState, pagingState.newerCursor, pagingState.hasNewer) {
-        snapshotFlow {
-            val layout = gridState.layoutInfo
-            shouldPrependTimeline(
-                firstVisibleItemIndex = layout.visibleItemsInfo.firstOrNull()?.index ?: -1,
-                visibleItemsCount = layout.visibleItemsInfo.size,
-                hasNewer = pagingState.hasNewer && pagingState.message == null,
-                loading = pagingState.loadingDirection != null,
-            )
-        }.filter { it }.collect { load(reset = false, direction = TimelineDirection.NEWER) }
+    TimelinePagingEffect(gridState, pagingState) { direction ->
+        load(reset = false, direction = direction)
     }
 
     DisposableEffect(scrollKey, gridState) {
@@ -297,7 +280,13 @@ private fun TimelinePageContent(
         PageState.Loading -> LoadingState("Loading timeline", Modifier)
         is PageState.Ready -> PullToRefreshBox(
             isRefreshing = pageState.refreshing,
-            onRefresh = ::refreshTimeline,
+            onRefresh = {
+                if (pagingState.hasNewer) {
+                    scope.launch { load(reset = false, direction = TimelineDirection.NEWER) }
+                } else {
+                    refreshTimeline()
+                }
+            },
             modifier = Modifier.fillMaxSize(),
         ) {
             ContinuousTimelineGrid(
@@ -371,6 +360,7 @@ private fun TimelinePageContent(
             initialDate = pickerInitialDate,
             dismiss = { showPeriodPicker = false },
             select = { selectedDate ->
+                requestGeneration += 1
                 pagingState = TimelinePagingState.initial()
                 anchorDate = timelinePeriodAnchorDate(period, selectedDate)
                 refreshVersion += 1

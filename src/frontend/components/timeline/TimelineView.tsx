@@ -132,6 +132,7 @@ export default function TimelineView({
   )
   const paging = useTimelinePaging({
     scrollRef,
+    contentKey: timelineGroups.flatMap((group) => group.media.map((media) => media.id)).join(','),
     hasOlder: hasNextPage,
     hasNewer: hasPreviousPage,
     isLoadingOlder,
@@ -183,6 +184,7 @@ export default function TimelineView({
       />
       <div
         ref={scrollRef}
+        style={{ overflowAnchor: 'none' }}
         className="h-full overflow-y-auto overscroll-contain pr-4 md:pr-20"
         onScroll={handleScroll}
         onWheel={handleWheel}

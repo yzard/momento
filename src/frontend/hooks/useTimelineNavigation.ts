@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type RefObject, type WheelEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+  type WheelEvent,
+} from 'react'
 import type { TimelineMarker } from '../api/media'
 import type { TimelineGroup } from '../api/types'
 
@@ -34,6 +42,7 @@ export function useActiveTimelineMarker(
 
 interface TimelinePagingOptions {
   scrollRef: RefObject<HTMLDivElement | null>
+  contentKey: string
   hasOlder: boolean
   hasNewer: boolean
   isLoadingOlder: boolean
@@ -53,6 +62,7 @@ export function timelinePrefetchDistance(viewportHeight: number): number {
 export function useTimelinePaging(options: TimelinePagingOptions) {
   const {
     scrollRef,
+    contentKey,
     hasOlder,
     hasNewer,
     isLoadingOlder,
@@ -61,30 +71,60 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
     requestNewer,
     updateActiveMarker,
   } = options
+  const generationRef = useRef(0)
   const loadingNewerRef = useRef(false)
   const previousScrollTopRef = useRef(0)
 
-  const loadNewer = useCallback(async () => {
-    if (!hasNewer || isLoadingNewer || loadingNewerRef.current) return
+  const visibleAnchorRef = useRef<{ id: string; top: number } | null>(null)
+  const captureAnchor = useCallback(() => {
     const container = scrollRef.current
     if (!container) return
-    loadingNewerRef.current = true
-    const previousHeight = container.scrollHeight
-    try {
-      await requestNewer()
-      requestAnimationFrame(() => {
-        container.scrollTop += container.scrollHeight - previousHeight
-        updateActiveMarker()
-      })
-    } finally {
-      loadingNewerRef.current = false
+    const viewportTop = container.getBoundingClientRect().top
+    const anchor = Array.from(container.querySelectorAll<HTMLElement>('[data-media-id]')).find(
+      (item) => item.getBoundingClientRect().bottom > viewportTop
+    )
+    visibleAnchorRef.current = anchor?.dataset.mediaId
+      ? { id: anchor.dataset.mediaId, top: anchor.getBoundingClientRect().top }
+      : null
+  }, [scrollRef])
+
+  useLayoutEffect(() => {
+    const container = scrollRef.current
+    if (!container) return
+    const saved = visibleAnchorRef.current
+    if (saved) {
+      const anchor = Array.from(container.querySelectorAll<HTMLElement>('[data-media-id]')).find(
+        (item) => item.dataset.mediaId === saved.id
+      )
+      if (anchor) container.scrollTop += anchor.getBoundingClientRect().top - saved.top
     }
-  }, [hasNewer, isLoadingNewer, requestNewer, scrollRef, updateActiveMarker])
+    previousScrollTopRef.current = container.scrollTop
+    captureAnchor()
+  }, [contentKey, scrollRef, captureAnchor])
+
+  const preservePosition = useCallback(
+    async (request: () => Promise<void>) => {
+      captureAnchor()
+      await request()
+    },
+    [captureAnchor]
+  )
+
+  const loadNewer = useCallback(async () => {
+    if (!hasNewer || isLoadingNewer || loadingNewerRef.current) return
+    const generation = generationRef.current
+    loadingNewerRef.current = true
+    try {
+      await preservePosition(requestNewer)
+    } finally {
+      if (generation === generationRef.current) loadingNewerRef.current = false
+    }
+  }, [hasNewer, isLoadingNewer, requestNewer, preservePosition])
 
   const loadOlder = useCallback(() => {
     if (!hasOlder || isLoadingOlder) return
-    void requestOlder()
-  }, [hasOlder, isLoadingOlder, requestOlder])
+    void preservePosition(requestOlder)
+  }, [hasOlder, isLoadingOlder, requestOlder, preservePosition])
 
   useEffect(() => {
     if (!hasOlder || isLoadingOlder) return
@@ -96,7 +136,7 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
       if (remaining <= timelinePrefetchDistance(container.clientHeight)) loadOlder()
     })
     return () => cancelAnimationFrame(frame)
-  }, [hasOlder, isLoadingOlder, loadOlder, scrollRef])
+  }, [hasOlder, isLoadingOlder, loadOlder, scrollRef, contentKey])
 
   useEffect(() => {
     if (!hasNewer || isLoadingNewer) return
@@ -109,7 +149,7 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
       }
     })
     return () => cancelAnimationFrame(frame)
-  }, [hasNewer, isLoadingNewer, loadNewer, scrollRef])
+  }, [hasNewer, isLoadingNewer, loadNewer, scrollRef, contentKey])
 
   const checkBoundaries = useCallback(
     (deltaY: number) => {
@@ -132,9 +172,10 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
     if (!container) return
     const scrollDelta = container.scrollTop - previousScrollTopRef.current
     previousScrollTopRef.current = container.scrollTop
+    captureAnchor()
     updateActiveMarker()
     if (scrollDelta !== 0) checkBoundaries(scrollDelta)
-  }, [checkBoundaries, scrollRef, updateActiveMarker])
+  }, [checkBoundaries, scrollRef, updateActiveMarker, captureAnchor])
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLElement>) => {
@@ -150,6 +191,9 @@ export function useTimelinePaging(options: TimelinePagingOptions) {
   )
 
   const reset = useCallback(() => {
+    generationRef.current += 1
+    visibleAnchorRef.current = null
+    loadingNewerRef.current = false
     previousScrollTopRef.current = 0
     scrollRef.current?.scrollTo({ top: 0 })
   }, [scrollRef])

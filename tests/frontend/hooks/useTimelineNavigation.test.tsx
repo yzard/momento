@@ -68,6 +68,7 @@ describe('timeline navigation hooks', () => {
     const requestOlder = vi.fn().mockResolvedValue(undefined)
     const hook = renderHook(() =>
       useTimelinePaging({
+        contentKey: 'initial',
         scrollRef,
         hasOlder: true,
         hasNewer: false,
@@ -97,6 +98,7 @@ describe('timeline navigation hooks', () => {
     const { rerender } = renderHook(
       ({ isLoadingOlder }: { isLoadingOlder: boolean }) =>
         useTimelinePaging({
+          contentKey: 'initial',
           scrollRef,
           hasOlder: true,
           hasNewer: false,
@@ -122,6 +124,30 @@ describe('timeline navigation hooks', () => {
     expect(requestOlder).toHaveBeenCalledTimes(2)
   })
 
+  it('continues cached pages when content changes without a loading-state render', () => {
+    const container = document.createElement('div')
+    Object.defineProperties(container, {
+      clientHeight: { value: 500 },
+      scrollHeight: { value: 500 },
+    })
+    const options = {
+      scrollRef: { current: container },
+      hasOlder: true,
+      hasNewer: false,
+      isLoadingOlder: false,
+      isLoadingNewer: false,
+      requestOlder: vi.fn().mockResolvedValue(undefined),
+      requestNewer: vi.fn().mockResolvedValue(undefined),
+      updateActiveMarker: vi.fn(),
+    }
+    const hook = renderHook(({ contentKey }) => useTimelinePaging({ ...options, contentKey }), {
+      initialProps: { contentKey: 'first-page' },
+    })
+    expect(options.requestOlder).toHaveBeenCalledTimes(1)
+    hook.rerender({ contentKey: 'first-and-second-page' })
+    expect(options.requestOlder).toHaveBeenCalledTimes(2)
+  })
+
   it('prefetches newer pages after jumping to a historical marker', () => {
     const container = document.createElement('div')
     Object.defineProperties(container, {
@@ -133,6 +159,7 @@ describe('timeline navigation hooks', () => {
 
     renderHook(() =>
       useTimelinePaging({
+        contentKey: 'initial',
         scrollRef: { current: container },
         hasOlder: false,
         hasNewer: true,
@@ -157,6 +184,7 @@ describe('timeline navigation hooks', () => {
 
     renderHook(() =>
       useTimelinePaging({
+        contentKey: 'initial',
         scrollRef: { current: container },
         hasOlder: true,
         hasNewer: true,
@@ -178,6 +206,7 @@ describe('timeline navigation hooks', () => {
 
     renderHook(() =>
       useTimelinePaging({
+        contentKey: 'initial',
         scrollRef,
         hasOlder: true,
         hasNewer: false,
@@ -190,5 +219,70 @@ describe('timeline navigation hooks', () => {
     )
 
     expect(requestOlder).not.toHaveBeenCalled()
+  })
+  it('does not move a new marker when the previous marker request finishes', async () => {
+    const container = document.createElement('div')
+    container.scrollTo = vi.fn()
+    let height = 2500
+    Object.defineProperties(container, {
+      clientHeight: { value: 500 },
+      scrollHeight: { get: () => height },
+    })
+    let finish!: () => void
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const hook = renderHook(() =>
+      useTimelinePaging({
+        contentKey: 'initial',
+        scrollRef: { current: container },
+        hasOlder: false,
+        hasNewer: true,
+        isLoadingOlder: false,
+        isLoadingNewer: false,
+        requestOlder: vi.fn().mockResolvedValue(undefined),
+        requestNewer: () => pending,
+        updateActiveMarker: vi.fn(),
+      })
+    )
+    act(() => hook.result.current.reset())
+    height = 5000
+    await act(async () => finish())
+    expect(container.scrollTop).toBe(0)
+  })
+
+  it('anchors the visible image instead of counting appended older-page height', async () => {
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientHeight', { value: 500 })
+    const image = document.createElement('div')
+    image.dataset.mediaId = '42'
+    let top = 0
+    image.getBoundingClientRect = () => ({ top, bottom: top + 100 }) as DOMRect
+    container.append(image)
+    let finish!: () => void
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const scrollRef = { current: container }
+    const hook = renderHook(
+      ({ contentKey }) =>
+        useTimelinePaging({
+          contentKey,
+          scrollRef,
+          hasOlder: false,
+          hasNewer: true,
+          isLoadingOlder: false,
+          isLoadingNewer: false,
+          requestOlder: vi.fn().mockResolvedValue(undefined),
+          requestNewer: () => pending,
+          updateActiveMarker: vi.fn(),
+        }),
+      { initialProps: { contentKey: 'initial' } }
+    )
+    top = 300
+    Object.defineProperty(container, 'scrollHeight', { value: 6000 })
+    await act(async () => finish())
+    hook.rerender({ contentKey: 'newer-and-older-pages' })
+    expect(container.scrollTop).toBe(300)
   })
 })

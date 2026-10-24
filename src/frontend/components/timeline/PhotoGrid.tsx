@@ -267,6 +267,7 @@ function MediaItem({ item, onPhotoClick, selection }: MediaItemProps) {
   return (
     <div
       ref={containerRef}
+      data-media-id={item.id}
       role="button"
       tabIndex={0}
       aria-pressed={selectionMode ? selected : undefined}
