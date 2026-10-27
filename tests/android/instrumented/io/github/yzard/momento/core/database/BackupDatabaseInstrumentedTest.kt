@@ -23,6 +23,30 @@ class BackupDatabaseInstrumentedTest {
     )
 
     @Test
+    fun restartUsesNewOperationAndCannotOverrideCancellation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
+        try {
+            val assets = database.backupAssetDao()
+            val original = backupAsset(9, BackupState.SERVER_PROCESSING).copy(uploadId = "expired-upload", uploadedBytes = 5L * 1024 * 1024 * 1024)
+            assets.insertDiscovered(original)
+            assertEquals(1, assets.restartTransfer(original.uri, original.operationId, "fresh-operation"))
+            val fresh = assets.pending(false).single()
+            assertEquals(original.clientAssetId, fresh.clientAssetId)
+            assertEquals("fresh-operation", fresh.operationId)
+            assertEquals(BackupState.QUEUED, fresh.state)
+            assertEquals(0L, fresh.uploadedBytes)
+            assertNull(fresh.uploadId)
+            assertEquals(0, assets.restartTransfer(original.uri, original.operationId, "stale-operation"))
+            assets.requestCancellation()
+            assertEquals(0, assets.restartTransfer(original.uri, "fresh-operation", "overwritten-cancellation"))
+            assertEquals(BackupState.CANCELLING, assets.pending(false).single().state)
+        } finally {
+            database.close()
+        }
+    }
+
+    @Test
     fun cancelledAssetIsRequeuedWhenTheNextScanFindsIt() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()

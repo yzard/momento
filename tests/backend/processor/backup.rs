@@ -390,6 +390,15 @@ async fn recovery_fails_missing_nonzero_staging_file_without_resuming() {
 
 #[tokio::test]
 async fn worker_finalizes_queued_backup_and_records_media() {
+    run_queued_backup(false).await;
+}
+
+#[tokio::test]
+async fn worker_rejects_whole_file_hash_mismatch_before_import() {
+    run_queued_backup(true).await;
+}
+
+async fn run_queued_backup(corrupt: bool) {
     let pool = create_test_db();
     let user_id = create_test_user(&pool, "backup-worker", "backup-worker@example.com");
     let staged_path = format!("processor-tests/{}/queued.jpg", uuid::Uuid::new_v4());
@@ -443,6 +452,26 @@ async fn worker_finalizes_queued_backup_and_records_media() {
             [],
         )
         .expect("queued session");
+
+    if corrupt {
+        std::fs::write(&file_path, b"changed file bytes").expect("corrupt staging");
+        run_cycle(&executors).await.expect("worker cycle");
+        let (status, media_id, error): (String, Option<i64>, String) = connection
+            .query_row(
+                "SELECT status, media_id, error FROM backup_assets WHERE id = ?",
+                [asset_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("failed backup");
+        assert_eq!(status, "failed");
+        assert_eq!(media_id, None);
+        assert!(error.contains("no longer matches"));
+        let media_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM media", [], |row| row.get(0))
+            .expect("media count");
+        assert_eq!(media_count, 0);
+        return;
+    }
 
     std::fs::write(
         file_path.with_file_name(format!(

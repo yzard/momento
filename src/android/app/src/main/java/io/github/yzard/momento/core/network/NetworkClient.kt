@@ -23,6 +23,7 @@ class NetworkClient(private val tokenStore: EncryptedTokenStore, cacheStore: io.
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
     private val client = OkHttpClient.Builder()
         .addInterceptor(cacheStore.interceptor(tokenStore::mediaCacheNamespace))
+        .addInterceptor(BackupTimeoutInterceptor())
         .addInterceptor(BearerInterceptor(tokenStore, this)).build()
     private var currentOrigin: String? = null
     private var currentApi: MomentoApi? = null

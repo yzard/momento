@@ -417,6 +417,7 @@ pub enum CreateBackupUploadOutcome {
     Existing(BackupUploadResponse),
     DeviceNotFound,
     ContractConflict,
+    PreviousUploadBusy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,6 +590,7 @@ pub struct FinishBackupChunk {
     pub upload_id: String,
     pub start: u64,
     pub next_offset: u64,
+    pub session_expiry_hours: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3095,6 +3097,20 @@ pub(crate) fn cancel_backup_upload(
     request: CancelBackupUpload,
 ) -> rusqlite::Result<CancelBackupUploadOutcome> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let outcome = cancel_backup_upload_in_transaction(&transaction, request)?;
+    if matches!(
+        outcome,
+        CancelBackupUploadOutcome::Cancelled(_) | CancelBackupUploadOutcome::AlreadyCancelled(_)
+    ) {
+        transaction.commit()?;
+    }
+    Ok(outcome)
+}
+
+fn cancel_backup_upload_in_transaction(
+    transaction: &Transaction<'_>,
+    request: CancelBackupUpload,
+) -> rusqlite::Result<CancelBackupUploadOutcome> {
     let upload = transaction
         .query_row(
             queries::backup::SELECT_UPLOAD,
@@ -3118,21 +3134,21 @@ pub(crate) fn cancel_backup_upload(
         )
         .optional()?;
     let Some(upload) = upload else {
-        transaction.rollback()?;
         return Ok(CancelBackupUploadOutcome::NotFound);
     };
     if upload.response.status == "cancelled" {
-        transaction.commit()?;
         return Ok(CancelBackupUploadOutcome::AlreadyCancelled(upload.response));
     }
     if upload.session_status == "writing" {
-        transaction.rollback()?;
         return Ok(CancelBackupUploadOutcome::Writing);
     }
-    if !matches!(upload.response.status.as_str(), "uploading" | "queued")
-        || !matches!(upload.session_status.as_str(), "uploading" | "queued")
-    {
-        transaction.rollback()?;
+    if !matches!(
+        upload.response.status.as_str(),
+        "uploading" | "queued" | "expired"
+    ) || !matches!(
+        upload.session_status.as_str(),
+        "uploading" | "queued" | "expired"
+    ) {
         return Ok(CancelBackupUploadOutcome::NotCancellable);
     }
     if transaction.execute(
@@ -3141,7 +3157,6 @@ pub(crate) fn cancel_backup_upload(
     )? != 1
         || transaction.execute(queries::backup::CANCEL_ASSET, [upload.asset_id])? != 1
     {
-        transaction.rollback()?;
         return Ok(CancelBackupUploadOutcome::Changed);
     }
 
@@ -3178,15 +3193,13 @@ pub(crate) fn cancel_backup_upload(
         }],
         space_reservation: None,
     };
-    if crate::io::journal::prepare_committed_cleanup(&transaction, plan)?
+    if crate::io::journal::prepare_committed_cleanup(transaction, plan)?
         == PrepareJournalOutcome::PathConflict
     {
-        transaction.rollback()?;
         return Ok(CancelBackupUploadOutcome::PathConflict);
     }
     let mut response = upload.response;
     response.status = "cancelled".to_string();
-    transaction.commit()?;
     Ok(CancelBackupUploadOutcome::Cancelled(response))
 }
 
@@ -3357,24 +3370,33 @@ pub(crate) fn create_backup_upload(
         &request.device_id,
         &request.client_asset_id,
     )? {
-        if !validate_or_upgrade_backup_create_contract(
-            &transaction,
-            request.user_id,
-            &upload.upload_id,
-            &request,
-        )? {
-            transaction.rollback()?;
-            return Ok(CreateBackupUploadOutcome::ContractConflict);
+        // A new operation for the same device asset replaces its previous transfer.
+        // Keep completed media and the old operation response for delayed retries.
+        if !matches!(upload.status.as_str(), "completed" | "failed" | "cancelled") {
+            match cancel_backup_upload_in_transaction(
+                &transaction,
+                CancelBackupUpload {
+                    user_id: request.user_id,
+                    upload_id: upload.upload_id.clone(),
+                },
+            )? {
+                CancelBackupUploadOutcome::Cancelled(_)
+                | CancelBackupUploadOutcome::AlreadyCancelled(_) => {}
+                _ => return Ok(CreateBackupUploadOutcome::PreviousUploadBusy),
+            }
         }
-        let upload = select_backup_upload_by_client_asset(
-            &transaction,
-            request.user_id,
-            &request.device_id,
-            &request.client_asset_id,
-        )?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        transaction.commit()?;
-        return Ok(CreateBackupUploadOutcome::Existing(upload));
+        if transaction.execute(
+            queries::backup::RETIRE_CLIENT_ASSET,
+            params![
+                upload.upload_id,
+                request.user_id,
+                request.device_id,
+                request.client_asset_id
+            ],
+        )? != 1
+        {
+            return Ok(CreateBackupUploadOutcome::PreviousUploadBusy);
+        }
     }
 
     let device_exists: bool = transaction.query_row(
@@ -3460,7 +3482,8 @@ fn validate_or_upgrade_backup_create_contract(
         },
     )?;
     let base_contract_matches = stored_contract.1 == request.device_id
-        && stored_contract.2 == request.client_asset_id
+        && (stored_contract.2 == request.client_asset_id
+            || stored_contract.2 == format!("{}#{}", request.client_asset_id, upload_id))
         && stored_contract.3 == request.operation_id
         && stored_contract.4 == request.original_filename
         && stored_contract.5 == request.mime_type
@@ -3694,7 +3717,13 @@ pub(crate) fn finish_backup_chunk(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if transaction.execute(
         queries::backup::COMPLETE_CHUNK,
-        params![next_offset, request.upload_id, request.user_id, start],
+        params![
+            next_offset,
+            format!("+{} hours", request.session_expiry_hours),
+            request.upload_id,
+            request.user_id,
+            start
+        ],
     )? != 1
     {
         transaction.rollback()?;

@@ -315,3 +315,23 @@ internal fun deleteAllBackupSnapshots(context: Context) {
     Files.deleteIfExists(snapshotDirectory.toPath())
 }
 
+
+internal suspend fun rekeyBackupSnapshot(
+    context: Context,
+    snapshot: BackupSnapshot,
+    previousOperationId: String,
+    operationId: String,
+): BackupSnapshot = withContext(Dispatchers.IO) {
+    val directory = File(context.noBackupFilesDir, BACKUP_SNAPSHOT_DIRECTORY)
+    val destination = File(directory, "$operationId.original")
+    val previousMetadata = File(directory, "$previousOperationId.metadata.json")
+    val destinationMetadata = File(directory, "$operationId.metadata.json")
+    moveSnapshotAtomically(previousMetadata, destinationMetadata)
+    try {
+        moveSnapshotAtomically(snapshot.file, destination)
+    } catch (error: Exception) {
+        moveSnapshotAtomically(destinationMetadata, previousMetadata)
+        throw error
+    }
+    snapshot.copy(file = destination)
+}

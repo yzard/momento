@@ -106,6 +106,9 @@ interface BackupAssetDao {
     """)
     suspend fun reconcileDiscovered(uri: String, volumeName: String, clientAssetId: String, operationId: String, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, generationModified: Long, folder: String)
 
+    @Query("UPDATE backup_assets SET operationId = :operationId, state = 'QUEUED', uploadId = NULL, uploadedBytes = 0, mediaId = NULL, errorMessage = NULL WHERE uri = :uri AND operationId = :previousOperationId AND state != 'CANCELLING'")
+    suspend fun restartTransfer(uri: String, previousOperationId: String, operationId: String): Int
+
     @Query("UPDATE backup_assets SET state = :state, uploadedBytes = :uploadedBytes, uploadId = :uploadId, mediaId = :mediaId, errorMessage = :errorMessage, protocolVersion = :protocolVersion, contentHash = :contentHash WHERE uri = :uri")
     suspend fun updateTransfer(uri: String, state: BackupState, uploadedBytes: Long, uploadId: String?, mediaId: Long?, errorMessage: String?, protocolVersion: Int, contentHash: String?)
 

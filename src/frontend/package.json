@@ -5,12 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "bash tooling/build.sh",
     "format": "prettier --config package.json --write \"{api,components,context,hooks,lib,pages,styles,utils}/**/*.{ts,tsx,css}\" \"*.{ts,js,html,json}\" \"../../tests/frontend/**/*.{ts,tsx}\"",
     "format:check": "prettier --config package.json --check \"{api,components,context,hooks,lib,pages,styles,utils}/**/*.{ts,tsx,css}\" \"*.{ts,js,html,json}\" \"../../tests/frontend/**/*.{ts,tsx}\"",
     "lint": "eslint .",
     "test": "vitest run",
-    "preview": "vite preview"
+    "preview": "vite preview --outDir ../../dist/frontend"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",

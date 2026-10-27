@@ -1,0 +1,15 @@
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app/build/frontend/workspace
+
+RUN apk add --no-cache bash util-linux && corepack enable && corepack prepare pnpm@9.15.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY src/frontend ./src/frontend
+COPY docker/lib/build_lifecycle.sh ./docker/lib/build_lifecycle.sh
+COPY src/backend/version.txt ./src/backend/version.txt
+
+RUN pnpm --dir /app/build/frontend/workspace/src/frontend build && mkdir -p /app/dist/frontend && cp -R /app/build/frontend/workspace/dist/frontend/. /app/dist/frontend/
+
+FROM scratch
+COPY --from=frontend-builder /app/dist/frontend /static

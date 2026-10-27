@@ -89,6 +89,8 @@ class BackupTest {
 
     @Test fun cancellationPreservesServerTerminalStates() {
         assertEquals(BackupState.CANCELLED, cancellationState("cancelled"))
+        assertEquals(BackupState.CANCELLED, cancellationState("expired"))
+        assertEquals(BackupProgress.COMPLETED, serverProgress(BackupUploadResponse("upload", "expired", 5, 10, "hash", null, null)))
         assertEquals(BackupState.COMPLETED, cancellationState("completed"))
         assertEquals(BackupState.TERMINAL_FAILED, cancellationState("failed"))
     }

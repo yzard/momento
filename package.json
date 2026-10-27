@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Self-hosted photo management application",
   "scripts": {
-    "build": "turbo build",
+    "build": "pnpm --filter @momento/web build",
     "dev": "turbo dev",
     "lint": "turbo lint",
     "test": "turbo test",

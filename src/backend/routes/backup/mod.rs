@@ -20,7 +20,7 @@ use crate::database::operations::{
     RegisterBackupDevice,
 };
 use crate::error::{AppError, AppResult};
-use crate::executor::{CpuExecutorHandle, FileIoExecutorHandle, Sha256Session};
+use crate::executor::FileIoExecutorHandle;
 use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::io::StorageFileSession;
 use crate::models::{
@@ -110,12 +110,16 @@ async fn create_upload(
     match outcome {
         CreateBackupUploadOutcome::Created(response) => {
             state.scheduler.wake_backup_import();
+            state.scheduler.wake_journal_recovery();
             render_json(&state, response).await
         }
         CreateBackupUploadOutcome::Existing(response) => render_json(&state, response).await,
         CreateBackupUploadOutcome::DeviceNotFound => {
             Err(AppError::NotFound("backup device not found".to_string()))
         }
+        CreateBackupUploadOutcome::PreviousUploadBusy => Err(AppError::Conflict(
+            "previous backup upload is still active; retry after it stops".to_string(),
+        )),
         CreateBackupUploadOutcome::ContractConflict => Err(AppError::Conflict(
             "idempotency key already belongs to a different backup manifest".to_string(),
         )),
@@ -146,7 +150,7 @@ async fn complete_upload(
     CpuJson(request): CpuJson<BackupUploadIdRequest>,
 ) -> AppResult<Response> {
     validate_identifier(&request.upload_id, "uploadId")?;
-    let (asset_id, staged_relative_path, expected_content_hash) = match state
+    let asset_id = match state
         .executors
         .sqlite
         .prepare_backup_completion_request(PrepareBackupCompletion {
@@ -158,11 +162,7 @@ async fn complete_upload(
         PrepareBackupCompletionOutcome::AlreadyQueued(response) => {
             return render_json(&state, response).await
         }
-        PrepareBackupCompletionOutcome::Ready {
-            asset_id,
-            staged_path,
-            expected_content_hash,
-        } => (asset_id, staged_path, expected_content_hash),
+        PrepareBackupCompletionOutcome::Ready { asset_id, .. } => asset_id,
         PrepareBackupCompletionOutcome::NotFound => {
             return Err(AppError::NotFound("backup upload not found".to_string()))
         }
@@ -177,15 +177,8 @@ async fn complete_upload(
             ))
         }
     };
-    let staged_path = NormalizedStoragePath::parse(&staged_relative_path)
-        .map_err(|error| AppError::Internal(format!("invalid stored backup path: {error}")))?;
-    let actual_content_hash =
-        calculate_backup_hash(&state.executors.file_io, &state.executors.cpu, staged_path).await?;
-    if actual_content_hash != expected_content_hash {
-        return Err(AppError::Conflict(
-            "backup upload content hash does not match the original".to_string(),
-        ));
-    }
+    // The durable import worker verifies the whole-file hash before publishing media.
+    // Queue here so completion latency does not depend on the video size.
     match state
         .executors
         .sqlite
@@ -331,6 +324,7 @@ async fn upload_chunk(
             );
             return Err(abandon_error.into());
         }
+        state.scheduler.wake_backup_import();
         return Err(error);
     }
     match state
@@ -341,10 +335,14 @@ async fn upload_chunk(
             upload_id,
             start,
             next_offset: end + 1,
+            session_expiry_hours: config.backup.session_expiry_hours,
         })
         .await?
     {
-        FinishBackupChunkOutcome::Completed(response) => render_json(&state, response).await,
+        FinishBackupChunkOutcome::Completed(response) => {
+            state.scheduler.wake_backup_import();
+            render_json(&state, response).await
+        }
         FinishBackupChunkOutcome::Changed => Err(AppError::Conflict(
             "backup upload changed while the chunk was written".to_string(),
         )),
@@ -472,52 +470,6 @@ async fn abort_backup_session(
         file_io.abort_storage_session_request(session).await?;
     }
     Ok(())
-}
-
-async fn calculate_backup_hash(
-    file_io: &FileIoExecutorHandle,
-    cpu: &CpuExecutorHandle,
-    staged_path: NormalizedStoragePath,
-) -> AppResult<String> {
-    let (opened_session, _) = file_io
-        .open_storage_read_session_request(StorageRootId::Backups, staged_path)
-        .await?;
-    let mut session = Some(opened_session);
-    let mut hash_session: Option<Sha256Session> = Some(cpu.start_sha256_session_request().await?);
-    loop {
-        let active_session = session.take().ok_or_else(|| {
-            AppError::Internal("backup hash file session is unavailable".to_string())
-        })?;
-        let (returned_session, bytes) = file_io
-            .read_storage_session_request(
-                active_session,
-                crate::runtime::FILE_IO_CHUNK_BYTES as usize,
-            )
-            .await?;
-        session = Some(returned_session);
-        if bytes.is_empty() {
-            break;
-        }
-        let active_hash_session = hash_session
-            .take()
-            .ok_or_else(|| AppError::Internal("backup hash session is unavailable".to_string()))?;
-        let (returned_hash_session, _) = cpu
-            .update_sha256_session_request(active_hash_session, bytes)
-            .await?;
-        hash_session = Some(returned_hash_session);
-    }
-    file_io
-        .close_storage_session_request(session.take().ok_or_else(|| {
-            AppError::Internal("backup hash file session is unavailable".to_string())
-        })?)
-        .await?;
-    Ok(cpu
-        .finish_sha256_session_request(
-            hash_session.take().ok_or_else(|| {
-                AppError::Internal("backup hash session is unavailable".to_string())
-            })?,
-        )
-        .await?)
 }
 
 fn validate_identifier(value: &str, name: &str) -> AppResult<()> {

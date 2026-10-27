@@ -80,7 +80,7 @@ internal fun backupCanRun(capabilities: BackupCapabilities): Boolean =
 internal class TerminalBackupException(message: String) : Exception(message)
 
 internal fun serverProgress(response: BackupUploadResponse): BackupProgress = when (response.status) {
-    "completed", "failed", "cancelled" -> BackupProgress.COMPLETED
+    "completed", "failed", "cancelled", "expired" -> BackupProgress.COMPLETED
     else -> BackupProgress.WAITING_FOR_SERVER
 }
 
@@ -132,6 +132,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 BackupDiagnosticLog.append(applicationContext, "Backup unavailable: $backupCapabilities")
                 return Result.success()
             }
+            require(backupCapabilities.maxChunkBytes > 0) { "Server backup chunk limit must be positive" }
             val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
             setProgress(androidx.work.workDataOf(BACKUP_PHASE_KEY to "uploading"))
             var waitingForServer = false
@@ -157,7 +158,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             Result.retry()
         } catch (error: HttpException) {
             BackupDiagnosticLog.append(applicationContext, backupFailureDetail(error))
-            if (isRetryable(error.code())) Result.retry() else Result.failure()
+            if (isRetryable(error.code()) || error.code() == 409) Result.retry() else Result.failure()
         } catch (error: Exception) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             BackupDiagnosticLog.append(applicationContext, backupFailureDetail(error))
@@ -168,13 +169,15 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
     }
 
     private suspend fun transfer(
-        asset: BackupAssetEntity,
+        originalAsset: BackupAssetEntity,
         assets: BackupAssetDao,
         repository: BackupRepository,
         deviceId: String,
         chunkSize: Int,
         locationMetadataAccess: BackupLocationMetadataAccess,
     ): BackupProgress {
+        var asset = originalAsset
+        var phase = "prepare snapshot"
         var activeUploadId = asset.uploadId
         var durableUploadedBytes = asset.uploadedBytes
         var activeProtocolVersion = asset.protocolVersion
@@ -183,9 +186,31 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             if (asset.state == BackupState.CANCELLING) {
                 return cancelBackupAsset(asset, assets, repository)
             }
-            val snapshot = prepareBackupSnapshot(applicationContext, asset, locationMetadataAccess)
+            var snapshot = prepareBackupSnapshot(applicationContext, asset, locationMetadataAccess)
             activeProtocolVersion = LOSSLESS_BACKUP_PROTOCOL_VERSION
             activeContentHash = snapshot.contentHash
+            phase = "create or resume upload"
+            var existing = asset.uploadId?.let { repository.backupUploadStatus(it) }
+            if (existing?.contentHash != null && existing.contentHash != snapshot.contentHash) {
+                throw TerminalBackupException("Server upload does not match this original snapshot")
+            }
+            if (existing?.status == "expired" || existing?.status == "cancelled") {
+                phase = "replace terminated upload"
+                if (existing.status == "expired") {
+                    val cancelled = repository.cancelBackupUpload(existing.uploadId)
+                    if (cancelled.status != "cancelled") throw IOException("Previous backup upload has not stopped")
+                }
+                val newOperationId = UUID.randomUUID().toString()
+                snapshot = rekeyBackupSnapshot(applicationContext, snapshot, asset.operationId, newOperationId)
+                if (assets.restartTransfer(asset.uri, asset.operationId, newOperationId) != 1) {
+                    rekeyBackupSnapshot(applicationContext, snapshot, newOperationId, asset.operationId)
+                    return BackupProgress.WAITING_FOR_SERVER
+                }
+                asset = asset.copy(operationId = newOperationId, state = BackupState.QUEUED, uploadId = null, uploadedBytes = 0, mediaId = null, errorMessage = null)
+                activeUploadId = null
+                durableUploadedBytes = 0
+                existing = null
+            }
             val createRequest = BackupUploadCreateRequest(
                 protocolVersion = LOSSLESS_BACKUP_PROTOCOL_VERSION,
                 deviceId = deviceId,
@@ -198,27 +223,11 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 sourceModifiedAt = Instant.ofEpochSecond(asset.modifiedAt).toString(),
                 metadata = snapshot.metadata,
             )
-            val existing = asset.uploadId?.let { repository.backupUploadStatus(it) }
-            if (existing?.contentHash != null && existing.contentHash != snapshot.contentHash) {
-                throw TerminalBackupException("Server upload does not match this original snapshot")
-            }
             val upload = when {
                 existing == null -> repository.createBackupUpload(createRequest)
                 existing.contentHash == null -> repository.createBackupUpload(createRequest)
                 else -> existing
             }
-            if (existing != null) {
-                val progress = recordServerStatus(
-                    asset,
-                    upload,
-                    assets,
-                    activeProtocolVersion,
-                    activeContentHash,
-                )
-                if (asset.state == BackupState.SERVER_PROCESSING || progress == BackupProgress.COMPLETED) return progress
-                if (asset.state == BackupState.COMPLETING && upload.status != "uploading") return progress
-            }
-
             activeUploadId = upload.uploadId
             durableUploadedBytes = upload.uploadedSize
             if (upload.status != "uploading") {
@@ -246,11 +255,18 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                     if (read <= 0) break
                     val end = offset + read - 1
                     val chunkHash = sha256Hex(buffer, read)
-                    val response = repository.uploadBackupChunk(
-                        upload.uploadId,
-                        "bytes $offset-$end/${snapshot.byteSize}",
-                        chunkHash,
-                        buffer.copyOf(read).toRequestBody(asset.mimeType.toMediaTypeOrNull()),
+                    phase = "upload chunk $offset-$end/${snapshot.byteSize}"
+                    val body = buffer.copyOf(read).toRequestBody(asset.mimeType.toMediaTypeOrNull())
+                    val response = transferBackupChunk(
+                        uploadId = upload.uploadId,
+                        offset = offset,
+                        length = read,
+                        total = snapshot.byteSize,
+                        contentHash = snapshot.contentHash,
+                        send = { repository.uploadBackupChunk(upload.uploadId, "bytes $offset-$end/${snapshot.byteSize}", chunkHash, body) },
+                        status = { repository.backupUploadStatus(upload.uploadId) },
+                        pause = { kotlinx.coroutines.delay(it) },
+                        onRetry = { BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=${upload.uploadId}: $it") },
                     )
                     offset = response.uploadedSize
                     durableUploadedBytes = offset
@@ -259,6 +275,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 }
             }
             if (offset != snapshot.byteSize) throw TerminalBackupException("Upload ended before source file")
+            phase = "complete upload"
             assets.updateTransfer(asset.uri, BackupState.COMPLETING, offset, upload.uploadId, null, null, activeProtocolVersion, activeContentHash)
             return recordServerStatus(
                 asset,
@@ -268,17 +285,17 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 activeContentHash,
             )
         } catch (error: HttpException) {
-            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
-            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
-            if (isRetryable(error.code())) throw error
+            BackupDiagnosticLog.append(applicationContext, "phase=$phase operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, "phase=$phase: ${backupFailureDetail(error)}", activeProtocolVersion, activeContentHash)
+            if (isRetryable(error.code()) || error.code() == 409) throw error
             return BackupProgress.COMPLETED
         } catch (error: IOException) {
-            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
-            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "phase=$phase operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.FAILED, durableUploadedBytes, activeUploadId, asset.mediaId, "phase=$phase: ${backupFailureDetail(error)}", activeProtocolVersion, activeContentHash)
             throw error
         } catch (error: TerminalBackupException) {
-            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "phase=$phase operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, "phase=$phase: ${backupFailureDetail(error)}", activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
@@ -292,8 +309,8 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 repository,
             )
         } catch (error: SecurityException) {
-            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "phase=$phase operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, "phase=$phase: ${backupFailureDetail(error)}", activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
@@ -307,8 +324,8 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 repository,
             )
         } catch (error: IllegalArgumentException) {
-            BackupDiagnosticLog.append(applicationContext, "operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
-            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, backupFailureDetail(error), activeProtocolVersion, activeContentHash)
+            BackupDiagnosticLog.append(applicationContext, "phase=$phase operation=${asset.operationId} upload=$activeUploadId bytes=$durableUploadedBytes: ${backupFailureDetail(error)}")
+            assets.updateTransfer(asset.uri, BackupState.CANCELLING, durableUploadedBytes, activeUploadId, asset.mediaId, "phase=$phase: ${backupFailureDetail(error)}", activeProtocolVersion, activeContentHash)
             return cancelBackupAsset(
                 asset.copy(
                     state = BackupState.CANCELLING,
@@ -336,15 +353,18 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 throw TerminalBackupException("Server completion hash does not match the original snapshot")
             }
             assets.updateTransfer(asset.uri, BackupState.COMPLETED, response.uploadedSize, response.uploadId, response.mediaId, response.error, protocolVersion, response.contentHash)
+            deleteBackupSnapshot(applicationContext, asset.operationId)
             BackupProgress.COMPLETED
         }
         "failed" -> {
             BackupDiagnosticLog.append(applicationContext, "Server failed: operation=${asset.operationId} upload=${response.uploadId}: ${response.error}")
             assets.updateTransfer(asset.uri, BackupState.TERMINAL_FAILED, response.uploadedSize, response.uploadId, response.mediaId, response.error ?: "Server upload ${response.status}", protocolVersion, contentHash)
+            deleteBackupSnapshot(applicationContext, asset.operationId)
             BackupProgress.COMPLETED
         }
-        "cancelled" -> {
+        "cancelled", "expired" -> {
             assets.updateTransfer(asset.uri, BackupState.CANCELLED, response.uploadedSize, response.uploadId, response.mediaId, response.error, protocolVersion, contentHash)
+            deleteBackupSnapshot(applicationContext, asset.operationId)
             BackupProgress.COMPLETED
         }
         else -> {

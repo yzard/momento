@@ -1,0 +1,85 @@
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Build artifacts
+build/
+dist/*
+!dist/android/
+dist/android/*
+!dist/android/*.apk
+sdist/
+wheels/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+target/
+**/target/
+
+# Rust
+.cargo/
+*.rs.bk
+
+# IDE and editor
+.idea/
+.vscode/
+
+# Virtual environments
+.venv/
+venv*/
+
+# Cache
+.mypy_cache/
+.ruff_cache/
+.turbo/
+
+# Development files
+*.log
+
+# Database files
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Git
+.git/
+.gitignore
+
+# Docker (don't include in context recursively)
+docker/Dockerfile.dockerignore
+
+# Documentation and planning
+.sisyphus/
+.ai-todo.md
+AGENTS.md
+*.md
+!src/backend/database/schema.sql
+
+# Node modules (will be installed fresh in build)
+node_modules/
+
+# Data directory
+data/
+playground/data/
+playground/output/
+
+# Test files
+tests/
+**/tests/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+
+# Environment files
+.env
+.env.*
+
+!tests/
+tests/*
+!tests/docker/
+tests/docker/*
+!tests/docker/build_raw_decoder.sh
+!tests/docker/libraw-dng-host.sh

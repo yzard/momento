@@ -32,56 +32,16 @@ cp "$repository_root/docker/Dockerfile.android" "$workspace/docker/Dockerfile.an
 cp "$repository_root/src/android/version.txt" "$workspace/src/android/version.txt"
 chmod +x "$workspace/build_android_client.sh"
 
-cat > "$tools_dir/docker" <<'DOCKER'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'docker:%s\n' "$*" >> "$MOMENTO_TEST_INVOCATIONS"
-
-case "$1" in
-    build)
-        [[ "$*" == *"docker/Dockerfile.android"* ]]
-        ;;
-    run)
-        distribution_dir=
-        signing_dir=
-        source_dir=
-        container_command=${!#}
-        while (( $# > 0 )); do
-            if [[ "$1" == --volume ]]; then
-                mount_value=$2
-                case "$mount_value" in
-                    *:/dist) distribution_dir=${mount_value%:/dist} ;;
-                    *:/signing:ro) signing_dir=${mount_value%:/signing:ro} ;;
-                    *:/workspace:ro) source_dir=${mount_value%:/workspace:ro} ;;
-                esac
-                shift 2
-                continue
-            fi
-            shift
-        done
-        version=$(<"$source_dir/src/android/version.txt")
-        case "$container_command" in
-            assemble-debug)
-                mkdir -p "$distribution_dir/debug"
-                : > "$distribution_dir/debug/momento-android-$version-debug.apk"
-                ;;
-            release)
-                stem=$(basename "$signing_dir"/*.jks .jks)
-                : > "$distribution_dir/$stem-$version.apk"
-                : > "$distribution_dir/$stem-$version.aab"
-                ;;
-        esac
-        ;;
-    *)
-        exit 1
-        ;;
-esac
-DOCKER
+mkdir -p "$workspace/docker/lib"
+cp "$repository_root/docker/lib/build_lifecycle.sh" "$workspace/docker/lib/"
+cp "$repository_root/docker/entrypoint_android.sh" "$workspace/docker/"
+cp "$repository_root/tests/docker/fake_build_docker.sh" "$tools_dir/docker"
 chmod +x "$tools_dir/docker"
 
 run_script() {
     PATH="$tools_dir:$PATH" \
     MOMENTO_TEST_INVOCATIONS="$invocation_log" \
+    MOMENTO_TEST_DOCKER_STATE="$test_root/docker-state" \
     "$workspace/build_android_client.sh" "$@"
 }
 
@@ -102,9 +62,9 @@ printf '1.0.0\n' > "$workspace/src/android/version.txt"
 : > "$invocation_log"
 run_script verify --no-cache
 mapfile -t verify_invocations < "$invocation_log"
-[[ "${verify_invocations[0]}" == *"--target android-builder"*"--no-cache"* ]] || fail "verify did not build the cached builder target correctly"
-[[ "${verify_invocations[1]}" == *"momento-android-builder:local verify" ]] || fail "verify did not run the builder command"
-[[ "${verify_invocations[1]}" != *":/signing:ro"* ]] || fail "verify mounted signing material"
+[[ "$(<"$invocation_log")" == *"--target android-builder"*"--no-cache"* ]] || fail "verify did not build the cached builder target correctly"
+[[ "$(<"$invocation_log")" == *"momento-android-toolchain:android-builder-"*" verify"* ]] || fail "verify did not run the builder command"
+[[ "$(<"$invocation_log")" != *":/signing:ro"* ]] || fail "verify mounted signing material"
 
 : > "$invocation_log"
 run_script assemble-debug
@@ -130,17 +90,35 @@ run_script release --keystore-dir "$keystore_dir"
 [[ -f "$workspace/dist/android/Momento-Release-1.0.0.apk" ]] || fail "release APK name did not include the Android version"
 [[ -f "$workspace/dist/android/Momento-Release-1.0.0.aab" ]] || fail "release AAB name did not include the Android version"
 mapfile -t release_invocations < "$invocation_log"
-[[ "${release_invocations[0]}" == *"--target android-builder"* ]] || fail "release did not build the builder target"
-[[ "${release_invocations[1]}" == *":/signing:ro"*" release" ]] || fail "release did not mount signing material for the release command"
+[[ "$(<"$invocation_log")" == *"momento-android-toolchain:android-builder-"* ]] || fail "release did not build the builder target"
+[[ "$(<"$invocation_log")" == *":/signing:ro"*" release"* ]] || fail "release did not mount signing material for the release command"
 
 if [[ -c /dev/kvm ]]; then
     : > "$invocation_log"
     run_script instrumented-test
     mapfile -t instrumented_invocations < "$invocation_log"
-    [[ "${instrumented_invocations[0]}" == *"--target android-emulator"* ]] || fail "instrumented tests did not build the emulator target"
-    [[ "${instrumented_invocations[1]}" == *"--device /dev/kvm"*" instrumented-test" ]] || fail "instrumented tests did not pass KVM into the container"
+    [[ "$(<"$invocation_log")" == *"--target android-emulator"* ]] || fail "instrumented tests did not build the emulator target"
+    [[ "$(<"$invocation_log")" == *"--device /dev/kvm"*" instrumented-test"* ]] || fail "instrumented tests did not pass KVM into the container"
 else
     expect_failure "requires /dev/kvm" run_script instrumented-test
 fi
+
+# An unchanged release does not invoke Docker or Gradle.
+: > "$invocation_log"
+run_script release --keystore-dir "$keystore_dir"
+[[ "$(<"$invocation_log")" != *"buildx build"* && "$(<"$invocation_log")" != *"docker:run"* ]] || fail "unchanged release rebuilt Android"
+[[ -f "$workspace/build/android/state/debug.keystore" ]] || fail "debug signing identity was deleted"
+[[ -f "$workspace/build/android/reports/release/reports/test-report.txt" ]] || fail "validation report was deleted"
+[[ ! -e "$workspace/build/android/workspace" && ! -e "$workspace/build/android/gradle-user-home" && ! -e "$workspace/build/android/android-avd" ]] || fail "successful build left temporary Android state"
+rm "$workspace/dist/android/Momento-Release-1.0.0.apk"
+run_script release --keystore-dir "$keystore_dir"
+[[ -s "$invocation_log" ]] || fail "missing artifact did not rebuild"
+: > "$invocation_log"
+printf 'source edit\n' > "$workspace/src/android/example.kt"
+run_script release --keystore-dir "$keystore_dir"
+[[ "$(<"$invocation_log")" != *"buildx build"* ]] || fail "source-only change rebuilt SDK image"
+MOMENTO_TEST_RUN_FAIL=true expect_failure "Diagnostics retained" run_script verify
+[[ -d "$workspace/build/android/workspace" ]] || fail "failed build diagnostics were erased"
+MOMENTO_TEST_CLEANUP_FAIL=true expect_failure "did not complete cleanly" run_script verify --no-cache
 
 printf 'build_android_client.sh tests passed\n'

@@ -76,7 +76,7 @@ private suspend fun recordCancellationStatus(
 }
 
 internal fun cancellationState(status: String): BackupState = when (status) {
-    "cancelled" -> BackupState.CANCELLED
+    "cancelled", "expired" -> BackupState.CANCELLED
     "completed" -> BackupState.COMPLETED
     "failed" -> BackupState.TERMINAL_FAILED
     "processing" -> BackupState.SERVER_PROCESSING
