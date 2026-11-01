@@ -1,6 +1,7 @@
 package io.github.yzard.momento.feature.backup
 
 import okhttp3.ResponseBody.Companion.toResponseBody
+import io.github.yzard.momento.core.model.BackupState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -36,5 +37,31 @@ class BackupDiagnosticsTest {
     @Test fun boundsServerErrorBody() {
         val error = HttpException(Response.error<Unit>(500, "x".repeat(20000).toResponseBody()))
         assertFalse(backupFailureDetail(error).contains("x".repeat(8193)))
+    }
+
+    @Test fun olderCancelledRecordsWithoutAnErrorStillShowTheirFileAndCorrelationIds() {
+        val asset = discoveredAsset(
+            "content://media/1490", 1490, "external_primary", null,
+            "IMG_1490.jpg", "image/jpeg", 100, 100, 0, "Camera",
+        ).copy(state = BackupState.CANCELLED, errorMessage = null)
+        val report = backupRecordDiagnostics(listOf(asset))
+        assertTrue(report.contains("File=IMG_1490.jpg; state=CANCELLED"))
+        assertTrue(report.contains("operation=${asset.operationId}"))
+        assertTrue(report.contains("asset=${asset.clientAssetId}"))
+        assertTrue(report.contains("No cancellation reason was retained"))
+    }
+
+    @Test fun recordReportKeepsOriginalReasonsAndOmitsSuccessfulRecordsWithoutErrors() {
+        val asset = discoveredAsset(
+            "content://media/42", 42, "external", null,
+            "cancelled.jpg", "image/jpeg", 100, 100, 0, "Camera",
+        ).copy(state = BackupState.CANCELLED, errorMessage = "Source is no longer available")
+        val successful = asset.copy(displayName = "successful.jpg", state = BackupState.COMPLETED, errorMessage = null)
+        val failed = asset.copy(displayName = "failed.jpg", state = BackupState.TERMINAL_FAILED, errorMessage = null)
+        val report = backupRecordDiagnostics(listOf(asset, successful, failed))
+        assertTrue(report.contains("Source is no longer available"))
+        assertFalse(report.contains("successful.jpg"))
+        assertTrue(report.contains("File=failed.jpg; state=TERMINAL_FAILED"))
+        assertTrue(report.contains("No failure reason was retained"))
     }
 }

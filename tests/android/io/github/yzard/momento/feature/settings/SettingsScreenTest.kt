@@ -82,7 +82,7 @@ class SettingsScreenTest {
             backupSummary(listOf(BackupQueueCount(BackupState.COMPLETED, 10)), networkAllowed = false),
         )
         assertEquals(
-            "8/10 media uploaded, 2 failed.",
+            "8/10 media uploaded, 1 failed, 1 cancelled.",
             backupSummary(
                 listOf(
                     BackupQueueCount(BackupState.COMPLETED, 8),
@@ -91,6 +91,24 @@ class SettingsScreenTest {
                 ),
                 networkAllowed = true,
             ),
+        )
+    }
+
+    @Test
+    fun cancelledRecordDoesNotCountAsFailedOrFullyBackedUp() {
+        assertEquals(
+            "234/235 media uploaded, 1 cancelled.",
+            backupSummary(
+                listOf(
+                    BackupQueueCount(BackupState.COMPLETED, 234),
+                    BackupQueueCount(BackupState.CANCELLED, 1),
+                ),
+                networkAllowed = true,
+            ),
+        )
+        assertEquals(
+            "0/1 media uploaded, 1 failed.",
+            backupSummary(listOf(BackupQueueCount(BackupState.TERMINAL_FAILED, 1)), networkAllowed = true),
         )
     }
 

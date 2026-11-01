@@ -59,6 +59,21 @@ elif [[ $1 == image && $2 == tag ]]; then
     if [[ $3 != "$4" ]]; then cp "$(image_path "$3")" "$(image_path "$4")"; fi
 elif [[ $1 == image && $2 == push ]]; then
     printf 'sha256:%s\n' "$(<"$(image_path "$3")")" > "$(image_path "$3").remote"
+elif [[ $1 == image && $2 == save ]]; then
+    [[ $3 == --output ]]
+    python3 - "$4" "${!#}" <<'SAVE'
+import hashlib, io, json, sys, tarfile
+layer = b"retained-model-layer"
+digest = hashlib.sha256(layer).hexdigest()
+config = json.dumps({"architecture": "amd64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": ["sha256:" + digest]}}).encode()
+name = hashlib.sha256(config).hexdigest() + ".json"
+manifest = json.dumps([{"Config": name, "RepoTags": [sys.argv[2]], "Layers": ["layer/layer.tar"]}]).encode()
+with tarfile.open(sys.argv[1], "w") as archive:
+    for path, data in [(name, config), ("manifest.json", manifest), ("layer/layer.tar", layer)]:
+        entry = tarfile.TarInfo(path)
+        entry.size = len(data)
+        archive.addfile(entry, io.BytesIO(data))
+SAVE
 elif [[ $1 == image && $2 == rm ]]; then
     rm -f "$(image_path "$3")"
 elif [[ $1 == buildx && $2 == imagetools && $3 == inspect ]]; then

@@ -210,14 +210,14 @@ pub fn request_cancel(connection: &Connection) -> AppResult<bool> {
     }
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(
-        queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
+        queries::ai::jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
         ["image_clustering"],
     )?;
     transaction.execute(
-        queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK,
+        queries::ai::jobs::QUEUE_CANCELLATIONS_FOR_TASK,
         ["image_clustering"],
     )?;
-    transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, ["image_clustering"])?;
+    transaction.execute(queries::ai::jobs::CANCEL_FOR_TASK, ["image_clustering"])?;
     let cancelled = transaction.execute(queries::deduplicate::REQUEST_CANCEL, [run.id])? > 0;
     transaction.commit()?;
     Ok(cancelled)
@@ -249,11 +249,11 @@ pub fn queue_clustering_jobs(connection: &Connection, run_id: i64) -> AppResult<
         transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
     }
     let queued_jobs = transaction.execute(
-        &queries::ai_jobs::insert_eligible("image_clustering")
+        &queries::ai::jobs::insert_eligible("image_clustering")
             .ok_or(rusqlite::Error::InvalidQuery)?,
         rusqlite::params!["image_clustering", run_id],
     )?;
-    transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+    transaction.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     transaction.commit()?;
     Ok(queued_jobs)
 }
@@ -305,7 +305,7 @@ pub fn load_finalization_work(connection: &Connection) -> AppResult<DeduplicateF
 
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(queries::deduplicate::REQUEUE_MISSING_INPUT_JOBS, [run_id])?;
-    transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+    transaction.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     transaction.commit()?;
     let pending: i64 =
         connection.query_row(queries::deduplicate::COUNT_PENDING_JOBS, [run_id], |row| {

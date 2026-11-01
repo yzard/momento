@@ -10,8 +10,8 @@ const LOCAL_SCHEDULER_CONFIGURATION: &str = "[scheduler]\nmax_queue_bytes = 1048
 #[test]
 fn llm_container_places_runtime_temporary_files_on_its_data_volume() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let dockerfile =
-        std::fs::read_to_string(repository.join("docker/Dockerfile.llm")).expect("LLM Dockerfile");
+    let dockerfile = std::fs::read_to_string(repository.join("docker/Dockerfile.llm-runtime"))
+        .expect("LLM Dockerfile");
     let entrypoint = std::fs::read_to_string(repository.join("docker/entrypoint_llm.sh"))
         .expect("LLM entrypoint");
     assert!(dockerfile.contains("TMPDIR=/data/llm/tmp"));
@@ -251,7 +251,8 @@ fn loads_playground_toml_configuration() {
         config.server.cache_dir(),
         std::path::Path::new("/data/llm/cache")
     );
-    assert_eq!(ocr.max_concurrent_jobs, Some(100));
+    assert_eq!(ocr.max_concurrent_jobs, Some(8));
+    assert_eq!(ocr.max_tokens, 65536);
     assert_eq!(tagging.max_concurrent_jobs, Some(16));
     assert_eq!(clustering.processing_concurrency, Some(16));
     assert_eq!(clustering.model_concurrency, Some(16));

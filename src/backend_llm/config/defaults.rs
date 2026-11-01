@@ -14,12 +14,12 @@ pub(crate) const RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES: usize = 16;
 pub(crate) const SERVICE_ENABLED: bool = true;
 pub(crate) const SERVICE_STARTUP_TIMEOUT_SECONDS: u64 = 300;
 pub(crate) const SERVICE_REQUEST_TIMEOUT_SECONDS: u64 = 180;
-pub(crate) const SERVICE_MAX_TOKENS: u32 = 8192;
+pub(crate) const SERVICE_MAX_TOKENS: u32 = 65536;
 
 pub(crate) const SERVER_API_KEY: &str = "";
 pub(crate) const OCR_STARTUP_TIMEOUT_SECONDS: u64 = 1800;
 pub(crate) const OCR_REQUEST_TIMEOUT_SECONDS: u64 = 1800;
-pub(crate) const OCR_MAX_CONCURRENT_JOBS: usize = 100;
+pub(crate) const OCR_MAX_CONCURRENT_JOBS: usize = 8;
 pub(crate) const IMAGE_TAGGING_STARTUP_TIMEOUT_SECONDS: u64 = 900;
 pub(crate) const IMAGE_TAGGING_REQUEST_TIMEOUT_SECONDS: u64 = 180;
 pub(crate) const IMAGE_TAGGING_MAX_CONCURRENT_JOBS: usize = 16;

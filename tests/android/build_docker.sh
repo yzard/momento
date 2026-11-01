@@ -16,7 +16,7 @@ readonly keystore_dir="$test_root/keystore"
 readonly tools_dir="$test_root/tools"
 readonly invocation_log="$test_root/invocations"
 mkdir -p "$workspace/src/"{backend,backend_llm,common,frontend} "$keystore_dir" "$tools_dir"
-for file in build_docker.sh docker/lib/build_lifecycle.sh docker/lib/validate_oci.py docker/Dockerfile docker/Dockerfile.llm \
+for file in build_docker.sh docker/lib/build_lifecycle.sh docker/lib/validate_oci.py docker/lib/docker_archive_oci.py src/backend_llm/ocr/requirements.txt docker/Dockerfile docker/Dockerfile.llm \
     docker/Dockerfile.runtime docker/Dockerfile.llm-runtime docker/Dockerfile.frontend \
     docker/Dockerfile.dockerignore docker/Dockerfile.llm.dockerignore docker/Dockerfile.runtime.dockerignore \
     docker/Dockerfile.llm-runtime.dockerignore docker/Dockerfile.frontend.dockerignore \
@@ -45,21 +45,27 @@ cp "$repository_root/tests/docker/fake_build_docker.sh" "$tools_dir/docker"
 chmod +x "$tools_dir/docker"
 run_script() {
     PATH="$tools_dir:$PATH" MOMENTO_TEST_INVOCATIONS="$invocation_log" \
-        MOMENTO_TEST_DOCKER_STATE="$test_root/docker-state" "$workspace/build_docker.sh" "$@"
+        MOMENTO_TEST_DOCKER_STATE="$test_root/docker-state" XDG_STATE_HOME="$test_root/state" "$workspace/build_docker.sh" "$@"
 }
 build_count() { local n; n=$(rg -c '^docker:buildx build ' "$invocation_log" || true); printf '%s' "${n:-0}"; }
 expect_failure 'Usage:' run_script
 help_output=$(run_script --help)
 [[ $help_output == *"Cargo's release profile"* && $help_output == *SOURCE_REPOSITORY* ]] || fail "help lost build contract"
 MOMENTO_TEST_SKIP_ANDROID_APK=true expect_failure 'exactly one non-empty signed release APK' run_script "$keystore_dir"
+mkdir -p "$workspace/build/old-cache" "$workspace/build/docker/reports"
+printf 'old temporary object\n' > "$workspace/build/old-cache/debug.o"
+printf 'preserved report\n' > "$workspace/build/docker/reports/legacy.log"
 : > "$invocation_log"
 run_script "$keystore_dir"
+readonly persistent_state="$test_root/state/momento-build/$(printf '%s' "$workspace" | sha256sum | cut -d ' ' -f1)"
+[[ -f "$persistent_state/docker/reports/legacy.log" ]] || fail "cleanup erased an existing report"
 [[ $(build_count) == 5 ]] || fail "initial build did not export three reusable artifacts and two services"
 [[ $(head -1 "$invocation_log") == android:* ]] || fail "Android release did not run first"
 [[ $(<"$invocation_log") == *"--load"* && $(<"$invocation_log") == *"buildx rm --force momento-"* ]] || fail "local export or owned cleanup missing"
 [[ $(<"$invocation_log") != *prune* ]] || fail "global cache pruning is forbidden"
 [[ -s "$workspace/dist/android/Momento-Release-1.0.0.apk" ]] || fail "cleanup erased final App"
-[[ -n $(find "$workspace/dist/docker/llm-runtime" -name inputs -print -quit) ]] || fail "reusable model artifact was erased"
+[[ ! -e "$workspace/build" && ! -e "$workspace/dist/docker" ]] || fail "successful build retained temporary directories or Docker exports"
+[[ "$(<"$invocation_log")" == *"--tag momento-build-llm-runtime:"* ]] || fail "model runtime was not retained as a Docker image"
 : > "$invocation_log"
 run_script "$keystore_dir"
 [[ $(build_count) == 0 ]] || fail "unchanged targets rebuilt"
@@ -87,16 +93,9 @@ run_script "$keystore_dir"
 run_script publish github yzard "$keystore_dir"
 [[ $(<"$invocation_log") == *"image push ghcr.io/yzard/momento:1.0.0"* ]] || fail "publishing did not preserve registry contract"
 # Simulate a build host with no locally loaded service images. Registry receipts remain valid.
-rm -f "$test_root/docker-state/"image-*
-# Restore only the remote receipts from the successful publish metadata.
-for receipt in "$workspace/build/docker/state/"*.inputs; do
-    read -r fingerprint digest < "$receipt"
-    for image in ghcr.io/yzard/momento ghcr.io/yzard/momento-llm-service; do
-        if [[ $(basename "$receipt" .inputs) == "$(printf '%s\n' "$image:1.0.0" | sha256sum | cut -d ' ' -f1)" ]]; then
-            for tag in 1.0.0 latest; do
-                printf '%s\n' "$digest" > "$test_root/docker-state/image-$(printf '%s' "$image:$tag" | sha256sum | cut -d ' ' -f1).remote"
-            done
-        fi
+for image in zhuoyin/momento zhuoyin/momento-llm-service ghcr.io/yzard/momento ghcr.io/yzard/momento-llm-service; do
+    for tag in 1.0.0 2.0.0 latest; do
+        rm -f "$test_root/docker-state/image-$(printf '%s' "$image:$tag" | sha256sum | cut -d ' ' -f1)"
     done
 done
 : > "$invocation_log"
@@ -105,6 +104,17 @@ run_script publish github yzard "$keystore_dir"
 : > "$invocation_log"
 run_script "$keystore_dir"
 [[ $(build_count) == 2 ]] || fail "missing service images did not rebuild from retained model/runtime artifacts"
+# A previously exported model is imported before its disk copy is removed.
+legacy="$workspace/dist/docker/llm-runtime/retired"
+mkdir -p "$legacy"
+PATH="$tools_dir:$PATH" MOMENTO_TEST_INVOCATIONS="$invocation_log" MOMENTO_TEST_DOCKER_STATE="$test_root/docker-state" \
+    docker buildx build -f "$workspace/docker/Dockerfile.llm-runtime" --output "type=oci,tar=false,dest=$legacy"
+printf 'retired\n' > "$legacy/inputs"
+: > "$invocation_log"
+run_script "$keystore_dir"
+[[ $(build_count) == 1 && ! -e "$workspace/dist/docker" && ! -e "$workspace/build" ]] || fail "legacy model was not migrated and removed"
+[[ "$(<"$invocation_log")" == *"--tag momento-build-llm-runtime:retired"* ]] || fail "legacy model was deleted without a retained image"
 printf 'cleanup failure\n' >> "$workspace/src/backend/main.rs"
 MOMENTO_TEST_CLEANUP_FAIL=true expect_failure 'did not complete cleanly' run_script "$keystore_dir"
+[[ -d "$workspace/build" && -s "$workspace/dist/android/Momento-Release-1.0.0.apk" ]] || fail "cleanup failure erased diagnostics or final App"
 printf 'build_docker.sh tests passed\n'

@@ -258,3 +258,44 @@ async fn invalid_scheduled_start_is_rejected_before_sqlite_dispatch() {
         .expect_err("scheduled starts require their occurrence");
     assert!(error.to_string().contains("AI start source is invalid"));
 }
+
+#[tokio::test]
+async fn large_ocr_restart_reserves_job_and_input_growth_before_commit() {
+    let pool = create_test_db();
+    {
+        let connection = pool.get().unwrap();
+        connection.execute_batch("BEGIN;
+            WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id + 1 FROM ids WHERE id < 6000)
+            INSERT INTO media (id, filename, original_filename, file_path, media_type)
+            SELECT id, 'scan.jpg', 'scan.jpg', 'scan/' || id, 'image' FROM ids;
+            INSERT INTO media_metadata_jobs (media_id, status) SELECT id, 'completed' FROM media;
+            INSERT INTO media_ai_inputs (media_id, task, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash)
+            SELECT id, 'ocr', 0, 'image', 'previews', 'scan/' || id || '/' || hex(zeroblob(512)), 'scan.jpg', 'image/jpeg', 4, 'hash' FROM media;
+            INSERT INTO media_text (media_id, model_type, model_version, string)
+            SELECT id, 'ocr', 'unlimited_ocr', 'old searchable text' FROM media;
+            COMMIT;").unwrap();
+    }
+    let handles = crate::test_utils::test_executor_handles(pool.clone());
+    assert_eq!(
+        handles
+            .sqlite
+            .start_ai_feature_request(AiFeature::Ocr, "manual".into(), None)
+            .await
+            .unwrap(),
+        6000
+    );
+    assert_eq!(
+        handles
+            .sqlite
+            .start_ai_feature_request(AiFeature::Ocr, "manual".into(), None)
+            .await
+            .unwrap(),
+        0
+    );
+    let connection = pool.get().unwrap();
+    let counts: (u64, u64, u64) = connection.query_row(
+        "SELECT (SELECT COUNT(*) FROM llm_jobs WHERE task = 'ocr'), (SELECT COUNT(*) FROM llm_job_inputs), (SELECT COUNT(*) FROM media_text WHERE string = 'old searchable text')",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(counts, (6000, 6000, 6000));
+}

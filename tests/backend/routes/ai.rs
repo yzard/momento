@@ -1418,3 +1418,77 @@ async fn deduplicate_control_uses_the_complete_pipeline_and_shared_contract() {
         1
     );
 }
+
+#[tokio::test]
+async fn ocr_model_upgrade_requeues_old_results_without_deleting_them() {
+    let pool = create_test_db();
+    let mut config = crate::test_utils::test_config();
+    config.llm.enabled = true;
+    let app = create_app(
+        create_test_config_manager(config),
+        crate::test_utils::test_app_dependencies(pool.clone(), None),
+    );
+    let server = TestServer::new(app).unwrap();
+    let user_id = create_test_user(&pool, "ocr-upgrade-admin", "ocr-upgrade@example.com");
+    let token = admin_token(user_id);
+    let connection = pool.get().unwrap();
+    connection
+        .execute("UPDATE users SET role='admin' WHERE id=?", [user_id])
+        .unwrap();
+    let old = create_test_media(&pool, "ocr-old.jpg");
+    let current = create_test_media(&pool, "ocr-current.jpg");
+    for (media_id, version) in [
+        (old, "unlimited_ocr"),
+        (current, momento_common::llm::OCR_MODEL_VERSION),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO media_metadata_jobs(media_id,status) VALUES (?,'completed')",
+                [media_id],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO media_ai_inputs(media_id,task,sequence,input_kind,storage_root,file_path,filename,mime_type,byte_size,content_hash) VALUES (?,'ocr',0,'image','originals','fixture.jpg','fixture.jpg','image/jpeg',4,'hash')", [media_id]).unwrap();
+        connection.execute("INSERT INTO media_text(media_id,model_type,model_version,string) VALUES (?,'ocr',?,'preserved text')", rusqlite::params![media_id,version]).unwrap();
+        connection.execute("INSERT INTO media_text_inputs(media_id,model_type,sequence,model_version,string) VALUES (?,'ocr',0,?,'preserved text')", rusqlite::params![media_id,version]).unwrap();
+    }
+    let response = server
+        .post("/api/v1/ai/ocr/start")
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(action_affected_jobs(&response.json::<Value>(), "ocr"), 1);
+    let repeat = server
+        .post("/api/v1/ai/ocr/start")
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    repeat.assert_status_ok();
+    assert_eq!(action_affected_jobs(&repeat.json::<Value>(), "ocr"), 0);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT string FROM media_text WHERE media_id=? AND model_type='ocr'",
+                [old],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "preserved text"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM media_text_inputs WHERE model_type='ocr'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
+    );
+    let queued = connection
+        .query_row(
+            "SELECT media_id FROM llm_jobs WHERE task='ocr' AND status='queued'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(queued, old);
+}

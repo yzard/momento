@@ -245,7 +245,7 @@ The playground uses the same [`docker-compose.yaml`](docker-compose.yaml) as nor
 deployments and builds exactly two containers: `momento-api` and `momento-llm-service`.
 Model runtimes are processes inside `momento-llm-service`; the deployment does not mount the Docker socket
 or create model containers. The CUDA 12.9 llm-service image contains isolated environments and
-baked model weights for Unlimited-OCR, RAM++, DINOv2-base, CLIP ViT-B/32 with the LAION aesthetic
+baked model weights for Unlimited-OCR-2, RAM++, DINOv2-base, CLIP ViT-B/32 with the LAION aesthetic
 head, InsightFace `buffalo_l`, BiSeNet ResNet18 face parsing, and PP-OCRv6-small. Screenshot and document detection share a
 PaddleOCR-assisted runtime design. Each active detector owns one CUDA pipeline and combines
 concurrent requests into bounded GPU micro-batches. Task activation performs no package
@@ -255,7 +255,7 @@ Requirements:
 
 - Docker with the Compose plugin.
 - An NVIDIA GPU, compatible host driver, and NVIDIA Container Toolkit.
-- Sufficient disk space for the large model image and at least 8 GiB shared memory for vLLM.
+- Sufficient disk space for the large model image and at least 8 GiB of shared memory for inference runtimes.
 - Review of the bundled model licenses before redistributing the llm-service image.
 
 Run from any working directory:
@@ -360,20 +360,50 @@ hosted inference API.
 
 ### Models and tasks
 
-| Task | Model or method | Compute | Output | Why this approach |
-| --- | --- | --- | --- | --- |
-| `ocr` | Baidu Unlimited-OCR served by vLLM | GPU | Recognized text and Markdown | Unlimited-OCR is Momento's full OCR model for photos and representative video frames. It is used when the recognized content itself is required. |
-| `image_tagging` | RAM++ with the Swin-Large checkpoint | GPU | Searchable semantic tags | RAM++ is a large-vocabulary image-tagging model. It recognizes visual concepts directly and does not use Unlimited-OCR. |
-| `image_clustering` | Meta DINOv2-base | GPU | Normalized 768-dimensional embedding, perceptual hash, and image-quality score | CPU workers preserve the full-image perceptual hash while bounding quality analysis to 512 pixels, then one CUDA model instance dynamically batches prepared DINOv2 tensors across requests. |
-| `image_aesthetics` | OpenAI CLIP ViT-B/32 with a LAION aesthetic linear head | GPU | Aesthetic, scenic, simplicity, landscape, and technical-quality scores | CPU workers share grayscale and edge analysis for the image measurements, then one CUDA model instance dynamically batches prepared CLIP tensors across requests. |
-| `face_detection` | InsightFace `buffalo_l` + BiSeNet ResNet18 | GPU | Face boxes, landmarks, normalized 512-dimensional identity embeddings, face size, frontality, visibility, and facial-feature clarity | One copy of each model remains on CUDA; recognition and face parsing dynamically batch aligned faces across requests, while configurable weights select group representatives. |
-| `screenshot_detection` | PP-OCRv6-small plus visual heuristics | GPU | Boolean decision and confidence | CPU workers letterbox images onto a fixed 1280x1280 canvas so one detector instance can dynamically batch differently shaped requests on CUDA. A separate recognition instance batches only top status-region crops, while CPU preparation, layout parsing, and classification overlap through a bounded pipeline. The classifier combines these OCR regions with mobile aspect ratio, compact UI components, edge geometry, and flat-color structure. |
-| `document_detection` | PP-OCRv6-small detection plus visual heuristics | GPU | Boolean decision and confidence | CPU workers letterbox images onto a fixed 1280x1280 canvas so one detector instance can dynamically batch differently shaped requests on CUDA. Document classification uses text geometry and confidence without loading or running text recognition; CPU preparation, layout parsing, and classification overlap through a bounded pipeline. The classifier combines these regions with paper-like color and photographic-content penalties. |
+The image pins the following models. A revision identifies an exact upstream checkpoint.
+Full revisions and artifact checksums live in `docker/Dockerfile.llm-runtime`.
 
-| OCR choice | Best use | Layout data | Hardware | Role in Momento |
-| --- | --- | --- | --- | --- |
-| Unlimited-OCR | High-quality text recognition | Returns text/Markdown rather than the normalized word regions required by the classifiers | GPU | Primary `ocr` task |
-| PP-OCRv6-small | Fast spatial text hints | Returns text boxes and recognition confidence directly | GPU | Internal batched signal for screenshot and document classification; not a replacement for primary OCR |
+| Model | Version or pinned revision | Task | Purpose |
+| --- | --- | --- | --- |
+| [Baidu Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) | 2, released October 27, 2026. Revision `9cf077c4b206e0e2a31879df937b0b0bcba3661c` | `ocr` | Extract text and Markdown from original photos and full-resolution video representative frames. |
+| [RAM++](https://github.com/xinyu1205/recognize-anything) | Swin-Large 14M checkpoint `84d4aee3a026`; implementation `7cb804a8609e` | `image_tagging` | Generate searchable visual tags without using OCR. |
+| [Meta DINOv2-base](https://huggingface.co/facebook/dinov2-base) | Revision `f9e44c814b77` | `image_clustering` | Generate normalized 768-dimensional image vectors for duplicate grouping. Perceptual hashes and quality measurements supplement these vectors. |
+| [OpenAI CLIP ViT-B/32](https://github.com/openai/CLIP) | Implementation `d05afc436d78`; checkpoint SHA-256 starts with `40d365715913` | `image_aesthetics` | Encode images for aesthetic scoring. Image measurements also produce scenic, simplicity, landscape, and technical-quality scores. |
+| [LAION aesthetic predictor](https://huggingface.co/LAION/aesthetic-predictor) | Revision `6d122adad522`; linear head SHA-256 starts with `c7b14cead230` | `image_aesthetics` | Convert CLIP features into an aesthetic score. |
+| [InsightFace buffalo_l](https://github.com/deepinsight/insightface) | Model pack from release `v0.7`; runtime `0.7.3` | `face_detection` | Detect faces and landmarks, then generate normalized 512-dimensional identity vectors for face grouping. |
+| [BiSeNet ResNet18](https://github.com/yakhyo/face-parsing) | `resnet18.onnx`, release `weights`; SHA-256 starts with `0d9bd318e469` | `face_detection` | Segment facial regions to measure visibility and facial-feature clarity. |
+| [PP-OCRv6-small detection](https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det) | Revision `106c97591b23`; PaddleOCR `3.7.0` | `screenshot_detection`, `document_detection` | Locate text regions for layout classification. Document detection uses this detector without running text recognition. |
+| [PP-OCRv6-small recognition](https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec) | Revision `bd619643acac`; PaddleOCR `3.7.0` | `screenshot_detection` | Read selected regions to help identify mobile screenshots. This model does not produce the library's primary OCR results. |
+
+RAM++ also uses the `bert-base-uncased` tokenizer at revision `86b5e0934494`.
+The tokenizer supports label processing and does not run as a separate inference feature.
+Screenshot and document decisions combine PaddleOCR signals with visual heuristics.
+
+Unlimited-OCR-2 runs with BF16 weights through Baidu's SGLang build `0.5.20.dev10+g8d62f5fb9c`.
+The image pins and checks the upstream wheel's SHA-256 before installation.
+The default OCR concurrency is `8`. SGLang batches these requests on the GPU.
+
+Set `max_concurrent_jobs` in the OCR `[[service]]` section to change this limit.
+Restart llm-service after a configuration change.
+
+The adapter acquires capacity before opening or decoding each image.
+It sends a lossless PNG to the engine through the service's loopback interface.
+
+The default output limit is 65,536 tokens per input.
+Set `max_tokens = 65536` in the OCR `[[service]]` section to configure this limit.
+Restart llm-service after a configuration change.
+The engine supports 131,072 total tokens for image input and generated output.
+For longer output, `max_tokens = 122880` leaves 8,192 tokens for image input.
+The runtime disables the upstream per-page length cap to prevent an earlier forced end.
+It rejects truncated output rather than replacing stored text with an incomplete result.
+
+This integration handles one image or representative frame per input.
+The runtime logs request start and completion times. SGLang logs batch size and token throughput.
+
+Each OCR result records `unlimited-ocr-2@9cf077c4b206e0e2a31879df937b0b0bcba3661c` as its model version.
+After an upgrade, the administrator's OCR start action and OCR schedule queue media with missing or older results.
+Existing text remains searchable until a successful result replaces it in SQLite.
+Failed inference preserves existing text. Image tags, face results, and other AI results remain independent.
 
 | Classifier behavior | Screenshot detection | Document detection |
 | --- | --- | --- |

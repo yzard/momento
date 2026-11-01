@@ -6,6 +6,8 @@ import androidx.work.WorkManager
 import io.github.yzard.momento.BuildConfig
 import io.github.yzard.momento.core.data.Settings
 import io.github.yzard.momento.core.database.BackupAssetDao
+import io.github.yzard.momento.core.database.BackupAssetEntity
+import io.github.yzard.momento.core.model.BackupState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -79,14 +81,23 @@ internal suspend fun backupDiagnosticReport(
         }
         appendLine("\nRecent local events (rolling history, up to 96,000 characters):")
         appendLine(BackupDiagnosticLog.read(context))
-        appendLine("\nAll current records with errors (file names and correlation IDs included):")
-        for (asset in records.filter { !it.errorMessage.isNullOrBlank() }) {
-            appendLine("File=${asset.displayName}; state=${asset.state}; bytes=${asset.uploadedBytes}/${asset.byteSize}; protocol=${asset.protocolVersion}")
-            appendLine("operation=${asset.operationId}; asset=${asset.clientAssetId}; upload=${asset.uploadId}; media=${asset.mediaId}")
-            appendLine(asset.errorMessage)
-        }
+        appendLine("\nCurrent failed or cancelled records and records with errors (file names and correlation IDs included):")
+        append(backupRecordDiagnostics(records))
     }
     redactBackupDiagnostic(report)
+}
+
+internal fun backupRecordDiagnostics(records: List<BackupAssetEntity>): String = buildString {
+    for (asset in records.filter {
+        !it.errorMessage.isNullOrBlank() || it.state == BackupState.CANCELLED || it.state == BackupState.TERMINAL_FAILED
+    }) {
+        appendLine("File=${asset.displayName}; state=${asset.state}; bytes=${asset.uploadedBytes}/${asset.byteSize}; protocol=${asset.protocolVersion}")
+        appendLine("operation=${asset.operationId}; asset=${asset.clientAssetId}; upload=${asset.uploadId}; media=${asset.mediaId}")
+        appendLine(asset.errorMessage?.takeIf { it.isNotBlank() } ?: when (asset.state) {
+            BackupState.CANCELLED -> "No cancellation reason was retained"
+            else -> "No failure reason was retained"
+        })
+    }
 }
 
 internal fun conciseBackupIssue(detail: String): String =

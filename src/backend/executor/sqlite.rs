@@ -5470,8 +5470,65 @@ fn execute(
     database_path: &std::path::Path,
     footprints: &crate::database::result_footprint::SqliteFootprintRegistry,
 ) -> Result<SqliteOutput, ExecutorError> {
-    let operation_spec = operation.spec(footprints)?;
+    let mut operation_spec = operation.spec(footprints)?;
     let operation_name = operation.name();
+    if matches!(
+        &operation,
+        SqliteOperation::StartAiFeature {
+            feature: AiFeature::Ocr,
+            ..
+        }
+    ) {
+        // The single writer owns both planning and insertion, so no writer can enlarge
+        // this input set before this operation commits.
+        let connection = pool
+            .get_timeout(SQLITE_CONNECTION_TIMEOUT)
+            .map_err(|error| {
+                ExecutorError::new(
+                    ExecutorErrorKind::DatabaseBusy,
+                    operation_name,
+                    error.to_string(),
+                )
+            })?;
+        let deadline = Instant::now() + SQLITE_OPERATION_TIMEOUT;
+        connection.progress_handler(
+            SQLITE_PROGRESS_HANDLER_OPS,
+            Some(move || Instant::now() >= deadline),
+        );
+        let estimate = connection.query_row(
+            crate::database::queries::ai::jobs::SELECT_OCR_START_FOOTPRINT,
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        );
+        connection.progress_handler(0, None::<fn() -> bool>);
+        let (jobs, inputs, payload_bytes) =
+            estimate.map_err(|error| map_sqlite_error(operation_name, error))?;
+        let page_size: u64 = connection
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .map_err(|error| map_sqlite_error(operation_name, error))?;
+        // Each job/input gets page and index slack. Four copies cover page splits,
+        // the database, and WAL growth. Descriptor bytes include UTF-8 byte lengths.
+        let max_growth_bytes = jobs
+            .checked_add(inputs)
+            .and_then(|rows| rows.checked_mul(page_size))
+            .and_then(|bytes| bytes.checked_add(payload_bytes))
+            .and_then(|bytes| bytes.checked_mul(4))
+            .and_then(|bytes| bytes.checked_add(BOUNDED_SQLITE_MAX_GROWTH_BYTES))
+            .ok_or_else(|| {
+                ExecutorError::new(
+                    ExecutorErrorKind::DatabasePermanent,
+                    operation_name,
+                    "OCR queue SQLite footprint overflowed",
+                )
+            })?;
+        operation_spec.capacity = SqliteCapacitySource::Fresh { max_growth_bytes };
+    }
     let durable_parent_job_id = operation.durable_parent_job_id().map(str::to_string);
     let mut capacity_token = match operation_spec.capacity {
         SqliteCapacitySource::ReadOnly | SqliteCapacitySource::DurableParent { .. } => None,

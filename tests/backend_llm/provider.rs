@@ -116,9 +116,6 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/ready':
             self.send_json(200, {'status': 'ready'})
             return
-        if arguments.mode == 'ocr' and self.path == '/v1/models':
-            self.send_json(200, {'data': []})
-            return
         if self.path == '/metrics':
             self.send_json(200, {'maximumActiveRequests': maximum_active_requests})
             return
@@ -126,15 +123,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global active_requests, maximum_active_requests
-        if arguments.mode == 'ocr' and self.path == '/v1/chat/completions':
-            content_length = int(self.headers.get('Content-Length', '0'))
-            request = json.loads(self.rfile.read(content_length))
-            image_url = request['messages'][0]['content'][1]['image_url']['url']
-            if not image_url.startswith('file://'):
-                self.send_json(400, {'detail': 'OCR input was not a local file URL'})
-                return
-            self.send_json(200, {'choices': [{'message': {'content': 'OCR text'}}]})
-            return
         if self.path != '/infer':
             self.send_error(404)
             return
@@ -149,6 +137,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if set(descriptor) != {'jobId', 'sequence', 'byteSize', 'contentHash', 'mimeType', 'inputFilename'}:
             self.send_json(400, {'detail': 'invalid input descriptor'})
+            return
+        if arguments.mode == 'ocr':
+            self.send_json(200, {'text': '<PAGE>OCR text'})
             return
         if 'screenshot_detection' in arguments.mode or 'document_detection' in arguments.mode or 'classifier' in arguments.mode:
             with request_lock:
@@ -349,7 +340,7 @@ pub(super) fn service(
         ]);
     }
     let model_version = if model_type == "ocr" {
-        "unlimited_ocr".to_string()
+        momento_common::llm::OCR_MODEL_VERSION.to_string()
     } else if model_type == "image_clustering" {
         "dinov2-base".to_string()
     } else if model_type == "image_aesthetics" {
@@ -396,13 +387,9 @@ pub(super) fn service(
             executable: Path::new("python3").to_path_buf(),
             arguments,
             environment: Vec::new(),
-            base_url: if model_type == "ocr" {
-                format!("http://127.0.0.1:{port}/v1")
-            } else {
-                format!("http://127.0.0.1:{port}")
-            },
+            base_url: format!("http://127.0.0.1:{port}"),
             model: if model_type == "ocr" {
-                "baidu/Unlimited-OCR".to_string()
+                "baidu/Unlimited-OCR-2".to_string()
             } else if model_type == "image_clustering" {
                 "facebook/dinov2-base".to_string()
             } else if model_type == "image_aesthetics" {
@@ -895,7 +882,7 @@ async fn manager_applies_the_runtime_environment_and_executable_path() {
 }
 
 #[tokio::test]
-async fn manager_sends_ocr_a_local_queue_file_url() {
+async fn manager_sends_ocr_a_validated_input_descriptor() {
     let (_directory, script_path, start_log) = fixture();
     let port = available_port();
     let ocr = service("ocr", "ocr", port, &script_path, &start_log);

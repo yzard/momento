@@ -39,6 +39,9 @@ that focused checks do not cover.
   `tests/` (for example `src/backend/routes/map.rs` → `tests/backend/routes/map.rs`).
   Move affected tests with source. Documentation belongs in `docs/`.
 - Intermediate artifacts belong in root `build/`, deliverables in root `dist/`.
+  Successful build entrypoints clear `build/` after the outermost invocation completes.
+  Signing state, fingerprints and reports use the per-project XDG state directory.
+  Docker retains reusable images; `dist/` contains final files and no Docker image exports.
   Runtime playground files belong in `playground/`. The root `docker-compose.yaml`,
   `build_docker.sh`, `run_playground.sh`, and `build_android_client.sh` are intentional
   exceptions to generic layout rules.

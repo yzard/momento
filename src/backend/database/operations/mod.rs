@@ -3236,14 +3236,14 @@ pub(crate) fn load_deduplicate_schedule_state(
 pub(crate) fn recover_deduplicate_runs(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(
-        queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
+        queries::ai::jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
         ["image_clustering"],
     )?;
     transaction.execute(
-        queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK,
+        queries::ai::jobs::QUEUE_CANCELLATIONS_FOR_TASK,
         ["image_clustering"],
     )?;
-    transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, ["image_clustering"])?;
+    transaction.execute(queries::ai::jobs::CANCEL_FOR_TASK, ["image_clustering"])?;
     transaction.execute(queries::deduplicate::FAIL_INTERRUPTED_RUNS, [])?;
     transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
     transaction.commit()
@@ -4198,8 +4198,8 @@ pub(crate) fn persist_metadata_generation(
 }
 
 pub(crate) fn prepare_llm_submission_cycle(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute(queries::ai_jobs::RECLAIM_STALE, [])?;
-    connection.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+    connection.execute(queries::ai::jobs::RECLAIM_STALE, [])?;
+    connection.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     Ok(())
 }
 
@@ -4212,7 +4212,7 @@ pub(crate) fn claim_llm_submission_jobs(
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let jobs = {
-        let mut statement = transaction.prepare(queries::ai_jobs::SELECT_QUEUED)?;
+        let mut statement = transaction.prepare(queries::ai::jobs::SELECT_QUEUED)?;
         let jobs = statement
             .query_map([i64::from(limit)], |row| {
                 Ok(LlmSubmissionJob {
@@ -4227,7 +4227,7 @@ pub(crate) fn claim_llm_submission_jobs(
     };
     let mut claimed = Vec::with_capacity(jobs.len());
     for job in jobs {
-        if transaction.execute(queries::ai_jobs::CLAIM, [&job.job_id])? == 1 {
+        if transaction.execute(queries::ai::jobs::CLAIM, [&job.job_id])? == 1 {
             claimed.push(job);
         }
     }
@@ -4238,7 +4238,7 @@ pub(crate) fn claim_llm_submission_jobs(
 pub(crate) fn next_llm_submission_delay_seconds(
     connection: &Connection,
 ) -> rusqlite::Result<Option<u64>> {
-    connection.query_row(queries::ai_jobs::NEXT_AVAILABLE_DELAY_SECONDS, [], |row| {
+    connection.query_row(queries::ai::jobs::NEXT_AVAILABLE_DELAY_SECONDS, [], |row| {
         row.get(0)
     })
 }
@@ -4247,7 +4247,7 @@ pub(crate) fn load_llm_prepared_inputs(
     connection: &Connection,
     job_id: &str,
 ) -> rusqlite::Result<Vec<LlmPreparedInput>> {
-    let mut statement = connection.prepare(queries::ai_jobs::SELECT_INPUTS)?;
+    let mut statement = connection.prepare(queries::ai::jobs::SELECT_INPUTS)?;
     let mut rows = statement.query([job_id])?;
     let mut inputs = Vec::new();
     let mut mapped_bytes = 0usize;
@@ -4293,7 +4293,7 @@ pub(crate) fn load_submitted_llm_page(
     after_id: &str,
 ) -> rusqlite::Result<Vec<LlmSubmissionJob>> {
     connection
-        .prepare(queries::ai_jobs::SELECT_SUBMITTED_PAGE)?
+        .prepare(queries::ai::jobs::SELECT_SUBMITTED_PAGE)?
         .query_map([after_id], |row| {
             Ok(LlmSubmissionJob {
                 job_id: row.get(0)?,
@@ -4312,7 +4312,7 @@ pub(crate) fn finish_llm_submission(
     match request {
         FinishLlmSubmission::RequeueMissing { job_id, attempt } => {
             let changed = connection.execute(
-                queries::ai_jobs::REQUEUE_MISSING_SUBMITTED,
+                queries::ai::jobs::REQUEUE_MISSING_SUBMITTED,
                 params![job_id, attempt],
             )?;
             if changed > 0 {
@@ -4324,25 +4324,25 @@ pub(crate) fn finish_llm_submission(
             }
         }
         FinishLlmSubmission::Submitted { job_id, attempt } => {
-            connection.execute(queries::ai_jobs::MARK_SUBMITTED, params![job_id, attempt])?;
+            connection.execute(queries::ai::jobs::MARK_SUBMITTED, params![job_id, attempt])?;
         }
         FinishLlmSubmission::Deferred {
             job_id,
             retry_after_seconds,
         } => {
             connection.execute(
-                queries::ai_jobs::REQUEUE_DEFERRED,
+                queries::ai::jobs::REQUEUE_DEFERRED,
                 params![retry_after_seconds, job_id],
             )?;
         }
         FinishLlmSubmission::Retry { job_id, error } => {
-            connection.execute(queries::ai_jobs::RETRY_OR_FAIL, params![error, job_id])?;
+            connection.execute(queries::ai::jobs::RETRY_OR_FAIL, params![error, job_id])?;
         }
         FinishLlmSubmission::Failed { job_id, error } => {
-            connection.execute(queries::ai_jobs::MARK_FAILED, params![error, job_id])?;
+            connection.execute(queries::ai::jobs::MARK_FAILED, params![error, job_id])?;
         }
         FinishLlmSubmission::RequeueAmbiguous { job_id } => {
-            connection.execute(queries::ai_jobs::REQUEUE_AMBIGUOUS, [job_id])?;
+            connection.execute(queries::ai::jobs::REQUEUE_AMBIGUOUS, [job_id])?;
         }
     }
     Ok(())
@@ -4353,7 +4353,7 @@ pub(crate) fn load_llm_cancellation_batch(
     limit: u16,
 ) -> rusqlite::Result<Option<LlmCancellationBatch>> {
     let Some((scope, task)) = connection
-        .query_row(queries::ai_jobs::SELECT_CANCELLATION_SCOPE, [], |row| {
+        .query_row(queries::ai::jobs::SELECT_CANCELLATION_SCOPE, [], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .optional()?
@@ -4362,12 +4362,12 @@ pub(crate) fn load_llm_cancellation_batch(
     };
     let job_ids = if scope == "all" {
         connection
-            .prepare(queries::ai_jobs::SELECT_ALL_CANCELLATIONS)?
+            .prepare(queries::ai::jobs::SELECT_ALL_CANCELLATIONS)?
             .query_map([i64::from(limit)], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         connection
-            .prepare(queries::ai_jobs::SELECT_CANCELLATIONS_FOR_TASK)?
+            .prepare(queries::ai::jobs::SELECT_CANCELLATIONS_FOR_TASK)?
             .query_map(params![task, i64::from(limit)], |row| {
                 row.get::<_, String>(0)
             })?
@@ -4400,25 +4400,25 @@ pub(crate) fn acknowledge_llm_cancellation(
 ) -> rusqlite::Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for job_id in request.job_ids {
-        transaction.execute(queries::ai_jobs::DELETE_CANCELLATION, [job_id])?;
+        transaction.execute(queries::ai::jobs::DELETE_CANCELLATION, [job_id])?;
     }
     let remaining: i64 = if request.scope == "all" {
-        transaction.query_row(queries::ai_jobs::COUNT_ALL_CANCELLATIONS, [], |row| {
+        transaction.query_row(queries::ai::jobs::COUNT_ALL_CANCELLATIONS, [], |row| {
             row.get(0)
         })?
     } else {
         transaction.query_row(
-            queries::ai_jobs::COUNT_CANCELLATIONS_FOR_TASK,
+            queries::ai::jobs::COUNT_CANCELLATIONS_FOR_TASK,
             [&request.task],
             |row| row.get(0),
         )?
     };
     if remaining == 0 {
         if request.scope == "all" {
-            transaction.execute(queries::ai_jobs::DELETE_ALL_CANCELLATION_SCOPES, [])?;
+            transaction.execute(queries::ai::jobs::DELETE_ALL_CANCELLATION_SCOPES, [])?;
         } else {
             transaction.execute(
-                queries::ai_jobs::DELETE_CANCELLATION_SCOPE_FOR_TASK,
+                queries::ai::jobs::DELETE_CANCELLATION_SCOPE_FOR_TASK,
                 [&request.task],
             )?;
         }

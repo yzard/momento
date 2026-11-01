@@ -24,7 +24,7 @@ internal suspend fun cancelBackupAsset(
 ): BackupProgress {
     val uploadId = asset.uploadId
     if (uploadId == null) {
-        assets.updateTransfer(asset.uri, BackupState.CANCELLED, 0, null, null, null, asset.protocolVersion, asset.contentHash)
+        assets.updateTransfer(asset.uri, BackupState.CANCELLED, 0, null, null, cancellationReason(asset.errorMessage, expired = false), asset.protocolVersion, asset.contentHash)
         return BackupProgress.COMPLETED
     }
     return try {
@@ -66,6 +66,8 @@ private suspend fun recordCancellationStatus(
         !completedHashMatches -> "Server completion hash does not match the original snapshot"
         response.error != null -> response.error
         state == BackupState.TERMINAL_FAILED -> "Server upload failed"
+        state == BackupState.CANCELLED -> cancellationReason(asset.errorMessage, response.status == "expired")
+        state == BackupState.CANCELLING || state == BackupState.SERVER_PROCESSING -> asset.errorMessage
         else -> null
     }
     assets.updateTransfer(asset.uri, state, response.uploadedSize, response.uploadId, response.mediaId, error, asset.protocolVersion, asset.contentHash)
@@ -74,6 +76,10 @@ private suspend fun recordCancellationStatus(
     }
     return BackupProgress.COMPLETED
 }
+
+private fun cancellationReason(previousError: String?, expired: Boolean): String =
+    previousError?.takeIf { it.isNotBlank() }
+        ?: if (expired) "Upload expired before backup completed" else "Backup cancelled before completion"
 
 internal fun cancellationState(status: String): BackupState = when (status) {
     "cancelled", "expired" -> BackupState.CANCELLED

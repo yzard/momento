@@ -139,10 +139,10 @@ pub(crate) fn start_feature_on_connection(
         | AiFeature::DocumentDetection => {
             let task = feature.name();
             let queued = transaction.execute(
-                &queries::ai_jobs::insert_eligible(task).ok_or(rusqlite::Error::InvalidQuery)?,
+                &queries::ai::jobs::insert_eligible(task).ok_or(rusqlite::Error::InvalidQuery)?,
                 rusqlite::params![task, Option::<i64>::None],
             )?;
-            transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+            transaction.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
             queued
         }
         AiFeature::FaceDetection => {
@@ -159,11 +159,11 @@ pub(crate) fn start_feature_on_connection(
             transaction.execute(queries::faces::INSERT_GROUPING_RUN, [])?;
             let run_id = transaction.last_insert_rowid();
             let queued = transaction.execute(
-                &queries::ai_jobs::insert_eligible(FACE_DETECTION_MODEL_TYPE)
+                &queries::ai::jobs::insert_eligible(FACE_DETECTION_MODEL_TYPE)
                     .ok_or(rusqlite::Error::InvalidQuery)?,
                 rusqlite::params![FACE_DETECTION_MODEL_TYPE, run_id],
             )?;
-            transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+            transaction.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
             queued
         }
         AiFeature::Deduplicate => {
@@ -198,11 +198,11 @@ pub(crate) fn start_feature_on_connection(
                 transaction.execute(queries::deduplicate::MARK_ALL_DIRTY, [])?;
             }
             let queued = transaction.execute(
-                &queries::ai_jobs::insert_eligible("image_clustering")
+                &queries::ai::jobs::insert_eligible("image_clustering")
                     .ok_or(rusqlite::Error::InvalidQuery)?,
                 rusqlite::params!["image_clustering", run_id],
             )?;
-            transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+            transaction.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
             queued
         }
     };
@@ -217,7 +217,7 @@ pub(crate) fn cancel_feature_on_connection(
     let transaction = connection.unchecked_transaction()?;
     let task = feature.inference_task();
     let affected_jobs =
-        transaction.query_row(queries::ai_jobs::COUNT_ACTIVE_FOR_TASK, [task], |row| {
+        transaction.query_row(queries::ai::jobs::COUNT_ACTIVE_FOR_TASK, [task], |row| {
             row.get::<_, i64>(0)
         })?;
     let cancellation_requested = match feature {
@@ -230,10 +230,11 @@ pub(crate) fn cancel_feature_on_connection(
                 )
                 .optional()?;
             if let Some(run) = run.filter(|run| run.status == "running") {
-                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
+                transaction
+                    .execute(queries::ai::jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::CANCEL_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
                 transaction.execute(queries::deduplicate::REQUEST_CANCEL, [run.id])? > 0
             } else {
                 false
@@ -241,20 +242,22 @@ pub(crate) fn cancel_feature_on_connection(
         }
         AiFeature::FaceDetection => {
             if affected_jobs > 0 {
-                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
+                transaction
+                    .execute(queries::ai::jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::CANCEL_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
             }
             let cancelled_runs = transaction.execute(queries::faces::REQUEST_CANCEL_RUNS, [])? > 0;
             affected_jobs > 0 || cancelled_runs
         }
         _ => {
             if affected_jobs > 0 {
-                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::CANCEL_FOR_TASK, [task])?;
-                transaction.execute(queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
+                transaction
+                    .execute(queries::ai::jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::QUEUE_CANCELLATIONS_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::CANCEL_FOR_TASK, [task])?;
+                transaction.execute(queries::ai::jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK, [task])?;
                 true
             } else {
                 false
@@ -282,7 +285,7 @@ pub(crate) fn cancel_all_on_connection(
     let mut counts = Vec::with_capacity(AiFeature::ALL.len());
     for feature in AiFeature::ALL {
         let count = transaction.query_row(
-            queries::ai_jobs::COUNT_ACTIVE_FOR_TASK,
+            queries::ai::jobs::COUNT_ACTIVE_FOR_TASK,
             [feature.inference_task()],
             |row| row.get::<_, i64>(0),
         )?;
@@ -290,10 +293,10 @@ pub(crate) fn cancel_all_on_connection(
     }
     let has_active_jobs = counts.iter().any(|(_, count)| *count > 0);
     if has_active_jobs {
-        transaction.execute(queries::ai_jobs::QUEUE_ALL_CANCELLATION_SCOPE, [])?;
-        transaction.execute(queries::ai_jobs::QUEUE_ALL_CANCELLATIONS, [])?;
-        transaction.execute(queries::ai_jobs::CANCEL_ALL, [])?;
-        transaction.execute(queries::ai_jobs::CANCEL_ALL_RESULT_RECEIPTS, [])?;
+        transaction.execute(queries::ai::jobs::QUEUE_ALL_CANCELLATION_SCOPE, [])?;
+        transaction.execute(queries::ai::jobs::QUEUE_ALL_CANCELLATIONS, [])?;
+        transaction.execute(queries::ai::jobs::CANCEL_ALL, [])?;
+        transaction.execute(queries::ai::jobs::CANCEL_ALL_RESULT_RECEIPTS, [])?;
     }
     let face_run_cancelled = transaction.execute(queries::faces::REQUEST_CANCEL_RUNS, [])? > 0;
     let deduplicate_run = transaction
@@ -307,19 +310,19 @@ pub(crate) fn cancel_all_on_connection(
     let deduplicate_run_cancelled = if let Some(run) = deduplicate_run {
         if !has_active_jobs {
             transaction.execute(
-                queries::ai_jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
+                queries::ai::jobs::QUEUE_CANCELLATION_SCOPE_FOR_TASK,
                 [AiFeature::Deduplicate.inference_task()],
             )?;
             transaction.execute(
-                queries::ai_jobs::QUEUE_CANCELLATIONS_FOR_TASK,
+                queries::ai::jobs::QUEUE_CANCELLATIONS_FOR_TASK,
                 [AiFeature::Deduplicate.inference_task()],
             )?;
             transaction.execute(
-                queries::ai_jobs::CANCEL_FOR_TASK,
+                queries::ai::jobs::CANCEL_FOR_TASK,
                 [AiFeature::Deduplicate.inference_task()],
             )?;
             transaction.execute(
-                queries::ai_jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK,
+                queries::ai::jobs::CANCEL_RESULT_RECEIPTS_FOR_TASK,
                 [AiFeature::Deduplicate.inference_task()],
             )?;
         }
@@ -357,7 +360,7 @@ pub(crate) fn clean_feature_on_connection(
     let transaction = connection.unchecked_transaction()?;
     let task = feature.inference_task();
     let active_jobs =
-        transaction.query_row(queries::ai_jobs::COUNT_ACTIVE_FOR_TASK, [task], |row| {
+        transaction.query_row(queries::ai::jobs::COUNT_ACTIVE_FOR_TASK, [task], |row| {
             row.get::<_, i64>(0)
         })?;
     if active_jobs > 0 {
@@ -365,7 +368,7 @@ pub(crate) fn clean_feature_on_connection(
         return Ok(AiFeatureCleanOutcome::ActiveWork);
     }
     let pending_cancellation = transaction.query_row(
-        queries::ai_jobs::COUNT_PENDING_CANCELLATION_SCOPE_FOR_TASK,
+        queries::ai::jobs::COUNT_PENDING_CANCELLATION_SCOPE_FOR_TASK,
         [task],
         |row| row.get::<_, i64>(0),
     )?;
@@ -374,7 +377,7 @@ pub(crate) fn clean_feature_on_connection(
         return Ok(AiFeatureCleanOutcome::PendingCancellation);
     }
     let pending_result_cleanup = transaction.query_row(
-        queries::ai_jobs::COUNT_PENDING_RESULT_CLEANUP_FOR_TASK,
+        queries::ai::jobs::COUNT_PENDING_RESULT_CLEANUP_FOR_TASK,
         [task],
         |row| row.get::<_, i64>(0),
     )?;
@@ -383,36 +386,36 @@ pub(crate) fn clean_feature_on_connection(
         return Ok(AiFeatureCleanOutcome::PendingResultCleanup);
     }
     let affected_jobs =
-        transaction.query_row(queries::ai_jobs::COUNT_JOBS_FOR_TASK, [task], |row| {
+        transaction.query_row(queries::ai::jobs::COUNT_JOBS_FOR_TASK, [task], |row| {
             row.get::<_, i64>(0)
         })?;
 
     let cleanup_group_created = match feature {
         AiFeature::Ocr | AiFeature::ImageTagging => {
-            transaction.execute(queries::ai_jobs::DELETE_TEXT_FOR_TASK, [task])?;
-            transaction.execute(queries::ai_jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
-            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            transaction.execute(queries::ai::jobs::DELETE_TEXT_FOR_TASK, [task])?;
+            transaction.execute(queries::ai::jobs::DELETE_TEXT_INPUTS_FOR_TASK, [task])?;
+            transaction.execute(queries::ai::jobs::DELETE_JOBS_FOR_TASK, [task])?;
             false
         }
         AiFeature::ImageAesthetics => {
-            transaction.execute(queries::ai_jobs::DELETE_AESTHETICS, [])?;
-            transaction.execute(queries::ai_jobs::DELETE_AESTHETIC_INPUTS, [])?;
-            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            transaction.execute(queries::ai::jobs::DELETE_AESTHETICS, [])?;
+            transaction.execute(queries::ai::jobs::DELETE_AESTHETIC_INPUTS, [])?;
+            transaction.execute(queries::ai::jobs::DELETE_JOBS_FOR_TASK, [task])?;
             false
         }
         AiFeature::ScreenshotDetection => {
-            transaction.execute(queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATIONS, [])?;
+            transaction.execute(queries::ai::jobs::DELETE_SCREENSHOT_CLASSIFICATIONS, [])?;
             transaction.execute(
-                queries::ai_jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
+                queries::ai::jobs::DELETE_SCREENSHOT_CLASSIFICATION_INPUTS,
                 [],
             )?;
-            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            transaction.execute(queries::ai::jobs::DELETE_JOBS_FOR_TASK, [task])?;
             false
         }
         AiFeature::DocumentDetection => {
-            transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
-            transaction.execute(queries::ai_jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS, [])?;
-            transaction.execute(queries::ai_jobs::DELETE_JOBS_FOR_TASK, [task])?;
+            transaction.execute(queries::ai::jobs::DELETE_DOCUMENT_CLASSIFICATIONS, [])?;
+            transaction.execute(queries::ai::jobs::DELETE_DOCUMENT_CLASSIFICATION_INPUTS, [])?;
+            transaction.execute(queries::ai::jobs::DELETE_JOBS_FOR_TASK, [task])?;
             false
         }
         AiFeature::FaceDetection => {
@@ -526,7 +529,7 @@ pub(crate) fn status_on_connection(
     let transaction = connection.unchecked_transaction()?;
     let mut counts_by_task = HashMap::<String, AiJobCounts>::new();
     for row in transaction
-        .prepare(queries::ai_jobs::SELECT_LATEST_STATUS_COUNTS)?
+        .prepare(queries::ai::jobs::SELECT_LATEST_STATUS_COUNTS)?
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -540,7 +543,7 @@ pub(crate) fn status_on_connection(
     }
     let mut errors_by_task = HashMap::<String, Vec<String>>::new();
     for row in transaction
-        .prepare(queries::ai_jobs::SELECT_LATEST_FAILURES)?
+        .prepare(queries::ai::jobs::SELECT_LATEST_FAILURES)?
         .query_map([], |row| {
             let task: String = row.get(0)?;
             let error: String = row.get(1)?;

@@ -840,11 +840,11 @@ pub fn start(connection: &Connection, enabled: bool) -> AppResult<usize> {
     transaction.execute(queries::faces::INSERT_GROUPING_RUN, [])?;
     let run_id = transaction.last_insert_rowid();
     let queued_jobs = transaction.execute(
-        &queries::ai_jobs::insert_eligible(FACE_DETECTION_MODEL_TYPE)
+        &queries::ai::jobs::insert_eligible(FACE_DETECTION_MODEL_TYPE)
             .ok_or(rusqlite::Error::InvalidQuery)?,
         rusqlite::params![FACE_DETECTION_MODEL_TYPE, run_id],
     )?;
-    transaction.execute(queries::ai_jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
+    transaction.execute(queries::ai::jobs::SNAPSHOT_QUEUED_INPUTS, [])?;
     transaction.commit()?;
     Ok(queued_jobs)
 }

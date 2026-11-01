@@ -1,9 +1,11 @@
 ARG CUDA_IMAGE=nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.22
 
-ARG VLLM_VERSION=0.27.1
-ARG VLLM_CUDA_VERSION=129
+ARG OCR_TRANSFORMERS_VERSION=5.12.1
+ARG OCR_CUDA_VERSION=130
 ARG OCR_PYTHON_VERSION=3.12.11
+ARG OCR_SGLANG_WHEEL=sglang-0.5.20.dev10+g8d62f5fb9c-py3-none-any.whl
+ARG OCR_SGLANG_SHA256=a3f3e2c94e09de90b61b43d01475fd5d1aa818d16eec05204b8079c09c2ba70d
 ARG TORCH_VERSION=2.7.0
 ARG TORCHVISION_VERSION=0.22.0
 ARG TRANSFORMERS_RAM_VERSION=4.30.2
@@ -24,7 +26,7 @@ ARG PADDLEX_VERSION=3.7.2
 
 ARG CLIP_COMMIT=d05afc436d78f1c48dc0dbf8e5980a9d471f35f6
 ARG RAM_COMMIT=7cb804a8609e9f4b1a50b7f31436d2df40bb9481
-ARG UNLIMITED_OCR_REVISION=07dea832e22aefee32ad281d4b80551282e1c168
+ARG UNLIMITED_OCR_REVISION=9cf077c4b206e0e2a31879df937b0b0bcba3661c
 ARG DINOV2_BASE_REVISION=f9e44c814b77203eaa57a6bdbbd535f21ede1415
 ARG RAM_CHECKPOINT_REVISION=84d4aee3a0265c4e0df1f714f0572011d1bf2ec3
 ARG BERT_TOKENIZER_REVISION=86b5e0934494bd15c9632b12f734a8a67f723594
@@ -104,23 +106,33 @@ COPY --from=uv /uv /usr/local/bin/uv
 
 FROM build-tools AS ocr-builder
 
-ARG VLLM_VERSION
-ARG VLLM_CUDA_VERSION
+ARG OCR_TRANSFORMERS_VERSION
+ARG OCR_CUDA_VERSION
 ARG OCR_PYTHON_VERSION
+ARG OCR_SGLANG_WHEEL
+ARG OCR_SGLANG_SHA256
+ARG UNLIMITED_OCR_REVISION
 ARG PILLOW_VERSION
 ARG PILLOW_HEIF_VERSION
 
 RUN uv python install "${OCR_PYTHON_VERSION}" \
     && uv venv --python "${OCR_PYTHON_VERSION}" /opt/venvs/ocr
 
-RUN uv pip install --python /opt/venvs/ocr/bin/python \
-    --extra-index-url "https://download.pytorch.org/whl/cu${VLLM_CUDA_VERSION}" \
-    --index-strategy unsafe-best-match \
-    "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${VLLM_CUDA_VERSION}-cp38-abi3-manylinux_2_28_x86_64.whl" \
-    "Pillow==${PILLOW_VERSION}" \
-    "pillow-heif==${PILLOW_HEIF_VERSION}" \
+COPY src/backend_llm/ocr/requirements.txt /build/ocr-requirements.txt
+RUN mkdir -p /build \
+    && curl --fail --location --retry 3 \
+       "https://huggingface.co/baidu/Unlimited-OCR-2/resolve/${UNLIMITED_OCR_REVISION}/wheel/${OCR_SGLANG_WHEEL}" \
+       --output "/build/${OCR_SGLANG_WHEEL}" \
+    && echo "${OCR_SGLANG_SHA256}  /build/${OCR_SGLANG_WHEEL}" | sha256sum --check - \
+    && uv pip install --python /opt/venvs/ocr/bin/python \
+       --extra-index-url "https://download.pytorch.org/whl/cu${OCR_CUDA_VERSION}" \
+       --index-strategy unsafe-best-match \
+       -r /build/ocr-requirements.txt "/build/${OCR_SGLANG_WHEEL}" \
+    && ln -s lib /opt/venvs/ocr/lib/python3.12/site-packages/nvidia/cu13/lib64 \
+    && ln -s libcudart.so.13 /opt/venvs/ocr/lib/python3.12/site-packages/nvidia/cu13/lib/libcudart.so \
     && uv pip check --python /opt/venvs/ocr/bin/python \
-    && /opt/venvs/ocr/bin/python -c "import pillow_heif, sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert vllm.__version__ == '${VLLM_VERSION}'; assert pillow_heif.__version__ == '${PILLOW_HEIF_VERSION}'"
+    && /opt/venvs/ocr/bin/python -c "import pillow_heif, sys, torch, transformers, triton; from importlib.metadata import version; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '13.0'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert transformers.__version__ == '${OCR_TRANSFORMERS_VERSION}'; assert version('sglang') == '0.5.20.dev10+g8d62f5fb9c'; assert pillow_heif.__version__ == '${PILLOW_HEIF_VERSION}'" \
+    && rm -f "/build/${OCR_SGLANG_WHEEL}"
 
 # The complete OCR environment is larger than GHCR's layer limit. The final image copies
 # its CUDA Python packages and the remainder from separate build-stage snapshots.
@@ -263,8 +275,8 @@ FROM ocr-builder AS unlimited-ocr-model
 ARG UNLIMITED_OCR_REVISION
 
 RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 /opt/venvs/ocr/bin/python -c \
-    "from huggingface_hub import snapshot_download; snapshot_download('baidu/Unlimited-OCR', revision='${UNLIMITED_OCR_REVISION}', local_dir='/opt/models/unlimited-ocr')" \
-    && rm -rf /opt/models/unlimited-ocr/.cache
+    "from huggingface_hub import snapshot_download; snapshot_download('baidu/Unlimited-OCR-2', revision='${UNLIMITED_OCR_REVISION}', local_dir='/opt/models/unlimited-ocr-2', ignore_patterns=['assets/*', '*.pdf', 'wheel/*'])" \
+    && rm -rf /opt/models/unlimited-ocr-2/.cache
 
 FROM paddleocr-verifier AS paddleocr-model
 
@@ -346,6 +358,10 @@ RUN mkdir -p /opt/models/clip /opt/models/aesthetic \
 
 FROM runtime-base
 
+# SGLang compiles architecture-specific CUDA and Triton kernels on first use.
+RUN apt-get update && apt-get install -y --no-install-recommends g++ libnuma1 \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG SOURCE_REPOSITORY=https://github.com/yzard/momento
 ARG PADDLEPADDLE_VERSION
 ARG PADDLEOCR_VERSION
@@ -372,7 +388,7 @@ COPY --from=python-builder /usr/local/lib/python3.10/dist-packages /usr/local/li
 COPY --from=python-builder /opt/venvs/ram /opt/venvs/ram
 COPY --from=python-builder /opt/venvs/dinov2 /opt/venvs/dinov2
 COPY --from=python-builder /opt/venvs/insightface /opt/venvs/insightface
-COPY --from=unlimited-ocr-model /opt/models/unlimited-ocr /opt/models/unlimited-ocr
+COPY --from=unlimited-ocr-model /opt/models/unlimited-ocr-2 /opt/models/unlimited-ocr-2
 COPY --from=paddleocr-model /opt/models/paddleocr /opt/models/paddleocr
 COPY --from=dinov2-model /opt/models/dinov2-base /opt/models/dinov2-base
 COPY --from=bert-tokenizer-model /opt/models/huggingface /opt/models/huggingface
@@ -383,12 +399,12 @@ COPY --from=image-aesthetics-model /opt/models/clip /opt/models/clip
 COPY --from=image-aesthetics-model /opt/models/aesthetic /opt/models/aesthetic
 
 RUN set -eux; \
-    ! command -v cc; \
+    command -v g++; \
     command -v dcraw_emu; \
     test -n "$(find /opt/triton-cache -name 'cuda_utils*.so' -print -quit)"; \
     mkdir -p /data/llm/tmp/verification-cache; \
     export XDG_CACHE_HOME=/data/llm/tmp/verification-cache; \
-    /opt/venvs/ocr/bin/python -c "import sys, torch, vllm; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '12.9'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr') / 'config.json').is_file()"; \
+    /opt/venvs/ocr/bin/python -c "import sys, torch, transformers; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert torch.version.cuda == '13.0'; assert Path(sys._base_executable).is_relative_to('/opt/python'); assert (Path('/opt/models/unlimited-ocr-2') / 'config.json').is_file()"; \
     /opt/venvs/ram/bin/python -c "import ram, torch, transformers; from pathlib import Path; from transformers import BertTokenizer; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_RAM_VERSION}'; assert BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True).vocab_size == 30522; assert (Path('/opt/models/ram') / 'ram_plus_swin_large_14m.pth').is_file()"; \
     /opt/venvs/dinov2/bin/python -c "import clip, torch, transformers; from pathlib import Path; from transformers import AutoConfig; assert torch.__file__.startswith('/usr/local/lib/python3.10/dist-packages/'); assert transformers.__version__ == '${TRANSFORMERS_DINOV2_VERSION}'; assert AutoConfig.from_pretrained('/opt/models/dinov2-base', local_files_only=True).hidden_size == 768; assert 'ViT-B/32' in clip.available_models(); state = torch.load('/opt/models/aesthetic/sa_0_4_vit_b_32_linear.pth', map_location='cpu', weights_only=True); assert state['weight'].shape == (1, 512); assert state['bias'].shape == (1,); assert Path('/opt/models/clip/ViT-B-32.pt').is_file()"; \
     /opt/venvs/insightface/bin/python -c "import insightface, onnxruntime; from pathlib import Path; assert any((Path('/opt/models/insightface/models/buffalo_l')).glob('*.onnx')); assert Path('/opt/models/face-parsing/resnet18.onnx').is_file()"; \

@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # Shared lifecycle for repository build entrypoints. Source from Bash with pipefail.
 
+momento_build_state_root() {
+    local root=$1
+    printf '%s/momento-build/%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}" "$(printf '%s' "$root" | sha256sum | cut -d ' ' -f1)"
+}
+
 momento_build_lock() {
     local root=$1
-    local lock_file="$root/build/.locks/build.lock"
-    mkdir -p "$(dirname "$lock_file")"
+    MOMENTO_BUILD_STATE=$(realpath -m "$(momento_build_state_root "$root")")
+    case "$MOMENTO_BUILD_STATE/" in
+        "$root/build/"*|"$root/dist/"*) printf 'Persistent build state must be outside build/ and dist/\n' >&2; return 1 ;;
+    esac
+    local lock_file="$MOMENTO_BUILD_STATE/build.lock"
+    mkdir -p "$MOMENTO_BUILD_STATE"
+    chmod 700 "$MOMENTO_BUILD_STATE"
+    MOMENTO_BUILD_OUTERMOST=true
     if [[ ${MOMENTO_BUILD_LOCK_FD:-} =~ ^[0-9]+$ ]] &&
         [[ $(readlink "/proc/self/fd/$MOMENTO_BUILD_LOCK_FD" 2>/dev/null) == "$lock_file" ]]; then
+        MOMENTO_BUILD_OUTERMOST=false
         return
     fi
     exec {MOMENTO_BUILD_LOCK_FD}>"$lock_file"
@@ -16,7 +28,9 @@ momento_build_lock() {
 
 momento_build_begin() {
     local root=$1 component=$2
+    [[ ! -L "$root/build" ]] || { printf 'Build directory must not be a symlink\n' >&2; return 1; }
     momento_build_lock "$root"
+    MOMENTO_BUILD_ROOT=$root
     mkdir -p "$root/build/$component"
     MOMENTO_BUILD_WORK=$(mktemp -d "$root/build/$component/run.XXXXXX")
     mkdir -p "$MOMENTO_BUILD_WORK/tmp"
@@ -30,6 +44,17 @@ momento_build_begin() {
     trap 'momento_build_exit "$?"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # Preserve existing reports and signing/receipt state before retiring the old layout.
+    local name kind previous
+    for name in android frontend docker; do
+        for kind in state reports; do
+            previous="$root/build/$name/$kind"
+            if [[ -d $previous && ! -L $previous ]]; then
+                mkdir -p "$MOMENTO_BUILD_STATE/$name/$kind"
+                cp -an "$previous/." "$MOMENTO_BUILD_STATE/$name/$kind/"
+            fi
+        done
+    done
 }
 
 momento_build_builder() {
@@ -67,27 +92,69 @@ momento_build_oci_valid() {
         python3 "$root/docker/lib/validate_oci.py" "$directory" >/dev/null 2>&1
 }
 
+momento_build_runtime_image() {
+    printf 'momento-build-%s:%s\n' "$1" "$2"
+}
+
+momento_build_import_oci() {
+    local root=$1 name=$2 fingerprint=$3 directory=$4 image
+    image=$(momento_build_runtime_image "$name" "$fingerprint")
+    [[ -n $MOMENTO_BUILD_BUILDER ]] || momento_build_builder
+    printf 'FROM retained-artifact\n' > "$MOMENTO_BUILD_WORK/import.Dockerfile"
+    docker buildx build --builder "$MOMENTO_BUILD_BUILDER" --load --provenance=false \
+        --build-context "retained-artifact=oci-layout://$directory" \
+        --label "io.momento.build.inputs=$fingerprint" --tag "$image" \
+        -f "$MOMENTO_BUILD_WORK/import.Dockerfile" "$root" \
+        2>&1 | tee "$MOMENTO_BUILD_WORK/import-$name.log"
+}
+
+# Retain reusable artifacts in Docker. OCI directories exist only during this invocation.
 momento_build_oci() {
     local root=$1 name=$2 dockerfile=$3 fingerprint=$4
-    local destination="$root/dist/docker/$name/$fingerprint"
-    if momento_build_oci_valid "$root" "$destination" "$fingerprint"; then
-        printf 'Reusing %s artifact %s\n' "$name" "$fingerprint"
-        return
+    local image destination legacy
+    image=$(momento_build_runtime_image "$name" "$fingerprint")
+    destination="$MOMENTO_BUILD_WORK/oci/$name/$fingerprint"
+    legacy="$root/dist/docker/$name/$fingerprint"
+    if [[ $(docker image inspect --format '{{index .Config.Labels "io.momento.build.inputs"}}' "$image" 2>/dev/null || true) != "$fingerprint" ]]; then
+        if [[ -e $legacy ]]; then
+            momento_build_oci_valid "$root" "$legacy" "$fingerprint" || { printf 'Invalid legacy Docker export: %s\n' "$legacy" >&2; return 1; }
+            momento_build_import_oci "$root" "$name" "$fingerprint" "$legacy"
+        else
+            [[ -n $MOMENTO_BUILD_BUILDER ]] || momento_build_builder
+            local platform_arguments=()
+            if [[ -n ${MOMENTO_BUILD_PLATFORM:-} ]]; then platform_arguments+=(--platform "$MOMENTO_BUILD_PLATFORM"); fi
+            docker buildx build --builder "$MOMENTO_BUILD_BUILDER" --load --provenance=false "${platform_arguments[@]}" \
+                --tag "$image" --label "io.momento.build.inputs=$fingerprint" \
+                --build-arg "SOURCE_REPOSITORY=${SOURCE_REPOSITORY:-https://github.com/yzard/momento}" \
+                -f "$root/docker/$dockerfile" "$root" 2>&1 | tee "$MOMENTO_BUILD_WORK/$name.log"
+        fi
+    else
+        printf 'Reusing %s image %s\n' "$name" "$image"
     fi
-    [[ -n $MOMENTO_BUILD_BUILDER ]] || momento_build_builder
-    local staging="$MOMENTO_BUILD_WORK/$name"
-    local platform_arguments=()
-    if [[ -n ${MOMENTO_BUILD_PLATFORM:-} ]]; then platform_arguments+=(--platform "$MOMENTO_BUILD_PLATFORM"); fi
-    docker buildx build --builder "$MOMENTO_BUILD_BUILDER" --provenance=false "${platform_arguments[@]}" \
-        --output "type=oci,tar=false,dest=$staging" \
-        --build-arg "SOURCE_REPOSITORY=${SOURCE_REPOSITORY:-https://github.com/yzard/momento}" \
-        -f "$root/docker/$dockerfile" "$root" 2>&1 | tee "$MOMENTO_BUILD_WORK/$name.log"
-    python3 "$root/docker/lib/validate_oci.py" "$staging" || return 1
-    mkdir -p "$(dirname "$destination")"
-    # An incomplete export for this exact fingerprint is disposable, never another version.
-    rm -rf -- "$destination"
-    mv "$staging" "$destination"
-    printf '%s\n' "$fingerprint" > "$destination/inputs"
+    docker image save --output "$MOMENTO_BUILD_WORK/$name.tar" "$image"
+    python3 "$root/docker/lib/docker_archive_oci.py" "$MOMENTO_BUILD_WORK/$name.tar" "$destination"
+    python3 "$root/docker/lib/validate_oci.py" "$destination"
+    rm -- "$MOMENTO_BUILD_WORK/$name.tar"
+}
+
+momento_build_migrate_oci() {
+    local root=$1 directory name fingerprint image
+    [[ ! -L "$root/dist/docker" ]] || { printf 'Docker export directory must not be a symlink\n' >&2; return 1; }
+    [[ -d "$root/dist/docker" ]] || return 0
+    for name in api-runtime frontend llm-runtime; do
+        for directory in "$root/dist/docker/$name/"*; do
+            [[ -d $directory ]] || continue
+            fingerprint=$(basename "$directory")
+            momento_build_oci_valid "$root" "$directory" "$fingerprint" || { printf 'Invalid legacy Docker export: %s\n' "$directory" >&2; return 1; }
+            image=$(momento_build_runtime_image "$name" "$fingerprint")
+            if [[ $(docker image inspect --format '{{index .Config.Labels "io.momento.build.inputs"}}' "$image" 2>/dev/null || true) != "$fingerprint" ]]; then
+                momento_build_import_oci "$root" "$name" "$fingerprint" "$directory"
+            fi
+        done
+    done
+    # Delete only validated legacy exports after their Docker images are available.
+    for name in api-runtime frontend llm-runtime; do rm -rf -- "$root/dist/docker/$name"; done
+    rmdir "$root/dist/docker" 2>/dev/null || { printf 'Docker export directory contains unrecognized files\n' >&2; return 1; }
 }
 
 momento_build_success() {
@@ -118,7 +185,11 @@ momento_build_exit() {
             done
         fi
         if [[ $status == 0 ]]; then
-            rm -rf -- "$MOMENTO_BUILD_WORK" || status=1
+            if [[ $MOMENTO_BUILD_OUTERMOST == true ]]; then
+                [[ ! -L "$MOMENTO_BUILD_ROOT/build" ]] && rm -rf -- "$MOMENTO_BUILD_ROOT/build" || status=1
+            else
+                rm -rf -- "$MOMENTO_BUILD_WORK" || status=1
+            fi
         fi
     fi
     if [[ $status != 0 ]]; then

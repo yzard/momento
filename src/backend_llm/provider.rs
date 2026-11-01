@@ -1,7 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use momento_common::llm::{IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS, IMAGE_CLUSTERING_MODEL_VERSION};
 use reqwest::Client;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -13,13 +12,16 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::adapters::{normalize_unlimited_ocr_text, UNLIMITED_OCR_MODEL};
 use crate::config::{Config, ServerConfig, ServiceConfig};
 use crate::error::ServiceError;
+use crate::ocr::{normalize_unlimited_ocr_text, UNLIMITED_OCR_MODEL};
 
 const RUNTIME_HOST: &str = "127.0.0.1";
 const RUNTIME_INPUT_PLACEHOLDER: &str = "{input_root}";
 const RUNTIME_CACHE_PLACEHOLDER: &str = "{cache_dir}";
+const MODEL_MAX_TOKENS_PLACEHOLDER: &str = "{max_tokens}";
+const RUNTIME_STARTUP_TIMEOUT_PLACEHOLDER: &str = "{startup_timeout_seconds}";
+const RUNTIME_REQUEST_TIMEOUT_PLACEHOLDER: &str = "{request_timeout_seconds}";
 const MODEL_CONCURRENCY_PLACEHOLDER: &str = "{model_concurrency}";
 const PROCESSING_CONCURRENCY_PLACEHOLDER: &str = "{processing_concurrency}";
 const MODEL_BATCH_WAIT_PLACEHOLDER: &str = "{model_batch_wait_milliseconds}";
@@ -159,37 +161,35 @@ impl RuntimeCatalog {
                 service_type: ServiceType::Ocr,
                 executable: PathBuf::from("/opt/venvs/ocr/bin/python"),
                 arguments: vec![
-                    "/app/runtimes/ocr_server.py",
-                    "--model",
-                    "/opt/models/unlimited-ocr",
-                    "--served-model-name",
-                    UNLIMITED_OCR_MODEL,
-                    "--trust-remote-code",
-                    "--logits-processors",
-                    "vllm.model_executor.models.unlimited_ocr:NGramPerReqLogitsProcessor",
+                    "/app/runtimes/ocr/server.py",
+                    "--model-path",
+                    "/opt/models/unlimited-ocr-2",
+                    "--device",
+                    "cuda",
                     "--host",
                     RUNTIME_HOST,
                     "--port",
                     "8400",
-                    "--no-enable-prefix-caching",
-                    "--mm-processor-cache-gb",
-                    "0",
-                    "--max-num-batched-tokens",
-                    "8192",
-                    "--max-num-seqs",
+                    "--max-concurrent-jobs",
                     MODEL_CONCURRENCY_PLACEHOLDER,
-                    "--allowed-local-media-path",
+                    "--max-tokens",
+                    MODEL_MAX_TOKENS_PLACEHOLDER,
+                    "--startup-timeout",
+                    RUNTIME_STARTUP_TIMEOUT_PLACEHOLDER,
+                    "--request-timeout",
+                    RUNTIME_REQUEST_TIMEOUT_PLACEHOLDER,
+                    "--input-root",
                     RUNTIME_INPUT_PLACEHOLDER,
-                    "--gpu-memory-utilization",
-                    "0.65",
+                    "--cache-dir",
+                    RUNTIME_CACHE_PLACEHOLDER,
                 ]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-                environment: vec![("VLLM_USE_FLASHINFER_SAMPLER".to_string(), "0".to_string())],
-                base_url: "http://127.0.0.1:8400/v1".to_string(),
+                environment: vec![],
+                base_url: "http://127.0.0.1:8400".to_string(),
                 model: UNLIMITED_OCR_MODEL.to_string(),
-                model_version: "unlimited_ocr".to_string(),
+                model_version: momento_common::llm::OCR_MODEL_VERSION.to_string(),
                 embedding_dimensions: 0,
             },
             RuntimeSpec {
@@ -591,35 +591,24 @@ impl ServiceManager {
     }
 }
 
+fn runtime_input_descriptor(input: &InferenceInput) -> serde_json::Value {
+    let input_filename = input
+        .path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .expect("scheduler-owned runtime input filename");
+    json!({ "jobId": input.job_id, "sequence": input.sequence, "byteSize": input.byte_size,
+        "contentHash": input.content_hash, "mimeType": input.mime_type, "inputFilename": input_filename })
+}
+
 pub struct LocalProvider {
-    client: Client,
-    config: ServiceConfig,
-    runtime: RuntimeSpec,
-    child: Arc<Mutex<Child>>,
-    process_id: u32,
-}
-
-impl Drop for LocalProvider {
-    fn drop(&mut self) {
-        if let Ok(mut child) = self.child.try_lock() {
-            kill_runtime_process_group(&mut child, self.process_id);
-        }
-    }
+    runtime: ManagedRuntime,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiResponse {
-    choices: Vec<OpenAiChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChoice {
-    message: OpenAiMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiMessage {
-    content: String,
+#[serde(deny_unknown_fields)]
+struct OcrRuntimeResponse {
+    text: String,
 }
 
 impl LocalProvider {
@@ -628,169 +617,27 @@ impl LocalProvider {
         runtime: &RuntimeSpec,
         server: &ServerConfig,
     ) -> Result<Self, ServiceError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(config.request_timeout_seconds))
-            .build()
-            .map_err(|error| {
-                ServiceError::Internal(format!("failed to build HTTP client: {error}"))
-            })?;
-        let input_root = runtime_input_root(server)?;
-        let child = spawn_service_command(config, runtime, &input_root, &server.cache_dir())?;
-        let process_id = child.id().ok_or_else(|| {
-            ServiceError::Internal("OCR runtime has no process ID after startup".to_string())
-        })?;
-        let runtime = Self {
-            client,
-            config: config.clone(),
-            runtime: runtime.clone(),
-            child: Arc::new(Mutex::new(child)),
-            process_id,
-        };
-        if let Err(error) = runtime.wait_until_ready().await {
-            if let Err(shutdown_error) = runtime.shutdown().await {
-                tracing::error!(
-                    "Failed to stop OCR runtime after startup failure: {shutdown_error}"
-                );
-            }
-            return Err(error);
-        }
-        Ok(runtime)
+        Ok(Self {
+            runtime: ManagedRuntime::new(config, runtime, server, "Unlimited-OCR-2").await?,
+        })
     }
 
-    async fn wait_until_ready(&self) -> Result<(), ServiceError> {
-        let started = Instant::now();
-        let models_url = format!("{}/models", self.runtime.base_url.trim_end_matches('/'));
-        loop {
-            if let Ok(response) = self.client.get(&models_url).send().await {
-                if response.status().is_success() {
-                    info!("local OCR runtime is ready at {}", self.runtime.base_url);
-                    return Ok(());
-                }
-            }
-
-            if let Ok(Some(status)) = self.child.lock().await.try_wait() {
-                return Err(ServiceError::Internal(format!(
-                    "local OCR runtime exited during startup with {status}"
-                )));
-            }
-
-            if started.elapsed() >= Duration::from_secs(self.config.startup_timeout_seconds) {
-                return Err(ServiceError::Internal(format!(
-                    "local OCR runtime did not become ready within {} seconds",
-                    self.config.startup_timeout_seconds
-                )));
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-
-    async fn shutdown(&self) -> Result<(), ServiceError> {
-        stop_service_child(&self.child, self.process_id, "OCR").await
-    }
-
-    async fn is_alive(&self) -> Result<bool, ServiceError> {
-        Ok(self
-            .child
-            .lock()
-            .await
-            .try_wait()
-            .map_err(|error| {
-                ServiceError::Internal(format!("failed to inspect OCR runtime: {error}"))
-            })?
-            .is_none())
-    }
-}
-
-fn runtime_input_descriptor(input: &InferenceInput) -> serde_json::Value {
-    let input_filename = input
-        .path
-        .file_name()
-        .and_then(|filename| filename.to_str())
-        .expect("scheduler-owned runtime input filename");
-    json!({
-        "jobId": input.job_id,
-        "sequence": input.sequence,
-        "byteSize": input.byte_size,
-        "contentHash": input.content_hash,
-        "mimeType": input.mime_type,
-        "inputFilename": input_filename,
-    })
-}
-
-impl LocalProvider {
     async fn infer(&self, input: &InferenceInput) -> Result<InferenceResponse, ServiceError> {
-        let image_url = reqwest::Url::from_file_path(&input.path).map_err(|_| {
-            ServiceError::Configuration(format!(
-                "OCR runtime input path is invalid: {}",
-                input.path.display()
-            ))
+        let body = self
+            .runtime
+            .infer_response_body(input, "Unlimited-OCR-2")
+            .await?;
+        let response: OcrRuntimeResponse = serde_json::from_str(&body).map_err(|error| {
+            ServiceError::Upstream(format!("invalid OCR runtime response: {error}"))
         })?;
-        let request = json!({
-            "model": self.runtime.model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "<image>document parsing."},
-                    {"type": "image_url", "image_url": {"url": image_url.to_string()}}
-                ]
-            }],
-            "max_tokens": self.config.max_tokens,
-            "temperature": 0.0,
-            "extra_body": {
-                "skip_special_tokens": false,
-                "vllm_xargs": {"ngram_size": 35, "window_size": 128}
-            }
-        });
-        let url = format!(
-            "{}/chat/completions",
-            self.runtime.base_url.trim_end_matches('/')
-        );
-        let response = self
-            .client
-            .post(url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| {
-                ServiceError::RuntimeUnavailable(format!("local OCR request failed: {error}"))
-            })?;
-        let status = response.status();
-        let body = response.text().await.map_err(|error| {
-            ServiceError::Upstream(format!("failed to read local OCR response: {error}"))
-        })?;
-        if !status.is_success() {
-            if status == StatusCode::BAD_REQUEST {
-                return Err(ServiceError::BadRequest(format!(
-                    "local OCR runtime rejected the image: {body}"
-                )));
-            }
-            return Err(ServiceError::Upstream(format!(
-                "local OCR runtime returned {status}: {body}"
-            )));
-        }
-
-        let response: OpenAiResponse = serde_json::from_str(&body).map_err(|error| {
-            ServiceError::Upstream(format!("invalid local OCR response: {error}"))
-        })?;
-        let raw_text = response
-            .choices
-            .first()
-            .map(|choice| choice.message.content.as_str())
-            .ok_or_else(|| {
-                ServiceError::Upstream("local OCR response had no choices".to_string())
-            })?;
-        let text = if self.runtime.model == UNLIMITED_OCR_MODEL {
-            normalize_unlimited_ocr_text(raw_text)
-        } else {
-            raw_text.trim().to_string()
-        };
+        let text = normalize_unlimited_ocr_text(&response.text);
         Ok(InferenceResponse {
             task: "ocr".to_string(),
             text: text.clone(),
             markdown: text,
             provider: self.name().to_string(),
             model_type: "ocr".to_string(),
-            model_version: self.runtime.model_version.clone(),
+            model_version: self.runtime.spec.model_version.clone(),
             tags: Vec::new(),
             embedding: None,
             embedding_encoding: None,
@@ -808,6 +655,12 @@ impl LocalProvider {
         })
     }
 
+    async fn shutdown(&self) -> Result<(), ServiceError> {
+        self.runtime.shutdown().await
+    }
+    async fn is_alive(&self) -> Result<bool, ServiceError> {
+        self.runtime.is_alive().await
+    }
     fn name(&self) -> &'static str {
         "local"
     }
@@ -1709,7 +1562,16 @@ fn spawn_service_command(
         .map(|arg| {
             let mut argument = arg
                 .replace(RUNTIME_INPUT_PLACEHOLDER, &input_root)
-                .replace(MODEL_CONCURRENCY_PLACEHOLDER, &model_concurrency);
+                .replace(MODEL_CONCURRENCY_PLACEHOLDER, &model_concurrency)
+                .replace(MODEL_MAX_TOKENS_PLACEHOLDER, &config.max_tokens.to_string())
+                .replace(
+                    RUNTIME_STARTUP_TIMEOUT_PLACEHOLDER,
+                    &config.startup_timeout_seconds.to_string(),
+                )
+                .replace(
+                    RUNTIME_REQUEST_TIMEOUT_PLACEHOLDER,
+                    &config.request_timeout_seconds.to_string(),
+                );
             argument = argument.replace(RUNTIME_CACHE_PLACEHOLDER, &cache_dir);
             if let Some(concurrency) = &processing_concurrency {
                 argument = argument.replace(PROCESSING_CONCURRENCY_PLACEHOLDER, concurrency);
@@ -1875,12 +1737,10 @@ mod tests {
         let ocr = runtimes.get(ServiceType::Ocr).expect("OCR runtime");
         assert_eq!(
             ocr.arguments.first().map(String::as_str),
-            Some("/app/runtimes/ocr_server.py")
+            Some("/app/runtimes/ocr/server.py")
         );
-        assert!(ocr
-            .environment
-            .iter()
-            .any(|(name, value)| { name == "VLLM_USE_FLASHINFER_SAMPLER" && value == "0" }));
+        assert_eq!(ocr.model, "baidu/Unlimited-OCR-2");
+        assert_eq!(ocr.model_version, momento_common::llm::OCR_MODEL_VERSION);
 
         let clustering = runtimes
             .get(ServiceType::ImageClustering)

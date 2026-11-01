@@ -38,7 +38,7 @@ Options:
   -h, --help         Show this help and exit successfully.
 
 Outputs:
-  Reports and signing state: build/android/reports/ and build/android/state/
+  Reports and signing state: user XDG state directory (outside build/ and dist/)
   Debug APK:                dist/android/debug/
   Signed release APK/AAB:   dist/android/
 
@@ -156,14 +156,14 @@ fi
 
 source "$repository_root/docker/lib/build_lifecycle.sh"
 momento_build_begin "$repository_root" android
-mkdir -p "$distribution_dir" "$build_dir/state"
+mkdir -p "$distribution_dir" "$MOMENTO_BUILD_STATE/android/state"
 
 cleanup_android_build() {
-    local reports_dir="$build_dir/reports/$command_name"
+    local reports_dir="$MOMENTO_BUILD_STATE/android/reports/$command_name"
     rm -rf -- "$reports_dir" || return 1
-    mkdir -p "$reports_dir" "$build_dir/state" || return 1
+    mkdir -p "$reports_dir" "$MOMENTO_BUILD_STATE/android/state" || return 1
     if [[ -f "$build_dir/home/.android/debug.keystore" ]]; then
-        cp "$build_dir/home/.android/debug.keystore" "$build_dir/state/debug.keystore" || return 1
+        cp "$build_dir/home/.android/debug.keystore" "$MOMENTO_BUILD_STATE/android/state/debug.keystore" || return 1
     fi
     local path
     for path in reports test-results outputs/androidTest-results; do
@@ -189,7 +189,7 @@ readonly source_fingerprint=$(printf '%s\n%s\n%s\n' \
     "$(momento_build_fingerprint "$repository_root" src/android build_android_client.sh docker/lib/build_lifecycle.sh)" \
     "$toolchain_fingerprint" \
     "$(if [[ $command_name == release ]]; then momento_build_fingerprint "$keystore_dir" "$keystore_basename" password.txt; fi)" | sha256sum | cut -d ' ' -f1)
-readonly receipt="$build_dir/state/$command_name.inputs"
+readonly receipt="$MOMENTO_BUILD_STATE/android/state/$command_name.inputs"
 if [[ $no_cache == false && -f "$receipt" && ( $command_name == release || $command_name == assemble-debug ) ]]; then
     mapfile -t previous_inputs < "$receipt"
     if [[ ${previous_inputs[0]:-} == "$source_fingerprint" ]]; then
@@ -206,9 +206,9 @@ if [[ $no_cache == false && -f "$receipt" && ( $command_name == release || $comm
         fi
     fi
 fi
-mkdir -p "$distribution_dir" "$build_dir/home/.android" "$build_dir/state"
-if [[ ! -f "$build_dir/home/.android/debug.keystore" && -f "$build_dir/state/debug.keystore" ]]; then
-    cp "$build_dir/state/debug.keystore" "$build_dir/home/.android/debug.keystore"
+mkdir -p "$distribution_dir" "$build_dir/home/.android" "$MOMENTO_BUILD_STATE/android/state"
+if [[ ! -f "$build_dir/home/.android/debug.keystore" && -f "$MOMENTO_BUILD_STATE/android/state/debug.keystore" ]]; then
+    cp "$MOMENTO_BUILD_STATE/android/state/debug.keystore" "$build_dir/home/.android/debug.keystore"
 fi
 
 MOMENTO_BUILD_CLEANUP_HOOK=cleanup_android_build

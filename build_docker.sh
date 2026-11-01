@@ -41,8 +41,9 @@ Behavior:
   and builds the separate llm-service image.
   Both Rust services use Cargo's release profile without debug symbols by default
   to limit disk usage. Success removes this invocation's BuildKit cache and
-  temporary workspace. Final images, reusable runtime/model artifacts, APK/AAB,
-  and failure diagnostics are retained. Unchanged targets are reused.
+  build directory. Docker retains reusable runtime/model images; dist/ retains
+  APK/AAB and Web files, without Docker exports. Unchanged targets are reused.
+  Reports, signing state and fingerprints use the user's XDG state directory.
 EOF
 }
 
@@ -124,26 +125,26 @@ fi
 archive_build_reports() {
     local logs=("$MOMENTO_BUILD_WORK/"*.log)
     if [[ -f ${logs[0]} ]]; then
-        mkdir -p "$ROOT_DIR/build/docker/reports" || return 1
-        cp "${logs[@]}" "$ROOT_DIR/build/docker/reports/" || return 1
+        mkdir -p "$MOMENTO_BUILD_STATE/docker/reports" || return 1
+        cp "${logs[@]}" "$MOMENTO_BUILD_STATE/docker/reports/" || return 1
     fi
 }
 MOMENTO_BUILD_CLEANUP_HOOK=archive_build_reports
 
-# Runtime/model artifacts are immutable OCI images. Disposable BuildKit state is separate.
+# Reusable runtime/model images stay in Docker. OCI build contexts are disposable.
 RUNTIME_REFRESH=${RUNTIME_REFRESH:-0}
 MOMENTO_BUILD_PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
 key() { printf '%s\n' "$@" | sha256sum | cut -d ' ' -f1; }
-common_inputs=$(momento_build_fingerprint "$ROOT_DIR" build_docker.sh docker/lib/build_lifecycle.sh docker/lib/validate_oci.py)
+common_inputs=$(momento_build_fingerprint "$ROOT_DIR" build_docker.sh docker/lib/build_lifecycle.sh docker/lib/validate_oci.py docker/lib/docker_archive_oci.py)
 decoder_inputs=$(momento_build_fingerprint "$ROOT_DIR" docker/build_raw_decoder.sh docker/libraw-dng-host.patch docker/dng-sdk-portability.patch tests/docker/build_raw_decoder.sh)
 api_runtime_inputs=$(key "$MOMENTO_BUILD_PLATFORM" "$decoder_inputs" "$RUNTIME_REFRESH" "$SOURCE_REPOSITORY" "$(momento_build_fingerprint "$ROOT_DIR" docker/Dockerfile.runtime docker/Dockerfile.runtime.dockerignore docker/imagemagick-policy.xml tests/docker/libraw-dng-host.sh)")
-llm_runtime_inputs=$(key "$MOMENTO_BUILD_PLATFORM" "$decoder_inputs" "$RUNTIME_REFRESH" "$SOURCE_REPOSITORY" "$(momento_build_fingerprint "$ROOT_DIR" docker/Dockerfile.llm-runtime docker/Dockerfile.llm-runtime.dockerignore)")
+llm_runtime_inputs=$(key "$MOMENTO_BUILD_PLATFORM" "$decoder_inputs" "$RUNTIME_REFRESH" "$SOURCE_REPOSITORY" "$(momento_build_fingerprint "$ROOT_DIR" docker/Dockerfile.llm-runtime docker/Dockerfile.llm-runtime.dockerignore src/backend_llm/ocr/requirements.txt)")
 frontend_inputs=$(key "$MOMENTO_BUILD_PLATFORM" "$(momento_build_fingerprint "$ROOT_DIR" src/frontend src/backend/version.txt package.json pnpm-lock.yaml pnpm-workspace.yaml docker/Dockerfile.frontend docker/Dockerfile.frontend.dockerignore docker/lib/build_lifecycle.sh)")
 api_inputs=$(key "$common_inputs" "$SOURCE_REPOSITORY" "$api_runtime_inputs" "$frontend_inputs" "$(sha256sum "$ANDROID_RELEASE_APK" | cut -d ' ' -f1)" "$(momento_build_fingerprint "$ROOT_DIR" src/backend src/common docker/Dockerfile docker/Dockerfile.dockerignore docker/entrypoint.sh docker/entrypoint_common.sh)")
 llm_inputs=$(key "$common_inputs" "$SOURCE_REPOSITORY" "$llm_runtime_inputs" "$(momento_build_fingerprint "$ROOT_DIR" src/backend_llm src/common src/backend/version.txt docker/Dockerfile.llm docker/Dockerfile.llm.dockerignore docker/entrypoint_llm.sh docker/entrypoint_common.sh)")
 
 service_receipt() {
-    printf '%s/build/docker/state/%s.inputs\n' "$ROOT_DIR" "$(key "$1:$TAG")"
+    printf '%s/docker/state/%s.inputs\n' "$MOMENTO_BUILD_STATE" "$(key "$1:$TAG")"
 }
 
 service_reused() {
@@ -204,7 +205,7 @@ build_image() {
         [[ -n $digest ]] || { printf 'Published image digest is missing\n' >&2; return 1; }
         local receipt="$MOMENTO_BUILD_WORK/$dockerfile.inputs"
         printf '%s %s\n' "$fingerprint" "$digest" > "$receipt"
-        mkdir -p "$ROOT_DIR/build/docker/state"
+        mkdir -p "$MOMENTO_BUILD_STATE/docker/state"
         mv "$receipt" "$(service_receipt "$image")"
     fi
 }
@@ -213,13 +214,13 @@ if ! service_reused "${IMAGE_PREFIX}/momento" "$api_inputs"; then
     momento_build_oci "$ROOT_DIR" api-runtime Dockerfile.runtime "$api_runtime_inputs"
     momento_build_oci "$ROOT_DIR" frontend Dockerfile.frontend "$frontend_inputs"
     build_image Dockerfile "${IMAGE_PREFIX}/momento" "$api_inputs" \
-        --build-context "momento-api-runtime=oci-layout://$ROOT_DIR/dist/docker/api-runtime/$api_runtime_inputs" \
-        --build-context "momento-frontend=oci-layout://$ROOT_DIR/dist/docker/frontend/$frontend_inputs"
+        --build-context "momento-api-runtime=oci-layout://$MOMENTO_BUILD_WORK/oci/api-runtime/$api_runtime_inputs" \
+        --build-context "momento-frontend=oci-layout://$MOMENTO_BUILD_WORK/oci/frontend/$frontend_inputs"
 fi
 if ! service_reused "${IMAGE_PREFIX}/momento-llm-service" "$llm_inputs"; then
     momento_build_oci "$ROOT_DIR" llm-runtime Dockerfile.llm-runtime "$llm_runtime_inputs"
     build_image Dockerfile.llm "${IMAGE_PREFIX}/momento-llm-service" "$llm_inputs" \
-        --build-context "momento-llm-runtime=oci-layout://$ROOT_DIR/dist/docker/llm-runtime/$llm_runtime_inputs"
+        --build-context "momento-llm-runtime=oci-layout://$MOMENTO_BUILD_WORK/oci/llm-runtime/$llm_runtime_inputs"
 fi
 
 if [[ "$PUBLISH" == true ]]; then
@@ -227,4 +228,5 @@ if [[ "$PUBLISH" == true ]]; then
 else
     printf 'Built Momento %s images locally under %s\n' "$TAG" "$IMAGE_PREFIX"
 fi
+momento_build_migrate_oci "$ROOT_DIR"
 momento_build_success

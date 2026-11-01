@@ -78,12 +78,19 @@ fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): Stri
         .filter { it.state == BackupState.SERVER_PROCESSING || it.state == BackupState.COMPLETED }
         .sumOf { it.count }
     val failed = counts
-        .filter { it.state == BackupState.TERMINAL_FAILED || it.state == BackupState.CANCELLED }
+        .filter { it.state == BackupState.TERMINAL_FAILED }
         .sumOf { it.count }
+    val cancelled = counts.filter { it.state == BackupState.CANCELLED }.sumOf { it.count }
     val cancelling = counts.filter { it.state == BackupState.CANCELLING }.sumOf { it.count }
     if (total == 0L) return "No media backed up yet"
     if (cancelling > 0) return "$uploaded/$total media uploaded, $cancelling cancelling..."
-    if (failed > 0) return "$uploaded/$total media uploaded, $failed failed."
+    if (failed > 0 || cancelled > 0) {
+        val outcomes = buildList {
+            if (failed > 0) add("$failed failed")
+            if (cancelled > 0) add("$cancelled cancelled")
+        }
+        return "$uploaded/$total media uploaded, ${outcomes.joinToString(", ")}."
+    }
     if (uploaded == total) return "$uploaded/$total media uploaded, all set."
     if (!networkAllowed) return "$uploaded/$total media uploaded, pausing"
     return "$uploaded/$total media uploaded, uploading..."

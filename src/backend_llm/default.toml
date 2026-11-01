@@ -25,11 +25,12 @@ result_delivery_retry_delay_seconds = {{RESULT_DELIVERY_RETRY_DELAY_SECONDS}}
 result_delivery_max_concurrent_deliveries = {{RESULT_DELIVERY_MAX_CONCURRENT_DELIVERIES}}
 
 [[service]]
-# Unlimited-OCR through the image-owned vLLM runtime.
+# Unlimited-OCR-2 through the image-owned SGLang batch runtime.
 enabled = {{SERVICE_ENABLED}}
 model_type = "ocr"
 startup_timeout_seconds = {{OCR_STARTUP_TIMEOUT_SECONDS}}
 request_timeout_seconds = {{OCR_REQUEST_TIMEOUT_SECONDS}}
+# Maximum generated tokens per input. The engine reserves a separate input budget.
 max_tokens = {{OCR_MAX_TOKENS}}
 max_concurrent_jobs = {{OCR_MAX_CONCURRENT_JOBS}}
 

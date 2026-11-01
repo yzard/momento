@@ -40,7 +40,7 @@ async fn jpeg_content_does_not_require_raw_decoder() {
 
 #[test]
 fn llm_image_installs_content_probe() {
-    assert!(include_str!("../../docker/Dockerfile.llm").contains("libimage-exiftool-perl"));
+    assert!(include_str!("../../docker/Dockerfile.llm-runtime").contains("libimage-exiftool-perl"));
 }
 
 #[test]

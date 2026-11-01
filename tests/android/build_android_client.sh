@@ -42,6 +42,7 @@ run_script() {
     PATH="$tools_dir:$PATH" \
     MOMENTO_TEST_INVOCATIONS="$invocation_log" \
     MOMENTO_TEST_DOCKER_STATE="$test_root/docker-state" \
+    XDG_STATE_HOME="$test_root/state" \
     "$workspace/build_android_client.sh" "$@"
 }
 
@@ -107,9 +108,10 @@ fi
 : > "$invocation_log"
 run_script release --keystore-dir "$keystore_dir"
 [[ "$(<"$invocation_log")" != *"buildx build"* && "$(<"$invocation_log")" != *"docker:run"* ]] || fail "unchanged release rebuilt Android"
-[[ -f "$workspace/build/android/state/debug.keystore" ]] || fail "debug signing identity was deleted"
-[[ -f "$workspace/build/android/reports/release/reports/test-report.txt" ]] || fail "validation report was deleted"
-[[ ! -e "$workspace/build/android/workspace" && ! -e "$workspace/build/android/gradle-user-home" && ! -e "$workspace/build/android/android-avd" ]] || fail "successful build left temporary Android state"
+readonly persistent_state="$test_root/state/momento-build/$(printf '%s' "$workspace" | sha256sum | cut -d ' ' -f1)"
+[[ -f "$persistent_state/android/state/debug.keystore" ]] || fail "debug signing identity was deleted"
+[[ -f "$persistent_state/android/reports/release/reports/test-report.txt" ]] || fail "validation report was deleted"
+[[ ! -e "$workspace/build" ]] || fail "successful build left temporary Android state"
 rm "$workspace/dist/android/Momento-Release-1.0.0.apk"
 run_script release --keystore-dir "$keystore_dir"
 [[ -s "$invocation_log" ]] || fail "missing artifact did not rebuild"

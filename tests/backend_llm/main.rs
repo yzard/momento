@@ -11,3 +11,5 @@ mod result_output;
 mod routes;
 mod scheduler;
 mod transport;
+
+mod ocr;

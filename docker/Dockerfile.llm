@@ -20,6 +20,7 @@ WORKDIR /app
 
 COPY --from=rust-builder /app/build/backend_llm/target/release/llm-service /app/llm-service
 COPY src/backend_llm/*.py /app/runtimes/
+COPY src/backend_llm/ocr /app/runtimes/ocr
 COPY docker/entrypoint_llm.sh /entrypoint_llm.sh
 COPY docker/entrypoint_common.sh /entrypoint_common.sh
 

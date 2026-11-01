@@ -283,7 +283,7 @@ async fn queued_replacements_wait_for_task_cancellation_acknowledgement() {
         .expect("replacement job");
 
     let blocked = connection
-        .prepare(momento_api::database::queries::ai_jobs::SELECT_QUEUED)
+        .prepare(momento_api::database::queries::ai::jobs::SELECT_QUEUED)
         .expect("queued query")
         .query_map([10_i64], |row| row.get::<_, String>(0))
         .expect("blocked rows")
@@ -293,12 +293,12 @@ async fn queued_replacements_wait_for_task_cancellation_acknowledgement() {
 
     connection
         .execute(
-            momento_api::database::queries::ai_jobs::DELETE_CANCELLATION_SCOPE_FOR_TASK,
+            momento_api::database::queries::ai::jobs::DELETE_CANCELLATION_SCOPE_FOR_TASK,
             ["image_aesthetics"],
         )
         .expect("acknowledged cancellation");
     let eligible = connection
-        .prepare(momento_api::database::queries::ai_jobs::SELECT_QUEUED)
+        .prepare(momento_api::database::queries::ai::jobs::SELECT_QUEUED)
         .expect("queued query")
         .query_map([10_i64], |row| row.get::<_, String>(0))
         .expect("eligible rows")

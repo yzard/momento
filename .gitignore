@@ -70,6 +70,15 @@ pnpm-debug.log*
 
 # Data directory (for development)
 /data/
+/production/
+/playground/
+
+# Generated GPU caches and place thumbnails
+.nv/
+ComputeCache/
+**/cache/cuda/
+**/cache/triton/
+thumbnails_places/
 
 # Editor directories and files
 .idea
@@ -78,17 +87,3 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 
-# End-to-end development data and generated output
-/playground/logs/
-/playground/upload/
-/playground/database.sqlite
-/playground/database.sqlite-*
-/playground/imports/
-/playground/llm/
-/playground/originals/
-/playground/previews/
-/playground/thumbnails/
-/playground/thumbnails_tiny/
-/playground/albums/
-/playground/trash/
-/playground/webdav/

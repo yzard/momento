@@ -251,7 +251,7 @@ fn llm_job_state_transitions_advance_the_fencing_version() {
 
     assert_eq!(
         connection
-            .execute(queries::ai_jobs::CLAIM, ["versioned-job"])
+            .execute(queries::ai::jobs::CLAIM, ["versioned-job"])
             .expect("claim job"),
         1
     );
@@ -268,7 +268,7 @@ fn llm_job_state_transitions_advance_the_fencing_version() {
 
     assert_eq!(
         connection
-            .execute(queries::ai_jobs::CANCEL_FOR_TASK, ["ocr"])
+            .execute(queries::ai::jobs::CANCEL_FOR_TASK, ["ocr"])
             .expect("cancel job"),
         1
     );

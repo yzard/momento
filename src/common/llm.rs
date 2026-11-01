@@ -33,6 +33,7 @@ pub const MAX_LLM_RESULT_CONTINUATIONS_PER_VALUE: u8 = 4;
 const RESULT_CHUNK_MAGIC: [u8; 4] = *b"MRCH";
 const RESULT_CHUNK_VERSION: u8 = 1;
 const RESULT_RECORD_VERSION: u8 = 1;
+pub const OCR_MODEL_VERSION: &str = "unlimited-ocr-2@9cf077c4b206e0e2a31879df937b0b0bcba3661c";
 pub const IMAGE_CLUSTERING_MODEL_VERSION: &str = "dinov2-base";
 pub const IMAGE_CLUSTERING_EMBEDDING_DIMENSIONS: usize = 768;
 pub const LLM_TASKS: [&str; 7] = [
