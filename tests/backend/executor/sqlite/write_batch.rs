@@ -52,6 +52,7 @@ fn fixture() -> (SqliteWorkerContext, tempfile::TempDir) {
     (
         SqliteWorkerContext {
             pool,
+            ai_finalization_work: momento_common::work_signal::WorkSignal::default(),
             capacity_wake: std::sync::Arc::new(Notify::new()),
             space_budget: budget,
             database_path,

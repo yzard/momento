@@ -465,13 +465,18 @@ async fn shutdown_deadline_reports_exact_registered_durable_claims() {
 async fn ai_finalization_wake_notifies_deduplicate_and_face_workers() {
     let pool = crate::test_utils::create_test_db();
     let scheduler = crate::test_utils::test_scheduler(pool);
+    let observed_version = scheduler.ai_finalization_work_version();
     let first_scheduler = scheduler.clone();
     let second_scheduler = scheduler.clone();
     let first = tokio::spawn(async move {
-        first_scheduler.ai_finalization_notified().await;
+        first_scheduler
+            .wait_for_ai_finalization_work(observed_version)
+            .await;
     });
     let second = tokio::spawn(async move {
-        second_scheduler.ai_finalization_notified().await;
+        second_scheduler
+            .wait_for_ai_finalization_work(observed_version)
+            .await;
     });
     tokio::task::yield_now().await;
 
@@ -485,6 +490,28 @@ async fn ai_finalization_wake_notifies_deduplicate_and_face_workers() {
         .await
         .expect("face finalization wake")
         .expect("face waiter");
+}
+
+#[tokio::test]
+async fn ai_finalization_retains_changes_before_either_worker_begins_waiting() {
+    let scheduler = crate::test_utils::test_scheduler(crate::test_utils::create_test_db());
+    let observed = scheduler.ai_finalization_work_version();
+    scheduler.wake_ai_finalization();
+    scheduler.wake_ai_finalization();
+    for _ in 0..2 {
+        let current = tokio::time::timeout(
+            Duration::from_secs(1),
+            scheduler.wait_for_ai_finalization_work(observed),
+        )
+        .await
+        .expect("both workers observe changes made while they were draining");
+        assert_eq!(current, observed + 2);
+    }
+    let current = scheduler.ai_finalization_work_version();
+    let mut idle = Box::pin(scheduler.wait_for_ai_finalization_work(current));
+    assert!(futures::poll!(&mut idle).is_pending());
+    scheduler.wake_ai_finalization();
+    assert_eq!(idle.await, current + 1);
 }
 
 #[tokio::test]

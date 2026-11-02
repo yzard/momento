@@ -104,7 +104,11 @@ async fn one_writer_drains_its_queue_while_readers_remain_available() {
     .unwrap();
     init_database(&pool.get().unwrap()).unwrap();
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# SQLite concurrency test\n").unwrap();
+    std::fs::write(
+        &config_path,
+        toml::to_string(&crate::test_utils::test_config()).unwrap(),
+    )
+    .unwrap();
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .unwrap()
         .identity;

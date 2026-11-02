@@ -4,6 +4,100 @@ use momento_api::processor::ai::operation::AiFeature;
 use crate::test_utils::{create_test_db, create_test_media};
 
 #[tokio::test]
+async fn zero_inference_starts_wake_finalization_for_every_start_source() {
+    for trigger in ["manual", "scheduled", "startup"] {
+        let pool = create_test_db();
+        let executors = crate::test_utils::test_executor_handles(pool.clone());
+        let observed = executors.scheduler.ai_finalization_work_version();
+        let queued = if trigger == "manual" {
+            executors
+                .sqlite
+                .start_ai_feature_request(AiFeature::Deduplicate, trigger.into(), None)
+                .await
+        } else {
+            executors
+                .sqlite
+                .start_ai_feature_durable(
+                    AiFeature::Deduplicate,
+                    trigger.into(),
+                    (trigger == "scheduled").then(|| "2026-11-02T08:00:00Z".into()),
+                )
+                .await
+        }
+        .expect("start without new inference inputs");
+        assert_eq!(queued, 0);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            executors.scheduler.wait_for_ai_finalization_work(observed),
+        )
+        .await
+        .expect("start wakes finalization without any inference results");
+        momento_api::processor::deduplicator::finalize_ready_runs(&executors)
+            .await
+            .unwrap();
+        let status: String = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM media_similarity_runs ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed", "{trigger}");
+    }
+}
+
+#[tokio::test]
+async fn single_and_global_cancellation_wake_finalization_without_an_inference_result() {
+    for cancel_all in [false, true] {
+        let pool = create_test_db();
+        let executors = crate::test_utils::test_executor_handles(pool.clone());
+        executors
+            .sqlite
+            .start_ai_feature_request(AiFeature::Deduplicate, "manual".into(), None)
+            .await
+            .unwrap();
+        let observed = executors.scheduler.ai_finalization_work_version();
+        if cancel_all {
+            let results = executors
+                .sqlite
+                .cancel_all_ai_features_request()
+                .await
+                .unwrap();
+            assert!(results.iter().any(|result| result.feature == "deduplicate"
+                && result.outcome == "cancellationRequested"));
+        } else {
+            let result = executors
+                .sqlite
+                .cancel_ai_feature_request(AiFeature::Deduplicate)
+                .await
+                .unwrap();
+            assert_eq!(result.outcome, "cancellationRequested");
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            executors.scheduler.wait_for_ai_finalization_work(observed),
+        )
+        .await
+        .expect("cancellation wakes finalization without a remote result");
+        momento_api::processor::deduplicator::finalize_ready_runs(&executors)
+            .await
+            .unwrap();
+        let status: String = pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM media_similarity_runs ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+    }
+}
+
+#[tokio::test]
 async fn every_ai_failure_identifies_the_job_and_original_media() {
     let pool = create_test_db();
     let media_id = create_test_media(&pool, "trace-original.dng");

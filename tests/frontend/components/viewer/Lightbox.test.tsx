@@ -139,6 +139,59 @@ describe('Lightbox', () => {
     vi.unstubAllGlobals()
   })
 
+  it('seeks videos with arrow keys without navigating media or changing volume', async () => {
+    mocks.getBatch.mockResolvedValue([{ id: 1, mediaType: 'video', originalFilename: 'video.mp4' }])
+    const change = vi.fn()
+    const { container } = render(viewer([1, 2], 0, change))
+    await waitFor(() => expect(container.querySelector('video')).toBeTruthy())
+    const video = container.querySelector('video')!
+    Object.defineProperty(video, 'duration', {
+      configurable: true,
+      value: 120,
+    })
+    video.currentTime = 70
+    video.volume = 0.5
+    for (const [key, position] of [
+      ['ArrowLeft', 65],
+      ['ArrowRight', 70],
+      ['ArrowDown', 10],
+      ['ArrowUp', 70],
+      ['ArrowUp', 120],
+      ['ArrowDown', 60],
+      ['ArrowDown', 0],
+      ['ArrowLeft', 0],
+    ] as const) {
+      expect(fireEvent.keyDown(video, { key })).toBe(false)
+      expect(video.currentTime).toBe(position)
+    }
+    expect(change).not.toHaveBeenCalled()
+    expect(video.volume).toBe(0.5)
+    expect(fireEvent.keyDown(video, { key: 'ArrowRight', ctrlKey: true })).toBe(true)
+    expect(video.currentTime).toBe(0)
+    const input = document.createElement('input')
+    container.appendChild(input)
+    expect(fireEvent.keyDown(input, { key: 'ArrowRight' })).toBe(true)
+    expect(video.currentTime).toBe(0)
+  })
+
+  it('ignores seeks before video metadata loads and keeps photo arrow navigation', async () => {
+    mocks.getBatch.mockResolvedValueOnce([
+      { id: 1, mediaType: 'video', originalFilename: 'video.mp4' },
+    ])
+    const change = vi.fn()
+    const view = render(viewer([1, 2], 0, change))
+    await waitFor(() => expect(view.container.querySelector('video')).toBeTruthy())
+    const video = view.container.querySelector('video')!
+    fireEvent.keyDown(video, { key: 'ArrowRight' })
+    expect(video.currentTime).toBe(0)
+    expect(change).not.toHaveBeenCalled()
+    mocks.getBatch.mockResolvedValueOnce([photo(2)])
+    view.rerender(viewer([1, 2], 1, change))
+    await screen.findByRole('img', { name: '2.jpg' })
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(change).toHaveBeenCalledWith(0)
+  })
+
   it.each(['/faces/5', '/places/7'])(
     'closes %s viewer with X and browser back one layer at a time',
     async (path) => {

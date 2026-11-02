@@ -443,12 +443,14 @@ impl ExecutorRuntime {
             },
         )
         .map_err(|error| error.to_string())?;
+        let ai_finalization_work = momento_common::work_signal::WorkSignal::default();
         let sqlite_workers = match spawn_sqlite_workers(
             sizing.sqlite_workers,
             sqlite_read_receiver,
             sqlite_write_receiver,
             SqliteWorkerContext {
                 pool: pool.clone(),
+                ai_finalization_work: ai_finalization_work.clone(),
                 capacity_wake: Arc::clone(&capacity_wake),
                 space_budget: space_budget.clone(),
                 database_path,
@@ -527,7 +529,11 @@ impl ExecutorRuntime {
                 log_event_producer,
             ),
             sqlite: SqliteExecutorHandle::new(ingress.clone()),
-            scheduler: crate::runtime::SchedulerHandle::new(sizing, ingress.clone()),
+            scheduler: crate::runtime::SchedulerHandle::new(
+                sizing,
+                ingress.clone(),
+                ai_finalization_work,
+            ),
         };
         Ok((
             Self {

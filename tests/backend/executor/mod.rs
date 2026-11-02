@@ -644,7 +644,11 @@ async fn sqlite_executor_atomically_prepares_journal_and_rejects_path_conflicts(
         .query_row("PRAGMA max_page_count", [], |row| row.get(0))
         .expect("native SQLite max page count");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    std::fs::write(
+        &config_path,
+        toml::to_string(&crate::test_utils::test_config()).unwrap(),
+    )
+    .expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;

@@ -2,7 +2,7 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/build/frontend/workspace
 
-RUN apk add --no-cache bash util-linux && corepack enable && corepack prepare pnpm@9.15.0 --activate
+RUN apk add --no-cache bash coreutils python3 util-linux && corepack enable && corepack prepare pnpm@9.15.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY src/frontend ./src/frontend

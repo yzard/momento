@@ -14,7 +14,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -68,7 +67,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -92,7 +90,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -718,6 +715,7 @@ private fun VideoViewer(
             }
     }
     var playbackError by remember(player) { mutableStateOf<String?>(null) }
+    VideoScreenAwake(player = player, active = active)
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -1008,9 +1006,7 @@ private fun VideoPlaybackControls(
     var seekState by remember(player) { mutableStateOf(ViewerSeekState.initial()) }
     var playing by remember(player) { mutableStateOf(player.playWhenReady) }
     var muted by remember(player) { mutableStateOf(player.volume == 0f) }
-    val seekRangeEnd = seekState.durationMs.coerceAtLeast(1L).toFloat()
     val displayedPosition = seekState.displayedPositionMs
-    val sliderGeometry = playbackSliderGeometry(seekState.dragging)
 
     LaunchedEffect(player) {
         while (isActive) {
@@ -1046,8 +1042,11 @@ private fun VideoPlaybackControls(
                     contentDescription = if (playing) "Pause video" else "Play video",
                 )
             }
-            Slider(
-                value = displayedPosition,
+            PlaybackSeekBar(
+                positionMs = displayedPosition,
+                durationMs = seekState.durationMs,
+                dragging = seekState.dragging,
+                color = floatingColors.content,
                 onValueChange = { value ->
                     userInteracted()
                     if (!seekState.dragging) interactionChanged(true)
@@ -1061,39 +1060,7 @@ private fun VideoPlaybackControls(
                     }
                     interactionChanged(false)
                 },
-                valueRange = 0f..seekRangeEnd,
-                enabled = seekState.durationMs > 0,
-                modifier = Modifier.weight(1f).height(48.dp),
-                thumb = {
-                    Canvas(Modifier.size(sliderGeometry.trackSlotHeightDp.dp)) {
-                        drawCircle(
-                            color = floatingColors.content,
-                            radius = sliderGeometry.thumbDiameterDp.dp.toPx() / 2f,
-                            center = center,
-                        )
-                    }
-                },
-                track = { sliderState ->
-                    val progress = playbackProgressFraction(sliderState.value, seekState.durationMs)
-                    Canvas(Modifier.fillMaxWidth().height(sliderGeometry.trackSlotHeightDp.dp)) {
-                        val centerY = size.height / 2f
-                        val strokeWidth = sliderGeometry.trackStrokeDp.dp.toPx()
-                        drawLine(
-                            color = floatingColors.content.copy(alpha = 0.32f),
-                            start = Offset(0f, centerY),
-                            end = Offset(size.width, centerY),
-                            strokeWidth = strokeWidth,
-                            cap = StrokeCap.Round,
-                        )
-                        drawLine(
-                            color = floatingColors.content,
-                            start = Offset(0f, centerY),
-                            end = Offset(size.width * progress, centerY),
-                            strokeWidth = strokeWidth,
-                            cap = StrokeCap.Round,
-                        )
-                    }
-                },
+                modifier = Modifier.weight(1f),
             )
             Text(
                 "${formatPlaybackTime(displayedPosition.toLong())} / ${formatPlaybackTime(seekState.durationMs)}",

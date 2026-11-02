@@ -164,6 +164,7 @@ fn start_background_tasks(
     let deduplicate_scheduler = scheduler.clone();
     scheduler.spawn_control(async move {
         loop {
+            let observed_version = deduplicate_scheduler.ai_finalization_work_version();
             match deduplicate_scheduler
                 .acquire_durable(
                     DurableSourceId::DeduplicateFinalization,
@@ -185,7 +186,9 @@ fn start_background_tasks(
                     return;
                 }
             }
-            deduplicate_scheduler.ai_finalization_notified().await;
+            deduplicate_scheduler
+                .wait_for_ai_finalization_work(observed_version)
+                .await;
         }
     });
 
@@ -194,6 +197,7 @@ fn start_background_tasks(
     let face_group_scheduler = scheduler.clone();
     scheduler.spawn_control(async move {
         loop {
+            let observed_version = face_group_scheduler.ai_finalization_work_version();
             match face_group_scheduler
                 .acquire_durable(
                     DurableSourceId::FaceGroupFinalization,
@@ -216,7 +220,9 @@ fn start_background_tasks(
                     return;
                 }
             }
-            face_group_scheduler.ai_finalization_notified().await;
+            face_group_scheduler
+                .wait_for_ai_finalization_work(observed_version)
+                .await;
         }
     });
 

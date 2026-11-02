@@ -79,7 +79,7 @@ struct SchedulerShared {
     webdav_import_wake: Notify,
     metadata_work: WorkSignal,
     llm_result_work: WorkSignal,
-    ai_finalization_wake: Notify,
+    ai_finalization_work: WorkSignal,
     journal_recovery_wake: Notify,
     scheduler_ingress: SchedulerIngress,
 }
@@ -133,7 +133,11 @@ enum HttpAdmission {
 }
 
 impl SchedulerHandle {
-    pub(crate) fn new(sizing: &RuntimeSizing, scheduler_ingress: SchedulerIngress) -> Self {
+    pub(crate) fn new(
+        sizing: &RuntimeSizing,
+        scheduler_ingress: SchedulerIngress,
+        ai_finalization_work: WorkSignal,
+    ) -> Self {
         Self {
             shared: Arc::new(SchedulerShared {
                 state: AtomicU8::new(SchedulerState::Running as u8),
@@ -155,7 +159,7 @@ impl SchedulerHandle {
                 webdav_import_wake: Notify::new(),
                 metadata_work: WorkSignal::default(),
                 llm_result_work: WorkSignal::default(),
-                ai_finalization_wake: Notify::new(),
+                ai_finalization_work,
                 journal_recovery_wake: Notify::new(),
                 scheduler_ingress,
             }),
@@ -582,7 +586,7 @@ impl SchedulerHandle {
         self.shared.webdav_import_wake.notify_waiters();
         self.shared.metadata_work.notify();
         self.shared.llm_result_work.notify();
-        self.shared.ai_finalization_wake.notify_waiters();
+        self.shared.ai_finalization_work.notify();
         self.shared.journal_recovery_wake.notify_waiters();
     }
 
@@ -633,11 +637,18 @@ impl SchedulerHandle {
     }
 
     pub fn wake_ai_finalization(&self) {
-        self.shared.ai_finalization_wake.notify_waiters();
+        self.shared.ai_finalization_work.notify();
     }
 
-    pub async fn ai_finalization_notified(&self) {
-        self.shared.ai_finalization_wake.notified().await;
+    pub fn ai_finalization_work_version(&self) -> u64 {
+        self.shared.ai_finalization_work.version()
+    }
+
+    pub async fn wait_for_ai_finalization_work(&self, observed_version: u64) -> u64 {
+        self.shared
+            .ai_finalization_work
+            .wait_for_change(observed_version)
+            .await
     }
 
     pub fn wake_journal_recovery(&self) {

@@ -5384,6 +5384,7 @@ fn validate_album_media_ids(
 #[derive(Clone)]
 pub(crate) struct SqliteWorkerContext {
     pub pool: DbPool,
+    pub ai_finalization_work: momento_common::work_signal::WorkSignal,
     pub capacity_wake: std::sync::Arc<Notify>,
     pub space_budget: crate::io::space_budget::DataDirSpaceBudget,
     pub database_path: std::path::PathBuf,
@@ -5459,6 +5460,15 @@ fn run_worker(context: SqliteWorkerContext, receiver: Receiver<SqliteCommand>, r
             &context.database_path,
             &context.footprints,
         );
+        if matches!(
+            &operation_result,
+            Ok(SqliteOutput::AiFeatureStarted(_)
+                | SqliteOutput::AiFeatureCancelled(_)
+                | SqliteOutput::AllAiFeaturesCancelled(_))
+        ) {
+            // Publish committed work even if the caller no longer awaits its reply.
+            context.ai_finalization_work.notify();
+        }
         let _ = command.reply.send(operation_result);
     }
 }

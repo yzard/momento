@@ -6,6 +6,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronLeft, ChevronRight, Download, Loader2, X } from 'lucide-react'
@@ -188,8 +189,7 @@ function useImageZoom(mediaId: number | undefined) {
   return { toggleZoom, handleKeyDown, handleMouseDown, handleMouseMove, stopDragging, imageStyle }
 }
 
-function useDisplayedMedia(currentMedia: Media | undefined) {
-  const videoRef = useRef<HTMLVideoElement>(null)
+function useDisplayedMedia(currentMedia: Media | undefined, videoRef: RefObject<HTMLVideoElement>) {
   const videoResumeTimeRef = useRef(0)
   const isVideo = currentMedia?.mediaType === 'video'
   const stream = useMediaStreamURL(isVideo ? currentMedia.id : null, Boolean(isVideo))
@@ -217,10 +217,11 @@ function useDisplayedMedia(currentMedia: Media | undefined) {
 
 interface LightboxStageProps {
   media: Media
+  videoRef: RefObject<HTMLVideoElement>
 }
 
-function LightboxStage({ media }: LightboxStageProps) {
-  const displayed = useDisplayedMedia(media)
+function LightboxStage({ media, videoRef }: LightboxStageProps) {
+  const displayed = useDisplayedMedia(media, videoRef)
   const zoom = useImageZoom(media.id)
   if (displayed.isLoading) {
     return (
@@ -314,6 +315,7 @@ export default function Lightbox({
   manageHistory,
 }: LightboxProps) {
   const handleClose = useLightboxHistory(onClose, manageHistory)
+  const videoRef = useRef<HTMLVideoElement>(null)
   const mediaState = useLightboxMedia(mediaIds, currentIndex, onIndexChange)
   const goToPrevious = useCallback(() => {
     if (mediaState.safeIndex > 0) onIndexChange(mediaState.safeIndex - 1)
@@ -325,9 +327,27 @@ export default function Lightbox({
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (
-        (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')
+        event.target instanceof Element &&
+        event.target.closest('input, textarea, select, [contenteditable="true"]')
       )
         return
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      const seekSteps: Record<string, number> = {
+        ArrowLeft: -5,
+        ArrowRight: 5,
+        ArrowUp: 60,
+        ArrowDown: -60,
+      }
+      const seekSeconds = seekSteps[event.key]
+      if (mediaState.currentMedia?.mediaType === 'video' && seekSeconds !== undefined) {
+        event.preventDefault()
+        event.stopPropagation()
+        const video = videoRef.current
+        if (video && Number.isFinite(video.duration) && video.duration > 0) {
+          video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seekSeconds))
+        }
+        return
+      }
       if (event.key === 'Escape' || event.key === 'Backspace') {
         event.preventDefault()
         handleClose()
@@ -335,9 +355,9 @@ export default function Lightbox({
       if (event.key === 'ArrowLeft') goToPrevious()
       if (event.key === 'ArrowRight') goToNext()
     }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [goToNext, goToPrevious, handleClose])
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [goToNext, goToPrevious, handleClose, mediaState.currentMedia?.mediaType])
 
   const content = (
     <div
@@ -361,7 +381,11 @@ export default function Lightbox({
             onNext={goToNext}
           />
           {mediaState.currentMedia ? (
-            <LightboxStage key={mediaState.currentMedia.id} media={mediaState.currentMedia} />
+            <LightboxStage
+              key={mediaState.currentMedia.id}
+              media={mediaState.currentMedia}
+              videoRef={videoRef}
+            />
           ) : mediaState.isLoading ? (
             <Loader2 aria-label="Loading media" className="h-12 w-12 animate-spin" />
           ) : (
