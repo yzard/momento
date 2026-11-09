@@ -12,9 +12,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import io.github.yzard.momento.feature.backup.backupDiagnosticReport
-import io.github.yzard.momento.feature.backup.conciseBackupIssue
+import io.github.yzard.momento.feature.backup.backupFileStatus
+import io.github.yzard.momento.feature.backup.backupUploadFailure
 import android.database.sqlite.SQLiteException
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -22,7 +24,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Backup
-import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -33,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -69,8 +71,6 @@ import io.github.yzard.momento.feature.backup.scheduleImmediateBackup
 import io.github.yzard.momento.feature.backup.schedulePeriodicBackup
 import kotlinx.coroutines.launch
 import java.io.IOException
-import java.text.DateFormat
-import java.util.Date
 
 fun backupSummary(counts: List<BackupQueueCount>, networkAllowed: Boolean): String {
     val total = counts.sumOf { it.count }
@@ -156,12 +156,6 @@ fun backupHistoryCanBeCleared(
     !backupHasActiveRecords(counts) &&
     scheduleStatus != BackupScheduleStatus.RUNNING
 
-fun backupScheduleSummary(status: BackupScheduleStatus, nextScheduledAt: String?): String = when (status) {
-    BackupScheduleStatus.NOT_SCHEDULED -> "Daily backup is not scheduled"
-    BackupScheduleStatus.RUNNING -> "Daily backup is running now"
-    BackupScheduleStatus.WAITING -> nextScheduledAt?.let { "Next daily backup: $it" } ?: "Daily backup is scheduled"
-}
-
 @Composable
 internal fun BackupSettingsSection(
     settings: Settings,
@@ -176,9 +170,9 @@ internal fun BackupSettingsSection(
     val allQueueCounts by remember(database) {
         database.backupAssetDao().observeCounts(cameraOnly = false)
     }.collectAsState(initial = emptyList())
-    val latestBackupError by remember(database) {
-        database.backupAssetDao().observeLatestError()
-    }.collectAsState(initial = null)
+    val uploadFailures by remember(database, settings.cameraOnly) {
+        database.backupAssetDao().observeUploadFailures(settings.cameraOnly)
+    }.collectAsState(initial = emptyList())
     val backupIntegrity by remember(database) {
         database.backupAssetDao().observeIntegritySummary()
     }.collectAsState(initial = BackupIntegritySummary(0, 0, 0, 0))
@@ -187,6 +181,7 @@ internal fun BackupSettingsSection(
         workManager.getWorkInfosForUniqueWorkFlow(IMMEDIATE_BACKUP_WORK_NAME)
     }.collectAsState(initial = emptyList())
     var startingBackup by remember { mutableStateOf(false) }
+    var cancellingBackup by remember { mutableStateOf(false) }
     var startError by remember { mutableStateOf<String?>(null) }
     val periodicWorkInfos by remember(workManager) {
         workManager.getWorkInfosForUniqueWorkFlow(PERIODIC_BACKUP_WORK_NAME)
@@ -231,19 +226,14 @@ internal fun BackupSettingsSection(
     val visibleWork = activePeriodicWork?.takeIf { it.state == WorkInfo.State.RUNNING } ?: immediateWork
     val backupRunning = startingBackup || visibleWork?.state == WorkInfo.State.RUNNING
     val historyScheduleStatus = if (backupRunning) BackupScheduleStatus.RUNNING else scheduleStatus
-    val nextScheduledAt = activePeriodicWork?.nextScheduleTimeMillis
-        ?.takeIf { it > 0 && it < Long.MAX_VALUE }
-        ?.let { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it)) }
-    val canCancel = backupHasActiveRecords(allQueueCounts)
-    val recordCount = allQueueCounts.sumOf { it.count }
     val canClear = backupHistoryCanBeCleared(allQueueCounts, historyScheduleStatus)
     val canRepair = backupIntegrity.unverifiedCompletedRecords > 0 &&
         !backupHasActiveRecords(allQueueCounts) &&
         historyScheduleStatus != BackupScheduleStatus.RUNNING
-    val historyDescription = historyStatus ?: when {
-        recordCount == 0L -> "No local backup history"
-        canClear -> "$recordCount local records. Clear them to back up the selected range again."
-        else -> "$recordCount local records. Finish or cancel the current backup before clearing."
+    LaunchedEffect(diagnosticStatus, historyStatus) {
+        (diagnosticStatus ?: historyStatus)?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+        diagnosticStatus = null
+        historyStatus = null
     }
     fun startBackup() {
         startingBackup = true
@@ -321,102 +311,99 @@ internal fun BackupSettingsSection(
             }
             ListItem(
                 headlineContent = { Text("Back up this device") },
-                supportingContent = {
-                    Column {
-                        Text(startError ?: backupActivitySummary(
-                            startingBackup, visibleWork?.state,
-                            visibleWork?.progress?.getString(BACKUP_PHASE_KEY), networkAllowed, queueCounts,
-                        ))
-                        Text(backupScheduleSummary(scheduleStatus, nextScheduledAt))
-                        latestBackupError?.let { Text("Recent issue: ${conciseBackupIssue(it)}") }
-                        Text("Metadata and AI processing run separately on the server schedule.")
-                    }
-                },
                 trailingContent = {
-                    SettingsTrailingActions {
-                        if (canCancel) {
-                            TextButton(
-                                enabled = !clearBusy,
-                                onClick = {
-                                    scope.launch {
-                                        requestBackupCancellation(
-                                            context.applicationContext,
-                                            database.backupAssetDao(),
-                                            settings.mobileDataEnabled,
-                                        )
-                                    }
-                                },
-                            ) { Text("Cancel") }
-                        }
-                        TextButton(
-                            enabled = !clearBusy && !backupRunning,
-                            onClick = {
-                                mediaAccess = currentBackupMediaAccess(context)
-                                locationAccess = currentBackupLocationMetadataAccess(context)
-                                if (!backupCanReadOriginalMedia(mediaAccess, locationAccess)) {
-                                    permissionRequest.launch(backupPermissions(Build.VERSION.SDK_INT))
-                                } else {
-                                    startBackup()
+                    BackupRunButton(
+                        running = backupRunning,
+                        enabled = !clearBusy && !cancellingBackup,
+                        start = {
+                            mediaAccess = currentBackupMediaAccess(context)
+                            locationAccess = currentBackupLocationMetadataAccess(context)
+                            if (!backupCanReadOriginalMedia(mediaAccess, locationAccess)) {
+                                permissionRequest.launch(backupPermissions(Build.VERSION.SDK_INT))
+                            } else {
+                                startBackup()
+                            }
+                        },
+                        cancel = {
+                            cancellingBackup = true
+                            startError = null
+                            scope.launch {
+                                try {
+                                    requestBackupCancellation(context.applicationContext, database.backupAssetDao(), settings.mobileDataEnabled)
+                                } catch (error: Exception) {
+                                    if (error is kotlinx.coroutines.CancellationException) throw error
+                                    startError = "Could not cancel backup. Try again."
+                                } finally {
+                                    cancellingBackup = false
                                 }
-                            },
-                        ) { Text(if (startingBackup) "Starting…" else if (backupRunning) "Backing up…" else "Back up now") }
-                    }
+                            }
+                        },
+                    )
                 },
                 leadingContent = { Icon(Icons.Default.Backup, null) },
             )
-            ListItem(
-                headlineContent = { Text("Backup diagnostics") },
-                supportingContent = { Text(diagnosticStatus ?: "Copy failure details and recent logs for your developer. Includes file names.") },
-                trailingContent = {
-                    TextButton(enabled = !copyingDiagnostics, onClick = {
-                        scope.launch {
-                            copyingDiagnostics = true
-                            try {
-                                if (diagnosticPartIndex >= diagnosticParts.size) {
-                                    val report = backupDiagnosticReport(context.applicationContext, settings, database.backupAssetDao())
-                                    diagnosticParts = report.chunked(100_000)
-                                    diagnosticPartIndex = 0
-                                }
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("Momento backup diagnostics", diagnosticParts[diagnosticPartIndex]))
-                                diagnosticPartIndex += 1
-                                diagnosticStatus = if (diagnosticParts.size == 1) "Diagnostic logs copied" else
-                                    "Copied part $diagnosticPartIndex of ${diagnosticParts.size}. Paste it before copying the next part."
-                            } catch (_: IOException) {
-                                diagnosticStatus = "Could not read diagnostic logs. Try again."
-                            } catch (_: SQLiteException) {
-                                diagnosticStatus = "Could not read backup records. Try again."
-                            } catch (_: IllegalStateException) {
-                                diagnosticStatus = "Could not copy diagnostic logs. Try again."
-                            } finally {
-                                copyingDiagnostics = false
+            BackupProgressContent(
+                        status = (if (backupRunning) visibleWork?.progress?.let(::backupFileStatus) else null)
+                            ?: backupActivitySummary(startingBackup, visibleWork?.state,
+                                visibleWork?.progress?.getString(BACKUP_PHASE_KEY), networkAllowed, queueCounts),
+                        running = backupRunning,
+                        completed = queueCounts.filter { it.state == BackupState.COMPLETED }.sumOf { it.count },
+                        total = queueCounts.sumOf { it.count },
+                        errors = uploadFailures.map { backupUploadFailure(it.displayName, it.errorMessage) } + listOfNotNull(startError),
+                    )
+            BackupDiagnosticsRow(
+                busy = copyingDiagnostics,
+                copy = {
+                    scope.launch {
+                        copyingDiagnostics = true
+                        try {
+                            if (diagnosticPartIndex >= diagnosticParts.size) {
+                                val report = backupDiagnosticReport(context.applicationContext, settings, database.backupAssetDao())
+                                diagnosticParts = report.chunked(100_000)
+                                diagnosticPartIndex = 0
                             }
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Momento backup diagnostics", diagnosticParts[diagnosticPartIndex]))
+                            diagnosticPartIndex += 1
+                            diagnosticStatus = if (diagnosticParts.size == 1) "Diagnostic logs copied" else
+                                "Copied part $diagnosticPartIndex of ${diagnosticParts.size}. Paste it, then tap Copy for the next part."
+                        } catch (_: IOException) {
+                            diagnosticStatus = "Could not read diagnostic logs. Try again."
+                        } catch (_: SQLiteException) {
+                            diagnosticStatus = "Could not read backup records. Try again."
+                        } catch (_: IllegalStateException) {
+                            diagnosticStatus = "Could not copy diagnostic logs. Try again."
+                        } finally {
+                            copyingDiagnostics = false
                         }
-                    }) { Text(if (copyingDiagnostics) "Preparing…" else if (diagnosticPartIndex < diagnosticParts.size) "Copy next part" else "Copy logs") }
+                    }
+                },
+                share = {
+                    scope.launch {
+                        copyingDiagnostics = true
+                        try {
+                            val report = backupDiagnosticReport(context.applicationContext, settings, database.backupAssetDao())
+                            val intent = backupDiagnosticsShareIntent(context.applicationContext, report)
+                            context.startActivity(Intent.createChooser(intent, "Share logs"))
+                        } catch (_: IOException) {
+                            diagnosticStatus = "Could not prepare diagnostic logs. Try again."
+                        } catch (_: SQLiteException) {
+                            diagnosticStatus = "Could not read backup records. Try again."
+                        } catch (_: ActivityNotFoundException) {
+                            diagnosticStatus = "No application is available to share diagnostic logs."
+                        } finally {
+                            copyingDiagnostics = false
+                        }
+                    }
                 },
             )
-            ListItem(
-                headlineContent = { Text("Backup history") },
-                supportingContent = {
-                    Column {
-                        Text(historyDescription)
-                        Text(backupIntegritySummary(backupIntegrity))
-                    }
-                },
-                trailingContent = {
-                    SettingsTrailingActions {
-                        TextButton(
-                            onClick = { repairDialog = true },
-                            enabled = canRepair && !repairBusy && !clearBusy,
-                        ) { Text(if (repairBusy) "Re-verifying" else "Re-verify older backups") }
-                        TextButton(
-                            onClick = { clearDialog = true },
-                            enabled = canClear && !clearBusy,
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        ) { Text(if (clearBusy) "Clearing" else "Clear backup history") }
-                    }
-                },
-                leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
+            BackupHistoryRow(
+                canRepair = canRepair,
+                canClear = canClear,
+                repairBusy = repairBusy,
+                clearBusy = clearBusy,
+                repair = { repairDialog = true },
+                clear = { clearDialog = true },
             )
         }
     }

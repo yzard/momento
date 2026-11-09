@@ -38,6 +38,7 @@ pub(crate) const WEBDAV_REALM: &str = "Momento WebDAV";
 pub(crate) const WEBDAV_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 pub(crate) const WEBDAV_STABLE_FILE_AGE_SECONDS: u64 = 2;
 pub(crate) const BACKUP_MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+pub(crate) const BACKUP_MAX_BATCH_BYTES: u64 = 50_000_000;
 pub(crate) const BACKUP_MAX_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const BACKUP_SESSION_EXPIRY_HOURS: u64 = 24;
 pub(crate) const FACE_GROUP_SIMILARITY_THRESHOLD: f32 = 0.50;
@@ -168,6 +169,10 @@ pub(crate) fn webdav_stable_file_age_seconds() -> u64 {
 
 pub(crate) fn backup_max_upload_bytes() -> u64 {
     BACKUP_MAX_UPLOAD_BYTES
+}
+
+pub(crate) fn backup_max_batch_bytes() -> u64 {
+    BACKUP_MAX_BATCH_BYTES
 }
 
 pub(crate) fn backup_max_chunk_bytes() -> u64 {
@@ -354,6 +359,10 @@ pub(crate) fn render_template(source: &str) -> String {
         (
             "{{BACKUP_MAX_UPLOAD_BYTES}}",
             BACKUP_MAX_UPLOAD_BYTES.to_string(),
+        ),
+        (
+            "{{BACKUP_MAX_BATCH_BYTES}}",
+            BACKUP_MAX_BATCH_BYTES.to_string(),
         ),
         (
             "{{BACKUP_MAX_CHUNK_BYTES}}",

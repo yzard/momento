@@ -11,9 +11,10 @@ mod timezone;
 pub use bootstrap::{ApplicationRuntime, RuntimeBuildError, RuntimeBuilder};
 pub use config_bootstrap::ConfigFileIdentity;
 pub use control::{
-    schedule_client_request, ActiveDurableClaim, ConnectionAdmission, DurableAdmission,
-    FileChunkAdmission, HttpRequestAdmission, OutboundStreamAdmission, RequestAdmission,
-    SchedulerControlSource, SchedulerHandle, SchedulerState, StreamSessionAdmission,
+    schedule_client_request, ActiveDurableClaim, BackupTransferAdmission, ConnectionAdmission,
+    DurableAdmission, FileChunkAdmission, HttpRequestAdmission, OutboundStreamAdmission,
+    RequestAdmission, SchedulerControlSource, SchedulerHandle, SchedulerState,
+    StreamSessionAdmission,
 };
 pub use http_server::{serve_http1, HttpIdleTimeouts};
 pub use job::{CronTaskId, DurableSourceId, SchedulerAdmissionKind};

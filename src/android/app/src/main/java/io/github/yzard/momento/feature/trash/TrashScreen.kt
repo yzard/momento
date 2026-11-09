@@ -193,7 +193,8 @@ fun TrashScreen(repository: MomentoRepository) {
                                 trashed = true,
                                 tiny = false,
                                 selected = media.id in selectedIds,
-                                modifier = Modifier
+                                selecting = selecting,
+                    modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(1f)
                                     .padding(0.5.dp)
@@ -233,21 +234,22 @@ fun TrashScreen(repository: MomentoRepository) {
                     },
                     modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
                 )
-                if (selecting && selectedIds.isNotEmpty()) {
-                    MomentoSelectionDock(
+                if (selecting) {
+                    io.github.yzard.momento.app.designsystem.PublishSelectionDock {
+MomentoSelectionDock(
                         selectedCount = selectedIds.size,
                         actions = listOf(
                             MomentoSelectionAction(
                                 label = "Restore",
                                 icon = Icons.Default.RestoreFromTrash,
-                                enabled = !working,
+                                enabled = !working && selectedIds.isNotEmpty(),
                                 destructive = false,
                                 perform = { scope.launch { restoreSelected() } },
                             ),
                             MomentoSelectionAction(
                                 label = "Delete forever",
                                 icon = Icons.Default.DeleteForever,
-                                enabled = !working,
+                                enabled = !working && selectedIds.isNotEmpty(),
                                 destructive = true,
                                 perform = { confirmAction = TrashAction.DELETE_SELECTED },
                             ),
@@ -256,8 +258,10 @@ fun TrashScreen(repository: MomentoRepository) {
                             selecting = false
                             selectedIds = emptySet()
                         },
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                        clearEnabled = !working,
+                modifier = Modifier,
                     )
+            }
                 } else if (!selecting) {
                     MomentoFloatingButton(
                         modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),

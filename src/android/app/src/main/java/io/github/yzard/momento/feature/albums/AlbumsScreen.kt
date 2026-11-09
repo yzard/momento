@@ -276,6 +276,7 @@ internal fun AlbumDetailScreen(
             repository = repository,
             pageState = error?.let { PageState.Failed(it) } ?: PageState.Loading,
             selectedMediaIds = emptySet(),
+        selecting = false,
             reserveBottomControls = false,
             bottomContent = null,
             footerContent = null,
@@ -297,6 +298,7 @@ internal fun AlbumDetailScreen(
         repository = repository,
         pageState = PageState.Ready(album.media, refreshing = false),
         selectedMediaIds = selectedIds,
+        selecting = selecting,
         reserveBottomControls = true,
         bottomContent = {
             if (selecting) {
@@ -614,6 +616,7 @@ private fun AlbumTile(
             title = album.name,
             subtitle = null,
             badge = albumMemoryCountLabel(album.mediaCount),
+            subtitleMaxLines = 1,
         )
         IconButton(
             onClick = delete,

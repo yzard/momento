@@ -76,6 +76,7 @@ tar -C "$android_source_dir" \
     --exclude=local.properties \
     -cf - . | tar -C "$android_project_dir" -xf -
 cp -a "$android_test_dir" "$workspace_dir/tests/android"
+cp -a "$source_root/tests/common" "$workspace_dir/tests/common"
 chmod +x "$android_project_dir/gradlew"
 
 export HOME="$build_root/home"

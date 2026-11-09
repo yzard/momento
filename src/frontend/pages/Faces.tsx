@@ -1,7 +1,8 @@
+import SelectionMark from '../components/media/SelectionMark'
 import { useCollectionScrollAnchor } from '../hooks/useCollectionScrollAnchor'
 import { useCallback, useMemo, useRef, useState, type RefObject } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, Check, ChevronLeft, Loader2, UsersRound } from 'lucide-react'
+import { AlertCircle, ChevronLeft, Loader2, UsersRound } from 'lucide-react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { facesApi, type FaceGroup } from '../api/faces'
@@ -469,18 +470,9 @@ function FaceGroupCard({
           aria-label={`${selected ? 'Deselect' : 'Select'} face group ${group.faceGroupId}`}
           aria-pressed={selected}
           onClick={onToggle}
-          className={cn(
-            'absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-md border-2 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-            selected
-              ? 'border-primary bg-primary text-primary-foreground'
-              : 'border-white/80 bg-black/40 text-white hover:bg-black/60'
-          )}
+          className="absolute left-2 top-2 flex h-11 w-11 items-start justify-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         >
-          {selected ? (
-            <Check className="h-4 w-4" />
-          ) : (
-            <span className="h-3.5 w-3.5 rounded-sm border border-current" />
-          )}
+          <SelectionMark selected={selected} />
         </button>
       )}
     </div>

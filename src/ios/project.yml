@@ -1,0 +1,81 @@
+name: Momento
+options:
+  bundleIdPrefix: io.github.yzard.momento
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0.3"
+    CURRENT_PROJECT_VERSION: "15"
+    MOMENTO_DEFAULT_SERVER_ORIGIN: ""
+    MOMENTO_APP_ENTITLEMENTS: ""
+targets:
+  Momento:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Core
+      - Feature
+      - Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.yzard.momento.ios
+        CODE_SIGN_ENTITLEMENTS: $(MOMENTO_APP_ENTITLEMENTS)
+        INFOPLIST_FILE: ../../src/ios/Resources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SUPPORTS_MACCATALYST: NO
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+  MomentoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../../tests/ios/App
+      - path: ../../tests/ios/Core
+      - path: ../../tests/ios/Feature
+      - path: ../../tests/common/resources/media
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: Momento
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.yzard.momento.ios.tests
+  MomentoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: ../../tests/ios/UI
+    dependencies:
+      - target: Momento
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.yzard.momento.ios.uitests
+schemes:
+  Momento:
+    build:
+      targets:
+        Momento: all
+        MomentoTests: [test]
+        MomentoUITests: [test]
+    test:
+      targets: [MomentoTests, MomentoUITests]
+      gatherCoverageData: true
+      environmentVariables:
+        MOMENTO_UI_TEST_ORIGIN: $(MOMENTO_UI_TEST_ORIGIN)
+        MOMENTO_PHYSICAL_READONLY: $(MOMENTO_PHYSICAL_READONLY)
+        MOMENTO_PHOTOKIT_FIXTURE: $(MOMENTO_PHOTOKIT_FIXTURE)
+        MOMENTO_PHOTO_DIAGNOSTIC_ASSET: $(MOMENTO_PHOTO_DIAGNOSTIC_ASSET)
+        MOMENTO_PHOTO_DIAGNOSTIC_EXPECTATION: $(MOMENTO_PHOTO_DIAGNOSTIC_EXPECTATION)
+        MOMENTO_BACKUP_DIAGNOSTIC_ASSETS: $(MOMENTO_BACKUP_DIAGNOSTIC_ASSETS)

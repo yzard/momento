@@ -22,6 +22,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.MomentoSelectionAction
@@ -47,9 +48,7 @@ class FaceSelectionPanelInstrumentedTest {
                                 MomentoSelectionAction("Not a face", Icons.Default.Face, !working, true, {}),
                                 MomentoSelectionAction("Merge", Icons.Default.Face, !working && ids.size > 1, false, {}),
                             ),
-                            removeSelection = { id -> ids = ids - id },
                             clearSelection = { ids = listOf(1L) },
-                            thumbnail = { _, modifier -> Box(modifier.background(Color.Gray)) },
                             modifier = Modifier.testTag("panel"),
                         )
                     }
@@ -60,26 +59,22 @@ class FaceSelectionPanelInstrumentedTest {
 
     @Test fun portraitLargeTextKeepsActionsAndSelectionTogether() {
         showPanel(320, false, 1.4f)
-        composeRule.onNodeWithTag("panel").assertWidthIsEqualTo(320.dp)
-        composeRule.onNodeWithText("Not a face").assertIsDisplayed()
-        composeRule.onNodeWithText("Merge").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Deselect face group 2").performClick()
-        composeRule.onNodeWithText("2 selected").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Clear selection").performClick()
-        composeRule.onNodeWithText("Merge").assertIsNotEnabled()
+        composeRule.onNodeWithText("Not a face").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Merge").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("3 selected").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Clear selection").performScrollTo().performClick()
+        composeRule.onNodeWithText("1 selected").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Merge").performScrollTo().assertIsNotEnabled()
     }
 
-    @Test fun unfoldedWidthCapsPanelInsteadOfStretching() {
+    @Test fun unfoldedDockKeepsTheSelectionCountVisible() {
         showPanel(760, false, 1f)
-        composeRule.onNodeWithTag("panel").assertWidthIsEqualTo(460.dp)
-        composeRule.onNodeWithText("3 selected").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Deselect face group 3").assertIsDisplayed()
+        composeRule.onNodeWithText("3 selected").performScrollTo().assertIsDisplayed()
     }
 
     @Test fun pendingOperationDisablesSelectionChanges() {
         showPanel(360, true, 1f)
         composeRule.onNodeWithContentDescription("Clear selection").assertIsNotEnabled()
-        composeRule.onNodeWithContentDescription("Deselect face group 2").assertIsNotEnabled()
         composeRule.onNodeWithText("Not a face").assertIsNotEnabled()
         composeRule.onNodeWithText("Merge").assertIsNotEnabled()
     }

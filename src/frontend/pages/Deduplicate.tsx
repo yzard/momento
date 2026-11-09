@@ -1,6 +1,7 @@
+import SelectionMark from '../components/media/SelectionMark'
 import { useRef, useState, type RefObject } from 'react'
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, Check, ImageOff, Loader2, Play, Square, Trash2 } from 'lucide-react'
+import { AlertCircle, ImageOff, Loader2, Play, Trash2 } from 'lucide-react'
 import { duplicatesApi, type DuplicateGroup } from '../api/duplicates'
 import { mediaApi } from '../api/media'
 import type { Media } from '../api/types'
@@ -447,14 +448,9 @@ function DuplicateMediaCard({ media, selected, onToggle, onInspect }: DuplicateM
         aria-pressed={selected}
         aria-label={`${selected ? 'Deselect' : 'Select'} ${media.originalFilename}`}
         onClick={onToggle}
-        className={cn(
-          'absolute left-2 top-2 flex h-8 w-8 items-center justify-center rounded-md border-2 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2',
-          selected
-            ? 'border-primary bg-primary text-primary-foreground'
-            : 'border-white/80 bg-black/40 text-white hover:bg-black/60'
-        )}
+        className="absolute left-2 top-2 flex h-11 w-11 items-start justify-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
       >
-        {selected ? <Check className="h-4 w-4" /> : <Square className="h-3.5 w-3.5" />}
+        <SelectionMark selected={selected} />
       </button>
     </div>
   )

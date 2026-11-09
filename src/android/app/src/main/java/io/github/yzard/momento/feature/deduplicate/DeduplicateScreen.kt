@@ -287,7 +287,8 @@ fun DeduplicateScreen(
                 }
             }
             if (selectedMediaIds.isNotEmpty()) {
-                MomentoSelectionDock(
+                io.github.yzard.momento.app.designsystem.PublishSelectionDock {
+MomentoSelectionDock(
                     selectedCount = selectedMediaIds.size,
                     actions = listOf(
                         MomentoSelectionAction(
@@ -299,8 +300,10 @@ fun DeduplicateScreen(
                         ),
                     ),
                     clearSelection = { selectedMediaIds = emptySet() },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                    clearEnabled = !working,
+                modifier = Modifier,
                 )
+            }
             }
         }
     }
@@ -399,7 +402,7 @@ private fun DuplicateMediaCard(
             )
             IconButton(
                 onClick = toggleSelection,
-                modifier = Modifier.align(Alignment.TopEnd),
+                modifier = Modifier.align(Alignment.TopStart),
             ) {
                 MomentoSelectionMark(
                     selected = selected,

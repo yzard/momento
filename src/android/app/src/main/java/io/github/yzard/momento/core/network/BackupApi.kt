@@ -4,6 +4,9 @@ import io.github.yzard.momento.core.model.BackupDeviceRegisterRequest
 import io.github.yzard.momento.core.model.BackupDeviceRegisterResponse
 import io.github.yzard.momento.core.model.BackupUploadCreateRequest
 import io.github.yzard.momento.core.model.BackupUploadIdRequest
+import io.github.yzard.momento.core.model.BackupBatchPrepareRequest
+import io.github.yzard.momento.core.model.BackupUploadIdsRequest
+import io.github.yzard.momento.core.model.BackupBatchResponse
 import io.github.yzard.momento.core.model.BackupUploadResponse
 import okhttp3.RequestBody
 import retrofit2.http.Body
@@ -13,6 +16,9 @@ import retrofit2.http.PUT
 import retrofit2.http.Path
 
 interface BackupApi {
+    @POST("api/v1/backup/upload/batch/prepare") suspend fun prepareBatch(@Body request: BackupBatchPrepareRequest): BackupBatchResponse
+    @POST("api/v1/backup/upload/batch/status") suspend fun batchStatus(@Body request: BackupUploadIdsRequest): BackupBatchResponse
+    @POST("api/v1/backup/upload/batch") suspend fun uploadBatch(@Body bytes: RequestBody): BackupBatchResponse
     @POST("api/v1/backup/device/register") suspend fun registerDevice(@Body request: BackupDeviceRegisterRequest): BackupDeviceRegisterResponse
     @POST("api/v1/backup/upload/create") suspend fun createUpload(@Body request: BackupUploadCreateRequest): BackupUploadResponse
     @POST("api/v1/backup/upload/status") suspend fun uploadStatus(@Body request: BackupUploadIdRequest): BackupUploadResponse

@@ -34,6 +34,7 @@ fun MediaGrid(
     media: List<Media>,
     repository: AuthenticatedMediaRepository,
     selectedMediaIds: Set<Long>,
+    selecting: Boolean,
     contentPadding: PaddingValues,
     headerContent: (@Composable () -> Unit)?,
     footerContent: (@Composable () -> Unit)?,
@@ -55,6 +56,7 @@ fun MediaGrid(
             trashed = false,
             tiny = false,
             selected = selected,
+            selecting = selecting,
             modifier = Modifier
                 .aspectRatio(1f)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -124,6 +126,7 @@ fun SelectableMediaThumbnail(
     trashed: Boolean,
     tiny: Boolean,
     selected: Boolean,
+    selecting: Boolean,
     modifier: Modifier,
 ) {
     Box(
@@ -134,10 +137,12 @@ fun SelectableMediaThumbnail(
         MediaThumbnail(media, repository, trashed, tiny, Modifier.fillMaxSize())
         if (selected) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.38f)))
+        }
+        if (selecting) {
             MomentoSelectionMark(
-                selected = true,
-                contentDescription = "Selected",
-                modifier = Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(8.dp),
+                selected = selected,
+                contentDescription = if (selected) "Selected" else "Not selected",
+                modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(8.dp),
             )
         }
     }

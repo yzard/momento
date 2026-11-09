@@ -76,6 +76,11 @@ fun placeGridColumns(widthDp: Int): Int = when {
 
 fun placeRegion(place: Place): String = listOfNotNull(place.state, place.country).joinToString(", ")
 
+fun placeCardRegion(place: Place): String = listOfNotNull(
+    place.state?.takeIf { it.isNotBlank() },
+    place.country.takeIf { it.isNotBlank() }?.replace(' ', '\u00a0'),
+).joinToString(", ")
+
 fun placeDetailSubtitle(place: Place): String =
     listOf(placeRegion(place), "${place.mediaCount} media").filter { it.isNotEmpty() }.joinToString(" · ")
 
@@ -231,12 +236,18 @@ private fun PlaceTile(place: Place, repository: MomentoRepository, select: () ->
                 modifier = Modifier.align(Alignment.Center),
             )
         }
-        MemoryCardOverlay(
-            title = place.city,
-            subtitle = placeRegion(place),
-            badge = "${place.mediaCount} media",
-        )
+        PlaceCardOverlay(place)
     }
+}
+
+@Composable
+internal fun PlaceCardOverlay(place: Place) {
+    MemoryCardOverlay(
+        title = place.city,
+        subtitle = placeCardRegion(place),
+        badge = place.mediaCount.toString(),
+        subtitleMaxLines = 2,
+    )
 }
 
 @Composable
@@ -285,6 +296,7 @@ internal fun PlaceDetailScreen(
         repository = repository,
         pageState = pageState,
         selectedMediaIds = emptySet(),
+        selecting = false,
         reserveBottomControls = false,
         bottomContent = null,
         footerContent = if (pagingState.hasMore && pagingState.nextCursor != null) {

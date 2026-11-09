@@ -143,10 +143,57 @@ class MediaCacheTest {
         online = false
         val offline = client(cache) { throw IOException("Offline") }
         offline.newCall(Request.Builder().url(preview).header("Range", "bytes=4-").build()).execute().use {
-            // HTTP permits a complete 200 response; Media3 skips to the requested offset locally.
-            assertEquals(200, it.code)
-            assertEquals("complete-video", it.body!!.string())
+            assertEquals(206, it.code)
+            assertEquals("bytes 4-13/14", it.header("Content-Range"))
+            assertEquals(10L, it.body!!.contentLength())
+            assertEquals("lete-video", it.body!!.string())
         }
+    }
+
+    @Test fun cachedVideoTailAndBoundedRangesReturnOnlyRequestedBytes() {
+        val cache = DiskMediaCache(temporary.newFolder(), 1024 * 1024)
+        val preview = url.replace("thumbnail", "preview")
+        val client = client(cache) { response(it, "0123456789", 200, "video") }
+        assertEquals("0123456789", read(client, preview))
+        online = false
+        for ((range, expected, contentRange) in listOf(
+            Triple("bytes=7-9", "789", "bytes 7-9/10"),
+            Triple("bytes=-2", "89", "bytes 8-9/10"),
+            Triple("bytes=2-4", "234", "bytes 2-4/10"),
+            Triple("bytes=8-99", "89", "bytes 8-9/10"),
+        )) {
+            client.newCall(Request.Builder().url(preview).header("Range", range).build()).execute().use {
+                assertEquals(206, it.code)
+                assertEquals(contentRange, it.header("Content-Range"))
+                assertEquals(expected.length.toLong(), it.body!!.contentLength())
+                assertEquals(expected, it.body!!.string())
+            }
+        }
+        for (range in listOf("bytes=10-", "bytes=4-2", "bytes=-0")) {
+            client.newCall(Request.Builder().url(preview).header("Range", range).build()).execute().use {
+                assertEquals(416, it.code); assertEquals("bytes */10", it.header("Content-Range")); assertEquals("", it.body!!.string())
+            }
+        }
+        client.newCall(Request.Builder().url(preview).header("Range", "bytes=8-").header("If-Range", "different-version").build()).execute().use {
+            assertEquals(200, it.code); assertEquals("0123456789", it.body!!.string())
+        }
+        assertEquals("0123456789", read(client, preview))
+    }
+
+    @Test fun clearingCacheRemovesSnapshotsAndPendingWritesWithoutChangingTheLimit() {
+        val directory = temporary.newFolder()
+        val cache = DiskMediaCache(directory, 100_000)
+        put(cache, "first", "cached media")
+        put(cache, "second", "metadata")
+        val pending = cache.begin("pending", 20, CachedMediaMetadata(null, null, null, clock))!!
+        pending.append(Buffer().writeUtf8("part"), 0, 4)
+        cache.clear()
+        pending.complete()
+        assertNull(cache.snapshot("first", clock)); assertNull(cache.snapshot("second", clock)); assertNull(cache.snapshot("pending", clock))
+        assertTrue(directory.listFiles()!!.isEmpty())
+        assertNull(cache.begin("above-limit", 200_000, CachedMediaMetadata(null, null, null, clock)))
+        put(cache, "fresh", "new media")
+        cache.snapshot("fresh", clock)!!.use { assertEquals("new media", it.input.bufferedReader().readText()) }
     }
 
     @Test fun cacheLimitChoicesUseBinaryUnitsAndDefaultTo512MiB() {

@@ -40,22 +40,28 @@ describe('Sidebar', () => {
     expect(labels.indexOf('Places')).toBe(labels.indexOf('Map') + 1)
     expect(labels.indexOf('Faces')).toBe(labels.indexOf('Places') + 1)
     expect(labels.indexOf('Utility')).toBe(labels.indexOf('Faces') + 1)
-    expect(screen.getByText('v1.0.0')).toBeTruthy()
+    const version = screen.getByText('v1.0.0')
     expect(screen.queryByText('Momento v1.0.0')).toBeNull()
     const androidDownload = screen.getByRole('link', {
       name: 'Download Android app',
     })
     expect(androidDownload.getAttribute('href')).toBe('/momento-android.apk')
     expect(androidDownload.getAttribute('download')).toBe('momento-android.apk')
-    expect(screen.getByRole('link', { name: 'Open account settings' }).getAttribute('href')).toBe(
-      '/settings'
-    )
+    const account = screen.getByRole('link', { name: 'Open account settings' })
+    expect(account.getAttribute('href')).toBe('/settings')
+    expect(
+      androidDownload.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(account.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const collapse = screen.getByRole('button', { name: 'Collapse Sidebar' })
+    expect(version.nextElementSibling).toBe(collapse)
     expect(screen.getByText('alice')).toBeTruthy()
     expect(screen.queryByRole('link', { name: 'Admin' })).toBeNull()
   })
 
   it('shows only accessible navigation icons and no labels while collapsed', async () => {
     const user = userEvent.setup()
+    const toggleCollapse = vi.fn()
     const { rerender } = render(
       <MemoryRouter>
         <Sidebar isCollapsed={false} isMobileOpen toggleCollapse={vi.fn()} onNavigate={vi.fn()} />
@@ -67,12 +73,15 @@ describe('Sidebar', () => {
 
     rerender(
       <MemoryRouter>
-        <Sidebar isCollapsed isMobileOpen toggleCollapse={vi.fn()} onNavigate={vi.fn()} />
+        <Sidebar isCollapsed isMobileOpen toggleCollapse={toggleCollapse} onNavigate={vi.fn()} />
       </MemoryRouter>
     )
 
     expect(screen.getByRole('link', { name: 'Open account settings' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Logout' })).toBeNull()
+    expect(screen.queryByText('v1.0.0')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Expand Sidebar' }))
+    expect(toggleCollapse).toHaveBeenCalledOnce()
     expect(screen.getByRole('link', { name: 'Download Android app' })).toBeTruthy()
     for (const label of ['Timeline', 'Albums', 'Map', 'Places', 'Faces', 'Utility', 'Trash']) {
       expect(screen.getByRole('link', { name: label })).toBeTruthy()

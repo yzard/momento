@@ -139,6 +139,16 @@ describe('Lightbox', () => {
     vi.unstubAllGlobals()
   })
 
+  it('keeps native video controls without advertising a caption track', async () => {
+    mocks.getBatch.mockResolvedValue([{ id: 1, mediaType: 'video', originalFilename: 'video.mp4' }])
+    const { container } = render(viewer([1], 0))
+    await waitFor(() => {
+      const video = container.querySelector('video')
+      expect(video?.controls).toBe(true)
+      expect(video?.querySelector('track')).toBeNull()
+    })
+  })
+
   it('seeks videos with arrow keys without navigating media or changing volume', async () => {
     mocks.getBatch.mockResolvedValue([{ id: 1, mediaType: 'video', originalFilename: 'video.mp4' }])
     const change = vi.fn()

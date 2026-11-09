@@ -103,20 +103,59 @@ internal class MediaCacheInterceptor(
         }).build()
     }
 
-    private fun CachedMediaSnapshot.response(request: Request): Response = Response.Builder()
-        .request(request).protocol(Protocol.HTTP_1_1).code(200).message("Cached")
-        .apply {
-            metadata.contentType?.let { header("Content-Type", it) }
-            metadata.etag?.let { header("ETag", it) }
-            metadata.lastModified?.let { header("Last-Modified", it) }
-            header("Content-Length", length.toString())
+    private fun CachedMediaSnapshot.response(request: Request): Response {
+        val ifRange = request.header("If-Range")
+        val mayRange = request.method == "GET" && (ifRange == null ||
+            ifRange == metadata.etag || ifRange == metadata.lastModified)
+        val range = if (mayRange) cachedByteRange(request.header("Range"), length) else null
+        val unsatisfied = range != null && range.isEmpty()
+        val start = range?.first ?: 0L
+        val count = if (unsatisfied) 0L else range?.let { it.last - it.first + 1 } ?: length
+        // ExoPlayer probes an MP4's tail before playback. Seek the file descriptor;
+        // returning a full 200 response makes the player drain the entire cached video.
+        if (!unsatisfied) input.channel.position(start)
+        val bounded = object : ForwardingSource(input.source()) {
+            private var remaining = count
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                if (byteCount == 0L) return 0L
+                if (remaining == 0L) return -1L
+                val read = super.read(sink, minOf(byteCount, remaining))
+                if (read > 0) remaining -= read
+                return read
+            }
+        }.buffer()
+        return Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+            .code(if (unsatisfied) 416 else if (range != null) 206 else 200)
+            .message(if (unsatisfied) "Range Not Satisfiable" else if (range != null) "Partial Content" else "Cached")
+            .apply {
+                metadata.contentType?.let { header("Content-Type", it) }
+                metadata.etag?.let { header("ETag", it) }
+                metadata.lastModified?.let { header("Last-Modified", it) }
+                header("Accept-Ranges", "bytes")
+                header("Content-Length", count.toString())
+                if (unsatisfied) header("Content-Range", "bytes */$length")
+                else if (range != null) header("Content-Range", "bytes ${range.first}-${range.last}/$length")
+            }
+            .body(object : ResponseBody() {
+                override fun contentType() = metadata.contentType?.toMediaTypeOrNull()
+                override fun contentLength() = count
+                override fun source(): BufferedSource = bounded
+            }).build()
+    }
+
+    private fun cachedByteRange(header: String?, length: Long): LongRange? {
+        val match = header?.let { Regex("bytes=(\\d*)-(\\d*)").matchEntire(it) } ?: return null
+        val first = match.groupValues[1]
+        val last = match.groupValues[2]
+        if (first.isEmpty() && last.isEmpty()) return null
+        if (first.isEmpty()) {
+            val suffix = last.toLongOrNull() ?: return null
+            return if (suffix == 0L || length == 0L) LongRange.EMPTY else maxOf(0L, length - suffix)..(length - 1)
         }
-        .body(object : ResponseBody() {
-            private val source = input.source().buffer()
-            override fun contentType() = metadata.contentType?.toMediaTypeOrNull()
-            override fun contentLength() = length
-            override fun source(): BufferedSource = source
-        }).build()
+        val start = first.toLongOrNull() ?: return null
+        val end = if (last.isEmpty()) length - 1 else last.toLongOrNull() ?: return null
+        return if (start >= length || end < start) LongRange.EMPTY else start..minOf(end, length - 1)
+    }
 
     internal companion object {
         const val MAP_FRESH_MILLIS = 30_000L

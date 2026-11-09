@@ -35,7 +35,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -51,8 +50,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import io.github.yzard.momento.app.designsystem.MomentoActionChip
 import androidx.compose.ui.unit.dp
-import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
 import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
 import io.github.yzard.momento.app.designsystem.MomentoSelectionAction
@@ -433,6 +435,7 @@ private fun ContinuousTimelineGrid(
                     trashed = false,
                     tiny = false,
                     selected = timelineItem.media.id in selectedIds,
+                    selecting = selecting,
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(1f)
@@ -472,66 +475,59 @@ private fun ContinuousTimelineGrid(
             cancelSelecting = cancelSelecting,
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 12.dp),
         )
-        if (selectedIds.isNotEmpty()) {
-            MomentoSelectionDock(
+        if (selecting) {
+            io.github.yzard.momento.app.designsystem.PublishSelectionDock {
+MomentoSelectionDock(
                 selectedCount = selectedIds.size,
                 actions = listOf(
                     MomentoSelectionAction(
                         label = "Add to album",
                         icon = Icons.Default.AddPhotoAlternate,
-                        enabled = true,
+                        enabled = selectedIds.isNotEmpty(),
                         destructive = false,
                         perform = requestAddToAlbum,
                     ),
                     MomentoSelectionAction(
                         label = "Move to Trash",
                         icon = Icons.Default.Delete,
-                        enabled = true,
+                        enabled = selectedIds.isNotEmpty(),
                         destructive = true,
                         perform = requestTrash,
                     ),
                 ),
                 clearSelection = cancelSelecting,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                clearEnabled = true,
+                modifier = Modifier,
             )
+            }
         }
     }
 }
 
 @Composable
-private fun FloatingTimelineHeader(
+internal fun FloatingTimelineHeader(
     label: String,
     choosePeriod: () -> Unit,
     modifier: Modifier,
 ) {
-    val floatingColors = momentoFloatingControlColors()
-    Surface(
-        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp),
-        color = floatingColors.container,
-        contentColor = floatingColors.content,
-        shape = MaterialTheme.shapes.extraLarge,
-        shadowElevation = 3.dp,
-        tonalElevation = 1.dp,
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.clickable(onClick = choosePeriod).padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
-            Icon(Icons.Default.CalendarMonth, "Choose period", Modifier.size(18.dp))
-            Spacer(Modifier.size(8.dp))
-            Text(text = label, style = MaterialTheme.typography.labelLarge)
-        }
-    }
+    MomentoActionChip(
+        label = label,
+        icon = Icons.Default.CalendarMonth,
+        enabled = true,
+        onClick = choosePeriod,
+        modifier = modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp)
+            .testTag("timeline-date-control").semantics { contentDescription = "Choose period" },
+    )
 }
 
 @Composable
-private fun TimelineSelectionControl(
+internal fun TimelineSelectionControl(
     selecting: Boolean,
     startSelecting: () -> Unit,
     cancelSelecting: () -> Unit,
     modifier: Modifier,
 ) {
-    MomentoFloatingDock(modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp)) {
+    MomentoFloatingDock(modifier.windowInsetsPadding(WindowInsets.statusBars).padding(top = 10.dp).testTag("timeline-selection-control")) {
         TextButton(onClick = if (selecting) cancelSelecting else startSelecting) {
             Text(if (selecting) "Done" else "Select")
         }

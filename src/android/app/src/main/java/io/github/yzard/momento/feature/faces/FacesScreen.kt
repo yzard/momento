@@ -231,6 +231,7 @@ fun FacesScreen(
                 FaceSelectionPanel(
                     selectedIds = selectedIds.toList(),
                     working = working,
+                    modifier = Modifier,
                     actions = listOf(
                         MomentoSelectionAction("Not a face", Icons.Default.Face, !working, true, { confirmReject = true }),
                         MomentoSelectionAction(
@@ -241,12 +242,7 @@ fun FacesScreen(
                             perform = { confirmMerge = true },
                         ),
                     ),
-                    removeSelection = { id -> selectedIds = selectedIds - id },
                     clearSelection = { selectedIds = emptySet() },
-                    thumbnail = { id, modifier -> SmallFaceThumbnail(repository, id, true, modifier) },
-                    modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                        .padding(horizontal = 16.dp)
-                        .padding(bottom = if (maxWidth < 600.dp) 84.dp else 12.dp),
                 )
             }
         }
@@ -338,6 +334,7 @@ internal fun FaceGroupDetailScreen(
         repository = repository,
         pageState = pageState,
         selectedMediaIds = selectedMedia,
+        selecting = selecting,
         reserveBottomControls = isAdmin,
         bottomContent = if (!isAdmin) null else { {
             Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(12.dp)) {

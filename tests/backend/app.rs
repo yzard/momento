@@ -87,6 +87,28 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
         b"console.log('momento')",
     )
     .expect("script asset");
+    let brand_assets = [
+        ("brand/momento-32.png", "image/png"),
+        ("brand/momento-180.png", "image/png"),
+        ("brand/momento-192.png", "image/png"),
+        ("brand/momento-512.png", "image/png"),
+        ("site.webmanifest", "application/manifest+json"),
+    ];
+    std::fs::create_dir(static_directory.join("brand")).unwrap();
+    for (path, _) in brand_assets {
+        std::fs::write(static_directory.join(path), b"public brand asset").unwrap();
+    }
+    std::fs::write(static_directory.join("brand/private.png"), b"PRIVATE").unwrap();
+    let association =
+        include_bytes!("../../src/backend/resources/webcredentials/apple-app-site-association");
+    let association_path = static_directory.join(".well-known/apple-app-site-association");
+    std::fs::create_dir(static_directory.join(".well-known")).unwrap();
+    std::fs::write(&association_path, association).unwrap();
+    std::fs::write(
+        static_directory.join(".well-known/private.json"),
+        b"PRIVATE",
+    )
+    .unwrap();
 
     let pool = create_pool_at(&data_directory.join("database.sqlite"), 2).expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
@@ -127,6 +149,38 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
     );
     let server = TestServer::new(application).expect("static server");
 
+    for (path, content_type) in brand_assets {
+        let path = format!("/{path}");
+        let response = server.get(&path).await;
+        response.assert_status_ok();
+        response.assert_header("content-type", content_type);
+        assert_eq!(response.as_bytes().as_ref(), b"public brand asset");
+        let head = server.method(axum::http::Method::HEAD, &path).await;
+        head.assert_status_ok();
+        head.assert_header("content-type", content_type);
+        assert!(head.as_bytes().is_empty());
+    }
+
+    let association_response = server.get("/.well-known/apple-app-site-association").await;
+    association_response.assert_status_ok();
+    association_response.assert_header("content-type", "application/json");
+    assert_eq!(association_response.as_bytes().as_ref(), association);
+    let head = server
+        .method(
+            axum::http::Method::HEAD,
+            "/.well-known/apple-app-site-association",
+        )
+        .await;
+    head.assert_status_ok();
+    head.assert_header("content-type", "application/json");
+    assert!(head.as_bytes().is_empty());
+    std::fs::remove_file(association_path).unwrap();
+    server
+        .get("/.well-known/apple-app-site-association")
+        .add_header("accept", "text/html")
+        .await
+        .assert_status_not_found();
+
     let script = server.get("/assets/app.js").await;
     script.assert_status_ok();
     script.assert_header("content-type", "text/javascript");
@@ -155,6 +209,10 @@ async fn static_assets_use_root_relative_file_sessions_and_safe_spa_fallback() {
         "/unknown-page",
         "/assets/../.env",
         "/assets/.secret.js",
+        "/.well-known/private.json",
+        "/.well-known/../.env",
+        "/brand/private.png",
+        "/brand/../.env",
     ] {
         let response = server.get(path).add_header("accept", "text/html").await;
         response.assert_status_not_found();

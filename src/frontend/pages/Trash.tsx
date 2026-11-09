@@ -1,3 +1,4 @@
+import SelectionMark from '../components/media/SelectionMark'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { trashApi, type TrashMedia } from '../api/trash'
@@ -245,16 +246,7 @@ function TrashItem({ item, selected, onToggle, daysRemaining }: TrashItemProps) 
       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity" />
 
       <div className="absolute top-2 left-2">
-        <div
-          className={cn(
-            'w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors',
-            selected
-              ? 'bg-primary border-primary text-primary-foreground'
-              : 'bg-black/50 border-white/50 group-hover:border-white'
-          )}
-        >
-          {selected && <span className="text-xs font-bold">✓</span>}
-        </div>
+        <SelectionMark selected={selected} />
       </div>
 
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">

@@ -1,3 +1,5 @@
+mod batch;
+
 use axum::{
     body::Bytes,
     http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE},

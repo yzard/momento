@@ -127,26 +127,6 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun summarizesDailyBackupSchedule() {
-        assertEquals(
-            "Daily backup is not scheduled",
-            backupScheduleSummary(BackupScheduleStatus.NOT_SCHEDULED, null),
-        )
-        assertEquals(
-            "Daily backup is running now",
-            backupScheduleSummary(BackupScheduleStatus.RUNNING, null),
-        )
-        assertEquals(
-            "Next daily backup: Aug 27, 9:00 AM",
-            backupScheduleSummary(BackupScheduleStatus.WAITING, "Aug 27, 9:00 AM"),
-        )
-        assertEquals(
-            "Daily backup is scheduled",
-            backupScheduleSummary(BackupScheduleStatus.WAITING, null),
-        )
-    }
-
-    @Test
     fun clearsBackupHistoryOnlyWhenRecordsExistAndBackupIsIdle() {
         val completed = listOf(BackupQueueCount(BackupState.COMPLETED, 12))
         assertEquals(true, backupHistoryCanBeCleared(completed, BackupScheduleStatus.WAITING))

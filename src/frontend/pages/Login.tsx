@@ -1,10 +1,11 @@
+import BrandMark from '../components/common/BrandMark'
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import PasswordChangeForm from '../components/auth/PasswordChangeForm'
 import { cn } from '../lib/utils'
 import { MOMENTO_VERSION } from '../lib/version'
-import { ArrowRight, Loader2, Aperture } from 'lucide-react'
+import { ArrowRight, Loader2 } from 'lucide-react'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -40,6 +41,7 @@ export default function Login() {
       <LoginBrand />
       <div className="flex-1 flex items-center justify-center bg-background p-8 lg:p-16">
         <div className="w-full max-w-sm space-y-10 animate-fade-in">
+          <BrandMark className="h-16 w-16 rounded-2xl lg:hidden" alt="Momento" />
           {!showChangePassword && (
             <LoginForm
               username={username}
@@ -85,9 +87,7 @@ function LoginBrand() {
   return (
     <div className="relative hidden items-center justify-center border-r border-border bg-muted/20 p-12 lg:flex lg:w-1/2">
       <div className="relative z-10 max-w-lg">
-        <div className="mb-12 inline-flex rounded-full border border-border bg-card p-4 shadow-sm">
-          <Aperture className="h-10 w-10 text-primary" strokeWidth={1.5} />
-        </div>
+        <BrandMark className="mb-10 h-24 w-24 rounded-3xl shadow-sm" alt="Momento" />
         <h1 className="mb-8 font-display text-7xl font-semibold leading-[0.9] tracking-tighter text-foreground">
           Momento.
         </h1>

@@ -12,8 +12,6 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
 import io.github.yzard.momento.core.model.BackupState
 import kotlinx.coroutines.flow.Flow
 
@@ -44,6 +42,7 @@ data class BackupAssetEntity(
 )
 
 data class BackupQueueCount(val state: BackupState, val count: Long)
+data class BackupUploadFailure(val displayName: String, val errorMessage: String)
 
 data class BackupIntegritySummary(
     val totalRecords: Long,
@@ -70,8 +69,14 @@ interface BackupAssetDao {
     suspend fun deleteAll(): Int
 
     @Query("SELECT * FROM backup_assets ORDER BY modifiedAt DESC") fun observeAll(): Flow<List<BackupAssetEntity>>
-    @Query("SELECT errorMessage FROM backup_assets WHERE errorMessage IS NOT NULL AND errorMessage != '' ORDER BY modifiedAt DESC LIMIT 1")
-    fun observeLatestError(): Flow<String?>
+    @Query("""
+        SELECT displayName, errorMessage FROM backup_assets
+        WHERE state IN ('FAILED', 'TERMINAL_FAILED') AND errorMessage IS NOT NULL AND errorMessage != ''
+          AND (:cameraOnly = 0 OR folder = 'Camera')
+        ORDER BY modifiedAt DESC, uri
+    """)
+    fun observeUploadFailures(cameraOnly: Boolean): Flow<List<BackupUploadFailure>>
+
     @Query("SELECT state, COUNT(*) AS count FROM backup_assets WHERE :cameraOnly = 0 OR folder = 'Camera' GROUP BY state")
     fun observeCounts(cameraOnly: Boolean): Flow<List<BackupQueueCount>>
     @Query("""
@@ -106,10 +111,13 @@ interface BackupAssetDao {
     """)
     suspend fun reconcileDiscovered(uri: String, volumeName: String, clientAssetId: String, operationId: String, displayName: String, mimeType: String, byteSize: Long, modifiedAt: Long, generationModified: Long, folder: String)
 
+    @Query("UPDATE backup_assets SET state = 'FAILED', errorMessage = :error WHERE uri = :uri AND state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING')")
+    suspend fun recordTransferFailure(uri: String, error: String)
+
     @Query("UPDATE backup_assets SET operationId = :operationId, state = 'QUEUED', uploadId = NULL, uploadedBytes = 0, mediaId = NULL, errorMessage = NULL WHERE uri = :uri AND operationId = :previousOperationId AND state != 'CANCELLING'")
     suspend fun restartTransfer(uri: String, previousOperationId: String, operationId: String): Int
 
-    @Query("UPDATE backup_assets SET state = :state, uploadedBytes = :uploadedBytes, uploadId = :uploadId, mediaId = :mediaId, errorMessage = :errorMessage, protocolVersion = :protocolVersion, contentHash = :contentHash WHERE uri = :uri")
+    @Query("UPDATE backup_assets SET state = CASE WHEN state = 'CANCELLING' AND :state IN ('QUEUED', 'FAILED', 'UPLOADING', 'COMPLETING', 'SERVER_PROCESSING') THEN 'CANCELLING' ELSE :state END, uploadedBytes = :uploadedBytes, uploadId = :uploadId, mediaId = :mediaId, errorMessage = :errorMessage, protocolVersion = :protocolVersion, contentHash = :contentHash WHERE uri = :uri")
     suspend fun updateTransfer(uri: String, state: BackupState, uploadedBytes: Long, uploadId: String?, mediaId: Long?, errorMessage: String?, protocolVersion: Int, contentHash: String?)
 
     @Query("""
@@ -135,22 +143,7 @@ abstract class BackupDatabase : RoomDatabase() {
     abstract fun backupAssetDao(): BackupAssetDao
 
     companion object {
-        val MIGRATION_3_4 = object : Migration(3, 4) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE backup_assets ADD COLUMN volumeName TEXT NOT NULL DEFAULT 'external'")
-                db.execSQL("ALTER TABLE backup_assets ADD COLUMN generationModified INTEGER NOT NULL DEFAULT 0")
-            }
-        }
-
-        val MIGRATION_4_5 = object : Migration(4, 5) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE backup_assets ADD COLUMN protocolVersion INTEGER NOT NULL DEFAULT 0")
-                db.execSQL("ALTER TABLE backup_assets ADD COLUMN contentHash TEXT")
-            }
-        }
-
         fun create(context: Context): BackupDatabase = Room.databaseBuilder(context, BackupDatabase::class.java, "momento-backup.db")
-            .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
             .build()
     }
 }

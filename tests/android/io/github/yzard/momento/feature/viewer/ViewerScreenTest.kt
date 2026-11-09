@@ -41,6 +41,13 @@ class ViewerScreenTest {
     }
 
     @Test
+    fun viewerHeadingUsesTheMostSpecificNonblankPlace() {
+        assertEquals("Flushing", viewerPlace(media(1).copy(locationCity = "Flushing", locationState = "New York", locationCountry = "US")))
+        assertEquals("New York", viewerPlace(media(1).copy(locationCity = " ", locationState = "New York")))
+        assertEquals(null, viewerPlace(media(1)))
+    }
+
+    @Test
     fun exposesAvailableMetadataWithoutPlaceholderRows() {
         val rows = media(1).copy(
             width = 1200,

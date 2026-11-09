@@ -245,9 +245,7 @@ function LightboxStage({ media, videoRef }: LightboxStageProps) {
         preload="metadata"
         onError={displayed.handleVideoError}
         onLoadedMetadata={displayed.restoreVideoTime}
-      >
-        <track kind="captions" />
-      </video>
+      />
     )
   }
   return (

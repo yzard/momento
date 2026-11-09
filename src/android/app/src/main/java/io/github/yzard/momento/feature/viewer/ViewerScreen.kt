@@ -47,11 +47,13 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -63,6 +65,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -101,6 +105,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
@@ -117,7 +122,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -126,6 +130,9 @@ import io.github.yzard.momento.feature.albums.AlbumAddMediaSheet
 import io.github.yzard.momento.core.model.Media
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
+import io.github.yzard.momento.app.designsystem.MomentoFloatingSurface
+import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
+import io.github.yzard.momento.app.designsystem.momentoFloatingControlHeight
 import io.github.yzard.momento.app.designsystem.LocalMomentoDarkTheme
 import io.github.yzard.momento.feature.media.MediaThumbnail
 import kotlinx.coroutines.delay
@@ -179,6 +186,10 @@ fun viewerTimestamp(media: Media): ViewerTimestamp {
         time = dateTime.format(DateTimeFormatter.ofPattern("hh:mm a", Locale.ENGLISH)),
     )
 }
+
+fun viewerPlace(media: Media): String? =
+    listOfNotNull(media.locationCity, media.locationState, media.locationCountry)
+        .firstOrNull { it.isNotBlank() }
 
 fun mediaMetadataRows(media: Media): List<Pair<String, String>> = listOfNotNull(
     "Media ID" to media.id.toString(),
@@ -487,7 +498,18 @@ fun ViewerScreen(
                         exit = fadeOut(),
                         modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
                     ) {
-                        ViewerTopControls(timestamp = timestamp, close = close, modifier = Modifier.fillMaxWidth())
+                        ViewerTopControls(
+                            timestamp = timestamp,
+                            place = viewerPlace(item),
+                            close = close,
+                            albums = { chromeState = chromeState.openSheet(ViewerSheet.ALBUMS) },
+                            information = { chromeState = chromeState.toggleSheet(ViewerSheet.INFORMATION) },
+                            share = { scope.launch { shareCurrent() } },
+                            trash = { confirmTrash = true },
+                            sharing = sharing,
+                            interactionChanged = ::changeChromeInteraction,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                     androidx.compose.animation.AnimatedVisibility(
                         visible = chromeState.visible,
@@ -706,9 +728,7 @@ private fun VideoViewer(
     }
     val player = remember(currentUrl) {
         val dataSourceFactory = OkHttpDataSource.Factory(repository.authenticatedHttpClient())
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory))
-            .build()
+        createViewerVideoPlayer(context, dataSourceFactory, viewerDurationHintMs(media.durationSeconds))
             .apply {
                 setMediaItem(PlayerMediaItem.fromUri(currentUrl))
                 prepare()
@@ -796,29 +816,58 @@ private fun VideoViewer(
 }
 
 @Composable
-private fun ViewerTopControls(timestamp: ViewerTimestamp, close: () -> Unit, modifier: Modifier) {
-    val floatingColors = momentoFloatingControlColors(darkTheme = true)
-    Box(modifier.windowInsetsPadding(WindowInsets.safeDrawing).padding(12.dp)) {
-        Surface(
-            modifier = Modifier.align(Alignment.TopCenter),
-            color = floatingColors.container,
-            contentColor = floatingColors.content,
-            shape = MaterialTheme.shapes.extraLarge,
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+private fun ViewerTopControls(
+    timestamp: ViewerTimestamp,
+    place: String?,
+    close: () -> Unit,
+    albums: () -> Unit,
+    information: () -> Unit,
+    share: () -> Unit,
+    trash: () -> Unit,
+    sharing: Boolean,
+    interactionChanged: (Boolean) -> Unit,
+    modifier: Modifier,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    fun dismissMenu() { menuOpen = false; interactionChanged(false) }
+    Row(
+        modifier.windowInsetsPadding(WindowInsets.safeDrawing).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        MomentoFloatingButton(modifier = Modifier, onClick = close) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Close media viewer")
+        }
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            MomentoFloatingSurface(
+                modifier = Modifier.clickable(onClick = information),
             ) {
-                Text(timestamp.date, style = MaterialTheme.typography.titleMedium)
-                if (timestamp.time.isNotEmpty()) {
-                    Text(timestamp.time, style = MaterialTheme.typography.labelSmall)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(horizontal = 18.dp),
+                ) {
+                    Text(place ?: timestamp.date, style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val subtitle = if (place == null) timestamp.time else "${timestamp.date}  ${timestamp.time}"
+                    if (subtitle.isNotBlank()) {
+                        Text(subtitle, style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         }
-        MomentoFloatingButton(
-            modifier = Modifier.align(Alignment.TopEnd),
-            onClick = close,
-        ) { Icon(Icons.Default.Close, "Close media viewer") }
+        Box {
+            MomentoFloatingButton(modifier = Modifier, onClick = { menuOpen = true; interactionChanged(true) }) {
+                Icon(Icons.Default.MoreHoriz, "More media actions")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = ::dismissMenu) {
+                DropdownMenuItem(text = { Text("Information") }, onClick = { dismissMenu(); information() })
+                DropdownMenuItem(text = { Text("Add to album") }, onClick = { dismissMenu(); albums() })
+                DropdownMenuItem(text = { Text("Share original") }, enabled = !sharing, onClick = { dismissMenu(); share() })
+                DropdownMenuItem(text = { Text("Move to Trash") }, onClick = { dismissMenu(); trash() })
+            }
+        }
     }
 }
 
@@ -860,7 +909,7 @@ private fun ViewerBottomControls(
             interactionChanged = interactionChanged,
             modifier = Modifier.widthIn(max = 640.dp).fillMaxWidth(),
         )
-        Box(Modifier.fillMaxWidth().height(56.dp)) {
+        Box(Modifier.fillMaxWidth().height(momentoFloatingControlHeight)) {
             MomentoFloatingButton(
                 modifier = Modifier.align(Alignment.CenterStart),
                 onClick = { userInteracted(); share() },
@@ -874,36 +923,24 @@ private fun ViewerBottomControls(
                     Icon(Icons.Default.Share, "Share media")
                 }
             }
-            Surface(
+            ViewerActionDock(
+                albums = { userInteracted(); albums() },
+                information = { userInteracted(); information() },
                 modifier = Modifier.align(Alignment.Center),
-                color = floatingColors.container,
-                contentColor = floatingColors.content,
-                shape = MaterialTheme.shapes.extraLarge,
-            ) {
-                Row {
-                    TextButton(
-                        onClick = { userInteracted(); albums() },
-                        colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                    ) {
-                        Icon(Icons.Default.AddPhotoAlternate, null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Albums")
-                    }
-                    TextButton(
-                        onClick = { userInteracted(); information() },
-                        colors = ButtonDefaults.textButtonColors(contentColor = floatingColors.content),
-                    ) {
-                        Icon(Icons.Default.Info, null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Info")
-                    }
-                }
-            }
+            )
             MomentoFloatingButton(
                 modifier = Modifier.align(Alignment.CenterEnd),
                 onClick = { userInteracted(); trash() },
             ) { Icon(Icons.Default.Delete, "Move media to Trash") }
         }
+    }
+}
+
+@Composable
+internal fun ViewerActionDock(albums: () -> Unit, information: () -> Unit, modifier: Modifier) {
+    MomentoFloatingDock(modifier) {
+        IconButton(onClick = albums) { Icon(Icons.Default.AddPhotoAlternate, "Add to album") }
+        IconButton(onClick = information) { Icon(Icons.Default.Info, "Information") }
     }
 }
 
@@ -941,8 +978,8 @@ private fun ViewerFilmstrip(
             }
     }
 
-    BoxWithConstraints(modifier.height(58.dp)) {
-        val thumbnailSize = 46.dp
+    BoxWithConstraints(modifier.height(52.dp)) {
+        val thumbnailSize = 32.dp
         val centeredPadding = ((maxWidth - thumbnailSize) / 2).coerceAtLeast(0.dp)
         val edgeVisibility = filmstripEdgeVisibility(
             canScrollBackward = listState.canScrollBackward,
@@ -951,7 +988,7 @@ private fun ViewerFilmstrip(
         LazyRow(
             state = listState,
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = centeredPadding),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -962,12 +999,12 @@ private fun ViewerFilmstrip(
                     trashed = false,
                     tiny = true,
                     modifier = Modifier
-                        .size(thumbnailSize)
-                        .clip(RoundedCornerShape(10.dp))
+                        .width(thumbnailSize).height(44.dp)
+                        .clip(RoundedCornerShape(4.dp))
                         .border(
                             width = if (index == currentIndex) 2.dp else 0.dp,
                             color = floatingColors.content,
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(4.dp),
                         )
                         .clickable { navigate(index) },
                 )

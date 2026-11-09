@@ -14,6 +14,7 @@ FROM momento-api-runtime
 
 COPY --from=backend-builder /app/dist/backend/momento-api /app/momento-api
 COPY --from=momento-frontend /static ./static
+COPY src/backend/resources/webcredentials/apple-app-site-association /app/static/.well-known/apple-app-site-association
 COPY dist/android/*.apk /app/android/
 RUN set -- /app/android/*.apk; \
     [ "$#" -eq 1 ]; \

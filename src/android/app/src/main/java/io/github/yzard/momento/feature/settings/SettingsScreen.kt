@@ -2,7 +2,6 @@ package io.github.yzard.momento.feature.settings
 
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.lazy.LazyColumn
@@ -12,7 +11,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.MomentoPageScaffold
 import io.github.yzard.momento.core.data.MomentoRepository
 import io.github.yzard.momento.core.data.Settings
@@ -25,6 +23,7 @@ fun SettingsScreen(
     repository: MomentoRepository,
     settingsStore: SettingsStore,
     user: User?,
+    serverVersion: String?,
     backupAvailable: Boolean,
     logout: () -> Unit,
 ) {
@@ -39,14 +38,13 @@ fun SettingsScreen(
         onBack = null,
         trailingContent = null,
         reserveBottomControls = true,
-        edgeToEdgeContent = false,
+        edgeToEdgeContent = true,
         bottomContent = null,
         modifier = Modifier,
     ) { contentPadding ->
         LazyColumn(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .widthIn(max = 840.dp)
                 .fillMaxHeight()
                 .fillMaxWidth(),
             contentPadding = contentPadding,
@@ -56,6 +54,7 @@ fun SettingsScreen(
                     repository = repository,
                     user = user,
                     origin = settings.origin,
+                    serverVersion = serverVersion,
                     logout = logout,
                 )
             }

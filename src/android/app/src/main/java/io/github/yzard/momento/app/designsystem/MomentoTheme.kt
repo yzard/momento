@@ -1,18 +1,15 @@
 package io.github.yzard.momento.app.designsystem
 
 import android.app.Activity
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Typography
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
@@ -147,13 +144,16 @@ data class FloatingControlColors(
     val outline: Color,
 )
 
+val momentoFloatingElevation = 16.dp
+val momentoFloatingControlHeight = 56.dp
+
 val LocalMomentoDarkTheme = staticCompositionLocalOf { false }
 
 fun momentoFloatingControlColors(darkTheme: Boolean): FloatingControlColors = FloatingControlColors(
-    container = if (darkTheme) Color(0xFF1C1C1E).copy(alpha = 0.94f) else Color(0xFFF5F5F7).copy(alpha = 0.96f),
+    container = if (darkTheme) Color(0xFF1C1C1E).copy(alpha = 0.97f) else Color.White.copy(alpha = 0.98f),
     content = if (darkTheme) Color.White else Color.Black,
-    selected = if (darkTheme) Color.White.copy(alpha = 0.16f) else Color.Black.copy(alpha = 0.10f),
-    outline = if (darkTheme) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f),
+    selected = if (darkTheme) Color.White.copy(alpha = 0.22f) else Color.Black.copy(alpha = 0.12f),
+    outline = if (darkTheme) Color.White.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.20f),
 )
 
 @Composable
@@ -166,16 +166,7 @@ fun MomentoFloatingButton(
     onClick: () -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val colors = momentoFloatingControlColors()
-    Surface(
-        modifier = modifier.size(56.dp),
-        shape = CircleShape,
-        color = colors.container,
-        contentColor = colors.content,
-        border = BorderStroke(1.dp, colors.outline),
-        shadowElevation = 0.dp,
-        tonalElevation = 0.dp,
-    ) {
+    MomentoFloatingSurface(modifier.size(momentoFloatingControlHeight)) {
         Box(
             modifier = Modifier.fillMaxSize().clickable(role = Role.Button, onClick = onClick),
             contentAlignment = Alignment.Center,

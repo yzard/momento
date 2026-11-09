@@ -38,6 +38,9 @@ export function systemPrefersDark(): boolean {
 export function applyTheme(theme: ResolvedTheme): void {
   document.documentElement.classList.toggle('dark', theme === 'dark')
   document.documentElement.style.colorScheme = theme
+  document
+    .querySelector('meta[name="theme-color"]')
+    ?.setAttribute('content', theme === 'dark' ? '#000000' : '#ffffff')
 }
 
 export function readThemePreference(): ThemePreference {

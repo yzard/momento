@@ -11,6 +11,7 @@ usage() {
 Usage:
   $script_name <keystore-directory>
   $script_name publish <github|docker> <namespace> <keystore-directory>
+  $script_name publish-api <github|docker> <namespace> <keystore-directory>
   $script_name --help
 
 Commands:
@@ -18,6 +19,8 @@ Commands:
                    and llm-service images and load them into the Docker daemon.
   publish          Build the same Android release and service images, then push
                    both service images. Android development and tests are not run.
+  publish-api      Build and publish the signed Android release and API image only.
+                   Keep the separate LLM image unchanged for client/Web releases.
 
 Arguments:
   github           Publish to ghcr.io.
@@ -55,15 +58,17 @@ fi
 VERSION=$(<"$ROOT_DIR/src/backend/version.txt")
 
 PUBLISH=false
+BUILD_LLM=true
 REGISTRY=
 NAMESPACE=$LOCAL_NAMESPACE
 KEYSTORE_DIR=
 
-if [[ $# -eq 1 && $1 != publish ]]; then
+if [[ $# -eq 1 && $1 != publish && $1 != publish-api ]]; then
     OUTPUT_MODE=--load
     KEYSTORE_DIR=$1
-elif [[ $# -eq 4 && $1 == publish ]]; then
+elif [[ $# -eq 4 && ( $1 == publish || $1 == publish-api ) ]]; then
     PUBLISH=true
+    if [[ $1 == publish-api ]]; then BUILD_LLM=false; fi
     OUTPUT_MODE=--push
     case "$2" in
         github)
@@ -217,14 +222,18 @@ if ! service_reused "${IMAGE_PREFIX}/momento" "$api_inputs"; then
         --build-context "momento-api-runtime=oci-layout://$MOMENTO_BUILD_WORK/oci/api-runtime/$api_runtime_inputs" \
         --build-context "momento-frontend=oci-layout://$MOMENTO_BUILD_WORK/oci/frontend/$frontend_inputs"
 fi
-if ! service_reused "${IMAGE_PREFIX}/momento-llm-service" "$llm_inputs"; then
+if [[ $BUILD_LLM == true ]] && ! service_reused "${IMAGE_PREFIX}/momento-llm-service" "$llm_inputs"; then
     momento_build_oci "$ROOT_DIR" llm-runtime Dockerfile.llm-runtime "$llm_runtime_inputs"
     build_image Dockerfile.llm "${IMAGE_PREFIX}/momento-llm-service" "$llm_inputs" \
         --build-context "momento-llm-runtime=oci-layout://$MOMENTO_BUILD_WORK/oci/llm-runtime/$llm_runtime_inputs"
 fi
 
 if [[ "$PUBLISH" == true ]]; then
-    printf 'Published Momento %s images to %s\n' "$TAG" "$IMAGE_PREFIX"
+    if [[ $BUILD_LLM == true ]]; then
+        printf 'Published Momento %s images to %s\n' "$TAG" "$IMAGE_PREFIX"
+    else
+        printf 'Published Momento %s API image with signed Android release to %s\n' "$TAG" "$IMAGE_PREFIX"
+    fi
 else
     printf 'Built Momento %s images locally under %s\n' "$TAG" "$IMAGE_PREFIX"
 fi

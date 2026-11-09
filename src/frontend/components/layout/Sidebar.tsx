@@ -1,3 +1,4 @@
+import BrandMark from '../common/BrandMark'
 import { NavLink, useLocation } from 'react-router-dom'
 import { useState } from 'react'
 import {
@@ -231,19 +232,6 @@ function NavSection({ item, isCollapsed, childPlacement, onNavigate }: NavSectio
   )
 }
 
-function SidebarBrandLinks({ isCollapsed }: Pick<SidebarProps, 'isCollapsed'>) {
-  if (isCollapsed) return <AndroidAppDownloadLink compact />
-
-  return (
-    <div className="animate-fade-in space-y-2">
-      <div className="rounded-xl border border-primary/10 bg-primary/5 px-3 py-2">
-        <p className="text-center text-xs font-medium text-primary/80">v{MOMENTO_VERSION}</p>
-      </div>
-      <AndroidAppDownloadLink compact={false} />
-    </div>
-  )
-}
-
 function SidebarCollapseButton({
   isCollapsed,
   onClick,
@@ -265,42 +253,38 @@ function SidebarCollapseButton({
 
 function SidebarAccountControls({
   isCollapsed,
-  toggleCollapse,
   onNavigate,
-}: Pick<SidebarProps, 'isCollapsed' | 'toggleCollapse' | 'onNavigate'>) {
+}: Pick<SidebarProps, 'isCollapsed' | 'onNavigate'>) {
   const { user, logout } = useAuth()
 
   return (
-    <div className="space-y-2">
-      <div className={cn('flex items-center', isCollapsed ? 'flex-col gap-3' : 'gap-2')}>
-        <NavLink
-          to="/settings"
-          onClick={onNavigate}
-          aria-label="Open account settings"
-          title={user?.username ?? 'Account'}
-          className={cn(
-            'flex items-center rounded-lg text-foreground transition-colors duration-200 hover:bg-muted/50',
-            isCollapsed ? 'justify-center p-1' : 'min-w-0 flex-1 gap-3 p-1.5'
-          )}
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
-            {user?.username?.[0]?.toUpperCase()}
-          </span>
-          {!isCollapsed && <span className="truncate text-sm font-medium">{user?.username}</span>}
-        </NavLink>
-        {!isCollapsed && (
-          <button
-            type="button"
-            onClick={logout}
-            aria-label="Logout"
-            title="Logout"
-            className="cursor-pointer rounded-lg p-2 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
-          >
-            <LogOut className="h-5 w-5" strokeWidth={2} />
-          </button>
+    <div className={cn('flex items-center', isCollapsed ? 'justify-center' : 'gap-2')}>
+      <NavLink
+        to="/settings"
+        onClick={onNavigate}
+        aria-label="Open account settings"
+        title={user?.username ?? 'Account'}
+        className={cn(
+          'flex items-center rounded-lg text-foreground transition-colors duration-200 hover:bg-muted/50',
+          isCollapsed ? 'justify-center p-1' : 'min-w-0 flex-1 gap-3 p-1.5'
         )}
-        <SidebarCollapseButton isCollapsed={isCollapsed} onClick={toggleCollapse} />
-      </div>
+      >
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
+          {user?.username?.[0]?.toUpperCase()}
+        </span>
+        {!isCollapsed && <span className="truncate text-sm font-medium">{user?.username}</span>}
+      </NavLink>
+      {!isCollapsed && (
+        <button
+          type="button"
+          onClick={logout}
+          aria-label="Logout"
+          title="Logout"
+          className="cursor-pointer rounded-lg p-2 text-muted-foreground transition-colors duration-200 hover:bg-destructive/10 hover:text-destructive"
+        >
+          <LogOut className="h-5 w-5" strokeWidth={2} />
+        </button>
+      )}
     </div>
   )
 }
@@ -317,12 +301,23 @@ function SidebarFooter({
         isCollapsed ? 'flex flex-col items-center gap-3 p-3' : 'space-y-3 p-6'
       )}
     >
-      <SidebarBrandLinks isCollapsed={isCollapsed} />
-      <SidebarAccountControls
-        isCollapsed={isCollapsed}
-        toggleCollapse={toggleCollapse}
-        onNavigate={onNavigate}
-      />
+      <AndroidAppDownloadLink compact={isCollapsed} />
+      <SidebarAccountControls isCollapsed={isCollapsed} onNavigate={onNavigate} />
+      <div
+        className={cn(
+          'items-center',
+          isCollapsed
+            ? 'flex justify-center'
+            : 'grid grid-cols-[2.25rem_1fr_2.25rem] rounded-xl border border-primary/10 bg-primary/5'
+        )}
+      >
+        {!isCollapsed && (
+          <p className="col-start-2 text-center text-xs font-medium text-primary/80">
+            v{MOMENTO_VERSION}
+          </p>
+        )}
+        <SidebarCollapseButton isCollapsed={isCollapsed} onClick={toggleCollapse} />
+      </div>
     </div>
   )
 }
@@ -344,8 +339,12 @@ export default function Sidebar({
       )}
     >
       <div
-        className={cn('flex items-center', isCollapsed ? 'justify-center p-4 py-6' : 'p-8 pb-10')}
+        className={cn(
+          'flex items-center gap-3',
+          isCollapsed ? 'justify-center p-4 py-6' : 'p-8 pb-10'
+        )}
       >
+        <BrandMark className="h-9 w-9 shrink-0 rounded-xl" alt={isCollapsed ? 'Momento' : ''} />
         {!isCollapsed && (
           <h2 className="text-2xl font-display font-bold text-foreground tracking-tight animate-fade-in">
             Momento

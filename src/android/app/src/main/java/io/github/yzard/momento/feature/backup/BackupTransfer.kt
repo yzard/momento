@@ -36,10 +36,17 @@ import io.github.yzard.momento.core.database.BackupAssetDao
 import io.github.yzard.momento.core.database.BackupAssetEntity
 import io.github.yzard.momento.core.database.BackupDatabase
 import io.github.yzard.momento.core.model.BackupState
+import io.github.yzard.momento.core.model.BackupBatchCapabilities
+import io.github.yzard.momento.core.model.BackupBatchPrepareRequest
+import io.github.yzard.momento.core.model.BackupUploadIdsRequest
 import io.github.yzard.momento.core.model.BackupCapabilities
 import io.github.yzard.momento.core.model.BackupUploadCreateRequest
 import io.github.yzard.momento.core.model.BackupUploadResponse
 import io.github.yzard.momento.core.network.NetworkClient
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -72,7 +79,7 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 
-internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER }
+internal enum class BackupProgress { COMPLETED, WAITING_FOR_SERVER, PREPARED }
 
 internal fun backupCanRun(capabilities: BackupCapabilities): Boolean =
     capabilities.enabled && capabilities.protocolVersion == LOSSLESS_BACKUP_PROTOCOL_VERSION
@@ -133,24 +140,36 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 return Result.success()
             }
             require(backupCapabilities.maxChunkBytes > 0) { "Server backup chunk limit must be positive" }
-            val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(1024L * 1024L).toInt()
+            val chunkSize = backupCapabilities.maxChunkBytes.coerceAtMost(8L * 1024L * 1024L).toInt()
             setProgress(androidx.work.workDataOf(BACKUP_PHASE_KEY to "uploading"))
             var waitingForServer = false
-            for (asset in assets.pending(settings.cameraOnly)) {
-                val backupProgress = transfer(
-                    asset,
-                    assets,
-                    repository,
-                    deviceId,
-                    chunkSize,
-                    locationMetadataAccess,
-                )
-                if (backupProgress == BackupProgress.COMPLETED) {
-                    deleteBackupSnapshot(applicationContext, asset.operationId)
-                } else {
-                    waitingForServer = true
-                }
+            val batch = backupCapabilities.batch?.takeIf { it.version == 1 && it.maxBytes > 0 && it.maxItems > 0 && it.maxManifestBytes > 0 }
+            val group = mutableListOf<PreparedBackupUpload>()
+            suspend fun flush() {
+                if (group.isEmpty()) return
+                if (uploadBatch(group.toList(), assets, repository, requireNotNull(batch))) waitingForServer = true
+                group.clear()
             }
+            if (batch != null) waitingForServer = pollBatchProcessing(assets, repository, batch, settings.cameraOnly)
+            for (asset in assets.pending(settings.cameraOnly)) {
+                if (batch != null && asset.state == BackupState.SERVER_PROCESSING) continue
+                var prepared: PreparedBackupUpload? = null
+                val result = transfer(asset, assets, repository, deviceId, chunkSize, locationMetadataAccess,
+                    if (batch == null) null else { value -> prepared = value })
+                if (result == BackupProgress.PREPARED) {
+                    val item = requireNotNull(prepared)
+                    val limits = requireNotNull(batch)
+                    val fitsBytes = backupBatchCanAppend(group.map { it.snapshot.byteSize }, item.snapshot.byteSize, limits)
+                    val fitsJSON = Json.encodeToString(BackupBatchPrepareRequest((group + item).map { it.manifest })).toByteArray(Charsets.UTF_8).size <= limits.maxManifestBytes
+                    if (group.isNotEmpty() && (!fitsBytes || !fitsJSON)) flush()
+                    val fitsSingleJSON = Json.encodeToString(BackupBatchPrepareRequest(listOf(item.manifest))).toByteArray(Charsets.UTF_8).size <= limits.maxManifestBytes
+                    if (item.snapshot.byteSize > limits.maxBytes || !fitsSingleJSON) {
+                        if (transfer(asset, assets, repository, deviceId, chunkSize, locationMetadataAccess, null) == BackupProgress.WAITING_FOR_SERVER) waitingForServer = true
+                    } else { group.add(item) }
+                } else if (result == BackupProgress.WAITING_FOR_SERVER) { waitingForServer = true }
+            }
+            flush()
+            if (batch != null) waitingForServer = pollBatchProcessing(assets, repository, batch, settings.cameraOnly) || waitingForServer
             BackupDiagnosticLog.append(applicationContext, "Backup pass finished: waitingForServer=$waitingForServer")
             if (waitingForServer) Result.retry() else Result.success()
         } catch (error: IOException) {
@@ -175,6 +194,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
         deviceId: String,
         chunkSize: Int,
         locationMetadataAccess: BackupLocationMetadataAccess,
+        prepareBatch: ((PreparedBackupUpload) -> Unit)?,
     ): BackupProgress {
         var asset = originalAsset
         var phase = "prepare snapshot"
@@ -186,6 +206,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             if (asset.state == BackupState.CANCELLING) {
                 return cancelBackupAsset(asset, assets, repository)
             }
+            setProgress(backupFileProgressData(asset.displayName, asset.uploadedBytes, asset.byteSize))
             var snapshot = prepareBackupSnapshot(applicationContext, asset, locationMetadataAccess)
             activeProtocolVersion = LOSSLESS_BACKUP_PROTOCOL_VERSION
             activeContentHash = snapshot.contentHash
@@ -223,6 +244,10 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 sourceModifiedAt = Instant.ofEpochSecond(asset.modifiedAt).toString(),
                 metadata = snapshot.metadata,
             )
+            if (existing == null && prepareBatch != null) {
+                prepareBatch(PreparedBackupUpload(asset, snapshot, createRequest))
+                return BackupProgress.PREPARED
+            }
             val upload = when {
                 existing == null -> repository.createBackupUpload(createRequest)
                 existing.contentHash == null -> repository.createBackupUpload(createRequest)
@@ -240,6 +265,7 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                 )
             }
 
+            setProgress(backupFileProgressData(asset.displayName, upload.uploadedSize, snapshot.byteSize))
             var offset = upload.uploadedSize
             assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, upload.uploadId, null, null, activeProtocolVersion, activeContentHash)
             val mediaStream = try {
@@ -271,7 +297,8 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
                     offset = response.uploadedSize
                     durableUploadedBytes = offset
                     assets.updateTransfer(asset.uri, BackupState.UPLOADING, offset, response.uploadId, response.mediaId, response.error, activeProtocolVersion, activeContentHash)
-                    setForeground(progress("Uploading ${asset.displayName}"))
+                    setProgress(backupFileProgressData(asset.displayName, offset, snapshot.byteSize))
+                    setForeground(progress(backupFileStatus(asset.displayName, offset, snapshot.byteSize)))
                 }
             }
             if (offset != snapshot.byteSize) throw TerminalBackupException("Upload ended before source file")
@@ -347,7 +374,12 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
         assets: BackupAssetDao,
         protocolVersion: Int,
         contentHash: String?,
-    ): BackupProgress = when (response.status) {
+    ): BackupProgress {
+        require(response.uploadId.isNotBlank() && (asset.uploadId == null || asset.uploadId == response.uploadId) &&
+            response.expectedSize == asset.byteSize && response.uploadedSize in 0..response.expectedSize &&
+            (response.contentHash == null || response.contentHash == contentHash) &&
+            response.status in setOf("completed", "failed", "cancelled", "expired", "queued", "processing", "uploading", "writing", "completing", "cancelling")) { "Server upload does not match the protected original" }
+        return when (response.status) {
         "completed" -> {
             if (!completedBackupHashMatches(protocolVersion, contentHash, response.contentHash)) {
                 throw TerminalBackupException("Server completion hash does not match the original snapshot")
@@ -371,6 +403,83 @@ class BackupWorker(context: Context, parameters: WorkerParameters) : CoroutineWo
             assets.updateTransfer(asset.uri, BackupState.SERVER_PROCESSING, response.uploadedSize, response.uploadId, response.mediaId, response.error, protocolVersion, contentHash)
             BackupProgress.WAITING_FOR_SERVER
         }
+    }
+
+    }
+
+    private suspend fun pollBatchProcessing(assets: BackupAssetDao, repository: BackupRepository, limits: BackupBatchCapabilities, cameraOnly: Boolean): Boolean {
+        val pending = assets.pending(cameraOnly).filter { it.state == BackupState.SERVER_PROCESSING }
+        for (group in pending.chunked(limits.maxItems)) {
+            val ids = group.map { requireNotNull(it.uploadId) }
+            val results = repository.backupBatchStatus(BackupUploadIdsRequest(ids)).indexed(ids)
+            for (asset in group) {
+                val item = results.getValue(requireNotNull(asset.uploadId))
+                if (item.error != null) {
+                    assets.updateTransfer(asset.uri, BackupState.FAILED, asset.uploadedBytes, asset.uploadId, asset.mediaId, item.error.detail, asset.protocolVersion, asset.contentHash)
+                } else { recordServerStatus(asset, requireNotNull(item.upload), assets, asset.protocolVersion, asset.contentHash) }
+            }
+        }
+        return assets.pending(cameraOnly).any { it.state == BackupState.SERVER_PROCESSING || it.state == BackupState.UPLOADING || it.state == BackupState.COMPLETING }
+    }
+
+    private suspend fun uploadBatch(group: List<PreparedBackupUpload>, assets: BackupAssetDao, repository: BackupRepository, limits: BackupBatchCapabilities): Boolean {
+        val accepted = mutableListOf<BackupBatchFile>()
+        val prepared = repository.prepareBackupBatch(BackupBatchPrepareRequest(group.map { it.manifest })).indexed(group.map { it.asset.operationId })
+        var waiting = false
+        for (item in group) {
+            val result = prepared.getValue(item.asset.operationId)
+            val error = result.error
+            if (error != null) {
+                assets.updateTransfer(item.asset.uri, BackupState.FAILED, 0, null, null, error.detail, LOSSLESS_BACKUP_PROTOCOL_VERSION, item.snapshot.contentHash)
+                if (isRetryable(error.status)) waiting = true
+                continue
+            }
+            val upload = requireNotNull(result.upload)
+            require(upload.uploadId.isNotBlank() && upload.expectedSize == item.snapshot.byteSize && upload.uploadedSize in 0..upload.expectedSize &&
+                upload.contentHash == item.snapshot.contentHash) { "Server batch does not match the protected original" }
+            if (upload.status == "uploading") {
+                assets.updateTransfer(item.asset.uri, BackupState.UPLOADING, upload.uploadedSize, upload.uploadId, null, null, LOSSLESS_BACKUP_PROTOCOL_VERSION, item.snapshot.contentHash)
+                if (upload.uploadedSize == 0L) accepted.add(BackupBatchFile(upload.uploadId, item)) else waiting = true
+            } else if (recordServerStatus(item.asset, upload, assets, LOSSLESS_BACKUP_PROTOCOL_VERSION, item.snapshot.contentHash) == BackupProgress.WAITING_FOR_SERVER) { waiting = true }
+        }
+        if (accepted.isEmpty()) return waiting
+        // All IDs are durable before the request starts. Unknown outcomes reconcile through status on retry.
+        try {
+            val response = coroutineScope {
+                data class FileProgress(val name: String, val sent: Long, val total: Long)
+                val events = Channel<FileProgress>(Channel.CONFLATED)
+                val monitor = launch {
+                    var last = 0L
+                    for (event in events) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - last >= 250 || event.sent == event.total) {
+                            last = now
+                            setProgress(backupFileProgressData(event.name, event.sent, event.total))
+                            setForeground(progress(backupFileStatus(event.name, event.sent, event.total)))
+                        }
+                    }
+                }
+                try { repository.uploadBackupBatch(BackupBatchRequestBody(accepted, limits) { name, sent, total -> events.trySend(FileProgress(name, sent, total)) }) }
+                finally { events.close(); monitor.join() }
+            }
+            val results = response.indexed(accepted.map { it.uploadId })
+            for ((uploadId, item) in accepted) {
+                val result = results.getValue(uploadId)
+                if (result.error != null) {
+                    assets.updateTransfer(item.asset.uri, BackupState.FAILED, 0, uploadId, null, result.error.detail, LOSSLESS_BACKUP_PROTOCOL_VERSION, item.snapshot.contentHash)
+                    waiting = true
+                } else if (recordServerStatus(item.asset.copy(uploadId = uploadId), requireNotNull(result.upload), assets, LOSSLESS_BACKUP_PROTOCOL_VERSION, item.snapshot.contentHash) == BackupProgress.WAITING_FOR_SERVER) { waiting = true }
+            }
+        } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            BackupDiagnosticLog.append(applicationContext, "Batch transfer interrupted: ${backupFailureDetail(error)}")
+            for ((_, item) in accepted) {
+                assets.recordTransferFailure(item.asset.uri, backupFailureDetail(error))
+            }
+            // Keep IDs and durable offsets; status reconciliation distinguishes committed files on retry.
+            throw error
+        }
+        return waiting
     }
 
     private fun skipFully(stream: java.io.InputStream, offset: Long) {

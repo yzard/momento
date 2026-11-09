@@ -35,7 +35,7 @@ internal fun AndroidUpdateSettingsSection(repository: AndroidUpdateRepository) {
         AndroidUpdateCoordinator(context.applicationContext, repository)
     }
     var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Check the signed-in host for a newer Android release") }
+    var status by remember { mutableStateOf<String?>(null) }
     var pendingUpdatePath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val installerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -101,8 +101,8 @@ internal fun AndroidUpdateSettingsSection(repository: AndroidUpdateRepository) {
     LaunchedEffect(coordinator) { coordinator.clearObsoleteUpdates() }
 
     ListItem(
-        headlineContent = { Text("Momento ${BuildConfig.VERSION_NAME}") },
-        supportingContent = { Text(status) },
+        headlineContent = { Text("Momento Android Client ${BuildConfig.VERSION_NAME}") },
+        supportingContent = status?.let { message -> { Text(message) } },
         trailingContent = {
             SettingsTrailingActions {
                 TextButton(

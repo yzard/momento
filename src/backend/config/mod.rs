@@ -203,6 +203,8 @@ impl WebDAVConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupConfig {
+    #[serde(default = "defaults::backup_max_batch_bytes")]
+    pub max_batch_bytes: u64,
     #[serde(default = "defaults::backup_max_upload_bytes")]
     pub max_upload_bytes: u64,
     #[serde(default = "defaults::backup_max_chunk_bytes")]
@@ -214,6 +216,7 @@ pub struct BackupConfig {
 impl Default for BackupConfig {
     fn default() -> Self {
         Self {
+            max_batch_bytes: defaults::BACKUP_MAX_BATCH_BYTES,
             max_upload_bytes: defaults::BACKUP_MAX_UPLOAD_BYTES,
             max_chunk_bytes: defaults::BACKUP_MAX_CHUNK_BYTES,
             session_expiry_hours: defaults::BACKUP_SESSION_EXPIRY_HOURS,
@@ -223,7 +226,8 @@ impl Default for BackupConfig {
 
 impl BackupConfig {
     fn validate(&self) -> std::io::Result<()> {
-        if self.max_upload_bytes == 0
+        if self.max_batch_bytes == 0
+            || self.max_upload_bytes == 0
             || self.max_chunk_bytes == 0
             || self.max_chunk_bytes > self.max_upload_bytes
         {

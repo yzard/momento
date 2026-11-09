@@ -24,6 +24,8 @@ class MediaCacheStore private constructor(context: Context) {
         selected.value = limit
     }
 
+    suspend fun clear() = withContext(Dispatchers.IO) { disk.clear() }
+
     fun interceptor(namespace: () -> String?): Interceptor = MediaCacheInterceptor(disk, namespace, {
         val network = connectivity.activeNetwork
         network != null && connectivity.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true

@@ -129,7 +129,9 @@ describe('Places page', () => {
     expect(parisCard.className).toContain('aspect-[3/2]')
     expect(screen.getByText('Paris')).toBeTruthy()
     expect(screen.getByText('Ile-de-France, France')).toBeTruthy()
-    expect(screen.getByText('8 media')).toBeTruthy()
+    expect(screen.getByText('8')).toBeTruthy()
+    expect(screen.getByText('3')).toBeTruthy()
+    expect(screen.queryByText(/^\d+ media$/)).toBeNull()
     expect(screen.getByText('Japan')).toBeTruthy()
     expect(
       screen.getByRole('heading', { name: 'Places' }).closest('[data-page-frame="true"]')

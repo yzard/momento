@@ -2393,7 +2393,14 @@ async fn backup_cancellation_commits_product_state_and_journal_cleanup_atomicall
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[security]\nsecret_key = {:?}\n",
+            crate::test_utils::test_config().security.secret_key
+        ),
+    )
+    .expect("write config");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;

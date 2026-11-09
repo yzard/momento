@@ -704,12 +704,13 @@ fn test_load_config_reads_backup_settings_and_rejects_invalid_limits() {
     let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
     let path = write_config(
         &dir,
-        "[backup]\nmax_upload_bytes = 4096\nmax_chunk_bytes = 1024\nsession_expiry_hours = 12\n",
+        "[backup]\nmax_upload_bytes = 4096\nmax_chunk_bytes = 1024\nmax_batch_bytes = 8192\nsession_expiry_hours = 12\n",
     );
 
     let config = load_config(&path).expect("Failed to load backup config");
     assert_eq!(config.backup.max_upload_bytes, 4096);
     assert_eq!(config.backup.max_chunk_bytes, 1024);
+    assert_eq!(config.backup.max_batch_bytes, 8192);
     assert_eq!(config.backup.session_expiry_hours, 12);
 
     let path = write_config(
@@ -718,6 +719,21 @@ fn test_load_config_reads_backup_settings_and_rejects_invalid_limits() {
     );
     let error = load_config(&path).expect_err("Chunk limit larger than upload limit must fail");
     assert!(error.to_string().contains("backup"));
+}
+
+#[test]
+fn test_backup_batch_default_and_zero_limit_validation() {
+    let dir = crate::temporary::tempdir().expect("temporary config");
+    let path = write_config(&dir, "[backup]\n");
+    assert_eq!(
+        load_config(&path).unwrap().backup.max_batch_bytes,
+        50_000_000
+    );
+    let path = write_config(&dir, "[backup]\nmax_batch_bytes = 0\n");
+    assert!(load_config(&path)
+        .unwrap_err()
+        .to_string()
+        .contains("backup"));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 package io.github.yzard.momento.app
 
+import io.github.yzard.momento.app.designsystem.MomentoBrandMark
 import android.view.autofill.AutofillManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -357,6 +358,7 @@ private fun LoginScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
         AuthFormLayout {
+            MomentoBrandMark(72.dp, Modifier.padding(bottom = 20.dp))
             Text("Sign in", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
             OutlinedTextField(
                 value = username,
@@ -580,6 +582,8 @@ private fun MainShell(
                 )
             },
         ) {
+            val selectionDock = remember { io.github.yzard.momento.app.designsystem.SelectionDockState() }
+            androidx.compose.runtime.CompositionLocalProvider(io.github.yzard.momento.app.designsystem.LocalSelectionDock provides selectionDock) {
             Box(Modifier.fillMaxSize()) {
                 ShellDestination(
                     route = shellState.contentRoute,
@@ -611,6 +615,7 @@ private fun MainShell(
                         },
                     )
                 }
+            }
             }
         }
         shellState.viewer?.let { viewer ->
@@ -682,12 +687,10 @@ private fun MainNavigationDrawer(
         drawerContentColor = MaterialTheme.colorScheme.onBackground,
     ) {
         Column(Modifier.fillMaxSize()) {
-            Text(
-                "Momento",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(24.dp),
-            )
+            Row(Modifier.padding(24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                MomentoBrandMark(36.dp, Modifier)
+                Text("Momento", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            }
             LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp)) {
                 item {
                     NavigationDrawerItem(
@@ -898,6 +901,7 @@ private fun ShellDestination(
             repository = repository,
             settingsStore = settingsStore,
             user = user,
+            serverVersion = (capabilityState as? CapabilityState.Available)?.capabilities?.appVersion,
             backupAvailable = capabilityState.backupAvailable(),
             logout = logout,
         )

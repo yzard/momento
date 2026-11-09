@@ -31,6 +31,7 @@ internal fun AccountSettingsSection(
     repository: AccountRepository,
     user: User?,
     origin: String?,
+    serverVersion: String?,
     logout: () -> Unit,
 ) {
     var passwordDialog by remember { mutableStateOf(false) }
@@ -39,13 +40,18 @@ internal fun AccountSettingsSection(
     Column {
         ListItem(
             headlineContent = { Text(user?.username ?: "Account") },
-            supportingContent = { Text(origin ?: "No server selected") },
+            supportingContent = {
+                Column {
+                    Text(origin ?: "No server selected")
+                    serverVersion?.let { Text("Server version $it") }
+                }
+            },
             trailingContent = {
                 SettingsTrailingActions {
                     TextButton(onClick = { passwordDialog = true }) { Text("Change password") }
                     TextButton(onClick = { logoutDialog = true }) {
                         Icon(Icons.AutoMirrored.Filled.Logout, null)
-                        Text("Log out")
+                        Text("Sign out")
                     }
                 }
             },
@@ -57,15 +63,15 @@ internal fun AccountSettingsSection(
     if (logoutDialog) {
         AlertDialog(
             onDismissRequest = { logoutDialog = false },
-            title = { Text("Log out?") },
-            text = { Text("Are you sure you want to log out?") },
+            title = { Text("Sign out?") },
+            text = { Text("Are you sure you want to sign out?") },
             confirmButton = {
                 TextButton(
                     onClick = {
                         logoutDialog = false
                         logout()
                     },
-                ) { Text("Log out") }
+                ) { Text("Sign out") }
             },
             dismissButton = { TextButton(onClick = { logoutDialog = false }) { Text("Cancel") } },
         )

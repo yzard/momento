@@ -1,26 +1,32 @@
 package io.github.yzard.momento.core.database
 
 import androidx.room.Room
-import androidx.room.testing.MigrationTestHelper
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yzard.momento.core.model.BackupState
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
-import org.junit.Rule
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class BackupDatabaseInstrumentedTest {
-    @get:Rule
-    val migrationHelper = MigrationTestHelper(
-        InstrumentationRegistry.getInstrumentation(),
-        BackupDatabase::class.java,
-    )
+    @Test
+    fun uploadFailuresRetainOriginalNamesAndFilterCancelledOrExcludedMedia() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
+        try {
+            val assets = database.backupAssetDao()
+            assets.insertDiscovered(backupAsset(1, BackupState.FAILED).copy(displayName = "Original.MOV", errorMessage = "Cannot Open"))
+            assets.insertDiscovered(backupAsset(2, BackupState.TERMINAL_FAILED).copy(displayName = "Imported.png", folder = "Downloads", errorMessage = "Unsupported original"))
+            assets.insertDiscovered(backupAsset(3, BackupState.CANCELLED).copy(errorMessage = "Cancelled by user"))
+            assertEquals(listOf("Imported.png", "Original.MOV"), assets.observeUploadFailures(false).first().map { it.displayName })
+            assertEquals("Cannot Open", assets.observeUploadFailures(true).first().single().errorMessage)
+            assertEquals("Original.MOV", assets.observeUploadFailures(true).first().single().displayName)
+        } finally { database.close() }
+    }
 
     @Test
     fun restartUsesNewOperationAndCannotOverrideCancellation() = runBlocking {
@@ -130,74 +136,26 @@ class BackupDatabaseInstrumentedTest {
     }
 
     @Test
-    fun migratesVersionThreeAssetsWithExplicitGenerationDefaults() {
-        val databaseName = "backup-migration-${System.nanoTime()}"
-        migrationHelper.createDatabase(databaseName, 3).apply {
-            execSQL(
-                """
-                INSERT INTO backup_assets (
-                    uri, clientAssetId, operationId, displayName, mimeType, byteSize,
-                    modifiedAt, folder, state, uploadId, uploadedBytes, mediaId, errorMessage
-                ) VALUES (
-                    'content://media/7', 'media_7', 'operation-7', 'IMG_7.jpg',
-                    'image/jpeg', 100, 1700000000, 'Camera', 'COMPLETED',
-                    'upload-7', 100, 7, NULL
-                )
-                """.trimIndent(),
-            )
-            close()
-        }
-
-        migrationHelper.runMigrationsAndValidate(
-            databaseName,
-            4,
-            true,
-            BackupDatabase.MIGRATION_3_4,
-        ).use { database ->
-            database.query(
-                "SELECT volumeName, generationModified FROM backup_assets WHERE uri = 'content://media/7'",
-            ).use { cursor ->
-                cursor.moveToFirst()
-                assertEquals("external", cursor.getString(0))
-                assertEquals(0, cursor.getLong(1))
-            }
-        }
-    }
-
-    @Test
-    fun migratesVersionFourAssetsAsUnverifiedHistory() {
-        val databaseName = "backup-migration-${System.nanoTime()}"
-        migrationHelper.createDatabase(databaseName, 4).apply {
-            execSQL(
-                """
-                INSERT INTO backup_assets (
-                    uri, volumeName, clientAssetId, operationId, displayName, mimeType,
-                    byteSize, modifiedAt, generationModified, folder, state, uploadId,
-                    uploadedBytes, mediaId, errorMessage
-                ) VALUES (
-                    'content://media/9', 'external', 'media_9', 'operation-9', 'IMG_9.jpg',
-                    'image/jpeg', 100, 1700000000, 4, 'Camera', 'COMPLETED',
-                    'upload-9', 100, 9, NULL
-                )
-                """.trimIndent(),
-            )
-            close()
-        }
-
-        migrationHelper.runMigrationsAndValidate(
-            databaseName,
-            5,
-            true,
-            BackupDatabase.MIGRATION_4_5,
-        ).use { database ->
-            database.query(
-                "SELECT protocolVersion, contentHash FROM backup_assets WHERE uri = 'content://media/9'",
-            ).use { cursor ->
-                cursor.moveToFirst()
-                assertEquals(0, cursor.getInt(0))
-                assertNull(cursor.getString(1))
-            }
-        }
+    fun cancellationWinsOverLateUploadAcknowledgement() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val database = Room.inMemoryDatabaseBuilder(context, BackupDatabase::class.java).build()
+        try {
+            val assets = database.backupAssetDao()
+            val original = backupAsset(1, BackupState.QUEUED)
+            assets.insertDiscovered(original)
+            assets.requestCancellation()
+            assets.updateTransfer(original.uri, BackupState.UPLOADING, 50, "batch-upload", null, null, 2, "a".repeat(64))
+            val retained = assets.pending(true).single()
+            assertEquals(BackupState.CANCELLING, retained.state)
+            assertEquals("batch-upload", retained.uploadId)
+            assertEquals(50L, retained.uploadedBytes)
+            assets.recordTransferFailure(original.uri, "Connection lost")
+            assertEquals(BackupState.CANCELLING, assets.pending(true).single().state)
+            assets.updateTransfer(original.uri, BackupState.COMPLETED, 100, "batch-upload", 1, null, 2, "a".repeat(64))
+            assertEquals(0, assets.activeRecordCount())
+            assets.recordTransferFailure(original.uri, "Late network error")
+            assertEquals(0, assets.activeRecordCount())
+        } finally { database.close() }
     }
 
     @Test

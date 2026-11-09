@@ -63,6 +63,7 @@ stable_file_age_seconds = {{WEBDAV_STABLE_FILE_AGE_SECONDS}}
 # Android uploads are resumable and staged below data_dir/backups before import.
 max_upload_bytes = {{BACKUP_MAX_UPLOAD_BYTES}}
 max_chunk_bytes = {{BACKUP_MAX_CHUNK_BYTES}}
+max_batch_bytes = {{BACKUP_MAX_BATCH_BYTES}}
 session_expiry_hours = {{BACKUP_SESSION_EXPIRY_HOURS}}
 
 [metadata]

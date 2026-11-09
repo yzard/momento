@@ -20,6 +20,7 @@ use crate::runtime::HttpRequestAdmission;
 use crate::runtime::{schedule_client_request, SchedulerHandle};
 use crate::webdav::webdav_router;
 use crate::VERSION;
+const APPLE_ASSOCIATION_PATH: &str = "/.well-known/apple-app-site-association";
 use crate::{
     error::{render_pending_error_response, AppError, AppResult},
     executor::{FileIoExecutorHandle, HealthcheckResponse},
@@ -111,9 +112,13 @@ async fn serve_static_path(
 ) -> AppResult<Response> {
     let path = NormalizedStoragePath::parse(path)
         .map_err(|_| AppError::NotFound("Static asset not found".to_string()))?;
-    let content_type = mime_guess::from_path(path.relative_path())
-        .first_or_octet_stream()
-        .to_string();
+    let content_type = if path.relative_path() == APPLE_ASSOCIATION_PATH.trim_start_matches('/') {
+        "application/json".to_string()
+    } else {
+        mime_guess::from_path(path.relative_path())
+            .first_or_octet_stream()
+            .to_string()
+    };
     serve_file(
         file_io,
         StorageRootId::Static,
@@ -144,9 +149,11 @@ fn accepts_html(headers: &HeaderMap) -> bool {
 }
 
 fn names_static_asset(path: &str) -> bool {
-    path.rsplit('/')
-        .next()
-        .is_some_and(|name| name.contains('.'))
+    path == APPLE_ASSOCIATION_PATH.trim_start_matches('/')
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'))
 }
 
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; font-src 'self'; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
@@ -162,7 +169,15 @@ struct PublicIngressPolicy {
 fn public_path_allowed(path: &str) -> bool {
     if matches!(
         path,
-        "/" | "/index.html" | "/favicon.ico" | "/momento-android.apk"
+        "/" | "/index.html"
+            | "/favicon.ico"
+            | "/momento-android.apk"
+            | APPLE_ASSOCIATION_PATH
+            | "/site.webmanifest"
+            | "/brand/momento-32.png"
+            | "/brand/momento-180.png"
+            | "/brand/momento-192.png"
+            | "/brand/momento-512.png"
     ) {
         return true;
     }

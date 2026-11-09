@@ -22,7 +22,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun MemoryCardOverlay(title: String, subtitle: String?, badge: String) {
+fun MemoryCardOverlay(title: String, subtitle: String?, badge: String, subtitleMaxLines: Int) {
     Box(
         Modifier
             .fillMaxSize()
@@ -55,7 +55,7 @@ fun MemoryCardOverlay(title: String, subtitle: String?, badge: String) {
                     text = subtitle,
                     color = Color.White.copy(alpha = 0.8f),
                     style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
+                    maxLines = subtitleMaxLines,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

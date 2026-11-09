@@ -162,7 +162,7 @@ function PlaceCard({ place }: { place: PlaceSummary }) {
       <MemoryCardOverlay
         title={place.city}
         subtitle={region}
-        badge={`${place.mediaCount} media`}
+        badge={String(place.mediaCount)}
         headingLevel="h2"
       />
     </Link>

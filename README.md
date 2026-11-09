@@ -33,6 +33,22 @@ again. Place covers reuse normal thumbnails; WebGUI and Android crop them to 3:2
 - `llm-service` may run on the same machine as Momento or on another machine reachable over the network.
 - All model runtimes run locally beside `llm-service`; remote model providers are not supported.
 
+## iOS Client
+
+The native SwiftUI client supports iOS 26 and later, with Liquid Glass controls,
+adaptive compact/expanded layouts, library management, administration, and original-file
+PhotoKit backup. It uses the same API as Android and intentionally omits Check for Updates.
+Background execution and camera-only selection follow iOS platform rules; see the
+[iOS client guide](docs/ios-client.md) for the feature map and exact differences.
+
+On macOS with Xcode and XcodeGen:
+
+```bash
+./build_ios.sh build
+./build_ios.sh verify
+./build_ios.sh device --team YOUR_TEAM_ID --device YOUR_DEVICE_UDID
+```
+
 ## Android Client
 
 The Android client connects to a Momento server for library browsing, timeline, albums, places,
@@ -160,6 +176,8 @@ Build both images locally with the tags used by Compose, or explicitly publish t
 ```bash
 ./build_docker.sh /secure/path/to/keystore-directory
 ./build_docker.sh publish docker zhuoyin /secure/path/to/keystore-directory
+# Publish a client/Web/API update with its signed APK:
+./build_docker.sh publish-api docker zhuoyin /secure/path/to/keystore-directory
 ```
 
 The build calls `build_android_client.sh release`, creates and verifies the signed Android release
@@ -167,6 +185,10 @@ first, requires exactly one non-empty APK, and embeds it in the Momento image. I
 development or test commands. Signed-in users can download that APK from the Android download action
 in the web sidebar or account settings; both serve `/momento-android.apk` from the same Momento
 instance. Android may require the user to allow installs from the browser used for the download.
+
+`publish-api` includes the same signed Android APK and Web assets, and leaves the separate
+LLM image unchanged. Its orchestration contracts are covered by
+`bash tests/docker/build_docker.sh`, which uses a disposable Docker substitute and no registry.
 
 Compose supplies one `LLM_SERVICE_API_KEY` to both services, `SECRET_KEY` to Momento, and
 `RESET_ADMIN_PASSWORD=false` by default. Set strong `LLM_SERVICE_API_KEY` and `SECRET_KEY` environment values

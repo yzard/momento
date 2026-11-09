@@ -145,8 +145,12 @@ pub fn test_config() -> Config {
 }
 
 pub fn create_test_app() -> (Router, DbPool) {
+    create_test_app_with_config(test_config())
+}
+
+pub fn create_test_app_with_config(config: Config) -> (Router, DbPool) {
     let pool = create_test_db();
-    let config_manager = create_test_config_manager(crate::test_utils::test_config());
+    let config_manager = create_test_config_manager(config);
     let app = create_app(config_manager, test_app_dependencies(pool.clone(), None));
     (app, pool)
 }

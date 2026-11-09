@@ -92,6 +92,15 @@ internal class DiskMediaCache(private val directory: File, private var maxBytes:
         File(directory, "$key.meta").delete()
     }
 
+    @Synchronized fun clear() {
+        initialize()
+        editors.toList().forEach { it.abort() }
+        entries.keys.toList().forEach { remove(it) }
+        for (file in directory.listFiles().orEmpty()) {
+            if (file.isFile && !file.delete()) throw IOException("Could not clear local media cache")
+        }
+    }
+
     @Synchronized fun removePrefix(prefix: String) {
         initialize()
         (entries.keys + editors.map { it.key }).filter { it.startsWith(prefix) }.toSet().forEach { remove(it) }

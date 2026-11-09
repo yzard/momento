@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   initializeTheme,
+  applyTheme,
   parseThemePreference,
   readThemePreference,
   resolveTheme,
@@ -62,4 +63,18 @@ describe('theme', () => {
     expect(readThemePreference()).toBe('system')
     expect(() => writeThemePreference('dark')).not.toThrow()
   })
+})
+
+it('keeps browser chrome synchronized with the explicit app theme', () => {
+  const meta = document.createElement('meta')
+  meta.name = 'theme-color'
+  document.head.append(meta)
+  try {
+    applyTheme('dark')
+    expect(meta.content).toBe('#000000')
+    applyTheme('light')
+    expect(meta.content).toBe('#ffffff')
+  } finally {
+    meta.remove()
+  }
 })

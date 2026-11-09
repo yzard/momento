@@ -151,6 +151,9 @@ class MomentoRepository(
     }
 
     override suspend fun registerBackupDevice(deviceId: String, deviceName: String): BackupDeviceRegisterResponse = api().registerDevice(BackupDeviceRegisterRequest(deviceId, deviceName))
+    override suspend fun prepareBackupBatch(request: BackupBatchPrepareRequest): BackupBatchResponse = api().prepareBatch(request)
+    override suspend fun backupBatchStatus(request: BackupUploadIdsRequest): BackupBatchResponse = api().batchStatus(request)
+    override suspend fun uploadBackupBatch(body: RequestBody): BackupBatchResponse = api().uploadBatch(body)
     override suspend fun createBackupUpload(request: BackupUploadCreateRequest): BackupUploadResponse = api().createUpload(request)
     override suspend fun backupUploadStatus(uploadId: String): BackupUploadResponse = api().uploadStatus(BackupUploadIdRequest(uploadId))
     override suspend fun uploadBackupChunk(uploadId: String, range: String, contentHash: String, body: RequestBody): BackupUploadResponse = api().uploadChunk(uploadId, range, contentHash, body)

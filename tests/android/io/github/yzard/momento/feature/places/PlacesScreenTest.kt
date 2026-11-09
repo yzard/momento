@@ -23,4 +23,11 @@ class PlacesScreenTest {
         assertEquals("France", placeRegion(place))
         assertEquals("France · 12 media", placeDetailSubtitle(place))
     }
+
+    @Test fun countryStaysTogetherWhenAPlaceCardWraps() {
+        val place = Place("opaque", "Corona", "New York", "United States", 2837)
+        assertEquals("New York, United\u00a0States", placeCardRegion(place))
+        assertEquals("United\u00a0States", placeCardRegion(place.copy(state = null)))
+        assertEquals("New York", placeCardRegion(place.copy(country = "")))
+    }
 }

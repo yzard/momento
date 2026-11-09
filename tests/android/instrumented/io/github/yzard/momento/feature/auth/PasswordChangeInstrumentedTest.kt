@@ -9,6 +9,10 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import io.github.yzard.momento.app.designsystem.MomentoTheme
 import io.github.yzard.momento.core.data.ThemePreference
 import org.junit.Rule
@@ -25,23 +29,26 @@ class PasswordChangeInstrumentedTest {
             var newPassword by remember { mutableStateOf("") }
             var confirmation by remember { mutableStateOf("") }
             MomentoTheme(ThemePreference.LIGHT) {
-                PasswordChangeFields(
-                    currentPassword = currentPassword,
-                    newPassword = newPassword,
-                    confirmation = confirmation,
-                    changeCurrentPassword = { currentPassword = it },
-                    changeNewPassword = { newPassword = it },
-                    changeConfirmation = { confirmation = it },
-                    enabled = true,
-                    errorMessage = "Password needs attention",
-                    modifier = Modifier,
-                )
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    PasswordChangeFields(
+                        currentPassword = currentPassword,
+                        newPassword = newPassword,
+                        confirmation = confirmation,
+                        changeCurrentPassword = { currentPassword = it },
+                        changeNewPassword = { newPassword = it },
+                        changeConfirmation = { confirmation = it },
+                        enabled = true,
+                        errorMessage = "Password needs attention",
+                        modifier = Modifier,
+                    )
+                }
             }
         }
 
         composeRule.onNodeWithText("Current password").performTextInput("admin")
-        composeRule.onNodeWithText("New password").assertIsDisplayed()
-        composeRule.onNodeWithText("Confirm new password").assertIsDisplayed()
-        composeRule.onNodeWithText("Password needs attention").assertIsDisplayed()
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
+        composeRule.onNodeWithText("New password").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Confirm new password").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Password needs attention").performScrollTo().assertIsDisplayed()
     }
 }

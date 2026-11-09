@@ -1,3 +1,9 @@
+mod batch;
+mod stream;
+
+pub(crate) use batch::batch_capabilities;
+use stream::BackupBodyReader;
+
 use axum::{
     body::Body,
     extract::{Extension, Path, State},
@@ -7,7 +13,6 @@ use axum::{
     Router,
 };
 use chrono::DateTime;
-use futures::StreamExt;
 use std::path::Path as FilePath;
 
 use crate::auth::{AppState, CurrentUser};
@@ -25,7 +30,7 @@ use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::io::StorageFileSession;
 use crate::models::{
     BackupDeviceRegisterRequest, BackupDeviceRegisterResponse, BackupUploadCreateRequest,
-    BackupUploadIdRequest,
+    BackupUploadIdRequest, BackupUploadResponse,
 };
 use crate::routes::{render_json, CpuJson};
 use crate::runtime::{ExecutorHandles, HttpRequestAdmission};
@@ -34,6 +39,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/backup/device/register", post(register_device))
         .route("/backup/upload/create", post(create_upload))
+        .route("/backup/upload/batch/prepare", post(batch::prepare))
+        .route("/backup/upload/batch/status", post(batch::status))
+        .route("/backup/upload/batch", post(batch::upload))
         .route("/backup/upload/status", post(upload_status))
         .route("/backup/upload/chunk/:upload_id", put(upload_chunk))
         .route("/backup/upload/complete", post(complete_upload))
@@ -66,6 +74,16 @@ async fn create_upload(
     current_user: CurrentUser,
     CpuJson(request): CpuJson<BackupUploadCreateRequest>,
 ) -> AppResult<Response> {
+    let _backup_activity = state.scheduler.begin_backup_transfer();
+    let upload = create_upload_item(&state, current_user.id, request).await?;
+    render_json(&state, upload).await
+}
+
+async fn create_upload_item(
+    state: &AppState,
+    user_id: i64,
+    request: BackupUploadCreateRequest,
+) -> AppResult<BackupUploadResponse> {
     let config = state.config.current();
     validate_identifier(&request.device_id, "deviceId")?;
     validate_identifier(&request.client_asset_id, "clientAssetId")?;
@@ -84,13 +102,13 @@ async fn create_upload(
         .ok_or_else(|| AppError::BadRequest("invalid originalFilename".to_string()))?;
     let staged_path = format!(
         "{}/{}/{}.{}",
-        current_user.id, request.device_id, upload_id, extension
+        user_id, request.device_id, upload_id, extension
     );
     let outcome = state
         .executors
         .sqlite
         .create_backup_upload_request(CreateBackupUpload {
-            user_id: current_user.id,
+            user_id: user_id,
             upload_id,
             device_id: request.device_id,
             client_asset_id: request.client_asset_id,
@@ -111,9 +129,9 @@ async fn create_upload(
         CreateBackupUploadOutcome::Created(response) => {
             state.scheduler.wake_backup_import();
             state.scheduler.wake_journal_recovery();
-            render_json(&state, response).await
+            Ok(response)
         }
-        CreateBackupUploadOutcome::Existing(response) => render_json(&state, response).await,
+        CreateBackupUploadOutcome::Existing(response) => Ok(response),
         CreateBackupUploadOutcome::DeviceNotFound => {
             Err(AppError::NotFound("backup device not found".to_string()))
         }
@@ -149,19 +167,27 @@ async fn complete_upload(
     current_user: CurrentUser,
     CpuJson(request): CpuJson<BackupUploadIdRequest>,
 ) -> AppResult<Response> {
-    validate_identifier(&request.upload_id, "uploadId")?;
+    let _backup_activity = state.scheduler.begin_backup_transfer();
+    let upload = complete_upload_item(&state, current_user.id, request.upload_id).await?;
+    render_json(&state, upload).await
+}
+
+async fn complete_upload_item(
+    state: &AppState,
+    user_id: i64,
+    upload_id: String,
+) -> AppResult<BackupUploadResponse> {
+    validate_identifier(&upload_id, "uploadId")?;
     let asset_id = match state
         .executors
         .sqlite
         .prepare_backup_completion_request(PrepareBackupCompletion {
-            user_id: current_user.id,
-            upload_id: request.upload_id.clone(),
+            user_id: user_id,
+            upload_id: upload_id.clone(),
         })
         .await?
     {
-        PrepareBackupCompletionOutcome::AlreadyQueued(response) => {
-            return render_json(&state, response).await
-        }
+        PrepareBackupCompletionOutcome::AlreadyQueued(response) => return Ok(response),
         PrepareBackupCompletionOutcome::Ready { asset_id, .. } => asset_id,
         PrepareBackupCompletionOutcome::NotFound => {
             return Err(AppError::NotFound("backup upload not found".to_string()))
@@ -183,15 +209,15 @@ async fn complete_upload(
         .executors
         .sqlite
         .queue_backup_completion_request(QueueBackupCompletion {
-            user_id: current_user.id,
-            upload_id: request.upload_id,
+            user_id: user_id,
+            upload_id: upload_id,
             asset_id,
         })
         .await?
     {
         QueueBackupCompletionOutcome::Queued(response) => {
             state.scheduler.wake_backup_import();
-            render_json(&state, response).await
+            Ok(response)
         }
         QueueBackupCompletionOutcome::Changed => Err(AppError::Conflict(
             "backup upload changed concurrently".to_string(),
@@ -247,6 +273,7 @@ async fn upload_chunk(
     headers: HeaderMap,
     body: Body,
 ) -> AppResult<Response> {
+    let _backup_activity = state.scheduler.begin_backup_transfer();
     let config = state.config.current();
     validate_identifier(&upload_id, "uploadId")?;
     let declared_length = content_length(&headers)?;
@@ -357,6 +384,28 @@ async fn write_chunk(
     expected_chunk_hash: &str,
     body: Body,
 ) -> AppResult<()> {
+    let mut reader = BackupBodyReader::new(body);
+    write_chunk_reader(
+        executors,
+        staged_path,
+        start,
+        declared_length,
+        expected_chunk_hash,
+        &mut reader,
+        true,
+    )
+    .await
+}
+
+async fn write_chunk_reader(
+    executors: &ExecutorHandles,
+    staged_path: &NormalizedStoragePath,
+    start: u64,
+    declared_length: u64,
+    expected_chunk_hash: &str,
+    reader: &mut BackupBodyReader,
+    final_body: bool,
+) -> AppResult<()> {
     let mut session = Some(
         executors
             .file_io
@@ -365,78 +414,69 @@ async fn write_chunk(
     );
     let mut written = 0_u64;
     let mut hash_session = Some(executors.cpu.start_sha256_session_request().await?);
-    let mut stream = body.into_data_stream();
-    while let Some(frame) = stream.next().await {
-        let chunk = match frame {
-            Ok(chunk) => chunk,
+    while written < declared_length {
+        let maximum = (declared_length - written).min(crate::runtime::FILE_IO_CHUNK_BYTES) as usize;
+        // Reserve bounded chunk memory before collecting network frames. Small
+        // TCP/HTTP frames must not each become a CPU job and a disk write job.
+        let _chunk_admission = executors
+            .scheduler
+            .acquire_file_chunk()
+            .await
+            .map_err(AppError::Unavailable)?;
+        let bytes = match reader.exact(maximum).await {
+            Ok(bytes) => bytes,
             Err(error) => {
                 abort_backup_session(&executors.file_io, session.take()).await?;
-                return Err(AppError::BadRequest(format!("invalid chunk body: {error}")));
+                return Err(error);
             }
         };
-        let Some(next_written) = written.checked_add(chunk.len() as u64) else {
+        if start.checked_add(written).is_none() {
             abort_backup_session(&executors.file_io, session.take()).await?;
-            return Err(AppError::BadRequest(
-                "chunk body exceeds Content-Length".to_string(),
-            ));
-        };
-        if next_written > declared_length {
-            abort_backup_session(&executors.file_io, session.take()).await?;
-            return Err(AppError::BadRequest(
-                "chunk body exceeds Content-Length".to_string(),
-            ));
+            return Err(AppError::BadRequest("chunk offset overflow".to_string()));
         }
-        for bytes in chunk.chunks(crate::runtime::FILE_IO_CHUNK_BYTES as usize) {
-            let _chunk_admission = executors
-                .scheduler
-                .acquire_file_chunk()
-                .await
-                .map_err(AppError::Unavailable)?;
-            if start.checked_add(written).is_none() {
+        let active_session = session
+            .take()
+            .ok_or_else(|| AppError::Internal("backup file session is unavailable".to_string()))?;
+        let active_hash_session = hash_session
+            .take()
+            .ok_or_else(|| AppError::Internal("backup hash session is unavailable".to_string()))?;
+        let (returned_hash_session, bytes) = executors
+            .cpu
+            .update_sha256_session_request(active_hash_session, bytes)
+            .await?;
+        hash_session = Some(returned_hash_session);
+        let byte_count = bytes.len();
+        match executors
+            .file_io
+            .write_storage_session_request(active_session, bytes)
+            .await
+        {
+            Ok((returned_session, count)) if count == byte_count => {
+                session = Some(returned_session);
+                written += count as u64;
+            }
+            Ok((returned_session, _)) => {
+                session = Some(returned_session);
                 abort_backup_session(&executors.file_io, session.take()).await?;
-                return Err(AppError::BadRequest("chunk offset overflow".to_string()));
+                return Err(AppError::Internal(
+                    "file worker returned a short backup write".to_string(),
+                ));
             }
-            let active_session = session.take().ok_or_else(|| {
-                AppError::Internal("backup file session is unavailable".to_string())
-            })?;
-            let active_hash_session = hash_session.take().ok_or_else(|| {
-                AppError::Internal("backup hash session is unavailable".to_string())
-            })?;
-            let (returned_hash_session, bytes) = executors
-                .cpu
-                .update_sha256_session_request(active_hash_session, bytes.to_vec())
-                .await?;
-            hash_session = Some(returned_hash_session);
-            let byte_count = bytes.len();
-            let result = executors
-                .file_io
-                .write_storage_session_request(active_session, bytes)
-                .await;
-            match result {
-                Ok((returned_session, count)) if count == byte_count => {
-                    session = Some(returned_session);
-                    written = written.checked_add(count as u64).ok_or_else(|| {
-                        AppError::BadRequest("chunk body length overflow".to_string())
-                    })?;
-                }
-                Ok((returned_session, _)) => {
-                    session = Some(returned_session);
-                    abort_backup_session(&executors.file_io, session.take()).await?;
-                    return Err(AppError::Internal(
-                        "file worker returned a short backup write".to_string(),
-                    ));
-                }
-                Err(error) => {
-                    return Err(error.into());
-                }
-            }
+            Err(error) => return Err(error.into()),
         }
     }
+
     if written != declared_length {
         abort_backup_session(&executors.file_io, session.take()).await?;
         return Err(AppError::BadRequest(
             "chunk body does not match Content-Length".to_string(),
         ));
+    }
+    if final_body {
+        if let Err(error) = reader.ensure_eof().await {
+            abort_backup_session(&executors.file_io, session.take()).await?;
+            return Err(error);
+        }
     }
     let actual_chunk_hash =
         executors

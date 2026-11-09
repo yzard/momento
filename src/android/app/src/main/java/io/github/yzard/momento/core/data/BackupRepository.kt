@@ -2,11 +2,17 @@ package io.github.yzard.momento.core.data
 
 import io.github.yzard.momento.core.model.BackupDeviceRegisterResponse
 import io.github.yzard.momento.core.model.BackupUploadCreateRequest
+import io.github.yzard.momento.core.model.BackupBatchPrepareRequest
+import io.github.yzard.momento.core.model.BackupUploadIdsRequest
+import io.github.yzard.momento.core.model.BackupBatchResponse
 import io.github.yzard.momento.core.model.BackupUploadResponse
 import io.github.yzard.momento.core.model.Capabilities
 import okhttp3.RequestBody
 
 interface BackupRepository {
+    suspend fun prepareBackupBatch(request: BackupBatchPrepareRequest): BackupBatchResponse
+    suspend fun backupBatchStatus(request: BackupUploadIdsRequest): BackupBatchResponse
+    suspend fun uploadBackupBatch(body: RequestBody): BackupBatchResponse
     suspend fun capabilities(origin: String): Capabilities
     suspend fun registerBackupDevice(deviceId: String, deviceName: String): BackupDeviceRegisterResponse
     suspend fun createBackupUpload(request: BackupUploadCreateRequest): BackupUploadResponse

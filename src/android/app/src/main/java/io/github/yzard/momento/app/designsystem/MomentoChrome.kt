@@ -13,12 +13,15 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
@@ -117,10 +120,9 @@ fun MomentoFloatingDock(
     modifier: Modifier,
     content: @Composable RowScope.() -> Unit,
 ) {
-    val colors = momentoFloatingControlColors()
-    FloatingSurface(modifier, colors.container, colors) {
+    MomentoFloatingSurface(modifier) {
         Row(
-            modifier = Modifier.padding(4.dp),
+            modifier = Modifier.fillMaxHeight().padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
             content = content,
@@ -143,7 +145,7 @@ fun MomentoActionChip(
     val container by animateColorAsState(targetValue = targetContainer, label = "Momento action chip")
     FloatingSurface(
         modifier = modifier
-            .heightIn(min = 48.dp)
+            .height(momentoFloatingControlHeight)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -176,6 +178,12 @@ internal fun momentoActionChipContainerColor(
 }
 
 @Composable
+fun MomentoFloatingSurface(modifier: Modifier, content: @Composable () -> Unit) {
+    val colors = momentoFloatingControlColors()
+    FloatingSurface(modifier.height(momentoFloatingControlHeight), colors.container, colors, content)
+}
+
+@Composable
 private fun FloatingSurface(
     modifier: Modifier,
     container: Color,
@@ -184,11 +192,11 @@ private fun FloatingSurface(
 ) {
     Surface(
         modifier = modifier,
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = CircleShape,
         color = container,
         contentColor = colors.content,
         border = BorderStroke(1.dp, colors.outline),
-        shadowElevation = 0.dp,
+        shadowElevation = momentoFloatingElevation,
         tonalElevation = 0.dp,
         content = content,
     )

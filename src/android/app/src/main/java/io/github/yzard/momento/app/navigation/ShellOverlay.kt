@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -25,7 +24,6 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +51,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import io.github.yzard.momento.app.designsystem.MomentoFloatingButton
 import io.github.yzard.momento.app.designsystem.MomentoFloatingDock
+import io.github.yzard.momento.app.designsystem.MomentoFloatingSurface
 import io.github.yzard.momento.app.designsystem.momentoFloatingControlColors
 import io.github.yzard.momento.feature.timeline.TimelinePeriod
 import io.github.yzard.momento.feature.timeline.normalizedTimelineSearchQuery
@@ -71,7 +70,8 @@ internal fun ShellOverlay(
         mutableStateOf(TextFieldValue(searchQuery))
     }
     val activeSearch = searchQuery.isNotBlank()
-    val timeline = destination.isTimelinePage()
+    val selection = io.github.yzard.momento.app.designsystem.LocalSelectionDock.current?.content
+    val timeline = destination.isTimelinePage() && selection == null
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -112,10 +112,19 @@ internal fun ShellOverlay(
         }
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
             MomentoFloatingButton(
-                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
+                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp).testTag("timeline-menu-button"),
                 onClick = { dismissEditing(); openMenu() },
             ) { Icon(Icons.Default.Menu, "Open navigation menu") }
 
+            if (selection != null) {
+                androidx.compose.foundation.layout.Row(
+                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(start = 80.dp, end = 12.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End,
+                ) {
+                    androidx.compose.foundation.layout.Box(Modifier.testTag("shell-selection-actions")) { selection() }
+                }
+            }
             if (timeline && !activeSearch && !editing) {
                 TimelinePeriodDock(
                     selected = timelinePeriod,
@@ -124,15 +133,10 @@ internal fun ShellOverlay(
                 )
             }
             if (timeline && (activeSearch || editing)) {
-                Surface(
+                MomentoFloatingSurface(
                     modifier = Modifier.align(Alignment.BottomCenter)
                         .fillMaxWidth().padding(start = 80.dp, end = 80.dp, bottom = 12.dp)
-                        .height(56.dp).testTag("timeline-search-bar"),
-                    shape = CircleShape,
-                    color = floatingColors.container,
-                    contentColor = floatingColors.content,
-                    shadowElevation = 0.dp,
-                    tonalElevation = 0.dp,
+                        .testTag("timeline-search-bar"),
                 ) {
                     Box(Modifier.padding(horizontal = 18.dp), contentAlignment = Alignment.CenterStart) {
                         BasicTextField(
@@ -158,7 +162,7 @@ internal fun ShellOverlay(
             }
             if (timeline) {
                 MomentoFloatingButton(
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp).testTag("timeline-search-button"),
                     onClick = {
                         when {
                             activeSearch -> clearSearch()

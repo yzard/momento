@@ -8,10 +8,11 @@ class MomentoSelectionDockTest {
     @Test
     fun selectionCountLabelIsConcise() {
         assertEquals("4 selected", momentoSelectionCountLabel(4))
+        assertEquals("0 selected", momentoSelectionCountLabel(0))
     }
 
     @Test
-    fun emptySelectionCannotCreateDockLabel() {
-        assertThrows(IllegalArgumentException::class.java) { momentoSelectionCountLabel(0) }
+    fun rejectsNegativeSelectionCount() {
+        assertThrows(IllegalArgumentException::class.java) { momentoSelectionCountLabel(-1) }
     }
 }
