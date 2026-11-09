@@ -143,12 +143,14 @@ fn execute_batch(
         name,
     )?;
     let deadline = Instant::now() + SQLITE_OPERATION_TIMEOUT;
-    connection.progress_handler(
-        SQLITE_PROGRESS_HANDLER_OPS,
-        Some(move || Instant::now() >= deadline),
-    );
     // Always remove the progress handler, including when a request panics.
     let outcome = catch_unwind(AssertUnwindSafe(|| {
+        connection
+            .progress_handler(
+                SQLITE_PROGRESS_HANDLER_OPS,
+                Some(move || Instant::now() >= deadline),
+            )
+            .map_err(|error| map_sqlite_error(name, error))?;
         let mut transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(name, error))?;
@@ -265,7 +267,9 @@ fn execute_batch(
         }
         Ok(results)
     }));
-    connection.progress_handler(0, None::<fn() -> bool>);
+    connection
+        .progress_handler(0, None::<fn() -> bool>)
+        .map_err(|error| map_sqlite_error(name, error))?;
     match outcome {
         Ok(result) => result,
         Err(panic) => std::panic::resume_unwind(panic),

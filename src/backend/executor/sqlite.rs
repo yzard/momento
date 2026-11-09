@@ -5491,7 +5491,7 @@ fn execute(
     ) {
         // The single writer owns both planning and insertion, so no writer can enlarge
         // this input set before this operation commits.
-        let connection = pool
+        let mut connection = pool
             .get_timeout(SQLITE_CONNECTION_TIMEOUT)
             .map_err(|error| {
                 ExecutorError::new(
@@ -5501,22 +5501,26 @@ fn execute(
                 )
             })?;
         let deadline = Instant::now() + SQLITE_OPERATION_TIMEOUT;
-        connection.progress_handler(
+        let installed = connection.progress_handler(
             SQLITE_PROGRESS_HANDLER_OPS,
             Some(move || Instant::now() >= deadline),
         );
-        let estimate = connection.query_row(
-            crate::database::queries::ai::jobs::SELECT_OCR_START_FOOTPRINT,
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, u64>(2)?,
-                ))
-            },
-        );
-        connection.progress_handler(0, None::<fn() -> bool>);
+        let estimate = installed.and_then(|()| {
+            connection.query_row(
+                crate::database::queries::ai::jobs::SELECT_OCR_START_FOOTPRINT,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                },
+            )
+        });
+        connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .map_err(|error| map_sqlite_error(operation_name, error))?;
         let (jobs, inputs, payload_bytes) =
             estimate.map_err(|error| map_sqlite_error(operation_name, error))?;
         let page_size: u64 = connection
@@ -5636,11 +5640,13 @@ fn execute(
             operation_spec.capacity == SqliteCapacitySource::ReadOnly,
         )
         .map_err(|error| map_sqlite_error(operation_name, error))?;
-    connection.progress_handler(
-        SQLITE_PROGRESS_HANDLER_OPS,
-        Some(move || Instant::now() >= deadline),
-    );
     let result = catch_unwind(AssertUnwindSafe(|| {
+        connection
+            .progress_handler(
+                SQLITE_PROGRESS_HANDLER_OPS,
+                Some(move || Instant::now() >= deadline),
+            )
+            .map_err(|error| map_sqlite_error(operation_name, error))?;
         if let SqliteCapacitySource::Fresh { max_growth_bytes }
         | SqliteCapacitySource::ProvisionalParent { max_growth_bytes }
         | SqliteCapacitySource::DurableParent { max_growth_bytes } = operation_spec.capacity
@@ -5674,10 +5680,11 @@ fn execute(
                 }),
         )
     }));
-    connection.progress_handler(0, None::<fn() -> bool>);
+    let progress_reset = connection.progress_handler(0, None::<fn() -> bool>);
     connection
         .pragma_update(None, "query_only", false)
         .map_err(|error| map_sqlite_error(operation_name, error))?;
+    progress_reset.map_err(|error| map_sqlite_error(operation_name, error))?;
     let mut operation_result = match result {
         Ok(result) => result,
         Err(_) => Err(ExecutorError::new(

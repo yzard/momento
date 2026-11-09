@@ -127,14 +127,16 @@ async fn one_writer_drains_its_queue_while_readers_remain_available() {
         .collect::<Vec<_>>();
     for connection in &mut connections {
         let writers = Arc::clone(&writers);
-        connection.update_hook(Some(
-            move |_: rusqlite::hooks::Action, _: &str, _: &str, _: i64| {
-                writers
-                    .lock()
-                    .unwrap()
-                    .insert(std::thread::current().name().unwrap().to_string());
-            },
-        ));
+        connection
+            .update_hook(Some(
+                move |_: rusqlite::hooks::Action, _: &str, _: &str, _: i64| {
+                    writers
+                        .lock()
+                        .unwrap()
+                        .insert(std::thread::current().name().unwrap().to_string());
+                },
+            ))
+            .unwrap();
     }
     drop(connections);
     let lock = pool.get().unwrap();

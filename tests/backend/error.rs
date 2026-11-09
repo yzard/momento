@@ -4,8 +4,6 @@ use axum::{
     http::{header::RETRY_AFTER, StatusCode},
 };
 use momento_api::error::AppError;
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use std::time::Duration;
 
 #[tokio::test]
@@ -181,8 +179,9 @@ async fn render_error(error: AppError) -> axum::response::Response {
 async fn all_internal_error_categories_return_the_same_generic_response() {
     let sqlite_error = rusqlite::Error::InvalidParameterName("secret-column".to_string());
     let io_error = std::io::Error::other("secret path");
-    let manager = SqliteConnectionManager::memory();
-    let pool = Pool::builder().max_size(1).build(manager).expect("pool");
+    let directory = crate::temporary::tempdir().expect("database directory");
+    let pool = momento_api::database::create_pool_at(&directory.path().join("database.sqlite"), 1)
+        .expect("pool");
     let held_connection = pool.get().expect("held connection");
     let pool_error = match pool.get_timeout(Duration::ZERO) {
         Ok(_) => panic!("second connection must time out"),

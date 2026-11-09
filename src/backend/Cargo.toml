@@ -35,7 +35,7 @@ toml = "0.8"
 toml_edit = "0.22"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "cache", "fallible_uint", "hooks"] }
 r2d2 = "0.8"
 scheduled-thread-pool = "0.2"
 
@@ -78,7 +78,6 @@ http-body-util = "0.1"
 axum-test = "15"
 filetime = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-r2d2_sqlite = "0.24"
 tempfile = "3"
 
 [[test]]

@@ -109,10 +109,15 @@ fn ready_cleanup_commands_share_a_commit_and_preserve_finished_jobs() {
         .unwrap();
     let commits = Arc::new(AtomicUsize::new(0));
     let observed = commits.clone();
-    context.pool.get().unwrap().commit_hook(Some(move || {
-        observed.fetch_add(1, Ordering::SeqCst);
-        false
-    }));
+    context
+        .pool
+        .get()
+        .unwrap()
+        .commit_hook(Some(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .unwrap();
     assert!(eligible(&cleanup("a"), &context.footprints));
     let outputs = execute_batch(
         vec![cleanup("a"), cleanup("b"), cleanup("missing")],
@@ -156,13 +161,19 @@ fn cleanup_batch_commit_failure_leaves_receipts_retryable() {
             [],
         )
         .unwrap();
-    context.pool.get().unwrap().commit_hook(Some(|| true));
+    context
+        .pool
+        .get()
+        .unwrap()
+        .commit_hook(Some(|| true))
+        .unwrap();
     assert!(execute_batch(vec![cleanup("a"), cleanup("b")], &context).is_err());
     context
         .pool
         .get()
         .unwrap()
-        .commit_hook(None::<fn() -> bool>);
+        .commit_hook(None::<fn() -> bool>)
+        .unwrap();
     let count: i64 = context
         .pool
         .get()
@@ -215,10 +226,15 @@ fn ready_writes_share_one_commit_and_bad_record_rolls_back_only_itself() {
     let (context, _directory) = fixture();
     let commits = Arc::new(AtomicUsize::new(0));
     let observed = commits.clone();
-    context.pool.get().unwrap().commit_hook(Some(move || {
-        observed.fetch_add(1, Ordering::SeqCst);
-        false
-    }));
+    context
+        .pool
+        .get()
+        .unwrap()
+        .commit_hook(Some(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .unwrap();
     let results = execute_batch(
         vec![
             command("a").operation,
@@ -265,14 +281,19 @@ fn ready_writes_share_one_commit_and_bad_record_rolls_back_only_itself() {
 #[test]
 fn failed_batch_commit_returns_no_success_and_keeps_jobs_retryable() {
     let (context, _directory) = fixture();
-    context.pool.get().unwrap().commit_hook(Some(|| true));
+    context
+        .pool
+        .get()
+        .unwrap()
+        .commit_hook(Some(|| true))
+        .unwrap();
     assert!(execute_batch(
         vec![command("a").operation, command("c").operation],
         &context
     )
     .is_err());
-    let connection = context.pool.get().unwrap();
-    connection.commit_hook(None::<fn() -> bool>);
+    let mut connection = context.pool.get().unwrap();
+    connection.commit_hook(None::<fn() -> bool>).unwrap();
     assert_eq!(
         connection
             .query_row(
