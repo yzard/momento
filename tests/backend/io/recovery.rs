@@ -174,7 +174,7 @@ async fn independent_cleanup_uses_a_bounded_rolling_window() {
     .unwrap();
     momento_api::database::init_database(&pool.get().unwrap()).unwrap();
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# test config\n").unwrap();
+    crate::test_utils::write_test_config(&config_path, "# test config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .unwrap()
         .identity;

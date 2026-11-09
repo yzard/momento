@@ -222,15 +222,13 @@ fn rejects_configurable_logging_path() {
 }
 
 #[test]
-fn loads_playground_toml_configuration() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../playground/config_llm.toml");
-    let playground = std::fs::read_to_string(&path).expect("Playground config must exist");
-    let resolved = resolve_config_environment(&playground, Some("change-me-llm-service-key"))
-        .expect("Playground API key should resolve");
-    let mut file = crate::temporary::tempfile().expect("Resolved playground config fixture");
-    write!(file, "{resolved}").expect("Resolved playground config");
-    let config = Config::load(file.path()).expect("Playground TOML configuration should load");
+fn loads_generated_operational_configuration() {
+    let resolved =
+        resolve_config_environment(default_config_template(), Some("test-llm-service-key"))
+            .expect("Template API key should resolve");
+    let mut file = crate::temporary::tempfile().expect("Resolved template config fixture");
+    write!(file, "{resolved}").expect("Resolved template config");
+    let config = Config::load(file.path()).expect("Generated configuration should load");
     let clustering = config.service_for("image_clustering").unwrap();
     let aesthetics = config.service_for("image_aesthetics").unwrap();
     let face_detection = config.service_for("face_detection").unwrap();
@@ -279,7 +277,6 @@ fn loads_playground_toml_configuration() {
     assert!(face_detection
         .minimum_face_resolution_pixels
         .is_some_and(|resolution| resolution > 0));
-    assert_eq!(playground, default_config_template());
 }
 
 #[test]

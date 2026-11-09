@@ -17,10 +17,10 @@ Both binaries also support `--init-config`, which writes their source-owned comm
 template and exits. The Docker entrypoints invoke it only when the expected config file is absent:
 `/data/config.toml` for Momento and `/data/config_llm.toml` for llm-service. Each service owns all
 of its fallback and operational-template values in its `config/defaults.rs`; its commented TOML
-source contains named placeholders rather than duplicated values. The rendered templates exactly
-match `playground/config.toml` and `playground/config_llm.toml`, including their environment
-placeholders. Normal startup never generates or replaces a configuration file except when atomically
-consuming the one-shot administrator password-reset request described below.
+source contains named placeholders for shared values. The playground uses the same entrypoints
+to create its local configuration files. Tests use the generated templates with test credentials.
+During normal startup, Momento only replaces its configuration file when it consumes the one-shot
+administrator password reset. It replaces the file atomically.
 
 Momento constructs one `ConfigManager` from the exact CLI config path and the fully validated
 configuration. Runtime code reads immutable snapshots from that manager instead of retaining its

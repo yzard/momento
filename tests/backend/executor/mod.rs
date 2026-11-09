@@ -107,7 +107,7 @@ async fn operations_run_on_their_named_execution_domains() {
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -557,7 +557,7 @@ async fn cpu_hashing_is_bounded_and_returns_the_expected_digest() {
     )
     .expect("database pool");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -769,7 +769,7 @@ async fn file_executor_requires_an_exclusive_generation_checked_journal_lease() 
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -1196,7 +1196,7 @@ async fn file_executor_streams_storage_chunks_through_root_relative_operations()
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -1377,7 +1377,7 @@ async fn file_executor_enumerates_large_directories_with_resumable_sessions() {
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -1455,7 +1455,7 @@ async fn journal_move_rejects_a_replaced_source_generation() {
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -1593,7 +1593,7 @@ async fn generic_journal_recovery_finishes_a_rename_not_checkpointed_before_rest
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -1880,7 +1880,7 @@ async fn prepared_journal_cancellation_rolls_back_temporaries_and_keeps_original
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -2290,7 +2290,7 @@ async fn durable_cancellations_release_mutation_fences_before_rollback_finishes(
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# executor config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# executor config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;
@@ -2393,14 +2393,7 @@ async fn backup_cancellation_commits_product_state_and_journal_cleanup_atomicall
     .expect("database pool");
     init_database(&pool.get().expect("schema connection")).expect("database schema");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            "[security]\nsecret_key = {:?}\n",
-            crate::test_utils::test_config().security.secret_key
-        ),
-    )
-    .expect("write config");
+    crate::test_utils::write_test_config(&config_path, "");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config")
         .identity;

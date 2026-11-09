@@ -147,7 +147,7 @@ fn start_runtime(
         .expect("database parent")
         .to_path_buf();
     let config_path = directory.join("config.toml");
-    std::fs::write(&config_path, "# test config\n").expect("test config");
+    crate::test_utils::write_test_config(&config_path, "# test config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;

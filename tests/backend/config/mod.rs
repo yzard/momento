@@ -61,19 +61,7 @@ fn magick_memory_quota_belongs_only_to_media_process() {
 
 fn write_config(dir: &TempDir, contents: &str) -> PathBuf {
     let path = dir.path().join("config.toml");
-    let mut contents = contents.to_string();
-    if !contents.contains("secret_key") {
-        let key = format!(
-            "secret_key = {:?}\n",
-            crate::test_utils::test_config().security.secret_key
-        );
-        if contents.contains("[security]") {
-            contents = contents.replacen("[security]", &format!("[security]\n{key}"), 1);
-        } else {
-            contents.push_str(&format!("\n[security]\n{key}"));
-        }
-    }
-    std::fs::write(&path, contents).expect("Failed to write test config");
+    crate::test_utils::write_test_config(&path, contents);
     path
 }
 
@@ -525,12 +513,10 @@ fn test_load_config_omitted_sections_use_defaults() {
 #[tokio::test]
 async fn test_consume_admin_password_reset_persists_false_and_preserves_comments() {
     let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
-    let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
+    let path = write_config(
+        &dir,
         "# keep this comment\n[server]\nreset_admin_password = true # one-shot\n",
-    )
-    .expect("Failed to write config");
+    );
     let loaded = load_config_with_identity(&path).expect("Failed to load config");
     let executors = crate::test_utils::test_executor_handles(crate::test_utils::create_test_db());
     let config_manager = ConfigManager::new(loaded, &executors);
@@ -555,9 +541,7 @@ async fn test_consume_admin_password_reset_persists_false_and_preserves_comments
 #[tokio::test]
 async fn test_consume_admin_password_reset_does_not_rewrite_false_config() {
     let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "[server]\nreset_admin_password = false\n")
-        .expect("Failed to write config");
+    let path = write_config(&dir, "[server]\nreset_admin_password = false\n");
     let original = std::fs::read_to_string(&path).expect("Failed to read config");
     let loaded = load_config_with_identity(&path).expect("Failed to load config");
     let executors = crate::test_utils::test_executor_handles(crate::test_utils::create_test_db());
@@ -576,9 +560,7 @@ async fn test_consume_admin_password_reset_does_not_rewrite_false_config() {
 #[test]
 fn test_llm_section_owns_ai_schedules_and_defaults() {
     let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "[llm]\ndeduplicate_cron = \"30 3 * * *\"\n")
-        .expect("Failed to write existing config");
+    let path = write_config(&dir, "[llm]\ndeduplicate_cron = \"30 3 * * *\"\n");
 
     let config = load_config(&path).expect("LLM schedules should be valid");
 
@@ -855,7 +837,7 @@ fn test_save_default_config_round_trips() {
         &generated,
         Some("llm-service:8100"),
         Some("false"),
-        Some("generated-secret"),
+        Some(crate::test_utils::TEST_SIGNING_SECRET),
         Some("generated-api-key"),
     )
     .expect("Failed to resolve generated config");
@@ -941,8 +923,7 @@ fn test_load_config_rejects_removed_metadata_batch_size() {
 #[test]
 fn test_load_config_uses_disabled_global_llm_default_when_section_is_missing() {
     let dir = crate::temporary::tempdir().expect("Failed to create temp dir");
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "[server]\nport = 9001\n").expect("Failed to write test config");
+    let path = write_config(&dir, "[server]\nport = 9001\n");
 
     let config = load_config(&path).expect("Missing LLM config should use safe defaults");
 
@@ -1019,11 +1000,17 @@ fn test_load_config_rejects_each_invalid_ai_schedule() {
 }
 
 #[test]
-fn playground_config_matches_the_generated_template() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../playground/config.toml");
-    let playground = std::fs::read_to_string(path).expect("Playground config must exist");
+fn generated_config_requires_an_explicit_signing_secret() {
+    let error = resolve_config_environment(
+        default_config_template(),
+        Some("llm-service:8100"),
+        None,
+        None,
+        Some("generated-api-key"),
+    )
+    .expect_err("generated config must require a signing secret");
 
-    assert_eq!(playground, default_config_template());
+    assert!(error.to_string().contains("SECRET_KEY"), "{error}");
 }
 
 #[test]

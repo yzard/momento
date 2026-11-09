@@ -65,6 +65,8 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dockerfile =
         std::fs::read_to_string(repository.join("docker/Dockerfile")).expect("Momento Dockerfile");
+    let runtime_dockerfile = std::fs::read_to_string(repository.join("docker/Dockerfile.runtime"))
+        .expect("Momento runtime Dockerfile");
     let image_magick_policy =
         std::fs::read_to_string(repository.join("docker/imagemagick-policy.xml"))
             .expect("ImageMagick policy");
@@ -73,8 +75,9 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
     assert!(dockerfile.contains("TMPDIR=/data/tmp"));
     assert!(dockerfile.contains("TEMP=/data/tmp"));
     assert!(dockerfile.contains("TMP=/data/tmp"));
-    assert!(dockerfile.contains("imagemagick-raw"));
-    assert!(dockerfile.contains("AVIF DNG GIF HEIC QOI TIFF WEBP"));
+    assert!(dockerfile.contains("FROM momento-api-runtime"));
+    assert!(runtime_dockerfile.contains("imagemagick-raw"));
+    assert!(runtime_dockerfile.contains("AVIF DNG GIF HEIC QOI TIFF WEBP"));
     assert!(!image_magick_policy.contains("name=\"time\""));
     assert!(image_magick_policy.contains("name=\"map\" value=\"1GiB\""));
     assert!(image_magick_policy.contains("name=\"disk\" value=\"32GiB\""));
@@ -85,7 +88,7 @@ fn momento_container_places_runtime_temporary_files_on_the_data_volume() {
 fn runtime_log_events_are_written_only_by_file_workers_and_count_oversize_drops() {
     let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
@@ -147,11 +150,10 @@ fn runtime_builder_publishes_named_executor_and_network_workers() {
     )
     .expect("runtime sizing");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(
+    crate::test_utils::write_test_config(
         &config_path,
         "[thread_pool]\ncpu_workers=1\nnetwork_io_workers = 3\nstorage_io_workers = 2\nsqlite_workers=2\n",
-    )
-    .expect("write config");
+    );
     let loaded_config =
         momento_api::config::load_config_with_identity(&config_path).expect("load config identity");
     let runtime = RuntimeBuilder::new(
@@ -212,11 +214,10 @@ fn journal_mutation_registry_covers_every_active_mutation_owner() {
     assert!(sizing.durable_orchestrations > sizing.file_queue_capacity);
     let mutation_capacity = sizing.journal_mutation_registry_capacity;
     let config_path = directory.path().join("config.toml");
-    std::fs::write(
+    crate::test_utils::write_test_config(
         &config_path,
         "[thread_pool]\ncpu_workers=8\nnetwork_io_workers = 2\nstorage_io_workers = 2\nsqlite_workers=4\n",
-    )
-    .expect("write config");
+    );
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("load config identity")
         .identity;
@@ -259,10 +260,10 @@ fn journal_mutation_registry_covers_every_active_mutation_owner() {
 fn runtime_builder_rejects_a_config_changed_after_initial_read() {
     let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# initial config\n").expect("write initial config");
+    crate::test_utils::write_test_config(&config_path, "# initial config\n");
     let loaded_config = momento_api::config::load_config_with_identity(&config_path)
         .expect("initial config identity");
-    std::fs::write(&config_path, "# changed config\n").expect("replace config contents");
+    crate::test_utils::write_test_config(&config_path, "# changed config\n");
     let sizing = RuntimeSizing::validate_worker_counts(
         &ThreadPoolConfig {
             cpu_workers: 1,
@@ -294,7 +295,7 @@ fn runtime_builder_rejects_a_config_changed_after_initial_read() {
 fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
     let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
@@ -338,7 +339,7 @@ fn runtime_builder_holds_an_exclusive_lifetime_lock_on_the_data_directory() {
 fn runtime_builder_does_not_create_a_missing_data_directory() {
     let directory = crate::temporary::tempdir().expect("temporary parent directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
@@ -369,7 +370,7 @@ fn runtime_builder_does_not_create_a_missing_data_directory() {
 fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
     let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let reserved_temporary = directory.path().join(".config.toml.momento-update.tmp");
     std::fs::write(&reserved_temporary, "# interrupted update\n")
         .expect("write interrupted temporary");
@@ -403,7 +404,7 @@ fn file_bootstrap_removes_only_the_reserved_config_update_temporary() {
 fn runtime_builder_creates_every_writable_storage_root_before_publication() {
     let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
@@ -472,7 +473,7 @@ fn runtime_builder_creates_every_writable_storage_root_before_publication() {
 fn runtime_builder_rejects_static_storage_that_overlaps_private_data() {
     let directory = crate::temporary::tempdir().expect("temporary runtime directory");
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;
@@ -513,7 +514,7 @@ fn runtime_builder_rejects_orphan_and_truncated_sqlite_bootstrap_files() {
     ] {
         let directory = crate::temporary::tempdir().expect("temporary runtime directory");
         let config_path = directory.path().join("config.toml");
-        std::fs::write(&config_path, "# config\n").expect("write config");
+        crate::test_utils::write_test_config(&config_path, "# config\n");
         std::fs::write(directory.path().join(filename), contents).expect("write SQLite fixture");
         let identity = momento_api::config::load_config_with_identity(&config_path)
             .expect("config identity")
@@ -554,7 +555,7 @@ fn runtime_builder_rejects_an_existing_schema_that_needs_migration() {
         .expect("legacy schema fixture");
     drop(pool);
     let config_path = directory.path().join("config.toml");
-    std::fs::write(&config_path, "# config\n").expect("write config");
+    crate::test_utils::write_test_config(&config_path, "# config\n");
     let identity = momento_api::config::load_config_with_identity(&config_path)
         .expect("config identity")
         .identity;

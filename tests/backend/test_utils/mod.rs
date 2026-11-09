@@ -1,5 +1,6 @@
 use axum::Router;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -138,10 +139,18 @@ pub fn test_scheduler(pool: DbPool) -> momento_api::runtime::SchedulerHandle {
     test_executor_handles(pool).scheduler
 }
 
+pub const TEST_SIGNING_SECRET: &str = "test-only-key-0cb5961f-4491-47f0-ab54-0e7b902856ad";
+
 pub fn test_config() -> Config {
     let mut config = Config::default();
-    config.security.secret_key = "test-only-key-0cb5961f-4491-47f0-ab54-0e7b902856ad".into();
+    config.security.secret_key = TEST_SIGNING_SECRET.into();
     config
+}
+
+pub fn write_test_config(path: &Path, contents: &str) {
+    let mut document: toml_edit::DocumentMut = contents.parse().expect("valid fixture TOML");
+    document["security"]["secret_key"] = toml_edit::value(TEST_SIGNING_SECRET);
+    std::fs::write(path, document.to_string()).expect("write test config");
 }
 
 pub fn create_test_app() -> (Router, DbPool) {
