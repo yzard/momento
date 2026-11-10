@@ -187,6 +187,7 @@ pub(crate) enum SqliteOperation {
     LoadNextMetadataJobDelay,
     FinishMetadataJob(FinishMetadataJob),
     RecoverMetadataClaims,
+    CheckVideoFrameWriteClaim(NormalizedStoragePath),
     LoadMetadataGenerationMedia {
         media_id: i64,
     },
@@ -203,6 +204,7 @@ pub(crate) enum SqliteOperation {
         job_id: String,
     },
     FinishLlmSubmission(FinishLlmSubmission),
+    DeferLlmForVideoFrameRepair(operations::LlmVideoFrameRepair),
     LoadLlmCancellationBatch {
         limit: u16,
     },
@@ -545,6 +547,7 @@ impl SqliteOperation {
             Self::LoadNextMetadataJobDelay => "load_next_metadata_job_delay",
             Self::FinishMetadataJob(_) => "finish_metadata_job",
             Self::RecoverMetadataClaims => "recover_metadata_claims",
+            Self::CheckVideoFrameWriteClaim(_) => "check_video_frame_write_claim",
             Self::LoadMetadataGenerationMedia { .. } => "load_metadata_generation_media",
             Self::PersistMetadataGeneration(_) => "persist_metadata_generation",
             Self::PrepareLlmSubmissionCycle => "prepare_llm_submission_cycle",
@@ -553,6 +556,7 @@ impl SqliteOperation {
             Self::LoadSubmittedLlmPage { .. } => "load_submitted_llm_page",
             Self::LoadLlmPreparedInputs { .. } => "load_llm_prepared_inputs",
             Self::FinishLlmSubmission(_) => "finish_llm_submission",
+            Self::DeferLlmForVideoFrameRepair(_) => "defer_llm_for_video_frame_repair",
             Self::LoadLlmCancellationBatch { .. } => "load_llm_cancellation_batch",
             Self::AcknowledgeLlmCancellation(_) => "acknowledge_llm_cancellation",
             Self::PrepareLlmResultReceipt(_) => "prepare_llm_result_receipt",
@@ -712,6 +716,7 @@ impl SqliteOperation {
             | Self::LoadTimelinePage(_)
             | Self::LoadTimelineMarkers(_)
             | Self::LoadMetadataJobStatus
+            | Self::CheckVideoFrameWriteClaim(_)
             | Self::LoadMetadataGenerationMedia { .. }
             | Self::LoadLlmPreparedInputs { .. }
             | Self::LoadLlmCancellationBatch { .. }
@@ -783,6 +788,7 @@ impl SqliteOperation {
             | Self::LoadTimelinePage(_)
             | Self::LoadTimelineMarkers(_)
             | Self::LoadMetadataJobStatus
+            | Self::CheckVideoFrameWriteClaim(_)
             | Self::LoadMetadataGenerationMedia { .. }
             | Self::LoadLlmPreparedInputs { .. }
             | Self::LoadLlmCancellationBatch { .. }
@@ -890,6 +896,7 @@ impl SqliteOperation {
             | Self::PrepareLlmSubmissionCycle
             | Self::ClaimLlmSubmissionJobs { .. }
             | Self::FinishLlmSubmission(_)
+            | Self::DeferLlmForVideoFrameRepair(_)
             | Self::AcknowledgeLlmCancellation(_)
             | Self::PrepareLlmResultReceipt(_)
             | Self::CommitLlmResultReceipt(_)
@@ -1106,12 +1113,14 @@ pub(crate) enum SqliteOutput {
     MediaMovedToTrash(usize),
     IncompleteMetadataQueued(usize),
     MissingVideoArtifactQueued(bool),
+    LlmVideoFrameRepair(operations::LlmVideoFrameRepairOutcome),
     ActiveMetadataJobsCancelled(usize),
     MetadataCleanStep(operations::CleanMetadataStepOutcome),
     MetadataJobStatus(MetadataJobStatus),
     MetadataJobClaimed(Option<MetadataJobClaim>),
     NextMetadataJobDelay(Option<u64>),
     JournalRetryDelay(Option<u64>),
+    VideoFrameWriteClaimed(bool),
     MetadataJobFinished,
     MetadataClaimsRecovered(usize),
     MetadataGenerationMedia(MetadataGenerationMedia),
@@ -1274,12 +1283,14 @@ impl SqliteOutput {
             Self::MediaMovedToTrash(_) => "media_moved_to_trash",
             Self::IncompleteMetadataQueued(_) => "incomplete_metadata_queued",
             Self::MissingVideoArtifactQueued(_) => "missing_video_artifact_queued",
+            Self::LlmVideoFrameRepair(_) => "llm_video_frame_repair",
             Self::ActiveMetadataJobsCancelled(_) => "active_metadata_jobs_cancelled",
             Self::MetadataCleanStep(_) => "metadata_clean_step",
             Self::MetadataJobStatus(_) => "metadata_job_status",
             Self::MetadataJobClaimed(_) => "metadata_job_claimed",
             Self::NextMetadataJobDelay(_) => "next_metadata_job_delay",
             Self::JournalRetryDelay(_) => "journal_retry_delay",
+            Self::VideoFrameWriteClaimed(_) => "video_frame_write_claimed",
             Self::MetadataJobFinished => "metadata_job_finished",
             Self::MetadataClaimsRecovered(_) => "metadata_claims_recovered",
             Self::MetadataGenerationMedia(_) => "metadata_generation_media",
@@ -4583,6 +4594,22 @@ impl SqliteExecutorHandle {
         }
     }
 
+    pub(crate) async fn video_frame_has_write_claim_durable(
+        &self,
+        path: NormalizedStoragePath,
+    ) -> Result<bool, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::CheckVideoFrameWriteClaim(path),
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::VideoFrameWriteClaimed(claimed) => Ok(claimed),
+            output => Err(output.mismatch("check_video_frame_write_claim")),
+        }
+    }
+
     pub async fn load_metadata_generation_media_durable(
         &self,
         media_id: i64,
@@ -4714,6 +4741,24 @@ impl SqliteExecutorHandle {
         {
             SqliteOutput::LlmPreparedInputs(inputs) => Ok(inputs),
             output => Err(output.mismatch("load_llm_prepared_inputs")),
+        }
+    }
+
+    pub async fn defer_llm_for_video_frame_repair_durable(
+        &self,
+        request: operations::LlmVideoFrameRepair,
+    ) -> Result<bool, ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::DeferLlmForVideoFrameRepair(request),
+                SubmissionMode::Durable,
+            )
+            .await?
+        {
+            SqliteOutput::LlmVideoFrameRepair(outcome) => {
+                Ok(outcome != operations::LlmVideoFrameRepairOutcome::Ineligible)
+            }
+            output => Err(output.mismatch("defer_llm_for_video_frame_repair")),
         }
     }
 
@@ -5493,7 +5538,10 @@ fn run_worker(context: SqliteWorkerContext, receiver: Receiver<SqliteCommand>, r
         }
         if matches!(
             &operation_result,
-            Ok(SqliteOutput::MissingVideoArtifactQueued(true))
+            Ok(SqliteOutput::MissingVideoArtifactQueued(true)
+                | SqliteOutput::LlmVideoFrameRepair(
+                    operations::LlmVideoFrameRepairOutcome::QueuedMetadata
+                ))
         ) {
             context.metadata_work.notify();
         }
@@ -6206,6 +6254,15 @@ fn execute_with_connection(
         SqliteOperation::RecoverMetadataClaims => operations::recover_metadata_claims(connection)
             .map(SqliteOutput::MetadataClaimsRecovered)
             .map_err(|error| map_sqlite_error(operation_name, error)),
+        SqliteOperation::CheckVideoFrameWriteClaim(path) => connection
+            .query_row(
+                crate::database::queries::file_operations::FIND_EQUAL_CLAIM_CONFLICT,
+                rusqlite::params![StorageRootId::Previews.as_str(), path.path_key(), "read"],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|claim| SqliteOutput::VideoFrameWriteClaimed(claim.is_some()))
+            .map_err(|error| map_sqlite_error(operation_name, error)),
         SqliteOperation::LoadMetadataGenerationMedia { media_id } => {
             operations::load_metadata_generation_media(connection, media_id)
                 .map(SqliteOutput::MetadataGenerationMedia)
@@ -6239,6 +6296,11 @@ fn execute_with_connection(
         SqliteOperation::LoadLlmPreparedInputs { job_id } => {
             operations::load_llm_prepared_inputs(connection, &job_id)
                 .map(SqliteOutput::LlmPreparedInputs)
+                .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::DeferLlmForVideoFrameRepair(request) => {
+            operations::defer_llm_for_video_frame_repair(connection, request)
+                .map(SqliteOutput::LlmVideoFrameRepair)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::FinishLlmSubmission(request) => {

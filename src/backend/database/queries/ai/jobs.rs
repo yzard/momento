@@ -79,6 +79,37 @@ SELECT CAST(
 pub const CLAIM: &str = "UPDATE llm_jobs SET status = 'submitting', state_version = state_version + 1, claimed_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'queued' AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)";
 pub const MARK_SUBMITTED: &str = "UPDATE llm_jobs SET status = 'submitted', state_version = state_version + 1, attempts = attempts + 1, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting' AND attempts + 1 = ?";
 pub const REQUEUE_AMBIGUOUS: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, available_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
+pub const SELECT_MISSING_VIDEO_FRAME_REPAIR_OWNER: &str = r#"
+    SELECT j.media_id
+      FROM llm_jobs AS j
+      JOIN media AS m ON m.id = j.media_id
+      JOIN media_metadata_jobs AS metadata ON metadata.media_id = j.media_id
+      JOIN llm_job_inputs AS snapshot ON snapshot.job_id = j.id AND snapshot.sequence = ?2
+      JOIN media_ai_inputs AS current ON current.media_id = j.media_id
+       AND current.task = j.task AND current.sequence = snapshot.sequence
+     WHERE j.id = ?1
+       AND j.status = 'submitting'
+       AND m.import_state = 'imported'
+       AND m.media_type = 'video'
+       AND m.file_path = ?4
+       AND metadata.status IN ('completed', 'queued', 'processing')
+       AND snapshot.storage_root = 'previews'
+       AND snapshot.input_kind = 'video_frame'
+       AND snapshot.frame_timestamp_ms = 0
+       AND snapshot.file_path = ?3
+       AND current.storage_root = snapshot.storage_root
+       AND current.input_kind = snapshot.input_kind
+       AND current.file_path = snapshot.file_path
+       AND current.byte_size = snapshot.byte_size
+       AND current.content_hash = snapshot.content_hash
+       AND current.frame_timestamp_ms = snapshot.frame_timestamp_ms
+       AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
+       AND NOT EXISTS (
+           SELECT 1 FROM llm_cancellation_scopes AS cancellation
+            WHERE cancellation.scope = 'all'
+               OR (cancellation.scope = 'task' AND cancellation.task = j.task)
+       )
+"#;
 pub const REQUEUE_DEFERRED: &str = "UPDATE llm_jobs SET status = 'queued', state_version = state_version + 1, claimed_at = NULL, available_at = datetime('now', '+' || ? || ' seconds'), last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status = 'submitting'";
 pub const SNAPSHOT_QUEUED_INPUTS: &str = "INSERT OR IGNORE INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash, frame_timestamp_ms) SELECT llm_jobs.id, media_ai_inputs.sequence, media_ai_inputs.input_kind, media_ai_inputs.storage_root, media_ai_inputs.file_path, media_ai_inputs.filename, media_ai_inputs.mime_type, media_ai_inputs.byte_size, media_ai_inputs.content_hash, media_ai_inputs.frame_timestamp_ms FROM llm_jobs JOIN media_ai_inputs ON media_ai_inputs.media_id = llm_jobs.media_id AND media_ai_inputs.task = llm_jobs.task WHERE llm_jobs.status = 'queued'";
 pub const SELECT_INPUTS: &str = "SELECT sequence, storage_root, file_path, filename, mime_type, byte_size, content_hash, input_kind, frame_timestamp_ms FROM llm_job_inputs WHERE job_id = ? ORDER BY sequence";

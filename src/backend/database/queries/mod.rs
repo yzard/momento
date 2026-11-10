@@ -339,6 +339,17 @@ pub mod metadata_jobs {
       , updated_at = datetime('now')
     "#;
 
+    pub const QUEUE_COMPLETED_FOR_VIDEO_FRAME_REPAIR: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = 'queued'
+         , attempts = 0
+         , available_at = datetime('now')
+         , completed_at = NULL
+         , last_error = NULL
+         , updated_at = datetime('now')
+     WHERE media_id = ?1 AND status = 'completed'
+    "#;
+
     pub const QUEUE_MISSING_VIDEO_ARTIFACT: &str = r#"
     UPDATE media_metadata_jobs
        SET status = 'queued'

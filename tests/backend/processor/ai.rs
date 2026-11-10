@@ -162,6 +162,149 @@ async fn prepared_input_verification_streams_size_and_hash_validation() {
 }
 
 #[tokio::test]
+async fn missing_video_frame_is_rebuilt_once_for_multiple_queued_jobs() {
+    use crate::test_utils::test_config;
+    use momento_api::database::operations::{FinishMetadataJob, LlmVideoFrameRepair};
+    use momento_api::processor::ai::PreparedInputError;
+    use momento_api::processor::metadata::generate_media_metadata;
+
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "video.mov");
+    let executors = test_executor_handles(pool.clone());
+    let directory = test_data_directory(&pool);
+    let original_path = NormalizedStoragePath::parse("original.mov").unwrap();
+    let bytes = include_bytes!("../../ios/Feature/Backup/Resources/noncamera-fixture.mov");
+    std::fs::write(directory.join("originals/original.mov"), bytes).unwrap();
+    let connection = pool.get().unwrap();
+    connection.execute(
+        "UPDATE media SET file_path='original.mov', media_type='video', mime_type='video/quicktime', import_state='imported' WHERE id=?",
+        [media_id],
+    ).unwrap();
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs(media_id,status) VALUES (?,'queued')",
+            [media_id],
+        )
+        .unwrap();
+    drop(connection);
+    let generate = || async {
+        let claim = executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .unwrap()
+            .unwrap();
+        generate_media_metadata(&executors, media_id, &claim.claim_token, &test_config())
+            .await
+            .unwrap();
+        executors
+            .sqlite
+            .finish_metadata_job_durable(FinishMetadataJob {
+                media_id,
+                claim_token: claim.claim_token,
+                error: None,
+                retryable: false,
+            })
+            .await
+            .unwrap();
+    };
+    generate().await;
+
+    for feature in [AiFeature::ImageTagging, AiFeature::Ocr] {
+        assert_eq!(
+            executors
+                .sqlite
+                .start_ai_feature_request(feature, "manual".to_string(), None)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    let jobs = executors
+        .sqlite
+        .claim_llm_submission_jobs_durable(2)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 2);
+    let mut input = executors
+        .sqlite
+        .load_llm_prepared_inputs_durable(jobs[0].job_id.clone())
+        .await
+        .unwrap()
+        .remove(0);
+    let frame_path = NormalizedStoragePath::parse(&input.file_path).unwrap();
+    std::fs::remove_file(directory.join("previews").join(&input.file_path)).unwrap();
+    let verify = |input: &momento_api::database::operations::LlmPreparedInput| {
+        let expected_hash = input.content_hash.clone();
+        let path = frame_path.clone();
+        let expected_size = input.byte_size as u64;
+        let executors = &executors;
+        async move {
+            verify_prepared_input(
+                &executors.file_io,
+                &executors.cpu,
+                StorageRootId::Previews,
+                path,
+                expected_size,
+                &expected_hash,
+            )
+            .await
+        }
+    };
+    assert!(matches!(
+        verify(&input).await,
+        Err(PreparedInputError::Missing)
+    ));
+    let version = executors.scheduler.metadata_work_version();
+    for job in &jobs {
+        assert!(executors
+            .sqlite
+            .defer_llm_for_video_frame_repair_durable(LlmVideoFrameRepair {
+                job_id: job.job_id.clone(),
+                sequence: input.sequence,
+                missing_path: frame_path.clone(),
+                original_path: original_path.clone(),
+            })
+            .await
+            .unwrap());
+    }
+    assert_eq!(executors.scheduler.metadata_work_version(), version + 1);
+    assert!(executors
+        .sqlite
+        .claim_llm_submission_jobs_durable(2)
+        .await
+        .unwrap()
+        .is_empty());
+    generate().await;
+    verify(&input).await.unwrap();
+    pool.get()
+        .unwrap()
+        .execute("UPDATE llm_jobs SET available_at=datetime('now')", [])
+        .unwrap();
+    let retried = executors
+        .sqlite
+        .claim_llm_submission_jobs_durable(2)
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 2);
+    for job in retried {
+        assert_eq!(job.attempts, 0);
+        assert!(jobs.iter().any(|original| original.job_id == job.job_id));
+        input = executors
+            .sqlite
+            .load_llm_prepared_inputs_durable(job.job_id)
+            .await
+            .unwrap()
+            .remove(0);
+        verify(&input).await.unwrap();
+    }
+    assert_eq!(
+        std::fs::read(directory.join("originals/original.mov")).unwrap(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
 async fn verified_input_handle_survives_source_path_removal() {
     let pool = create_test_db();
     let executors = test_executor_handles(pool.clone());

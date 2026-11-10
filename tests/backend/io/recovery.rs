@@ -899,6 +899,74 @@ async fn interrupted_video_frame_cleanup_preserves_current_and_snapshotted_input
 }
 
 #[tokio::test]
+async fn background_recovery_leaves_video_frame_publication_to_the_live_metadata_claim() {
+    use momento_api::database::operations::FinishMetadataJob;
+
+    for state in ["publishing", "files_committed"] {
+        let pool = crate::test_utils::create_test_db();
+        let media_id = crate::test_utils::create_test_media(&pool, "video.mp4");
+        let (executors, directory) =
+            crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+        let connection = pool.get().unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+                [media_id],
+            )
+            .unwrap();
+        let claim = executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .unwrap()
+            .unwrap();
+        connection.execute(
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, entry_count, version)
+             VALUES ('live-frame','video_ai_frame','generated_artifact','live-frame',?,?,1,2)",
+            rusqlite::params![claim.claim_token,state],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO file_operation_entries (group_id,sequence,action,storage_root,temporary_path,destination_path)
+             VALUES ('live-frame',0,'publish','previews','partial-frame','frame.png')", [],
+        ).unwrap();
+        let visible = directory.join("previews/frame.png");
+        std::fs::write(&visible, b"unsettled frame").unwrap();
+
+        assert_eq!(
+            recover_generic_file_operations(&executors).await.unwrap(),
+            0
+        );
+        assert_eq!(executors.sqlite.journal_retry_delay().await.unwrap(), None);
+        let version: i64 = connection
+            .query_row(
+                "SELECT version FROM file_operation_groups WHERE id='live-frame'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert!(visible.is_file());
+        drop(connection);
+
+        executors
+            .sqlite
+            .finish_metadata_job_durable(FinishMetadataJob {
+                media_id,
+                claim_token: claim.claim_token,
+                error: Some("publication interrupted".to_string()),
+                retryable: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recover_generic_file_operations(&executors).await.unwrap(),
+            1
+        );
+        assert!(!visible.exists());
+    }
+}
+
+#[tokio::test]
 async fn background_recovery_discards_a_video_frame_after_its_owner_claim_expires() {
     let pool = crate::test_utils::create_test_db();
     let (executors, directory) =

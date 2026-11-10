@@ -247,14 +247,39 @@ pub const SELECT_ACTIVE_SQLITE_RESULT_RESERVATION: &str = "SELECT s.id, s.class,
 pub const CONSUME_SQLITE_RESULT_RESERVATION: &str = "UPDATE data_dir_space_reservations SET newly_allocated_blocks = newly_allocated_blocks + ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND newly_allocated_blocks + ? <= reserved_peak_additional_bytes";
 pub const SHRINK_SQLITE_RESULT_RESERVATION_TO_CLEANUP: &str = "UPDATE data_dir_space_reservations SET owner_kind = 'llm_result_cleanup', newly_allocated_blocks = reserved_peak_additional_bytes - ?, version = version + 1, updated_at = datetime('now') WHERE id = ? AND class = 'sqlite' AND owner_kind = 'llm_result' AND owner_id = ? AND state = 'active' AND version = ? AND reserved_peak_additional_bytes - newly_allocated_blocks >= ?";
 pub const SELECT_GROUP_VERSION: &str = "SELECT version FROM file_operation_groups WHERE id = ?";
+// A publisher owns its journal version until its claim settles.
+macro_rules! exclude_live_publishers {
+    () => {
+        r#"
+        AND (
+            state NOT IN ('publishing', 'files_committed')
+            OR (
+                NOT EXISTS (
+                    SELECT 1 FROM import_content_hash_claims AS active_import
+                     WHERE active_import.claim_token = file_operation_groups.claim_token
+                )
+                AND (
+                    kind <> 'video_ai_frame' OR owner_kind <> 'generated_artifact'
+                    OR NOT EXISTS (
+                        SELECT 1 FROM media_metadata_jobs AS active_metadata
+                         WHERE active_metadata.claim_token = file_operation_groups.claim_token
+                           AND active_metadata.status = 'processing'
+                    )
+                )
+            )
+        )
+        "#
+    };
+}
+
 // The ready-only ordered index is the durable FIFO; never sort the backlog per dequeue.
-pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind, kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND retry_at <= unixepoch() AND (state NOT IN ('publishing', 'files_committed') OR NOT EXISTS (SELECT 1 FROM import_content_hash_claims AS active_import WHERE active_import.claim_token = file_operation_groups.claim_token)) AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
+pub const SELECT_NEXT_GENERIC_RECOVERY_GROUP: &str = concat!("SELECT id, state, version, owner_kind, kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND retry_at <= unixepoch()", exclude_live_publishers!(), " AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1");
 pub const SELECT_NEXT_STARTUP_CRITICAL_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind, kind FROM file_operation_groups WHERE product_target IS NULL AND (state IN ('publishing', 'files_committed', 'rollback_pending') OR (state = 'cleanup_pending' AND completion_outcome = 'discarded' AND cancel_requested = 1)) AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
-pub const SELECT_NEXT_BLOCKING_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind, kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND (state <> 'cleanup_pending' OR cancel_requested = 1) AND retry_at <= unixepoch() AND (state NOT IN ('publishing', 'files_committed') OR NOT EXISTS (SELECT 1 FROM import_content_hash_claims AS active_import WHERE active_import.claim_token = file_operation_groups.claim_token)) AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
-pub const SELECT_NEXT_CLEANUP_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind, kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND state = 'cleanup_pending' AND cancel_requested = 0 AND retry_at <= unixepoch() AND (state NOT IN ('publishing', 'files_committed') OR NOT EXISTS (SELECT 1 FROM import_content_hash_claims AS active_import WHERE active_import.claim_token = file_operation_groups.claim_token)) AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
+pub const SELECT_NEXT_BLOCKING_RECOVERY_GROUP: &str = concat!("SELECT id, state, version, owner_kind, kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND (state <> 'cleanup_pending' OR cancel_requested = 1) AND retry_at <= unixepoch()", exclude_live_publishers!(), " AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1");
+pub const SELECT_NEXT_CLEANUP_RECOVERY_GROUP: &str = "SELECT id, state, version, owner_kind, kind FROM file_operation_groups INDEXED BY idx_file_operation_groups_recovery_queue WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND state = 'cleanup_pending' AND cancel_requested = 0 AND retry_at <= unixepoch() AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY recovery_order, id LIMIT 1";
 pub const YIELD_RECOVERY_PROGRESS: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), updated_at = datetime('now') WHERE id = ? AND version = ? AND state IN ('cleanup_pending', 'rollback_pending')";
 pub const DEFER_RECOVERY: &str = "UPDATE file_operation_groups SET version = version + 1, recovery_order = (SELECT COALESCE(MAX(recovery_order), 0) + 1 FROM file_operation_groups), retry_at = unixepoch() + 1, finalization_error_kind = ?1, finalization_error = ?2, rollback_error_kind = CASE WHEN state = 'rollback_pending' THEN ?1 ELSE rollback_error_kind END, rollback_error = CASE WHEN state = 'rollback_pending' THEN ?2 ELSE rollback_error END, updated_at = datetime('now') WHERE id = ?3 AND version = ?4 AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending')";
-pub const NEXT_RECOVERY_DELAY: &str = "SELECT MAX(0, MIN(retry_at) - unixepoch()) FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending') AND (state NOT IN ('publishing', 'files_committed') OR NOT EXISTS (SELECT 1 FROM import_content_hash_claims AS active_import WHERE active_import.claim_token = file_operation_groups.claim_token))";
+pub const NEXT_RECOVERY_DELAY: &str = concat!("SELECT MAX(0, MIN(retry_at) - unixepoch()) FROM file_operation_groups WHERE product_target IS NULL AND state IN ('publishing', 'files_committed', 'cleanup_pending', 'rollback_pending')", exclude_live_publishers!());
 pub const SELECT_RETRY_RECEIPT: &str = "SELECT group_id, expected_version, request_hash, response_state, response_version, expires_at > datetime('now') FROM file_operation_retry_requests WHERE retry_request_id = ?";
 pub const COUNT_LIVE_RETRY_RECEIPTS: &str = "SELECT COUNT(*) FROM file_operation_retry_requests WHERE group_id = ? AND expires_at > datetime('now')";
 pub const SELECT_FAILED_GROUP_FOR_RETRY: &str =

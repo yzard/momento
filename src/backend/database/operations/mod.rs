@@ -1032,6 +1032,21 @@ pub struct LlmSubmissionJob {
 }
 
 #[derive(Debug)]
+pub struct LlmVideoFrameRepair {
+    pub job_id: String,
+    pub sequence: i64,
+    pub missing_path: NormalizedStoragePath,
+    pub original_path: NormalizedStoragePath,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LlmVideoFrameRepairOutcome {
+    Ineligible,
+    Deferred,
+    QueuedMetadata,
+}
+
+#[derive(Debug)]
 pub struct LlmPreparedInput {
     pub sequence: i64,
     pub storage_root: String,
@@ -4328,6 +4343,43 @@ pub(crate) fn load_submitted_llm_page(
             })
         })?
         .collect()
+}
+
+pub(crate) fn defer_llm_for_video_frame_repair(
+    connection: &mut Connection,
+    request: LlmVideoFrameRepair,
+) -> rusqlite::Result<LlmVideoFrameRepairOutcome> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let media_id = transaction
+        .query_row(
+            queries::ai::jobs::SELECT_MISSING_VIDEO_FRAME_REPAIR_OWNER,
+            params![
+                request.job_id,
+                request.sequence,
+                request.missing_path.relative_path(),
+                request.original_path.relative_path(),
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(media_id) = media_id else {
+        return Ok(LlmVideoFrameRepairOutcome::Ineligible);
+    };
+    let queued = transaction.execute(
+        queries::metadata_jobs::QUEUE_COMPLETED_FOR_VIDEO_FRAME_REPAIR,
+        [media_id],
+    )?;
+    const VIDEO_FRAME_REPAIR_RETRY_SECONDS: i64 = 30;
+    transaction.execute(
+        queries::ai::jobs::REQUEUE_DEFERRED,
+        params![VIDEO_FRAME_REPAIR_RETRY_SECONDS, request.job_id],
+    )?;
+    transaction.commit()?;
+    Ok(if queued == 1 {
+        LlmVideoFrameRepairOutcome::QueuedMetadata
+    } else {
+        LlmVideoFrameRepairOutcome::Deferred
+    })
 }
 
 pub(crate) fn finish_llm_submission(

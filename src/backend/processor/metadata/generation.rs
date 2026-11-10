@@ -513,6 +513,17 @@ async fn prepare_ai_inputs(
             .into_owned();
         let frame_path = crate::io::file::NormalizedStoragePath::parse(&frame_relative)
             .map_err(|error| error.to_string())?;
+        // A visible destination can still belong to an interrupted publication.
+        // Wait for Journal recovery to settle its ownership before reusing it.
+        if executors
+            .sqlite
+            .video_frame_has_write_claim_durable(frame_path.clone())
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            executors.scheduler.wake_journal_recovery();
+            return Err("prepared video frame is waiting for file recovery".to_string());
+        }
         let frame_exists = match executors
             .file_io
             .open_storage_read_session_durable(

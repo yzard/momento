@@ -504,7 +504,10 @@ async fn run_recovery_step(
             });
             if stalled
                 && scope == JournalRecoveryScope::All
-                && group.state == JournalRecoveryState::Publishing
+                && matches!(
+                    group.state,
+                    JournalRecoveryState::Publishing | JournalRecoveryState::FilesCommitted
+                )
                 && group.kind == "video_ai_frame"
                 && group.owner_kind == "generated_artifact"
             {
@@ -654,6 +657,9 @@ async fn recover_file_operation_step(
                 Err(error) => return Err(error),
             };
             if outcome == JournalCheckpointOutcome::VersionConflict {
+                if group.kind == "video_ai_frame" && group.owner_kind == "generated_artifact" {
+                    return Ok(0);
+                }
                 return Err(recovery_conflict());
             }
             let JournalCheckpointOutcome::Advanced { version } = outcome else {

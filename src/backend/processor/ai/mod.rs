@@ -7,9 +7,11 @@ use thiserror::Error;
 
 use crate::config::Config;
 use crate::database::operations::{
-    AcknowledgeLlmCancellation, FinishLlmSubmission, LlmSubmissionJob,
+    AcknowledgeLlmCancellation, FinishLlmSubmission, LlmSubmissionJob, LlmVideoFrameRepair,
 };
-use crate::executor::{CpuExecutorHandle, FileIoExecutorHandle, SqliteExecutorHandle};
+use crate::executor::{
+    CpuExecutorHandle, ExecutorErrorKind, FileIoExecutorHandle, SqliteExecutorHandle,
+};
 use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::io::StorageFileSession;
 use crate::runtime::{DurableSourceId, ExecutorHandles, SchedulerAdmissionKind, SchedulerHandle};
@@ -455,13 +457,35 @@ async fn submit_claimed_job(
             &executors.file_io,
             &executors.cpu,
             storage.storage_root_id(),
-            input_path,
+            input_path.clone(),
             input_size,
             &input.content_hash,
         )
         .await
         {
             Ok(session) => session,
+            Err(PreparedInputError::Missing)
+                if storage.storage_root_id() == StorageRootId::Previews
+                    && input.input_kind == "video_frame" =>
+            {
+                if defer_missing_video_frame(
+                    executors,
+                    media_id,
+                    &job_id,
+                    input.sequence,
+                    input_path,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                return fail_submission(
+                    &executors.sqlite,
+                    &job_id,
+                    PreparedInputError::Missing.to_string(),
+                )
+                .await;
+            }
             Err(error) => {
                 return fail_submission(&executors.sqlite, &job_id, error.to_string()).await
             }
@@ -564,6 +588,46 @@ async fn submit_claimed_job(
     finish_submission(&executors.sqlite, completion).await
 }
 
+async fn defer_missing_video_frame(
+    executors: &ExecutorHandles,
+    media_id: i64,
+    job_id: &str,
+    sequence: i64,
+    missing_path: NormalizedStoragePath,
+) -> Result<bool, String> {
+    let media = executors
+        .sqlite
+        .load_metadata_generation_media_durable(media_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let original_path =
+        NormalizedStoragePath::parse(&media.file_path).map_err(|error| error.to_string())?;
+    match executors
+        .file_io
+        .open_storage_read_session_durable(StorageRootId::Originals, original_path.clone())
+        .await
+    {
+        Ok((session, snapshot)) => {
+            drop(session);
+            if snapshot.byte_size == 0 {
+                return Ok(false);
+            }
+        }
+        Err(error) if error.kind == ExecutorErrorKind::FileNotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    executors
+        .sqlite
+        .defer_llm_for_video_frame_repair_durable(LlmVideoFrameRepair {
+            job_id: job_id.to_string(),
+            sequence,
+            missing_path,
+            original_path,
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn verify_prepared_input(
     file_io: &FileIoExecutorHandle,
     cpu: &CpuExecutorHandle,
@@ -589,6 +653,8 @@ pub async fn verify_prepared_input(
 
 #[derive(Debug, Error)]
 pub enum PreparedInputError {
+    #[error("prepared AI input file is missing")]
+    Missing,
     #[error("prepared AI input no longer matches its durable descriptor")]
     Changed,
     #[error("prepared AI input executor failed: {0}")]
@@ -608,7 +674,10 @@ pub async fn open_verified_input(
     let (opened_session, snapshot) = file_io
         .open_storage_read_session_durable(storage_root, path)
         .await
-        .map_err(|error| PreparedInputError::Executor(error.to_string()))?;
+        .map_err(|error| match error.kind {
+            ExecutorErrorKind::FileNotFound => PreparedInputError::Missing,
+            _ => PreparedInputError::Executor(error.to_string()),
+        })?;
     if snapshot.byte_size != expected_size {
         drop(opened_session);
         return Err(PreparedInputError::Changed);

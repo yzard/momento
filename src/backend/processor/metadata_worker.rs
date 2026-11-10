@@ -77,6 +77,7 @@ impl MetadataClaimGuard {
                 return Err(error.to_string());
             }
         }
+        self.scheduler.wake_journal_recovery();
         self.claim.take();
         self.registration.take();
         self.admission.take();
@@ -158,6 +159,7 @@ async fn retry_metadata_claim_handoff(
         drop(admission);
         match outcome {
             Ok(()) => {
+                scheduler.wake_journal_recovery();
                 drop(registration);
                 return;
             }

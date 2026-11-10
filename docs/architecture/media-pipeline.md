@@ -168,8 +168,12 @@ falls back to a thumbnail.
 `llm_job_inputs` snapshots the storage root and descriptor when the job is queued. Before each
 submission, Momento resolves the path only inside the selected Momento storage root, opens it,
 streams its exact byte size and SHA-256 hash, rewinds that same open handle, and sends from the
-verified handle. Missing or changed bytes fail the Momento job and are never submitted. The wire
-manifest contains no storage root or path: llm-service receives only descriptors and raw bytes,
+verified handle. If a published video frame is missing, Momento queues metadata repair from the
+original. The job waits without consuming a submission attempt. Momento keeps the saved input
+descriptor and checks the regenerated frame against it before submission. A missing original or
+changed input fails the job. File recovery skips frames that an active metadata claim is publishing.
+The metadata worker waits for recovery to release a pending write claim before it reuses a frame.
+The wire manifest contains no storage root or path: llm-service receives only descriptors and raw bytes,
 persists those bytes below its own data root, and can run on another server with unrelated storage.
 Input and job admission allow up to 32 GiB so large streamed media is not rejected by the previous
 50 MiB cap. llm-service responds to admission with the exact input sequences it does not already
