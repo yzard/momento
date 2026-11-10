@@ -99,13 +99,11 @@ async fn thumbnail_reconciliation_cleans_history_without_touching_live_or_active
         for name in ["current.jpg", "active.jpg", "published-old.jpg"] {
             std::fs::write(directory.join(root).join(name), b"preserve or retire").unwrap();
         }
-        // More than one SQLite batch; no historical Journal evidence is needed.
+        // One file per directory exercises full batches and the final partial batch.
         for index in 0..70 {
-            std::fs::write(
-                directory.join(root).join(format!("nested/old-{index}.jpg")),
-                b"old",
-            )
-            .unwrap();
+            let nested = directory.join(root).join(format!("nested/{index}"));
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("old.jpg"), b"old").unwrap();
         }
     }
     std::fs::write(directory.join("originals/untouched.jpg"), b"original").unwrap();
@@ -141,7 +139,7 @@ async fn thumbnail_reconciliation_cleans_history_without_touching_live_or_active
         for index in 0..70 {
             assert!(!directory
                 .join(root)
-                .join(format!("nested/old-{index}.jpg"))
+                .join(format!("nested/{index}/old.jpg"))
                 .exists());
         }
     }

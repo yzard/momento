@@ -25,6 +25,51 @@ async fn thumbnail_reconciliation_rejects_other_roots_and_unbounded_batches() {
         .is_err());
 }
 
+#[test]
+fn thumbnail_reference_lookup_work_does_not_grow_with_llm_history() {
+    use momento_api::database::queries::metadata::SELECT_REFERENCED_THUMBNAIL_PATHS;
+    use rusqlite::{params, StatementStatus};
+
+    let pool = create_test_db();
+    let media_id = create_test_media(&pool, "original.jpg");
+    let connection = pool.get().unwrap();
+    connection.execute(
+        "INSERT INTO media_metadata(media_id, thumbnail_path, preview_path) VALUES (?, 'live.jpg', 'preview-only.jpg')
+         ON CONFLICT(media_id) DO UPDATE SET thumbnail_path=excluded.thumbnail_path, preview_path=excluded.preview_path",
+        [media_id],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO llm_jobs (id, media_id, task, status) VALUES ('historical-job', ?, 'ocr', 'completed')",
+        [media_id],
+    ).unwrap();
+    connection.execute(
+        "WITH RECURSIVE inputs(sequence) AS (
+             SELECT 0 UNION ALL SELECT sequence + 1 FROM inputs WHERE sequence < 1023
+         )
+         INSERT INTO llm_job_inputs (job_id, sequence, input_kind, storage_root, file_path, filename, mime_type, byte_size, content_hash)
+         SELECT 'historical-job', sequence, 'image', 'previews', 'ai-only.jpg', 'original.jpg', 'image/jpeg', 1, ?
+           FROM inputs",
+        params!["a".repeat(64)],
+    ).unwrap();
+
+    let mut statement = connection
+        .prepare(SELECT_REFERENCED_THUMBNAIL_PATHS)
+        .unwrap();
+    let paths = statement
+        .query_map(
+            [r#"["live.jpg", "preview-only.jpg", "ai-only.jpg"]"#],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(paths, ["live.jpg"]);
+    assert!(
+        statement.get_status(StatementStatus::FullscanStep) < 32,
+        "thumbnail lookup scanned unrelated history"
+    );
+}
+
 #[tokio::test]
 async fn metadata_replacement_atomically_transfers_old_publication_claims_to_cleanup() {
     use momento_api::database::operations::{MetadataValuesWrite, PersistMetadataGeneration};

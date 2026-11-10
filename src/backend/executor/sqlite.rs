@@ -4245,7 +4245,7 @@ impl SqliteExecutorHandle {
         storage_root: StorageRootId,
         paths: Vec<NormalizedStoragePath>,
     ) -> Result<usize, ExecutorError> {
-        if paths.len() > 64
+        if paths.len() > operations::THUMBNAIL_RECONCILIATION_BATCH_LIMIT
             || !matches!(
                 storage_root,
                 StorageRootId::Thumbnails | StorageRootId::TinyThumbnails

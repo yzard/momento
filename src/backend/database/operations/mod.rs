@@ -3951,6 +3951,8 @@ pub(crate) fn load_metadata_generation_media(
     )
 }
 
+pub(crate) const THUMBNAIL_RECONCILIATION_BATCH_LIMIT: usize = 64;
+
 pub(crate) fn queue_unreferenced_thumbnails(
     connection: &mut Connection,
     storage_root: StorageRootId,
@@ -3959,7 +3961,7 @@ pub(crate) fn queue_unreferenced_thumbnails(
     if !matches!(
         storage_root,
         StorageRootId::Thumbnails | StorageRootId::TinyThumbnails
-    ) || paths.len() > 64
+    ) || paths.len() > THUMBNAIL_RECONCILIATION_BATCH_LIMIT
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -3972,10 +3974,8 @@ pub(crate) fn queue_unreferenced_thumbnails(
     )
     .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let referenced = transaction
-        .prepare(queries::metadata::SELECT_REFERENCED_ARTIFACT_PATHS)?
-        .query_map(params![storage_root.as_str(), candidates], |row| {
-            row.get::<_, String>(0)
-        })?
+        .prepare(queries::metadata::SELECT_REFERENCED_THUMBNAIL_PATHS)?
+        .query_map([candidates], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
     let mut queued = 0;
     for path in paths {

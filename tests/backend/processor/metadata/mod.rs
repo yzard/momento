@@ -28,7 +28,14 @@ async fn unsupported_decoder_fails_without_retry_but_explicit_generate_can_retry
         )
         .unwrap();
     let token = claim_metadata_job(&pool, &executors, media_id).await;
-    let error = MetadataGenerationError::from("source=/data/originals/unsupported.dng: magick: Unsupported file format or not RAW file @ error/dng.c/ReadDNGImage/555".to_string());
+    assert!(!MetadataGenerationError::from(
+        "magick: Unsupported file format or not RAW file @ error/dng.c/ReadDNGImage/555"
+            .to_string()
+    )
+    .retryable());
+    let error = MetadataGenerationError::from(
+        "magick: Sorry, can not handle image with PhotometricInterpretation=32803. `/proc/self/fd/10' @ error/tiff.c/TIFFErrors/565.; embedded-preview fallback failed".to_string(),
+    );
     assert!(!error.retryable());
     assert!(error.to_string().contains("decoder_unsupported"));
     executors

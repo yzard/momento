@@ -24,11 +24,13 @@ pub async fn reconcile_unreferenced_thumbnails(
     executors: &ExecutorHandles,
 ) -> Result<usize, ExecutorError> {
     use super::file::{NormalizedStoragePath, StorageRootId};
+    use crate::database::operations::THUMBNAIL_RECONCILIATION_BATCH_LIMIT;
     use crate::executor::StorageDirectoryEntryKind;
     use crate::runtime::{DurableSourceId, SchedulerAdmissionKind};
     let mut total = 0;
     for root in [StorageRootId::Thumbnails, StorageRootId::TinyThumbnails] {
         let mut directories = std::collections::VecDeque::from([None]);
+        let mut paths = Vec::new();
         while let Some(directory) = directories.pop_front() {
             let mut session = None;
             loop {
@@ -58,7 +60,6 @@ pub async fn reconcile_unreferenced_thumbnails(
                         }
                     })
                     .await?;
-                let mut paths = Vec::new();
                 for entry in entries {
                     if entry.name.starts_with('.') {
                         continue;
@@ -79,7 +80,14 @@ pub async fn reconcile_unreferenced_thumbnails(
                         StorageDirectoryEntryKind::File => paths.push(path),
                     }
                 }
-                for page in paths.chunks(64) {
+                // Most generated thumbnail directories contain one file.
+                // Carry partial batches between directories to avoid a scan per file.
+                let batch_end = if finished && directories.is_empty() {
+                    paths.len()
+                } else {
+                    paths.len() - paths.len() % THUMBNAIL_RECONCILIATION_BATCH_LIMIT
+                };
+                for page in paths[..batch_end].chunks(THUMBNAIL_RECONCILIATION_BATCH_LIMIT) {
                     let queued = executors
                         .sqlite
                         .queue_unreferenced_thumbnails_durable(root, page.to_vec())
@@ -94,6 +102,7 @@ pub async fn reconcile_unreferenced_thumbnails(
                         );
                     }
                 }
+                paths.drain(..batch_end);
                 if finished {
                     executors
                         .file_io

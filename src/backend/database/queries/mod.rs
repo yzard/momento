@@ -1889,8 +1889,13 @@ pub mod media_text {
 }
 
 pub mod metadata {
-    pub const SELECT_REFERENCED_ARTIFACT_PATHS: &str =
-        "SELECT file_path FROM file_product_references WHERE storage_root = ?1 AND file_path IN (SELECT value FROM json_each(?2))";
+    // Both thumbnail roots use this column. AI inputs and other products
+    // cannot reference files in either thumbnail root.
+    pub const SELECT_REFERENCED_THUMBNAIL_PATHS: &str = r#"
+        SELECT thumbnail_path
+          FROM media_metadata
+         WHERE thumbnail_path IN (SELECT value FROM json_each(?1))
+    "#;
     pub const SELECT_ARTIFACT_PATHS: &str =
         "SELECT thumbnail_path, preview_path FROM media_metadata WHERE media_id = ?";
     // Published destinations are immutable products. Normal cleanup of these

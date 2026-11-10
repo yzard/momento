@@ -96,7 +96,9 @@ impl From<String> for MetadataGenerationError {
             && (diagnostic.contains("no decode delegate for this image format")
                 || diagnostic.contains("unsupported file format or not raw file")
                 || diagnostic.contains("compression not supported")
-                || diagnostic.contains("unsupported compression"));
+                || diagnostic.contains("unsupported compression")
+                || (diagnostic.contains("can not handle image with photometricinterpretation=")
+                    && diagnostic.contains("@ error/tiff.c/")));
         let unsupported_video = diagnostic.contains("ffmpeg exited with")
             && (diagnostic.contains("unknown decoder")
                 || diagnostic.contains("decoding requested, but no decoder found")
