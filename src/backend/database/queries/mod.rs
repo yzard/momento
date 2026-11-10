@@ -339,6 +339,35 @@ pub mod metadata_jobs {
       , updated_at = datetime('now')
     "#;
 
+    pub const QUEUE_MISSING_VIDEO_ARTIFACT: &str = r#"
+    UPDATE media_metadata_jobs
+       SET status = 'queued'
+         , attempts = 0
+         , available_at = datetime('now')
+         , completed_at = NULL
+         , last_error = NULL
+         , updated_at = datetime('now')
+     WHERE media_id = ?1
+       AND status = 'completed'
+       AND NOT EXISTS (SELECT 1 FROM metadata_clean_operations)
+       AND EXISTS (
+           SELECT 1
+             FROM media AS m
+             JOIN media_access AS ma ON ma.media_id = m.id
+             JOIN media_metadata AS mm ON mm.media_id = m.id
+            WHERE m.id = ?1
+              AND m.import_state = 'imported'
+              AND m.media_type = 'video'
+              AND ma.user_id = ?2
+              AND ma.deleted_at IS NULL
+              AND CASE ?3
+                    WHEN 'previews' THEN mm.preview_path
+                    WHEN 'thumbnails' THEN mm.thumbnail_path
+                    WHEN 'tiny_thumbnails' THEN mm.thumbnail_path
+                  END = ?4
+       )
+    "#;
+
     pub const CANCEL_ACTIVE: &str = r#"
     UPDATE media_metadata_jobs
        SET status = CASE WHEN status = 'processing' THEN 'cancelling' ELSE 'cancelled' END

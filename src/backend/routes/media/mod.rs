@@ -14,9 +14,10 @@ use crate::auth::{
 };
 use crate::database::operations::{
     BinaryMediaQuery, BinaryMediaRecord, FinalizeMediaUpdate, MediaBatchQuery, MoveMediaToTrash,
-    PrepareMediaUpdate, TimelineMarkersQuery, TimelinePageQuery,
+    PrepareMediaUpdate, TimelineMarkersQuery, TimelinePageQuery, VideoArtifactRepair,
 };
 use crate::error::{AppError, AppResult};
+use crate::executor::ExecutorErrorKind;
 use crate::io::file::{NormalizedStoragePath, StorageRootId};
 use crate::models::{
     DeleteMediaResponse, MediaAccessResource, MediaAccessTicketRequest, MediaAccessTicketResponse,
@@ -462,8 +463,14 @@ async fn get_media_preview(
     let user_id = authorization.authorize(media_id, MediaAccessResource::Preview)?;
     let media = load_binary_media_info(&state, user_id, media_id, false).await?;
     let (storage_root, path, content_type) = resolve_preview_path(&media)?;
-    serve_file(
-        &state.executors.file_io,
+    serve_media_artifact(
+        &state,
+        BinaryMediaQuery {
+            user_id,
+            media_id,
+            deleted: false,
+        },
+        &media,
         storage_root,
         path,
         FileResponseOptions {
@@ -522,8 +529,14 @@ async fn serve_thumbnail(
 ) -> AppResult<Response> {
     let media = load_binary_media_info(state, user_id, media_id, deleted).await?;
     let path = thumbnail_relative_path(media.thumbnail_path.as_deref())?;
-    serve_file(
-        &state.executors.file_io,
+    serve_media_artifact(
+        state,
+        BinaryMediaQuery {
+            user_id,
+            media_id,
+            deleted,
+        },
+        &media,
         thumbnail_storage_root(size),
         path,
         FileResponseOptions {
@@ -538,6 +551,54 @@ async fn serve_thumbnail(
         },
     )
     .await
+}
+
+async fn serve_media_artifact(
+    state: &AppState,
+    access: BinaryMediaQuery,
+    media: &BinaryMediaRecord,
+    storage_root: StorageRootId,
+    path: NormalizedStoragePath,
+    options: FileResponseOptions<'_>,
+) -> AppResult<Response> {
+    let file_io = &state.executors.file_io;
+    let repair = (!access.deleted
+        && media.media_type == "video"
+        && storage_root != StorageRootId::Originals)
+        .then(|| VideoArtifactRepair {
+            media_id: access.media_id,
+            user_id: access.user_id,
+            storage_root,
+            missing_path: path.clone(),
+        });
+    let response = serve_file(file_io, storage_root, path, options).await;
+    let Some(repair) = repair else {
+        return response;
+    };
+    if !matches!(&response, Err(AppError::NotFound(_))) {
+        return response;
+    }
+    let Ok(original) = NormalizedStoragePath::parse(&media.file_path) else {
+        return response;
+    };
+    match file_io
+        .open_storage_read_session_request(StorageRootId::Originals, original)
+        .await
+    {
+        Ok((session, snapshot)) => {
+            drop(session);
+            if snapshot.byte_size > 0 {
+                state
+                    .executors
+                    .sqlite
+                    .queue_missing_video_artifact_request(repair)
+                    .await?;
+            }
+        }
+        Err(error) if error.kind == ExecutorErrorKind::FileNotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    response
 }
 
 async fn load_binary_media_info(

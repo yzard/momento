@@ -159,6 +159,7 @@ impl SchedulerHandle {
         sizing: &RuntimeSizing,
         scheduler_ingress: SchedulerIngress,
         ai_finalization_work: WorkSignal,
+        metadata_work: WorkSignal,
     ) -> Self {
         Self {
             shared: Arc::new(SchedulerShared {
@@ -186,7 +187,7 @@ impl SchedulerHandle {
                 control_changed: Notify::new(),
                 backup_import_wake: Notify::new(),
                 webdav_import_wake: Notify::new(),
-                metadata_work: WorkSignal::default(),
+                metadata_work,
                 llm_result_work: WorkSignal::default(),
                 ai_finalization_work,
                 journal_recovery_wake: Notify::new(),

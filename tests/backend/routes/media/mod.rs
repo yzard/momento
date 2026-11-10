@@ -461,6 +461,137 @@ async fn video_preview_uses_persisted_path_not_extension_and_preserves_original_
 }
 
 #[tokio::test]
+async fn missing_video_artifacts_queue_one_repair_and_are_rebuilt_from_the_original() {
+    use crate::test_utils::{test_config, test_executor_handles};
+    use momento_api::database::operations::FinishMetadataJob;
+    use momento_api::processor::metadata::generate_media_metadata;
+
+    let (app, pool) = create_test_app();
+    let viewer = create_test_user(&pool, "repair-viewer", "repair-viewer@example.com");
+    let other = create_test_user(&pool, "repair-other", "repair-other@example.com");
+    let media = create_test_media_with_gps_and_date(
+        &pool,
+        "original.mov",
+        40.0,
+        -74.0,
+        "2024-01-15T10:30:00",
+    );
+    grant_media_access(&pool, media, viewer);
+    let executors = test_executor_handles(pool.clone());
+    let data = test_data_directory(&pool);
+    let original = data.join("originals/original.mov");
+    let original_bytes =
+        include_bytes!("../../../ios/Feature/Backup/Resources/noncamera-fixture.mov");
+    let connection = pool.get().unwrap();
+    connection.execute(
+        "UPDATE media SET file_path='original.mov', media_type='video', mime_type='video/quicktime', import_state='imported' WHERE id=?",
+        [media],
+    ).unwrap();
+    connection.execute(
+        "UPDATE media_metadata SET preview_path='missing.mp4', thumbnail_path='missing.jpg', artifact_version=1 WHERE media_id=?",
+        [media],
+    ).unwrap();
+    connection
+        .execute(
+            "INSERT INTO media_metadata_jobs (media_id,status,attempts) VALUES (?,'completed',7)",
+            [media],
+        )
+        .unwrap();
+    drop(connection);
+
+    let server = TestServer::new(app).unwrap();
+    let preview = format!("/api/v1/media/{media}/preview");
+    let thumb = format!("/api/v1/media/{media}/thumbnail");
+    let tiny = format!("/api/v1/media/{media}/thumbnail/tiny");
+    let authorization = format!("Bearer {}", access_token(viewer));
+    let initial_version = executors.scheduler.metadata_work_version();
+    server
+        .get(&preview)
+        .add_header(AUTHORIZATION, authorization.clone())
+        .await
+        .assert_status_not_found();
+    std::fs::write(&original, original_bytes).unwrap();
+    server
+        .get(&preview)
+        .add_header(AUTHORIZATION, format!("Bearer {}", access_token(other)))
+        .await
+        .assert_status_not_found();
+    assert_eq!(executors.scheduler.metadata_work_version(), initial_version);
+
+    let preview_request = server
+        .get(&preview)
+        .add_header(AUTHORIZATION, authorization.clone());
+    let thumb_request = server
+        .get(&thumb)
+        .add_header(AUTHORIZATION, authorization.clone());
+    let tiny_request = server
+        .get(&tiny)
+        .add_header(AUTHORIZATION, authorization.clone());
+    let (missing_preview, missing_thumb, missing_tiny) = tokio::join!(
+        async { preview_request.await },
+        async { thumb_request.await },
+        async { tiny_request.await }
+    );
+    for response in [missing_preview, missing_thumb, missing_tiny] {
+        response.assert_status_not_found();
+    }
+    assert_eq!(
+        executors.scheduler.metadata_work_version(),
+        initial_version + 1
+    );
+
+    let claim = executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.media_id, media);
+    assert!(executors
+        .sqlite
+        .claim_next_metadata_job_durable()
+        .await
+        .unwrap()
+        .is_none());
+    generate_media_metadata(&executors, media, &claim.claim_token, &test_config())
+        .await
+        .unwrap();
+    executors
+        .sqlite
+        .finish_metadata_job_durable(FinishMetadataJob {
+            media_id: media,
+            claim_token: claim.claim_token,
+            error: None,
+            retryable: false,
+        })
+        .await
+        .unwrap();
+
+    for (url, mime) in [
+        (&preview, "video/mp4"),
+        (&thumb, "image/jpeg"),
+        (&tiny, "image/jpeg"),
+    ] {
+        let response = server
+            .get(url)
+            .add_header(AUTHORIZATION, authorization.clone())
+            .await;
+        response.assert_status_ok();
+        response.assert_header("content-type", mime);
+        assert!(!response.as_bytes().is_empty());
+    }
+    let (version, attempts, frame_path): (i64, i64, String) = pool.get().unwrap().query_row(
+        "SELECT mm.artifact_version,j.attempts,(SELECT file_path FROM media_ai_inputs WHERE media_id=mm.media_id LIMIT 1)
+         FROM media_metadata mm JOIN media_metadata_jobs j USING (media_id) WHERE mm.media_id=?",
+        [media],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).unwrap();
+    assert_eq!((version, attempts), (2, 1));
+    assert!(data.join("previews").join(frame_path).is_file());
+    assert_eq!(std::fs::read(original).unwrap(), original_bytes.as_slice());
+}
+
+#[tokio::test]
 async fn image_preview_prefers_published_preview_regardless_of_original_format() {
     let (app, pool) = create_test_app();
     let user_id = create_test_user(&pool, "original-preview", "original-preview@example.com");

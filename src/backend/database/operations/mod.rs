@@ -1215,6 +1215,14 @@ pub struct BinaryMediaQuery {
 }
 
 #[derive(Debug)]
+pub(crate) struct VideoArtifactRepair {
+    pub media_id: i64,
+    pub user_id: i64,
+    pub storage_root: StorageRootId,
+    pub missing_path: NormalizedStoragePath,
+}
+
+#[derive(Debug)]
 pub struct BinaryMediaRecord {
     pub file_path: String,
     pub mime_type: Option<String>,
@@ -3834,6 +3842,23 @@ pub(crate) fn load_face_group(
         media,
         faces,
     }))
+}
+
+pub(crate) fn queue_missing_video_artifact(
+    connection: &Connection,
+    repair: VideoArtifactRepair,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(
+            queries::metadata_jobs::QUEUE_MISSING_VIDEO_ARTIFACT,
+            params![
+                repair.media_id,
+                repair.user_id,
+                repair.storage_root.as_str(),
+                repair.missing_path.relative_path(),
+            ],
+        )
+        .map(|changed| changed == 1)
 }
 
 pub(crate) fn queue_incomplete_metadata(connection: &Connection) -> rusqlite::Result<usize> {

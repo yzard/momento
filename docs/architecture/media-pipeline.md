@@ -149,8 +149,11 @@ transcoding additionally reserves duration-based video/audio output headroom,
 bounded by the executor's 32 GiB child-output ceiling. Empty input or remux failure
 does not publish a partial preview. Existing completed metadata needs regeneration to gain it.
 
-Generate Metadata queues ordinary incomplete work; a missing preview path alone does not
-requeue completed metadata. Compatible originals intentionally have no generated preview.
+Generate Metadata queues ordinary incomplete work. A compatible original uses no generated preview.
+If an authorized request finds a published video preview or thumbnail missing, the API can queue
+one repair for that generation. The original must exist. The metadata worker regenerates both
+thumbnail sizes, the required playback preview, and any missing prepared video frame.
+The request still returns a missing-file response until the worker publishes the new generation.
 
 `media_ai_inputs` records a Momento-owned `storage_root` (`originals` or `previews`) plus the task,
 sequence, input kind, relative file path, filename, MIME type, byte size, SHA-256 content hash, and

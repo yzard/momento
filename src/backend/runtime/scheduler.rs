@@ -444,6 +444,7 @@ impl ExecutorRuntime {
         )
         .map_err(|error| error.to_string())?;
         let ai_finalization_work = momento_common::work_signal::WorkSignal::default();
+        let metadata_work = momento_common::work_signal::WorkSignal::default();
         let sqlite_workers = match spawn_sqlite_workers(
             sizing.sqlite_workers,
             sqlite_read_receiver,
@@ -451,6 +452,7 @@ impl ExecutorRuntime {
             SqliteWorkerContext {
                 pool: pool.clone(),
                 ai_finalization_work: ai_finalization_work.clone(),
+                metadata_work: metadata_work.clone(),
                 capacity_wake: Arc::clone(&capacity_wake),
                 space_budget: space_budget.clone(),
                 database_path,
@@ -533,6 +535,7 @@ impl ExecutorRuntime {
                 sizing,
                 ingress.clone(),
                 ai_finalization_work,
+                metadata_work,
             ),
         };
         Ok((

@@ -175,6 +175,7 @@ pub(crate) enum SqliteOperation {
     LoadTimelineMarkers(TimelineMarkersQuery),
     MoveMediaToTrash(MoveMediaToTrash),
     QueueIncompleteMetadata,
+    QueueMissingVideoArtifact(operations::VideoArtifactRepair),
     CancelActiveMetadataJobs,
     CleanMetadataPage {
         cleanup_group_id: Option<String>,
@@ -536,6 +537,7 @@ impl SqliteOperation {
             Self::LoadTimelineMarkers(_) => "load_timeline_markers",
             Self::MoveMediaToTrash(_) => "move_media_to_trash",
             Self::QueueIncompleteMetadata => "queue_incomplete_metadata",
+            Self::QueueMissingVideoArtifact(_) => "queue_missing_video_artifact",
             Self::CancelActiveMetadataJobs => "cancel_active_metadata_jobs",
             Self::CleanMetadataPage { .. } => "clean_metadata_page",
             Self::LoadMetadataJobStatus => "load_metadata_job_status",
@@ -879,6 +881,7 @@ impl SqliteOperation {
             | Self::LoadPublicShareContent(_)
             | Self::MoveMediaToTrash(_)
             | Self::QueueIncompleteMetadata
+            | Self::QueueMissingVideoArtifact(_)
             | Self::CancelActiveMetadataJobs
             | Self::CleanMetadataPage { .. }
             | Self::ClaimNextMetadataJob { .. }
@@ -1102,6 +1105,7 @@ pub(crate) enum SqliteOutput {
     TimelineMarkers(Vec<TimelineMarkerRecord>),
     MediaMovedToTrash(usize),
     IncompleteMetadataQueued(usize),
+    MissingVideoArtifactQueued(bool),
     ActiveMetadataJobsCancelled(usize),
     MetadataCleanStep(operations::CleanMetadataStepOutcome),
     MetadataJobStatus(MetadataJobStatus),
@@ -1269,6 +1273,7 @@ impl SqliteOutput {
             Self::TimelineMarkers(_) => "timeline_markers",
             Self::MediaMovedToTrash(_) => "media_moved_to_trash",
             Self::IncompleteMetadataQueued(_) => "incomplete_metadata_queued",
+            Self::MissingVideoArtifactQueued(_) => "missing_video_artifact_queued",
             Self::ActiveMetadataJobsCancelled(_) => "active_metadata_jobs_cancelled",
             Self::MetadataCleanStep(_) => "metadata_clean_step",
             Self::MetadataJobStatus(_) => "metadata_job_status",
@@ -4371,6 +4376,22 @@ impl SqliteExecutorHandle {
             .await
     }
 
+    pub(crate) async fn queue_missing_video_artifact_request(
+        &self,
+        repair: operations::VideoArtifactRepair,
+    ) -> Result<(), ExecutorError> {
+        match self
+            .submit(
+                SqliteOperation::QueueMissingVideoArtifact(repair),
+                SubmissionMode::Request,
+            )
+            .await?
+        {
+            SqliteOutput::MissingVideoArtifactQueued(_) => Ok(()),
+            output => Err(output.mismatch("queue_missing_video_artifact")),
+        }
+    }
+
     pub async fn cancel_active_metadata_jobs_request(&self) -> Result<usize, ExecutorError> {
         match self
             .submit(
@@ -5385,6 +5406,7 @@ fn validate_album_media_ids(
 pub(crate) struct SqliteWorkerContext {
     pub pool: DbPool,
     pub ai_finalization_work: momento_common::work_signal::WorkSignal,
+    pub metadata_work: momento_common::work_signal::WorkSignal,
     pub capacity_wake: std::sync::Arc<Notify>,
     pub space_budget: crate::io::space_budget::DataDirSpaceBudget,
     pub database_path: std::path::PathBuf,
@@ -5468,6 +5490,12 @@ fn run_worker(context: SqliteWorkerContext, receiver: Receiver<SqliteCommand>, r
         ) {
             // Publish committed work even if the caller no longer awaits its reply.
             context.ai_finalization_work.notify();
+        }
+        if matches!(
+            &operation_result,
+            Ok(SqliteOutput::MissingVideoArtifactQueued(true))
+        ) {
+            context.metadata_work.notify();
         }
         let _ = command.reply.send(operation_result);
     }
@@ -6140,6 +6168,11 @@ fn execute_with_connection(
         SqliteOperation::QueueIncompleteMetadata => {
             operations::queue_incomplete_metadata(connection)
                 .map(SqliteOutput::IncompleteMetadataQueued)
+                .map_err(|error| map_sqlite_error(operation_name, error))
+        }
+        SqliteOperation::QueueMissingVideoArtifact(repair) => {
+            operations::queue_missing_video_artifact(connection, repair)
+                .map(SqliteOutput::MissingVideoArtifactQueued)
                 .map_err(|error| map_sqlite_error(operation_name, error))
         }
         SqliteOperation::CancelActiveMetadataJobs => {
