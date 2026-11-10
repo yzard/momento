@@ -576,6 +576,90 @@ async fn recovery_verifies_only_the_entry_it_will_apply() {
 }
 
 #[tokio::test]
+async fn thumbnail_rollback_preserves_the_metadata_workers_failure() {
+    use momento_api::database::operations::FinishMetadataJob;
+
+    for finish_before_rollback in [false, true] {
+        let pool = crate::test_utils::create_test_db();
+        let media_id = crate::test_utils::create_test_media(&pool, "unsupported.dng");
+        let (executors, directory) =
+            crate::test_utils::test_executor_handles_with_data_directory(pool.clone());
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO media_metadata_jobs (media_id, status) VALUES (?, 'queued')",
+                [media_id],
+            )
+            .unwrap();
+        let job = executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = pool.get().unwrap();
+        connection.execute(
+            "INSERT INTO file_operation_groups (id, kind, owner_kind, owner_id, claim_token, state, product_target, product_version, entry_count)
+             VALUES ('failed-thumbnail', 'metadata_artifacts', 'metadata_generation', ?, ?, 'prepared', 'metadata_artifacts', 1, 1)",
+            rusqlite::params![media_id.to_string(), job.claim_token],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO file_operation_entries (group_id, sequence, action, storage_root, temporary_path, destination_path)
+             VALUES ('failed-thumbnail', 0, 'publish', 'thumbnails', 'partial.jpg', 'final.jpg')",
+            [],
+        ).unwrap();
+        drop(connection);
+        let partial = directory.join("thumbnails/partial.jpg");
+        std::fs::write(&partial, b"partial").unwrap();
+        momento_api::io::recovery::cancel_generic_file_operation(
+            &executors,
+            "failed-thumbnail".to_string(),
+            1,
+        )
+        .await
+        .unwrap();
+
+        let finish = || {
+            executors
+                .sqlite
+                .finish_metadata_job_durable(FinishMetadataJob {
+                    media_id,
+                    claim_token: job.claim_token.clone(),
+                    error: Some("decoder_unsupported: test fixture".to_string()),
+                    retryable: false,
+                })
+        };
+        if finish_before_rollback {
+            finish().await.unwrap();
+        }
+        recover_generic_file_operations(&executors).await.unwrap();
+        if !finish_before_rollback {
+            finish().await.unwrap();
+        }
+
+        assert!(!partial.exists());
+        let status = executors
+            .sqlite
+            .load_metadata_job_status_durable()
+            .await
+            .unwrap();
+        assert!(status.counts.contains(&("failed".to_string(), 1)));
+        assert!(executors
+            .sqlite
+            .claim_next_metadata_job_durable()
+            .await
+            .unwrap()
+            .is_none());
+        assert!(executors
+            .sqlite
+            .load_next_metadata_job_delay_durable()
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
 async fn discarded_metadata_is_requeued_only_after_cleanup_and_preserves_successful_generation() {
     for succeeded in [false, true] {
         let pool = crate::test_utils::create_test_db();

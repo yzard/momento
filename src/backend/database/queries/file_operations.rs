@@ -1,3 +1,6 @@
+// An interrupted publication needs a fresh generation after its products are
+// discarded. A pre-publication rollback only cleans temporary files. The
+// worker still owns that job's outcome, or startup will recover its claim.
 pub const REQUEUE_DISCARDED_METADATA: &str = r#"
     UPDATE media_metadata_jobs
        SET status = 'queued', claim_token = NULL, claimed_at = NULL,
@@ -9,7 +12,8 @@ pub const REQUEUE_DISCARDED_METADATA: &str = r#"
             WHERE g.id = ?1 AND g.kind = 'metadata_artifacts'
               AND g.owner_kind = 'metadata_generation'
               AND g.owner_id = CAST(media_metadata_jobs.media_id AS TEXT)
-              AND g.cancel_requested = 1 AND g.state IN ('cleaned', 'rolled_back')
+              AND g.cancel_requested = 1
+              AND g.state = 'cleaned' AND g.completion_outcome = 'discarded'
               AND g.product_version > COALESCE((
                   SELECT artifact_version FROM media_metadata WHERE media_id = media_metadata_jobs.media_id
               ), 0)
